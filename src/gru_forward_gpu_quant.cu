@@ -85,17 +85,17 @@ __device__ __forceinline__ int8_t computeG( // New Gate
     const int32_t Wx = rshift_round(Wx_val, rescale_params.n_Wx_[channel_idx]) - W_sum_mul_x_zp + rescale_params.zp_Wx_;
     const int32_t Rh = rshift_round(Rh_val, rescale_params.n_Rh_[channel_idx]) - R_sum_mul_h_zp + rescale_params.zp_Rh_;
     const int32_t Rh_add_br = rshift_round(Rh, rescale_params.n_Rh_to_Rh_add_br_) +
-                              rshift_round(bx_val, rescale_params.n_br_to_Rh_add_br_[channel_idx])
-    /*+ rescale_params.zp_Rh_add_br_*/;
+                              rshift_round(br_val, rescale_params.n_br_to_Rh_add_br_[channel_idx])
+    /* + rescale_params.zp_Rh_add_br_*/;
 
-    const int32_t rRh = (r - rescale_params.zp_r_out_) *
-                        (Rh_add_br/* - rescale_params.zp_Rh_add_br_*/)
-                        /*+ rescale_params.zp_r_pre_*/;
+    const int32_t rRh = rshift_round((r - rescale_params.zp_r_out_) *
+                                     (Rh_add_br/* - rescale_params.zp_Rh_add_br_*/), rescale_params.n9_)
+    /* + rescale_params.zp_rRh_*/;
 
     // 累加求和
     const int8_t g_pre_i8 = dev::clamp<int8_t>(
-        rshift_round(Wx, rescale_params.n_Wx_to_g_[channel_idx]) +
-        rshift_round(rRh/* - rescale_params.zp_r_pre_*/, rescale_params.n_rRh_to_g_[channel_idx]) +
+        rshift_round(Wx, rescale_params.n_Wx_to_g_) +
+        rshift_round(rRh/* - rescale_params.zp_rRh_*/, rescale_params.n_rRh_to_g_) +
         rshift_round(bx_val, rescale_params.n_bx_to_g_[channel_idx]) +
         rescale_params.zp_g_pre_);
 
@@ -206,7 +206,7 @@ __global__ void PointwiseOperationsQuant(
                      bx[b_g_idx],
                      br[b_g_idx],
                      r,
-                     re_scale_param);
+                     re_scale_param); // New Gate
         // 候选状态~ht
     } else {
         // TODO: int16 量化
@@ -419,75 +419,71 @@ template<typename T>
 void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms) {
     const int hidden = parms.hidden_;
 
+    std::vector<int32_t> n_Wx(hidden);
+    std::vector<int32_t> n_Rh(hidden);
+
     // z门
-    std::vector<int32_t> n_Wx_to_z(hidden); // size = hidden (channel)
-    std::vector<int32_t> n_Rh_to_z(hidden);
     std::vector<int32_t> n_bx_to_z(hidden);
     std::vector<int32_t> n_br_to_z(hidden);
 
     // r门
-    std::vector<int32_t> n_Wx_to_r(hidden);
-    std::vector<int32_t> n_Rh_to_r(hidden);
     std::vector<int32_t> n_bx_to_r(hidden);
     std::vector<int32_t> n_br_to_r(hidden);
 
     // n门
-    std::vector<int32_t> n_Rh_to_Rh_add_br(hidden);
     std::vector<int32_t> n_br_to_Rh_add_br(hidden);
-    std::vector<int32_t> n_Wx_to_g(hidden);
-    std::vector<int32_t> n_rRh_to_g(hidden);
     std::vector<int32_t> n_bx_to_g(hidden);
 
+    const float scale_Wx = parms.scale_Wx_;
+    const float scale_Rh = parms.scale_Rh_;
     for (int idx = 0; idx < hidden; ++idx) { // per-channel
-        const float scale_Wx = parms.scale_Wx_;
-        const float scale_Rh = parms.scale_Rh_;
         // z门
-        n_Wx_to_z[idx] = calculate_right_shift_bits(scale_Wx / parms.scale_z_pre_);
-        n_Rh_to_z[idx] = calculate_right_shift_bits(scale_Rh / parms.scale_z_pre_);
         n_bx_to_z[idx] = calculate_right_shift_bits(parms.scale_bx_[idx] / parms.scale_z_pre_);
         n_br_to_z[idx] = calculate_right_shift_bits(parms.scale_br_[idx] / parms.scale_z_pre_);
 
         // r门
-        n_Wx_to_r[idx] = calculate_right_shift_bits(scale_Wx / parms.scale_r_pre_);
-        n_Rh_to_r[idx] = calculate_right_shift_bits(scale_Rh / parms.scale_r_pre_);
         n_bx_to_r[idx] = calculate_right_shift_bits(parms.scale_bx_[idx] / parms.scale_r_pre_);
         n_br_to_r[idx] = calculate_right_shift_bits(parms.scale_br_[idx] / parms.scale_r_pre_);
 
         // n门
-        n_Rh_to_Rh_add_br[idx] = calculate_right_shift_bits(scale_Rh / parms.scale_Rh_add_br_[idx]);
-        n_br_to_Rh_add_br[idx] = calculate_right_shift_bits(parms.scale_br_[idx] / parms.scale_Rh_add_br_[idx]);
-        n_Wx_to_g[idx] = calculate_right_shift_bits(scale_Wx / parms.scale_g_pre_);
-        n_rRh_to_g[idx] = calculate_right_shift_bits(parms.scale_rRh_[idx] / parms.scale_g_pre_);
+        n_br_to_Rh_add_br[idx] = calculate_right_shift_bits(parms.scale_br_[idx] / parms.scale_Rh_add_br_);
         n_bx_to_g[idx] = calculate_right_shift_bits(parms.scale_bx_[idx] / parms.scale_g_pre_);
     }
 
     /* init */
     rescale_param_.zp_x_ = parms.zp_x_;
     rescale_param_.zp_h_ = parms.zp_h_;
+    h2d(rescale_param_.n_Wx_, n_Wx);
+    rescale_param_.zp_Wx_ = parms.zp_Wx_;
+    h2d(rescale_param_.n_Rh_, n_Rh);
+    rescale_param_.zp_Rh_ = parms.zp_Rh_;
 
     // z门
     rescale_param_.zp_z_pre_ = parms.zp_z_pre_;
     rescale_param_.zp_z_out_ = parms.zp_z_out_;
-    h2d(rescale_param_.n_Wx_to_z_, n_Wx_to_z);
-    h2d(rescale_param_.n_Rh_to_z_, n_Rh_to_z);
+    rescale_param_.n_Wx_to_z_ = calculate_right_shift_bits(scale_Wx / parms.scale_z_pre_);
+    rescale_param_.n_Rh_to_z_ = calculate_right_shift_bits(scale_Rh / parms.scale_z_pre_);
     h2d(rescale_param_.n_bx_to_z_, n_bx_to_z);
     h2d(rescale_param_.n_br_to_z_, n_br_to_z);
 
     // r门
     rescale_param_.zp_r_pre_ = parms.zp_r_pre_;
     rescale_param_.zp_r_out_ = parms.zp_r_out_;
-    h2d(rescale_param_.n_Wx_to_r_, n_Wx_to_r);
-    h2d(rescale_param_.n_Rh_to_r_, n_Rh_to_r);
+    rescale_param_.n_Wx_to_r_ = calculate_right_shift_bits(scale_Wx / parms.scale_r_pre_);
+    rescale_param_.n_Rh_to_r_ = calculate_right_shift_bits(scale_Rh / parms.scale_r_pre_);
     h2d(rescale_param_.n_bx_to_r_, n_bx_to_r);
     h2d(rescale_param_.n_br_to_r_, n_br_to_r);
 
     // n门
     rescale_param_.zp_g_pre_ = parms.zp_g_pre_;
     rescale_param_.zp_g_out_ = parms.zp_g_out_;
-    h2d(rescale_param_.n_Rh_to_Rh_add_br_, n_Rh_to_Rh_add_br);
+    rescale_param_.n_Rh_to_Rh_add_br_ = calculate_right_shift_bits(scale_Rh / parms.scale_Rh_add_br_);
     h2d(rescale_param_.n_br_to_Rh_add_br_, n_br_to_Rh_add_br);
-    h2d(rescale_param_.n_Wx_to_g_, n_Wx_to_g);
-    h2d(rescale_param_.n_rRh_to_g_, n_rRh_to_g);
+    rescale_param_.zp_Rh_add_br_ = parms.zp_Rh_add_br_;
+    rescale_param_.n9_ = calculate_right_shift_bits((parms.scale_r_out_ * parms.scale_h_) / parms.scale_rRh_);
+    rescale_param_.zp_rRh_ = parms.zp_rRh_;
+    rescale_param_.n_Wx_to_g_ = calculate_right_shift_bits(parms.scale_Wx_ / parms.scale_g_pre_);
+    rescale_param_.n_rRh_to_g_ = calculate_right_shift_bits(parms.scale_rRh_ / parms.scale_g_pre_);
     h2d(rescale_param_.n_bx_to_g_, n_bx_to_g);
 
     // h_new
@@ -499,8 +495,8 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
     rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
     rescale_param_.n13_ = calculate_right_shift_bits(
         (parms.scale_one_minus_update_ * parms.scale_g_out_) / parms.scale_new_contrib_);
-    rescale_param_.n14_ = calculate_right_shift_bits((parms.scale_z_out_ * parms.scale_h_) / parms.scale_old_contrib_);
     rescale_param_.zp_old_contrib_ = parms.zp_old_contrib_;
+    rescale_param_.n14_ = calculate_right_shift_bits((parms.scale_z_out_ * parms.scale_h_) / parms.scale_old_contrib_);
     rescale_param_.n15_ = calculate_right_shift_bits(parms.scale_new_contrib_ / parms.scale_h_);
     rescale_param_.n16_ = calculate_right_shift_bits(parms.scale_old_contrib_ / parms.scale_h_);
     rescale_param_.c15_ = parms.zp_h_ - (rshift_round(parms.zp_new_contrib_, rescale_param_.n15_) +

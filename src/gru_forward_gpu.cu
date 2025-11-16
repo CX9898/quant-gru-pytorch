@@ -1,6 +1,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 #include <cuda_fp16.h>
+#include <utility>
 
 #include "blas.h"
 #include "device_assert.h"
@@ -311,6 +312,32 @@ void ForwardPass<T>::IterateInternal(
 }
 
 template<typename T>
+std::pair<float, int32_t> calculateXScale(const T *x_dev, int size_per_step, int steps) {
+    std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
+    std::vector<T> min(steps);
+    std::vector<T> max(steps);
+
+#pragma omp parallel for
+    for (int t = 0; t < steps; ++t) {
+        const int offset = t * size_per_step;
+        min[t] = x_host[offset];
+        max[t] = x_host[offset];
+        for (int i = 1; i < size_per_step; ++i) {
+            min[t] = std::min(min[t], x_host[offset + i]);
+            max[t] = std::max(max[t], x_host[offset + i]);
+        }
+    }
+
+    float res_min = min[0];
+    float res_max = max[0];
+    for(int t = 1; t < steps; ++t){
+        res_min = 0.9 * res_min + 0.1 * min[t];
+        res_max = 0.9 * res_max + 0.1 * max[t];
+    }
+
+}
+
+template<typename T>
 void ForwardPass<T>::Run(
     const int steps,
     const T *W,  // [C,H*3]
@@ -368,17 +395,18 @@ void ForwardPass<T>::Run(
 
     cublasSetStream(blas_handle, save_stream);
 
-    if(calibration_mode_){
+    if (calibration_mode_) {
         quant_parms_.hidden_ = data_->hidden_size;
-        if(!use_int16_quant_){
+        if (!use_int16_quant_) {
 
         }
-        quant_parms_.scale_x_ = calculateScaleZeroPointFromDevice<int8_t>();
+        quant_parms_.scale_x_ = calculateXScale(x, NH, steps).first;
+        quant_parms_.zp_x_ = calculateXScale(x, NH, steps).second;
     }
 }
 
-template
-struct ForwardPass<half>;
+//template
+//struct ForwardPass<half>;
 template
 struct ForwardPass<float>;
 template

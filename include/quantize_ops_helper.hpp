@@ -37,8 +37,10 @@ struct GRUQuantitativeParameters {
   float scale_g_out_;
   int32_t zp_g_out_;
 
-  std::vector<float> scale_Rh_add_br_;
-  std::vector<float> scale_rRh_;
+  float scale_Rh_add_br_;
+  int32_t zp_Rh_add_br_;
+  float scale_rRh_;
+  int32_t zp_rRh_;
 
   float scale_one_minus_update_;
   int32_t zp_one_minus_update_;
@@ -52,9 +54,9 @@ struct QuantGRUReScale {
   int32_t zp_x_;
   int32_t zp_h_;
 
-  dev::vector<int32_t> n_Wx_;
+  dev::vector<int32_t> n_Wx_; // size = hidden
   int32_t zp_Wx_;
-  dev::vector<int32_t> n_Rh_;
+  dev::vector<int32_t> n_Rh_; // size = hidden
   int32_t zp_Rh_;
 
   // z门
@@ -73,22 +75,24 @@ struct QuantGRUReScale {
   dev::vector<int32_t> n_bx_to_r_;
   dev::vector<int32_t> n_br_to_r_;
 
-  // n门
+  // New Gate
   int32_t zp_g_pre_;
   int32_t zp_g_out_;
   int32_t n_Rh_to_Rh_add_br_;
   dev::vector<int32_t> n_br_to_Rh_add_br_; // br 是 per-channel
   int32_t zp_Rh_add_br_;
-  dev::vector<int32_t> n_Wx_to_g_;
-  dev::vector<int32_t> n_rRh_to_g_;
+  int32_t n9_;
+  int32_t zp_rRh_;
+  int32_t n_Wx_to_g_;
+  int32_t n_rRh_to_g_;
   dev::vector<int32_t> n_bx_to_g_;
 
   // h_new
-  int32_t zp_old_contrib_;
   int32_t n_one_minus_update_;
   int32_t c12_; // 不需要加zp_omu
   int32_t zp_new_contrib_;
   int32_t n13_;
+  int32_t zp_old_contrib_;
   int32_t n14_;
   int32_t n15_;
   int32_t n16_;
