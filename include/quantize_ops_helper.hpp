@@ -5,6 +5,8 @@
 
 #include "devVector.h"
 
+
+
 struct GRUQuantitativeParameters {
   int hidden_;
   float scale_x_;
@@ -12,8 +14,8 @@ struct GRUQuantitativeParameters {
   float scale_h_;
   int32_t zp_h_;
 
-  std::vector<float> scale_W_; // size = hidden
-  std::vector<float> scale_R_; // size = hidden
+  std::vector<float> scale_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一行一个scale)
+  std::vector<float> scale_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一行一个scale)
 
   float scale_Wx_;
   int32_t zp_Wx_;
@@ -178,6 +180,7 @@ void computeWeightSumMulzp(
     const T *W_q,// [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,// [out_dim] 输出数组
     int zp,
+    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,// 输出通道数 (M)
     int in_dim,// 输入通道数 (K)
     cudaStream_t stream = 0);
@@ -209,6 +212,67 @@ void calculateScaleZeroPointFromDevice(
     int32_t &zero_point,
     bool symmetric = true,
     cudaStream_t stream = 0);
+
+/**
+ * @brief 从浮点数据计算量化参数 scale 和 zero_point（通用函数）
+ *
+ * 量化公式：
+ * - 对称量化：scale = max(|min_val|, |max_val|) / qmax, zero_point = 0
+ * - 非对称量化：scale = (max_val - min_val) / (qmax - qmin),
+ *               zero_point = round(qmin - min_val / scale)
+ *
+ * 量化过程：q = round(x / scale + zero_point)
+ * 反量化过程：x = (q - zero_point) * scale
+ *
+ * @tparam QuantT         目标量化类型（int8_t 或 int16_t）
+ * @param data            [in] 输入浮点数据指针（CPU内存）
+ * @param size            [in] 数据元素数量
+ * @param scale           [out] 输出的量化scale参数
+ * @param zero_point      [out] 输出的量化zero_point参数
+ * @param symmetric       [in] 是否使用对称量化（默认true）
+ *                          - true: 对称量化，zero_point固定为0，scale基于绝对值最大值计算
+ *                          - false: 非对称量化，zero_point可非零，scale基于实际范围计算
+ * @param min_val         [in/out] 可选，输入时指定最小值（跳过计算），输出时返回计算的最小值
+ * @param max_val         [in/out] 可选，输入时指定最大值（跳过计算），输出时返回计算的最大值
+ *
+ * @note 如果 min_val 和 max_val 都有效（min_val < max_val），则跳过数据扫描，直接使用提供的值计算scale和zero_point
+ */
+template<typename QuantT>
+void calculateScaleZeroPoint(
+    const float *data,
+    size_t size,
+    float &scale,
+    int32_t &zero_point,
+    bool symmetric = true,
+    float *min_val = nullptr,
+    float *max_val = nullptr);
+
+/**
+ * @brief 从GPU上的浮点数据计算量化参数 scale 和 zero_point
+ *
+ * 功能与 calculateScaleZeroPoint 相同，但数据位于GPU内存中。
+ * 函数会自动将数据拷贝到CPU进行最大最小值计算。
+ *
+ * @tparam QuantT         目标量化类型（int8_t 或 int16_t）
+ * @param data_dev        [in] 输入浮点数据指针（GPU内存）
+ * @param size            [in] 数据元素数量
+ * @param scale           [out] 输出的量化scale参数
+ * @param zero_point      [out] 输出的量化zero_point参数
+ * @param symmetric       [in] 是否使用对称量化（默认true）
+ * @param stream          [in] CUDA stream，用于异步拷贝（默认0）
+ * @param min_val         [in/out] 可选，输入时指定最小值，输出时返回计算的最小值
+ * @param max_val         [in/out] 可选，输入时指定最大值，输出时返回计算的最大值
+ */
+template<typename QuantT>
+void calculateScaleZeroPointFromFloatDevice(
+    const float *data_dev,
+    size_t size,
+    float &scale,
+    int32_t &zero_point,
+    bool symmetric = true,
+    cudaStream_t stream = 0,
+    float *min_val = nullptr,
+    float *max_val = nullptr);
 
 //template<typename T>
 //T findMaxValueFromDev(const T *dev_data, size_t size);

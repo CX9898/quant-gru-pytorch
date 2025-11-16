@@ -419,8 +419,9 @@ int main() {
 
     printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
+    // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
-    calibrateGruScales<int8_t>(W, R, bx, br, x, quant_parms); // 效验得到固定量化参数
+    calibrateGruScales<int8_t>(W, R, bx, br, x, quant_parms);
 
     // Quant
     Tensor2i8 W_quant(HIDDEN_DIMS * 3, INPUT_DIMS);  // 对应W_z/W_r/W_h的合并
@@ -430,7 +431,7 @@ int main() {
     Tensor3i8 x_quant(INPUT_DIMS, BATCH_SIZE, SEQUENCE_LEN);
     Tensor3i8 dh_new_quant(HIDDEN_DIMS, BATCH_SIZE, SEQUENCE_LEN + 1);
 
-    // 使用固定量化参数将输入量化
+    // TODO: 使用固定量化参数将输入量化
     GruQuantInit<false>(W,
                         R,
                         bx,

@@ -126,6 +126,9 @@ class ForwardPass {
   bool calibration_mode_ = false;
   bool use_int16_quant_ = false;
   GRUQuantitativeParameters quant_parms_;
+  dev::vector<T> z_pres;
+  dev::vector<T> r_pres;
+  dev::vector<T> g_pres;
 };
 
 template<typename T>
