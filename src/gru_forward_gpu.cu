@@ -27,7 +27,10 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
                                                     const T *zoneout_mask,
                                                     T *z_pres,
                                                     T *r_pres,
-                                                    T *g_pres) {  // Zoneout mask (only used if ApplyZoneout==true)
+                                                    T *g_pres,
+                                                    T *one_minus_update,
+                                                    T *new_contrib,
+                                                    T *old_contrib) {  // Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
     const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
 
@@ -58,12 +61,6 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
     const T g_pre = Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx];
     const T g = tanh(g_pre);
 
-    if (Calibration) {
-        z_pres[output_idx] = z_pre;
-        r_pres[output_idx] = r_pre;
-        g_pres[output_idx] = g_pre;
-    }
-
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
         const int base_v_idx = col * (hidden_dim * 4) + row;
@@ -81,6 +78,15 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
         } else {
             cur_h_value = (zoneout_prob * h[output_idx]) + ((static_cast<T>(1.0) - zoneout_prob) * cur_h_value);
         }
+    }
+
+    if (Calibration) {
+        z_pres[output_idx] = z_pre;
+        r_pres[output_idx] = r_pre;
+        g_pres[output_idx] = g_pre;
+        one_minus_update[output_idx] = (static_cast<T>(1.0) - z);
+        new_contrib[output_idx] = (static_cast<T>(1.0) - z) * g;
+        old_contrib[output_idx] = z * h[output_idx];
     }
 
     h_out[output_idx] = cur_h_value;
@@ -113,6 +119,9 @@ __global__ void PointwiseOperations(const int batch_dim,
                                                                     zoneout_mask,
                                                                     nullptr,
                                                                     nullptr,
+                                                                    nullptr,
+                                                                    nullptr,
+                                                                    nullptr,
                                                                     nullptr);
 }
 
@@ -130,7 +139,10 @@ __global__ void PointwiseOperations(const int batch_dim,
                                     const T *zoneout_mask,
                                     T *z_pres,
                                     T *r_pres,
-                                    T *g_pres
+                                    T *g_pres,
+                                    T *one_minus_update,
+                                    T *new_contrib,
+                                    T *old_contrib
 ) {
     op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(batch_dim,
                                                                     hidden_dim,
@@ -145,7 +157,10 @@ __global__ void PointwiseOperations(const int batch_dim,
                                                                     zoneout_mask,
                                                                     z_pres,
                                                                     r_pres,
-                                                                    g_pres);
+                                                                    g_pres,
+                                                                    one_minus_update,
+                                                                    new_contrib,
+                                                                    old_contrib);
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
@@ -261,6 +276,7 @@ void ForwardPass<T>::Iterate(
     cudaEventRecord(event, stream2);
 
     IterateInternal(
+        0,
         R,
         bx,
         br,
@@ -277,6 +293,7 @@ void ForwardPass<T>::Iterate(
 
 template<typename T>
 void ForwardPass<T>::IterateInternal(
+    int steps_idx,
     const T *R,  // [H,H*3]
     const T *bx, // [H*3]
     const T *br, // [H*3]
@@ -316,6 +333,8 @@ void ForwardPass<T>::IterateInternal(
 
     cudaStreamWaitEvent(stream1, event, 0);
 
+    const int offset = steps_idx * batch_size * hidden_size;
+
     if (calibration_mode_) {
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, true, true, true><<<gridDim, blockDim, 0, stream1>>>(
@@ -330,9 +349,12 @@ void ForwardPass<T>::IterateInternal(
                 v,
                 zoneout_prob,
                 zoneout_mask,
-                z_pres.data(),
-                r_pres.data(),
-                g_pres.data());
+                z_pres_.data() + offset,
+                r_pres_.data() + offset,
+                g_pres_.data() + offset,
+                one_minus_update_.data() + offset,
+                new_contrib_.data() + offset,
+                old_contrib_.data() + offset);
         } else {
             PointwiseOperations<T, true, false, true><<<gridDim, blockDim, 0, stream1>>>(
                 batch_size,
@@ -346,9 +368,12 @@ void ForwardPass<T>::IterateInternal(
                 v,
                 0.0f,
                 nullptr,
-                z_pres.data(),
-                r_pres.data(),
-                g_pres.data());
+                z_pres_.data() + offset,
+                r_pres_.data() + offset,
+                g_pres_.data() + offset,
+                one_minus_update_.data() + offset,
+                new_contrib_.data() + offset,
+                old_contrib_.data() + offset);
         }
         return;
     }
@@ -582,6 +607,16 @@ void ForwardPass<T>::Run(
     const cudaStream_t stream2 = data_->stream[1];
     const cudaEvent_t event = data_->event;
 
+    if (calibration_mode_) {
+        const size_t size = steps * batch_size * hidden_size;
+        z_pres_.resize(size);
+        r_pres_.resize(size);
+        g_pres_.resize(size);
+        one_minus_update_.resize(size);
+        new_contrib_.resize(size);
+        old_contrib_.resize(size);
+    }
+
     cudaStream_t save_stream;
     cublasGetStream(blas_handle, &save_stream);
 
@@ -600,6 +635,7 @@ void ForwardPass<T>::Run(
     for (int i = 0; i < steps; ++i) {
         const int Rh_offset = calibration_mode_ ? i * NH * 3 : 0;
         IterateInternal(
+            i,
             R,
             bx,
             br,
@@ -630,6 +666,15 @@ void ForwardPass<T>::Run(
 
             quant_parms_.scale_bx_ = calculateBiasScale(bx, hidden_size * 3, true, false);
             quant_parms_.scale_br_ = calculateBiasScale(br, hidden_size * 3, true, false);
+
+            std::tie(quant_parms_.scale_one_minus_update_, quant_parms_.zp_one_minus_update_) =
+                calculateScale(one_minus_update_.data(), one_minus_update_.size());
+
+            std::tie(quant_parms_.scale_new_contrib_, quant_parms_.zp_new_contrib_) =
+                calculateScale(new_contrib_.data(), new_contrib_.size());
+
+            std::tie(quant_parms_.scale_old_contrib_, quant_parms_.zp_old_contrib_) =
+                calculateScale(old_contrib_.data(), old_contrib_.size());
         }
     }
 }

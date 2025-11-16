@@ -5,7 +5,15 @@
 
 #include "devVector.h"
 
-
+template<typename T>
+struct GRUQuantitativeParametersInCalibration {
+  dev::vector<T> z_pres_;
+  dev::vector<T> r_pres_;
+  dev::vector<T> g_pres_;
+  dev::vector<T> one_minus_update_;
+  dev::vector<T> new_contrib_;
+  dev::vector<T> old_contrib_;
+};
 
 struct GRUQuantitativeParameters {
   int hidden_;

@@ -43,11 +43,6 @@ class ForwardPass {
   // Blocks until all iterations have completed executing on the GPU.
   ~ForwardPass();
 
-  void setCalibrationMode(bool calibration_mode, bool use_int16_quant) {
-      calibration_mode_ = calibration_mode;
-      use_int16_quant_ = use_int16_quant;
-  }
-
   const GRUQuantitativeParameters &getGRUQuantitativeParameters() const {
       return quant_parms_;
   }
@@ -107,8 +102,14 @@ class ForwardPass {
       const float zoneout_prob,
       const T *zoneout_mask);
 
+  void setCalibrationMode(bool calibration_mode, bool use_int16_quant) {
+      calibration_mode_ = calibration_mode;
+      use_int16_quant_ = use_int16_quant;
+  }
+
  private:
   void IterateInternal(
+      int steps,
       const T *R,
       const T *bx,
       const T *br,
@@ -126,9 +127,12 @@ class ForwardPass {
   bool calibration_mode_ = false;
   bool use_int16_quant_ = false;
   GRUQuantitativeParameters quant_parms_;
-  dev::vector<T> z_pres;
-  dev::vector<T> r_pres;
-  dev::vector<T> g_pres;
+  dev::vector<T> z_pres_;
+  dev::vector<T> r_pres_;
+  dev::vector<T> g_pres_;
+  dev::vector<T> one_minus_update_;
+  dev::vector<T> new_contrib_;
+  dev::vector<T> old_contrib_;
 };
 
 template<typename T>
