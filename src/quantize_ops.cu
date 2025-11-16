@@ -220,43 +220,26 @@ __global__ void computeWeightSumTiled(
 }
 
 template<typename T>
-__global__ void computeWeightSumMulzp(
-    const T *__restrict__ W_q,   // [out_dim, in_dim] 权重量化矩阵
+__global__ void computeWeightSumMulZP(
+    const T *__restrict__ W_q,   // [out_dim, in_dim] 权重量化矩阵, 列主序储存
     int32_t *__restrict__ weight_sum, // [out_dim] 输出数组
     int x_zp,
-    int32_t n, //
+    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,                      // 输出通道数 (M)
     int in_dim                        // 输入通道数 (K)
 ) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= out_dim) return;
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= out_dim) {
+        return;
+    }
 
     int32_t sum = 0;
-    const T *row_ptr = W_q + row * in_dim;
-#pragma unroll 8
+#pragma unroll
     for (int j = 0; j < in_dim; ++j) {
-        sum += static_cast<int32_t>(row_ptr[j]);
+        sum += static_cast<int32_t>(W_q[row + j * out_dim]);
     }
-    weight_sum[row] = rshift_round(sum * x_zp, n);
+    weight_sum[row] = rshift_round(sum * x_zp, n[row]);
 }
-
-template __global__ void computeWeightSumMulzp<int8_t>(
-    const int8_t *__restrict__ W_q,   // [out_dim, in_dim] 权重量化矩阵
-    int32_t *__restrict__ weight_sum, // [out_dim] 输出数组
-    int x_zp,
-    int32_t n, //
-    int out_dim,                      // 输出通道数 (M)
-    int in_dim                        // 输入通道数 (K)
-);
-
-template __global__ void computeWeightSumMulzp<int16_t>(
-    const int16_t *__restrict__ W_q,   // [out_dim, in_dim] 权重量化矩阵
-    int32_t *__restrict__ weight_sum, // [out_dim] 输出数组
-    int x_zp,
-    int32_t n, //
-    int out_dim,                      // 输出通道数 (M)
-    int in_dim                        // 输入通道数 (K)
-);
 
 __global__ void applyZeroPointCompensation2D(
     int32_t *__restrict__ Y_int32,
@@ -281,7 +264,7 @@ void computeWeightSumMulzp(
     const T *W_q,// [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,// [out_dim] 输出数组
     int x_zp,
-    int32_t n, //
+    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,// 输出通道数 (M)
     int in_dim,// 输入通道数 (K)
     cudaStream_t stream
@@ -295,7 +278,7 @@ void computeWeightSumMulzp(
 //    } else {
     int threads = 256;
     int blocks = (out_dim + threads - 1) / threads;
-    kernel::computeWeightSumMulzp<<<blocks, threads, 0, stream>>>(W_q, weight_sum, x_zp, n, out_dim, in_dim);
+    kernel::computeWeightSumMulZP<<<blocks, threads, 0, stream>>>(W_q, weight_sum, x_zp, n, out_dim, in_dim);
 //    }
 }
 
@@ -303,7 +286,7 @@ template void computeWeightSumMulzp<int8_t>(
     const int8_t *W_q,// [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,// [out_dim] 输出数组
     int x_zp,
-    int32_t n, //
+    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,// 输出通道数 (M)
     int in_dim,// 输入通道数 (K)
     cudaStream_t stream
@@ -313,7 +296,7 @@ template void computeWeightSumMulzp<int16_t>(
     const int16_t *W_q,// [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,// [out_dim] 输出数组
     int x_zp,
-    int32_t n, //
+    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,// 输出通道数 (M)
     int in_dim,// 输入通道数 (K)
     cudaStream_t stream

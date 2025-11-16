@@ -1,7 +1,9 @@
+#include <cstdint>
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 #include <cuda_fp16.h>
 #include <utility>
+#include <tuple>
 
 #include "blas.h"
 #include "device_assert.h"
@@ -10,24 +12,22 @@
 
 namespace {
 
+namespace op {
 template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
-__global__
-void PointwiseOperations(const int batch_dim,
-                         const int hidden_dim,
-                         const T *Wx,
-                         const T *Rh,
-                         const T *bx,
-                         const T *br,
-                         const T *h,
-                         T *h_out,
-                         T *v,
-                         const T zoneout_prob,
-                         const T *zoneout_mask
-//                         ,
-//                         T *z_pres,
-//                         T *r_pres,
-//                         T *g_pres
-) {  // Zoneout mask (only used if ApplyZoneout==true)
+__device__ __forceinline__ void PointwiseOperations(const int batch_dim,
+                                                    const int hidden_dim,
+                                                    const T *Wx,
+                                                    const T *Rh,
+                                                    const T *bx,
+                                                    const T *br,
+                                                    const T *h,
+                                                    T *h_out,
+                                                    T *v,
+                                                    const T zoneout_prob,
+                                                    const T *zoneout_mask,
+                                                    T *z_pres,
+                                                    T *r_pres,
+                                                    T *g_pres) {  // Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
     const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
 
@@ -59,7 +59,9 @@ void PointwiseOperations(const int batch_dim,
     const T g = tanh(g_pre);
 
     if (Calibration) {
-//        z_pres;
+        z_pres[output_idx] = z_pre;
+        r_pres[output_idx] = r_pre;
+        g_pres[output_idx] = g_pre;
     }
 
     // Store internal activations if we're eventually going to backprop.
@@ -82,6 +84,68 @@ void PointwiseOperations(const int batch_dim,
     }
 
     h_out[output_idx] = cur_h_value;
+}
+} // op namespace
+
+template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
+__global__ void PointwiseOperations(const int batch_dim,
+                                    const int hidden_dim,
+                                    const T *Wx,
+                                    const T *Rh,
+                                    const T *bx,
+                                    const T *br,
+                                    const T *h,
+                                    T *h_out,
+                                    T *v,
+                                    const T zoneout_prob,
+                                    const T *zoneout_mask
+) {
+    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(batch_dim,
+                                                                    hidden_dim,
+                                                                    Wx,
+                                                                    Rh,
+                                                                    bx,
+                                                                    br,
+                                                                    h,
+                                                                    h_out,
+                                                                    v,
+                                                                    zoneout_prob,
+                                                                    zoneout_mask,
+                                                                    nullptr,
+                                                                    nullptr,
+                                                                    nullptr);
+}
+
+template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
+__global__ void PointwiseOperations(const int batch_dim,
+                                    const int hidden_dim,
+                                    const T *Wx,
+                                    const T *Rh,
+                                    const T *bx,
+                                    const T *br,
+                                    const T *h,
+                                    T *h_out,
+                                    T *v,
+                                    const T zoneout_prob,
+                                    const T *zoneout_mask,
+                                    T *z_pres,
+                                    T *r_pres,
+                                    T *g_pres
+) {
+    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(batch_dim,
+                                                                    hidden_dim,
+                                                                    Wx,
+                                                                    Rh,
+                                                                    bx,
+                                                                    br,
+                                                                    h,
+                                                                    h_out,
+                                                                    v,
+                                                                    zoneout_prob,
+                                                                    zoneout_mask,
+                                                                    z_pres,
+                                                                    r_pres,
+                                                                    g_pres);
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
@@ -252,6 +316,43 @@ void ForwardPass<T>::IterateInternal(
 
     cudaStreamWaitEvent(stream1, event, 0);
 
+    if (calibration_mode_) {
+        if (zoneout_prob && zoneout_mask) {
+            PointwiseOperations<T, true, true, true><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size,
+                hidden_size,
+                tmp_Wx,
+                tmp_Rh,
+                bx,
+                br,
+                h,
+                h_out,
+                v,
+                zoneout_prob,
+                zoneout_mask,
+                z_pres.data(),
+                r_pres.data(),
+                g_pres.data());
+        } else {
+            PointwiseOperations<T, true, false, true><<<gridDim, blockDim, 0, stream1>>>(
+                batch_size,
+                hidden_size,
+                tmp_Wx,
+                tmp_Rh,
+                bx,
+                br,
+                h,
+                h_out,
+                v,
+                0.0f,
+                nullptr,
+                z_pres.data(),
+                r_pres.data(),
+                g_pres.data());
+        }
+        return;
+    }
+
     if (training) {
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, true, true><<<gridDim, blockDim, 0, stream1>>>(
@@ -311,8 +412,67 @@ void ForwardPass<T>::IterateInternal(
     }
 }
 
+// return: scale, zero_point
 template<typename T>
-std::pair<float, int32_t> calculateXScale(const T *x_dev, int size_per_step, int steps) {
+std::pair<float, int32_t> calculateQuantScale(T min_val, T max_val, bool use_symmetric = true, bool is_int16 = false) {
+
+    // 根据目标类型选择量化范围
+    int qmin, qmax;
+    if (is_int16) {
+        if (use_symmetric) {
+            qmin = -32768;
+            qmax = 32767;
+        } else {
+            qmin = 0;
+            qmax = 65535;
+        }
+    } else { // int8
+        if (use_symmetric) {
+            qmin = -128;
+            qmax = 127;
+        } else {
+            qmin = 0;
+            qmax = 255;
+        }
+    }
+
+    float scale = 1.0f;
+    int32_t zp = 0;
+    if (use_symmetric) {
+        float abs_max = std::max(std::abs(min_val), std::abs(max_val));
+        // 避免除零
+        if (abs_max == 0) abs_max = 1e-6f;
+        scale = abs_max / ((float) qmax);
+        zp = 0;
+    } else {
+        // 保证 (0 - min_val)/scale = qmin, (max_val - min_val)/scale = qmax
+        float denominator = max_val - min_val;
+        if (denominator == 0) denominator = 1e-6f;
+        scale = denominator / (float) (qmax - qmin);
+        zp = static_cast<int32_t>(std::round(qmin - min_val / scale));
+        // zp截断到[qmin, qmax]
+        if (zp < qmin) zp = qmin;
+        if (zp > qmax) zp = qmax;
+    }
+
+    return std::make_pair(scale, zp);
+}
+
+/**
+* 通用(仅host)scale/zp 计算函数
+* @param x_dev  -- 设备端输入数据指针
+* @param size_per_step -- 每步输入长度
+* @param steps -- 步数
+* @param use_symmetric -- 是否对称量化
+* @param is_int16 -- 是否量化为int16（否则int8）
+* @return std::pair<float, int32_t> (scale, zp)
+*/
+template<typename T>
+std::pair<float, int32_t> calculateXScale(const T *x_dev,
+                                          int size_per_step,
+                                          int steps,
+                                          bool use_symmetric = true,
+                                          bool is_int16 = false) {
     std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
     std::vector<T> min(steps);
     std::vector<T> max(steps);
@@ -330,11 +490,69 @@ std::pair<float, int32_t> calculateXScale(const T *x_dev, int size_per_step, int
 
     float res_min = min[0];
     float res_max = max[0];
-    for(int t = 1; t < steps; ++t){
+    for (int t = 1; t < steps; ++t) {
         res_min = 0.9 * res_min + 0.1 * min[t];
         res_max = 0.9 * res_max + 0.1 * max[t];
     }
 
+    return calculateQuantScale(res_min, res_max, use_symmetric, is_int16);
+}
+
+template<typename T>
+std::vector<float> calculateWeightScales(const T *W_dev, int out_dim, int in_dim) {
+    // 列主序排列
+
+    std::vector<T> W_host = d2h(W_dev, out_dim * in_dim);
+
+    std::vector<float> scales(out_dim);
+    std::vector<T> min(out_dim);
+    std::vector<T> max(out_dim);
+
+#pragma omp parallel for
+    for (int i = 0; i < out_dim; ++i) {
+        min[i] = W_host[i];
+        max[i] = W_host[i];
+        for (int j = 1; j < in_dim; ++j) {
+            min[i] = std::min(min[i], W_host[j * out_dim + i]);
+            max[i] = std::max(max[i], W_host[j * out_dim + i]);
+        }
+    }
+
+#pragma omp parallel for
+    for (int i = 0; i < out_dim; ++i) {
+        scales[i] = calculateQuantScale(min[i], max[i], true, false).first;
+    }
+    return scales;
+}
+
+template<typename T>
+std::pair<float, int32_t> calculateScale(const T *data_dev,
+                                         size_t size,
+                                         bool use_symmetric = true,
+                                         bool is_int16 = false) {
+    std::vector<T> data_host = d2h(data_dev, size);
+    T min_val = data_host[0];
+    T max_val = data_host[0];
+#pragma omp parallel for reduction(min:val_min, max:val_max)
+    for (int i = 1; i < size; ++i) {
+        min_val = std::min(min_val, data_host[i]);
+        max_val = std::max(max_val, data_host[i]);
+    }
+    return calculateQuantScale(max_val, max_val, use_symmetric, is_int16);
+}
+
+template<typename T>
+std::vector<float> calculateBiasScale(const T *bx_dev,
+                                      size_t size,
+                                      bool use_symmetric = true,
+                                      bool is_int16 = false) {
+    std::vector<T> bx_host = d2h(bx_dev, size);
+    std::vector<float> scales(size);
+#pragma omp parallel for
+    for (int i = 0; i < size; ++i) {
+        scales[i] = calculateQuantScale(static_cast<T>(0), bx_host[i], use_symmetric, is_int16).first;
+    }
+    return scales;
 }
 
 template<typename T>
@@ -357,9 +575,9 @@ void ForwardPass<T>::Run(
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
-    const int batch_size = data_->batch_size;
-    const int input_size = data_->input_size;
-    const int hidden_size = data_->hidden_size;
+    const int batch_size = data_->batch_size; // N
+    const int input_size = data_->input_size; // C
+    const int hidden_size = data_->hidden_size; // H
     const cublasHandle_t blas_handle = data_->blas_handle;
     const cudaStream_t stream2 = data_->stream[1];
     const cudaEvent_t event = data_->event;
@@ -380,6 +598,7 @@ void ForwardPass<T>::Run(
 
     const int NH = batch_size * hidden_size;
     for (int i = 0; i < steps; ++i) {
+        const int Rh_offset = calibration_mode_ ? i * NH * 3 : 0;
         IterateInternal(
             R,
             bx,
@@ -388,7 +607,7 @@ void ForwardPass<T>::Run(
             h + (i + 1) * NH,
             v + i * NH * 4,
             tmp_Wx + i * NH * 3,
-            tmp_Rh,
+            tmp_Rh + Rh_offset,
             zoneout_prob,
             zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
@@ -398,10 +617,20 @@ void ForwardPass<T>::Run(
     if (calibration_mode_) {
         quant_parms_.hidden_ = data_->hidden_size;
         if (!use_int16_quant_) {
+            std::tie(quant_parms_.scale_x_, quant_parms_.zp_x_) = calculateXScale(x, NH, steps, false, false);
+            std::tie(quant_parms_.scale_h_, quant_parms_.zp_h_) = calculateXScale(h, NH, steps + 1, false, false);
 
+            quant_parms_.scale_W_ = calculateWeightScales(W, hidden_size * 3, input_size);
+            quant_parms_.scale_R_ = calculateWeightScales(R, hidden_size * 3, hidden_size);
+
+            std::tie(quant_parms_.scale_Wx_, quant_parms_.zp_Wx_) =
+                calculateScale(tmp_Wx, steps * batch_size * hidden_size * 3, false, false);
+            std::tie(quant_parms_.scale_Rh_, quant_parms_.zp_Rh_) =
+                calculateScale(tmp_Rh, steps * batch_size * hidden_size * 3, false, false);
+
+            quant_parms_.scale_bx_ = calculateBiasScale(bx, hidden_size * 3, true, false);
+            quant_parms_.scale_br_ = calculateBiasScale(br, hidden_size * 3, true, false);
         }
-        quant_parms_.scale_x_ = calculateXScale(x, NH, steps).first;
-        quant_parms_.zp_x_ = calculateXScale(x, NH, steps).second;
     }
 }
 
