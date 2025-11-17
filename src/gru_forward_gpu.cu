@@ -560,10 +560,11 @@ std::pair<float, int32_t> calculateScale(const T *data_dev,
     T max_val = data_host[0];
 #pragma omp parallel for reduction(min:val_min, max:val_max)
     for (int i = 1; i < size; ++i) {
-        min_val = std::min(min_val, data_host[i]);
-        max_val = std::max(max_val, data_host[i]);
+        const T val =  data_host[i];
+        min_val = std::min(min_val, val);
+        max_val = std::max(max_val, val);
     }
-    return calculateQuantScale(max_val, max_val, use_symmetric, is_int16);
+    return calculateQuantScale(min_val, max_val, use_symmetric, is_int16);
 }
 
 template<typename T>
@@ -573,7 +574,7 @@ std::vector<float> calculateBiasScale(const T *bx_dev,
                                       bool is_int16 = false) {
     std::vector<T> bx_host = d2h(bx_dev, size);
     std::vector<float> scales(size);
-#pragma omp parallel for
+//#pragma omp parallel for
     for (int i = 0; i < size; ++i) {
         scales[i] = calculateQuantScale(static_cast<T>(0), bx_host[i], use_symmetric, is_int16).first;
     }
@@ -667,16 +668,33 @@ void ForwardPass<T>::Run(
             quant_parms_.scale_bx_ = calculateBiasScale(bx, hidden_size * 3, true, false);
             quant_parms_.scale_br_ = calculateBiasScale(br, hidden_size * 3, true, false);
 
+            std::tie(quant_parms_.scale_z_pre_, quant_parms_.zp_z_pre_) =
+                calculateScale(z_pres_.data(), z_pres_.size(), false, false);
+            std::tie(quant_parms_.scale_r_pre_, quant_parms_.zp_r_pre_) =
+                calculateScale(r_pres_.data(), r_pres_.size(), false, false);
+            std::tie(quant_parms_.scale_g_pre_, quant_parms_.zp_g_pre_) =
+                calculateScale(g_pres_.data(), g_pres_.size(), false, false);
+
+//            std::tie(quant_parms_.scale_z_out_, quant_parms_.zp_z_out_) =
+//                calculateScale();
+            std::tie(quant_parms_.scale_r_out_, quant_parms_.zp_r_out_);
+            std::tie(quant_parms_.scale_g_out_, quant_parms_.zp_g_out_);
+
+            std::tie(quant_parms_.scale_Rh_add_br_, quant_parms_.zp_Rh_add_br_);
+            std::tie(quant_parms_.scale_rRh_, quant_parms_.zp_rRh_);
+
             std::tie(quant_parms_.scale_one_minus_update_, quant_parms_.zp_one_minus_update_) =
-                calculateScale(one_minus_update_.data(), one_minus_update_.size());
+                calculateScale(one_minus_update_.data(), one_minus_update_.size(), false, false);
 
             std::tie(quant_parms_.scale_new_contrib_, quant_parms_.zp_new_contrib_) =
-                calculateScale(new_contrib_.data(), new_contrib_.size());
+                calculateScale(new_contrib_.data(), new_contrib_.size(), false, false);
 
             std::tie(quant_parms_.scale_old_contrib_, quant_parms_.zp_old_contrib_) =
-                calculateScale(old_contrib_.data(), old_contrib_.size());
+                calculateScale(old_contrib_.data(), old_contrib_.size(), false, false);
         }
     }
+
+
 }
 
 //template
