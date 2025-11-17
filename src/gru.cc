@@ -82,6 +82,72 @@ void GruQuantInit(
     // N : batch_size
     // C : input_size
     if (!use_int16) { // int8量化
+        // 权重是per-channel的，大小为H * 3（hidden_size * 3）
+        // W: [H*3, C]，W_quant: [H*3, C]，scale_W_: [H*3]
+        for (int i = 0; i < W.dimension(0); ++i) {  // i: [0, H*3)
+            float scale_W = gruRescaleParams.scale_W_[i];
+            for (int j = 0; j < W.dimension(1); ++j) {  // j: [0, input_size)
+                float real = W(i, j);
+                // 对称量化到int8：clip到[-128,127]
+                int32_t q = static_cast<int32_t>(std::round(real / scale_W));
+                q = std::max(-128, std::min(127, q));
+                W_quant(i, j) = static_cast<int8_t>(q);
+            }
+        }
+        // R: [H*3, H]，R_quant: [H*3, H]，scale_R_: [H*3]
+        for (int i = 0; i < R.dimension(0); ++i) {  // i: [0, H*3)
+            float scale_R = gruRescaleParams.scale_R_[i];
+            for (int j = 0; j < R.dimension(1); ++j) {  // j: [0, hidden_size)
+                float real = R(i, j);
+                int32_t q = static_cast<int32_t>(std::round(real / scale_R));
+                q = std::max(-128, std::min(127, q));
+                R_quant(i, j) = static_cast<int8_t>(q);
+            }
+        }
+
+        // 偏置per-channel，H*3
+        // bx_quant: [H*3], scale_bx_: [H*3]
+        for (int i = 0; i < bx.dimension(0); ++i) {  // i: [0, H*3)
+            float scale_bx = gruRescaleParams.scale_bx_[i];
+            float real = bx(i);
+            int32_t q = static_cast<int32_t>(std::round(real / scale_bx));
+            bx_quant(i) = q;
+        }
+        // br_quant: [H*3], scale_br_: [H*3]
+        for (int i = 0; i < br.dimension(0); ++i) {  // i: [0, H*3)
+            float scale_br = gruRescaleParams.scale_br_[i];
+            float real = br(i);
+            int32_t q = static_cast<int32_t>(std::round(real / scale_br));
+            br_quant(i) = q;
+        }
+
+        // x: [C, N, T], x_quant: [C, N, T]
+        // 量化用全局scale_x_和zp_x_
+        for (int t = 0; t < x.dimension(2); ++t) {      // t: [0, time_steps)
+            for (int n = 0; n < x.dimension(1); ++n) {  // n: [0, batch_size)
+                for (int c = 0; c < x.dimension(0); ++c) {  // c: [0, input_size)
+                    float real = x(c, n, t);
+                    int32_t q =
+                        static_cast<int32_t>(std::round(real / gruRescaleParams.scale_x_)) + gruRescaleParams.zp_x_;
+                    q = std::max(-128, std::min(127, q));
+                    x_quant(c, n, t) = static_cast<int8_t>(q);
+                }
+            }
+        }
+
+        // dh_new: [H, N, T+1], dh_new_quant: [H, N, T+1]
+        // 使用scale_h_和zp_h_
+        for (int t = 0; t < dh_new.dimension(2); ++t) {    // t: [0, time_steps+1)
+            for (int n = 0; n < dh_new.dimension(1); ++n) { // n: [0, batch_size)
+                for (int h = 0; h < dh_new.dimension(0); ++h) { // h: [0, hidden_size)
+                    float real = dh_new(h, n, t);
+                    int32_t q =
+                        static_cast<int32_t>(std::round(real / gruRescaleParams.scale_h_)) + gruRescaleParams.zp_h_;
+                    q = std::max(-128, std::min(127, q));
+                    dh_new_quant(h, n, t) = static_cast<int8_t>(q);
+                }
+            }
+        }
 
 
     } else {
@@ -116,11 +182,9 @@ void GruInferenceQuant(const Tensor2i8 &W,
     device_ptr<Tensor2i32> tmp_Rh_dev(batch_size * hidden_size * 3); // 用于存放R * h的中间结果
 
     device_ptr<Tensor3i8> h_dev(h);
-//    h_dev.zero(); // h初始化为0
+    h_dev.zero(); // h初始化为0
 
     {
-        ScopeTimer t("Inference Quant:");
-
         gru::ForwardPassQuant<int8_t> forward = gru::ForwardPassQuant<int8_t>(
             false, // training
             batch_size, input_size, hidden_size, g_blas_handle);
@@ -128,6 +192,7 @@ void GruInferenceQuant(const Tensor2i8 &W,
         // 得到量化GRU中使用的rescale参数
         forward.setRescaleParam(quant_parms);
 
+        ScopeTimer t("Inference Quant:");
         forward.Run(time_steps, W_dev.data, R_dev.data, bx_dev.data, br_dev.data,
                     x_dev.data, h_dev.data, nullptr, tmp_Wx_dev.data, tmp_Rh_dev.data,
                     0.0f, nullptr);
@@ -141,7 +206,7 @@ void GruInference(const Tensor2f &W,
                   const Tensor1f &bx,
                   const Tensor1f &br,
                   const Tensor3f &x,
-                  Tensor3f h) {
+                  Tensor3f &h) {
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);
     const int input_size = x.dimension(0);
@@ -154,11 +219,11 @@ void GruInference(const Tensor2f &W,
     device_ptr<Tensor1f> br_dev(br);
     device_ptr<Tensor3f> x_dev(x);
 
-    device_ptr<Tensor3f> h_dev(h);
+    device_ptr<Tensor3f> h_dev(hidden_size * batch_size * (time_steps + 1));
     device_ptr<Tensor3f> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3); // 用于存放W * x的中间结果
     device_ptr<Tensor2f> tmp_Rh_dev(batch_size * hidden_size * 3); // 用于存放R * h的中间结果
 
-//    h_dev.zero(); // h初始化为0
+    h_dev.zero(); // h初始化为0
 
     {
         ScopeTimer t("Inference:");
@@ -275,31 +340,95 @@ void checkHQuantizationWithCosine(
     int time_steps,
     int batch_size,
     int hidden_size,
-    const GRUQuantitativeParameters &scaleParam,                  // 每步 scale M, 每步 shift
-    float threshold = 1.0f                          // 超阈值
+    const GRUQuantitativeParameters &scaleParam,
+    float threshold = -1.0f                         // 超阈值，如果 < 0 则自动计算
 ) {
-
-    float max_h = 0.0f;
-    for (float v : h_inference) max_h = std::max(max_h, std::abs(v));
-    float step = max_h / 127.0f;  // int8
-    threshold = 0.5f * step;
+    // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
+    // 使用 2 * scale 作为阈值，允许一定的误差范围
+    if (threshold < 0.0f) {
+        threshold = 2.0f * scaleParam.scale_h_;
+    }
 
     const int size_per_step = batch_size * hidden_size;
+
+    // 验证输入数据大小
+    if (h_inference.size() != static_cast<size_t>((time_steps + 1) * size_per_step)) {
+        printf("[Error] h_inference size mismatch: expected %d, got %zu\n",
+               (time_steps + 1) * size_per_step, h_inference.size());
+        return;
+    }
+    if (h_quant_inference.size() != static_cast<size_t>((time_steps + 1) * size_per_step)) {
+        printf("[Error] h_quant_inference size mismatch: expected %d, got %zu\n",
+               (time_steps + 1) * size_per_step, h_quant_inference.size());
+        return;
+    }
+
+    printf("checkHQuantizationWithCosine: time_steps=%d, batch_size=%d, hidden_size=%d\n",
+           time_steps, batch_size, hidden_size);
+    printf("  scale_h_=%f, zp_h_=%d, threshold=%f\n",
+           scaleParam.scale_h_, scaleParam.zp_h_, threshold);
+
+    // 检查前几个数据点的值
+    printf("  Sample data check:\n");
+    printf("    h_inference size: %zu, expected: %d\n", h_inference.size(), (time_steps + 1) * size_per_step);
+    printf("    h_quant_inference size: %zu, expected: %d\n",
+           h_quant_inference.size(),
+           (time_steps + 1) * size_per_step);
+
+    // 检查初始状态（t=0）的数据
+    printf("    h_inference[t=0, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%f ", h_inference[i]);
+    }
+    printf("\n");
+    printf("    h_quant_inference[t=0, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%d ", static_cast<int>(h_quant_inference[i]));
+    }
+    printf("\n");
+
+    // 检查第一个时间步（t=1）的数据
+    const int t1_offset = size_per_step;
+    printf("    h_inference[t=1, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%f ", h_inference[t1_offset + i]);
+    }
+    printf("\n");
+    printf("    h_quant_inference[t=1, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%d ", static_cast<int>(h_quant_inference[t1_offset + i]));
+    }
+    printf("\n");
+
+    // 检查是否有非零值
+    int non_zero_float = 0, non_zero_quant = 0;
+    for (size_t i = 0; i < h_inference.size(); ++i) {
+        if (std::abs(h_inference[i]) > 1e-6f) non_zero_float++;
+    }
+    for (size_t i = 0; i < h_quant_inference.size(); ++i) {
+        if (h_quant_inference[i] != 0) non_zero_quant++;
+    }
+    printf("    Non-zero values: h_inference=%d/%zu, h_quant_inference=%d/%zu\n",
+           non_zero_float, h_inference.size(), non_zero_quant, h_quant_inference.size());
 
     std::vector<float> h_float_step(size_per_step);
     std::vector<float> h_quant_step(size_per_step);
 
     for (int t = 1; t <= time_steps; ++t) {
-        // 拷贝浮点 h
-        std::copy(h_inference.begin() + t * size_per_step,
-                  h_inference.begin() + (t + 1) * size_per_step,
-                  h_float_step.begin());
+        // ForwardPass 存储 h 的方式：h + t * (batch_size * hidden_size)
+        // 每个时间步内部：按 [batch0_h0, batch0_h1, ..., batch0_hH-1, batch1_h0, ..., batchN-1_hH-1] 顺序
+        // 即：t * (N*H) + n * H + h
 
-        // TODO: 反量化
-//        dequantizeTensorFixedPoint(h_quant_inference.data() + t * size_per_step,
-//                                   size_per_step,
-//                                   scaleParam.h,
-//                                   h_quant_step.data());
+        const size_t t_offset = static_cast<size_t>(t) * size_per_step;
+
+        // 直接拷贝和反量化
+        for (int idx = 0; idx < size_per_step; ++idx) {
+            h_float_step[idx] = h_inference[t_offset + idx];
+
+            // 反量化: dequant = (quant - zp) * scale
+            int8_t quant_val = h_quant_inference[t_offset + idx];
+            h_quant_step[idx] = static_cast<float>(quant_val - scaleParam.zp_h_) * scaleParam.scale_h_;
+        }
 
         // 差值统计
         float max_diff = 0.0f;
@@ -384,6 +513,111 @@ void calibrateGruScales(const Tensor2f &W,
 
 }
 
+void printGRUQuantitativeParameters(const GRUQuantitativeParameters &quant_gru_scales) {
+    printf("GRUQuantitativeParameters (量化参数):\n");
+    printf("  scale_x_ = %f\n",
+           quant_gru_scales.scale_x_);
+    printf("  zp_x_    = %d\n", quant_gru_scales.zp_x_);
+    printf("  scale_h_ = %f (1/scale_h_ = %f)\n",
+           quant_gru_scales.scale_h_);
+    printf("  zp_h_    = %d\n", quant_gru_scales.zp_h_);
+
+    printf("  scale_W_ (size %zu): ", quant_gru_scales.scale_W_.size());
+    for (size_t i = 0; i < quant_gru_scales.scale_W_.size() && i < 8; ++i) {
+        printf("%f ", quant_gru_scales.scale_W_[i]);
+    }
+    if (quant_gru_scales.scale_W_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  scale_R_ (size %zu): ", quant_gru_scales.scale_R_.size());
+    for (size_t i = 0; i < quant_gru_scales.scale_R_.size() && i < 8; ++i) {
+        printf("%f ", quant_gru_scales.scale_R_[i]);
+    }
+    if (quant_gru_scales.scale_R_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  scale_bx_ (size %zu): ", quant_gru_scales.scale_bx_.size());
+    for (size_t i = 0; i < quant_gru_scales.scale_bx_.size() && i < 8; ++i) {
+        printf("%f ", quant_gru_scales.scale_bx_[i]);
+    }
+    if (quant_gru_scales.scale_bx_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  scale_br_ (size %zu): ", quant_gru_scales.scale_br_.size());
+    for (size_t i = 0; i < quant_gru_scales.scale_br_.size() && i < 8; ++i) {
+        printf("%f ", quant_gru_scales.scale_br_[i]);
+    }
+    if (quant_gru_scales.scale_br_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  scale_Wx_ = %f, zp_Wx_ = %d \n",
+           quant_gru_scales.scale_Wx_, quant_gru_scales.zp_Wx_);
+    printf("  scale_Rh_ = %f, zp_Rh_ = %d \n",
+           quant_gru_scales.scale_Rh_, quant_gru_scales.zp_Rh_);
+    printf("  scale_z_pre_ = %f, zp_z_pre_ = %d \n",
+           quant_gru_scales.scale_z_pre_, quant_gru_scales.zp_z_pre_);
+    printf("  scale_r_pre_ = %f, zp_r_pre_ = %d\n",
+           quant_gru_scales.scale_r_pre_, quant_gru_scales.zp_r_pre_);
+    printf("  scale_g_pre_ = %f, zp_g_pre_ = %d\n",
+           quant_gru_scales.scale_g_pre_, quant_gru_scales.zp_g_pre_);
+    printf("  scale_one_minus_update_ = %f, zp_one_minus_update_ = %d\n",
+           quant_gru_scales.scale_one_minus_update_,
+           quant_gru_scales.zp_one_minus_update_);
+    printf("  scale_new_contrib_ = %f, zp_new_contrib_ = %d\n",
+           quant_gru_scales.scale_new_contrib_,
+           quant_gru_scales.zp_new_contrib_);
+    printf("  scale_old_contrib_ = %f, zp_old_contrib_ = %d\n",
+           quant_gru_scales.scale_old_contrib_,
+           quant_gru_scales.zp_old_contrib_);
+    printf("  hidden_ = %d\n", quant_gru_scales.hidden_);
+}
+
+void checkQuant(const Tensor2i8 &W_quant,  // 对应W_z/W_r/W_h的合并
+                const Tensor2i8 &R_quant, // 对应R_z/R_r/R_h的合并
+                const Tensor1i32 &bx_quant, // 对应b_z/b_r/b_h的合并. bx 负责给 “输入 x_t 到门控的线性变换” 加偏置
+                const Tensor1i32 &br_quant, // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
+                const Tensor3i8 &x_quant,
+                const Tensor3i8 &dh_new_quant
+) {
+    for (int i = 0; i < W_quant.size(); ++i) {
+        if (W_quant.data()[i] == 0) {
+            printf("Error, W_quant[%d] = %d\n", i, W_quant.data()[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < R_quant.size(); ++i) {
+        if (R_quant.data()[i] == 0) {
+            printf("Error, R_quant[%d] = %d\n", i, R_quant.data()[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < bx_quant.size(); ++i) {
+        if (bx_quant.data()[i] == 0) {
+            printf("Error, bx_quant[%d] = %d\n", i, bx_quant.data()[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < br_quant.size(); ++i) {
+        if (br_quant.data()[i] == 0) {
+            printf("Error, br_quant[%d] = %d\n", i, br_quant.data()[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < x_quant.size(); ++i) {
+        if (x_quant.data()[i] == 0) {
+            printf("Error, x_quant[%d] = %d\n", i, x_quant.data()[i]);
+            break;
+        }
+    }
+    for (int i = 0; i < dh_new_quant.size(); ++i) {
+        if (dh_new_quant.data()[i] == 0) {
+            printf("Error, dh_new_quant[%d] = %d", i, dh_new_quant.data()[i]);
+            break;
+        }
+    }
+    printf("Quant values check over\n");
+}
+
 int main() {
     srand(time(0));
 
@@ -392,8 +626,8 @@ int main() {
     // Weights.
     Tensor2f W(HIDDEN_DIMS * 3, INPUT_DIMS);  // 对应W_z/W_r/W_h的合并
     Tensor2f R(HIDDEN_DIMS * 3, HIDDEN_DIMS); // 对应R_z/R_r/R_h的合并
-    Tensor1f bx(HIDDEN_DIMS * 3); // 对应b_z/b_r/b_h的合并. bx 负责给 “输入 x_t 到门控的线性变换” 加偏置
-    Tensor1f br(HIDDEN_DIMS * 3); // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
+    Tensor1f bx(HIDDEN_DIMS * 3); // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t 到门控的线性变换" 加偏置
+    Tensor1f br(HIDDEN_DIMS * 3); // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态 h_{t-1} 到门控的线性变换" 加偏置
 
     // Input.
     Tensor3f x(INPUT_DIMS, BATCH_SIZE, SEQUENCE_LEN);
@@ -401,19 +635,42 @@ int main() {
     // Gradients from upstream layers.
     Tensor3f dh(HIDDEN_DIMS, BATCH_SIZE, SEQUENCE_LEN + 1);
 
+    // W: 输入权重矩阵，使用 Xavier/Glorot 均匀初始化
+    // 范围: U(-k, k)，其中 k = sqrt(6 / (input_size + hidden_size * 3))
+    // 这确保前向和反向传播的方差保持稳定
     W.setRandom();
+    float k_W = sqrtf(6.0f / (static_cast<float>(INPUT_DIMS) + static_cast<float>(HIDDEN_DIMS * 3)));
+    W = W * W.constant(k_W);  // 将 [-1, 1] 缩放到 [-k_W, k_W]
+
+    // R: 循环权重矩阵，使用较小的初始化范围
+    // 范围: U(-k, k)，其中 k = sqrt(1 / hidden_size) 或更保守的 k = 1 / sqrt(hidden_size)
+    // 循环权重通常需要更小的初始值以避免梯度爆炸
     R.setRandom();
+    float k_R = 1.0f / sqrtf(static_cast<float>(HIDDEN_DIMS));
+    R = R * R.constant(k_R);
+
+    // bx, br: 偏置通常初始化为0或很小的随机值
+    // PyTorch GRU 默认偏置为0，这里使用很小的随机值 [-0.01, 0.01] 以增加一些随机性
     bx.setRandom();
+//    bx = bx * bx.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
     br.setRandom();
-    x.setRandom();
+//    br = br * br.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
+
+    // x: 输入数据，通常在 [-1, 1] 范围内（标准化后的输入）
+    // 或者根据实际应用场景，可以是归一化后的数据
+    // 这里使用 [-1, 1] 范围，模拟标准化后的输入
+    x.setRandom();  // Eigen setRandom() 默认生成 [-1, 1] 的均匀分布
+
+    // dh: 来自上层或损失函数的梯度，通常在 [-0.01, 0.01] 范围内
+    // 实际训练中梯度值通常较小，这里使用合理的范围
     dh.setRandom();
+    dh = dh * dh.constant(0.01f);  // 梯度缩放为 [-0.01, 0.01]
 
 
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);
     const int input_size = x.dimension(0);
     const int hidden_size = R.dimension(1);
-
 
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
@@ -427,7 +684,7 @@ int main() {
     Tensor3i8 x_quant(INPUT_DIMS, BATCH_SIZE, SEQUENCE_LEN);
     Tensor3i8 dh_new_quant(HIDDEN_DIMS, BATCH_SIZE, SEQUENCE_LEN + 1);
 
-    // TODO: 使用固定量化参数将输入量化
+    // 使用固定量化参数将输入量化
     GruQuantInit<false>(W,
                         R,
                         bx,
@@ -441,6 +698,14 @@ int main() {
                         x_quant,
                         dh_new_quant,
                         quant_parms);
+
+    checkQuant(W_quant,
+               R_quant,
+               bx_quant,
+               br_quant,
+               x_quant,
+               dh_new_quant);
+    printGRUQuantitativeParameters(quant_parms);
 
     // 运行量化GRU得到量化结果2
     Tensor3i8 h_quant_inference(hidden_size, batch_size, (time_steps + 1));
@@ -461,7 +726,7 @@ int main() {
 
     printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
-    { // Test
+    if (false) { // Test
         std::vector<float> h_inference_tmp(h_inference.data(), h_inference.data() + h_inference.size());
         std::vector<int8_t> h_quant_inference_tmp(h_quant_inference.data(),
                                                   h_quant_inference.data() + h_quant_inference.size());

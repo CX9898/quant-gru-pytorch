@@ -312,6 +312,22 @@ void dequantizeTensorFixedPoint(const QuantT *quant_data,
     }
 }
 
+/**
+ * @brief 完整的反量化函数（支持对称和非对称量化）
+ * @param quant_data 量化后的int8数据
+ * @param dequant_data 反量化后的float数据输出
+ * @param size 数据数量
+ * @param scale 缩放因子
+ * @param zero_point 零点（对称量化为0，非对称量化通常不为0）
+ */
+template<typename QuantT>
+inline void dequantizeTensor(const QuantT* quant_data, float* dequant_data,
+                             int size, float scale, int32_t zero_point) {
+    for (int i = 0; i < size; ++i) {
+        dequant_data[i] = static_cast<float>(quant_data[i] - zero_point) * scale;
+    }
+}
+
 // 定义常量
 constexpr int32_t Q15_ONE = 32768;
 constexpr int32_t ALPHA_Q15 = 29491; // 0.9 * 32768
@@ -376,48 +392,96 @@ inline int32_t calculate_right_shift_bits(float S, int32_t min_n = 0, int32_t ma
     return n;
 }
 
-
 /**
- * @brief 验证 S_omu 是否为 2的负幂次浮点数，并计算 1/S_omu（整数结果）
- * @param S_omu 输入的缩放因子（浮点数，需符合量化工程约定：S_omu = 2^(-m), m为整数）
- * @param tolerance 浮点数精度容差（默认 1e-6，应对浮点存储微小误差）
- * @return 1/S_omu 的整数结果（int32_t 类型，因量化场景中 m 通常≤30，2^30≈1e9，适配32位整数）
- * @throws std::invalid_argument 若 S_omu 不是 2的负幂次，或 S_omu ≤0
+ * @brief 计算 1/S 的近似值，用整数右移位实现
+ * @param S 输入缩放因子 (必须 > 0)
+ * @return 近似计算 1/S 的整数值
  */
-inline int32_t calculate_one_over_Somu(float S_omu, float tolerance = 1e-6f) {
-    // 1. 基础合法性检查：S_omu 必须为正
-    if (S_omu <= 0.0f) {
-        throw std::invalid_argument("S_omu must be positive! Current value: " + std::to_string(S_omu));
+inline int32_t calculate_one_over_S(float S) {
+    if (S <= 0.0f) {
+        throw std::invalid_argument("S must be positive! Current value: " + std::to_string(S));
     }
 
-    // 2. 计算理论 m 值：由 S_omu = 2^(-m) → m = -log2(S_omu)
-    float log2_Somu = log2f(S_omu);
-    float m_theory = -log2_Somu;
+    // 计算理论右移位数：n = -log2(S)
+    float n_theory = -log2f(S);
 
-    // 3. 验证 m 是否为整数（核心：S_omu 必须是 2的负幂次）
-    int32_t m = static_cast<int32_t>(roundf(m_theory)); // 四舍五入到最近整数
-    float S_omu_approx = powf(2.0f, -static_cast<float>(m)); // 由 m 反推理论 S_omu
+    // 四舍五入到最近整数
+    int32_t n = static_cast<int32_t>(roundf(n_theory));
 
-    // 4. 检查实际 S_omu 与理论值的误差是否在容差内
-    float absolute_error = fabsf(S_omu - S_omu_approx);
-    if (absolute_error > tolerance) {
-        throw std::invalid_argument(
-            "S_omu is not a negative power of 2! "
-            "Current S_omu: " + std::to_string(S_omu) + ", "
-                                                        "Nearest 2^(-m): " + std::to_string(S_omu_approx) + ", "
-                                                                                                            "Error: " +
-            std::to_string(absolute_error)
-        );
+    // 边界检查：确保 n 在合理范围内
+    // n < 0 意味着 S > 1.0，此时 1/S < 1，不适合用右移位
+    // n ≥ 32 会导致未定义行为（对于 32 位整数）
+    if (n < 0) {
+        n = 0;  // 最小右移 0 位（即不移位）
+    } else if (n > 30) {
+        n = 30; // 最大右移 30 位（避免溢出）
     }
 
-    // 5. 计算 1/S_omu = 2^m（整数结果），并检查溢出
-    if (m < 0) {
-        throw std::invalid_argument("m = " + std::to_string(m) + " is negative! S_omu is too large (exceeds 1.0f)");
-    }
-    if (m > 30) { // 2^30 = 1073741824，2^31 会溢出 int32_t（最大值 2147483647）
-        throw std::overflow_error("m = " + std::to_string(m) + " is too large! 2^m exceeds int32_t limit");
-    }
+    // 计算 1/S ≈ 2^n
+    // 注意：这里返回的是 2^n，不是右移位数 n
+    int32_t result = 1 << n;
 
-    int32_t one_over_Somu = 1 << m; // 等价于 2^m，用左移实现整数乘法（无浮点运算）
-    return one_over_Somu;
+    return result;
 }
+
+inline int32_t calculate_one_over_Somu(float S_omu, float tolerance = 1e-6f) {
+    if (S_omu <= 0.0f) {
+        throw std::invalid_argument("S_omu must be positive!");
+    }
+
+    // 直接计算 1/S_omu 并四舍五入到整数
+    float one_over = 1.0f / S_omu;
+    int32_t result = static_cast<int32_t>(roundf(one_over));
+
+    // 可选：检查结果是否在 int32_t 范围内
+    if (result <= 0) {
+        throw std::overflow_error("1/S_omu is too large or invalid");
+    }
+
+    return result;
+}
+
+///**
+// * @brief 验证 S_omu 是否为 2的负幂次浮点数，并计算 1/S_omu（整数结果）
+// * @param S_omu 输入的缩放因子（浮点数，需符合量化工程约定：S_omu = 2^(-m), m为整数）
+// * @param tolerance 浮点数精度容差（默认 1e-6，应对浮点存储微小误差）
+// * @return 1/S_omu 的整数结果（int32_t 类型，因量化场景中 m 通常≤30，2^30≈1e9，适配32位整数）
+// * @throws std::invalid_argument 若 S_omu 不是 2的负幂次，或 S_omu ≤0
+// */
+//inline int32_t calculate_one_over_Somu(float S_omu, float tolerance = 1e-6f) {
+//    // 1. 基础合法性检查：S_omu 必须为正
+//    if (S_omu <= 0.0f) {
+//        throw std::invalid_argument("S_omu must be positive! Current value: " + std::to_string(S_omu));
+//    }
+//
+//    // 2. 计算理论 m 值：由 S_omu = 2^(-m) → m = -log2(S_omu)
+//    float log2_Somu = log2f(S_omu);
+//    float m_theory = -log2_Somu;
+//
+//    // 3. 验证 m 是否为整数（核心：S_omu 必须是 2的负幂次）
+//    int32_t m = static_cast<int32_t>(roundf(m_theory)); // 四舍五入到最近整数
+//    float S_omu_approx = powf(2.0f, -static_cast<float>(m)); // 由 m 反推理论 S_omu
+//
+//    // 4. 检查实际 S_omu 与理论值的误差是否在容差内
+//    float absolute_error = fabsf(S_omu - S_omu_approx);
+//    if (absolute_error > tolerance) {
+//        throw std::invalid_argument(
+//            "S_omu is not a negative power of 2! "
+//            "Current S_omu: " + std::to_string(S_omu) + ", "
+//                                                        "Nearest 2^(-m): " + std::to_string(S_omu_approx) + ", "
+//                                                                                                            "Error: " +
+//            std::to_string(absolute_error)
+//        );
+//    }
+//
+//    // 5. 计算 1/S_omu = 2^m（整数结果），并检查溢出
+//    if (m < 0) {
+//        throw std::invalid_argument("m = " + std::to_string(m) + " is negative! S_omu is too large (exceeds 1.0f)");
+//    }
+//    if (m > 30) { // 2^30 = 1073741824，2^31 会溢出 int32_t（最大值 2147483647）
+//        throw std::overflow_error("m = " + std::to_string(m) + " is too large! 2^m exceeds int32_t limit");
+//    }
+//
+//    int32_t one_over_Somu = 1 << m; // 等价于 2^m，用左移实现整数乘法（无浮点运算）
+//    return one_over_Somu;
+//}

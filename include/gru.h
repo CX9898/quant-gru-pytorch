@@ -133,6 +133,8 @@ class ForwardPass {
   dev::vector<T> one_minus_update_;
   dev::vector<T> new_contrib_;
   dev::vector<T> old_contrib_;
+
+
 };
 
 template<typename T>

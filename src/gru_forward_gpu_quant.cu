@@ -32,6 +32,10 @@ __device__ __forceinline__ int8_t computeZ( // 更新门z
     const int32_t Wx = rshift_round(Wx_val, rescale_params.n_Wx_[channel_idx]) - W_sum_mul_x_zp + rescale_params.zp_Wx_;
     const int32_t Rh = rshift_round(Rh_val, rescale_params.n_Rh_[channel_idx]) - R_sum_mul_h_zp + rescale_params.zp_Rh_;
 
+//    printf("computeZ: Wx_val = %d, Wx = %d, Rh_val = %d, Rh = %d, W_sum_mul_x_zp = %d, R_sum_mul_h_zp = %d,"
+//           "bx_val = %d, br_val = %d\n",
+//           Wx_val, Wx,Rh_val, Rh_val, Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx_val, br_val);
+
     // scale_z_pre是通过效验阶段得到的; 通过sigmoid函数入口前的各项相加:Wx_val+Rh_val+bx_val+br_val的结果的的最大最小值计算得到
     const int8_t z_pre_i8 = dev::clamp<int8_t>( // clamp: 截断到int8的范围
         rshift_round(Wx, rescale_params.n_Wx_to_z_) + // n为: scale_Wx / scale_z_pre ≈ 2^-n
@@ -238,6 +242,16 @@ __global__ void PointwiseOperationsQuant(
 
     /* 结果储存 */
     h_out[output_idx] = cur_h_value;
+//    printf("h_out = %f, z = %f, r = %f, g = %f,z_pre = %f, r_pre = %f, g_pre = %f, h_old = %f\n",
+//           cur_h_value,
+//           z,
+//           r,
+//           g,
+//           z_pre,
+//           r_pre,
+//           g_pre,
+//           h[output_idx]);
+//    printf("Wx_z = %f, Rh_z = %f, bx_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[bz_idx]);
 }
 
 //#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
@@ -490,7 +504,7 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
     // h_new
     rescale_param_.n_one_minus_update_ = calculate_right_shift_bits(parms.scale_one_minus_update_);
     rescale_param_.c12_ =
-        calculate_one_over_Somu(parms.scale_one_minus_update_) +
+        calculate_one_over_S(parms.scale_one_minus_update_) +
         rshift_round(parms.zp_z_out_,
                      calculate_right_shift_bits(parms.scale_z_out_ / parms.scale_one_minus_update_)); // 不需要加zp_omu
     rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
@@ -530,7 +544,7 @@ void ForwardPassQuant<T>::Run(const int steps, // 时间步数, 序列长度T
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
     const cublasHandle_t blas_handle = data_->blas_handle;
-    const cudaStream_t stream1 = data_->stream[1];
+    const cudaStream_t stream1 = data_->stream[0];
     const cudaStream_t stream2 = data_->stream[1];
     const cudaEvent_t event = data_->event;
 
@@ -542,14 +556,6 @@ void ForwardPassQuant<T>::Run(const int steps, // 时间步数, 序列长度T
                   CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
                   input_size, &alpha, W, hidden_size * 3, x, input_size, &beta,
                   tmp_Wx, hidden_size * 3);
-
-    // Test
-    std::vector<int32_t> Wx_host = d2h(tmp_Wx, batch_size * hidden_size * 3);
-    for (auto &it : Wx_host) {
-        if (it == 0) {
-            printf("Error!!\n");
-        }
-    }
 
     // 计算W_sum_mul_zp用于补偿x_zp
     dev::vector<int32_t> W_sum_mul_x_zp(hidden_size * 3);
@@ -576,13 +582,6 @@ void ForwardPassQuant<T>::Run(const int steps, // 时间步数, 序列长度T
 
     // 同步R_sum_mul_h_zp计算
     cudaEventRecord(event, stream1);
-
-    std::vector<int32_t> Wx_host2 = d2h(tmp_Wx, batch_size * hidden_size * 3);
-    for (auto &it : Wx_host2) {
-        if (it == 0) {
-            printf("Error2!!\n");
-        }
-    }
 
     const int NH = batch_size * hidden_size;
 
