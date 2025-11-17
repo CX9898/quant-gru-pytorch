@@ -3,14 +3,9 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
-constexpr int32_t shift_Rh = 24;
-constexpr int32_t shift_br = 24;
-
 extern __constant__ int8_t d_sigmoid_int8_z_lut[256];
 extern __constant__ int8_t d_sigmoid_int8_r_lut[256];
 extern __constant__ int8_t d_tanh_int8_g_lut[256];
-
-void initLut();
 
 namespace dev {
 

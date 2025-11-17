@@ -776,7 +776,7 @@ std::vector<float> calculateBiasScale(const T *bx_dev,
         // 所以传入 min_val = -abs(bias), max_val = abs(bias)
         // 这样 scale = abs(bias) / quant_max
         T abs_bias = std::abs(bias_val);
-        auto result = calculateQuantScale<T, QuantT>(-abs_bias, abs_bias, use_symmetric);
+        auto result = calculateQuantScale<T, QuantT>(abs_bias, abs_bias, use_symmetric);
         scales[i] = result.first;
     }
     return scales;

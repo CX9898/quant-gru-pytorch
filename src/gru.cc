@@ -1,4 +1,5 @@
 #include <Eigen/Dense>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -31,7 +32,14 @@ constexpr int SEQUENCE_LEN = 1000; // 序列长度(T), 每个样本有T个时间
 constexpr int HIDDEN_DIMS = 512; // 隐藏层维度(H), h_t的维度
 constexpr int INPUT_DIMS = 512;  // 输入维度(I), x_t的维度
 
-static cublasHandle_t g_blas_handle;
+cublasHandle_t g_blas_handle;  // 改为非static以便在wrapper中访问
+
+// 初始化函数，供Python绑定调用
+void init_gru_cublas() {
+    if (g_blas_handle == nullptr) {
+        cublasCreate(&g_blas_handle);
+    }
+}
 
 class ScopeTimer { // 测量时间类
  public:
@@ -170,6 +178,10 @@ void GruInferenceQuant(const Tensor2i8 &W,
     const int batch_size = x.dimension(1);
     const int input_size = x.dimension(0);
     const int hidden_size = R.dimension(1);
+
+    generate_int8_lut(quant_parms.scale_z_pre_, quant_parms.zp_z_pre_, quant_parms.scale_z_out_, quant_parms.zp_z_out_,
+                      quant_parms.scale_r_pre_, quant_parms.zp_r_pre_, quant_parms.scale_r_out_, quant_parms.zp_r_out_,
+                      quant_parms.scale_g_pre_, quant_parms.zp_g_pre_, quant_parms.scale_g_out_, quant_parms.zp_g_out_);
 
     // Copy weights over to GPU.
     device_ptr<Tensor2i8> W_dev(W);
@@ -428,6 +440,10 @@ void checkHQuantizationWithCosine(
             // 反量化: dequant = (quant - zp) * scale
             int8_t quant_val = h_quant_inference[t_offset + idx];
             h_quant_step[idx] = static_cast<float>(quant_val - scaleParam.zp_h_) * scaleParam.scale_h_;
+            if ((quant_val == 0 || h_quant_step[idx] == 0) && h_float_step[idx] != 0) {
+                printf("Error!, quant_val = %d, h_quant_step[%d] = %f\n", quant_val, idx, h_quant_step[idx]);
+                return;
+            }
         }
 
         // 差值统计
@@ -518,7 +534,7 @@ void printGRUQuantitativeParameters(const GRUQuantitativeParameters &quant_gru_s
     printf("  scale_x_ = %f\n",
            quant_gru_scales.scale_x_);
     printf("  zp_x_    = %d\n", quant_gru_scales.zp_x_);
-    printf("  scale_h_ = %f (1/scale_h_ = %f)\n",
+    printf("  scale_h_ = %f\n",
            quant_gru_scales.scale_h_);
     printf("  zp_h_    = %d\n", quant_gru_scales.zp_h_);
 
@@ -618,10 +634,71 @@ void checkQuant(const Tensor2i8 &W_quant,  // 对应W_z/W_r/W_h的合并
     printf("Quant values check over\n");
 }
 
+bool checkScale(const float *src, size_t size, const int8_t *quant, float scale, int32_t zero_point) {
+    // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
+    // 使用 2 * scale 作为阈值，允许一定的误差范围
+    float threshold = 2.0f * scale;
+    // 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
+    threshold = std::max(threshold, 1e-6f);
+    for (int i = 0; i < size; ++i) {
+        const float val = src[i];
+        const float req_val = (quant[i] - zero_point) * scale;
+        const float diff = std::abs(val - req_val);
+
+        if (diff > threshold) {
+            printf("Error, src[%d] = %f, req_val[%d] = %f, diff = %f, threshold = %f, scale = %f\n", i, val, i, req_val, diff, threshold, scale);
+            return false;
+        }
+    }
+    return true;
+}
+
+template<typename QuantT>
+bool checkScalePerChannel(const float *src, size_t channel_size, size_t in_dim, const QuantT *quant, std::vector<float> scale) {
+    for (int i = 0; i < in_dim; ++i) {
+        for(int j = 0; j < channel_size; ++j) {
+            const float val = src[i * channel_size + j];
+            const float req_val = (quant[i * channel_size + j]) * scale[j];
+            const float diff = std::abs(val - req_val);
+            // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
+            // 使用 2 * scale 作为阈值，允许一定的误差范围
+            float threshold = 2.0f * scale[j];
+            // 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
+            threshold = std::max(threshold, 1e-6f);
+            if (diff > threshold) {
+                printf("Error, src[%d][%d] = %f, req_val[%d][%d] = %f, diff = %f, threshold = %f, scale = %f\n", i, j, val, i, j, req_val, diff, threshold, scale[j]);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void checkQuantParameters(const GRUQuantitativeParameters &quant_parms,
+    const Tensor1f &bx,
+    const Tensor1f &br,
+    const Tensor2f &W,
+    const Tensor2f &R,
+    const Tensor3f &x,
+    const Tensor3f &dh,
+    const Tensor1i32 &bx_quant,
+    const Tensor1i32 &br_quant,
+    const Tensor2i8 &W_quant,
+    const Tensor2i8 &R_quant,
+    const Tensor3i8 &x_quant,
+    const Tensor3i8 &dh_new_quant) {
+    checkScale(x.data(), x.size(), x_quant.data(), quant_parms.scale_x_, quant_parms.zp_x_);
+    checkScale(dh.data(), dh.size(), dh_new_quant.data(), quant_parms.scale_h_, quant_parms.zp_h_);
+    checkScalePerChannel(W.data(), HIDDEN_DIMS * 3, INPUT_DIMS, W_quant.data(), quant_parms.scale_W_);
+    checkScalePerChannel(R.data(), HIDDEN_DIMS * 3, HIDDEN_DIMS, R_quant.data(), quant_parms.scale_R_);
+    checkScalePerChannel(bx.data(), HIDDEN_DIMS * 3, 1, bx_quant.data(), quant_parms.scale_bx_);
+    checkScalePerChannel(br.data(), HIDDEN_DIMS * 3, 1, br_quant.data(), quant_parms.scale_br_);
+}
+
 int main() {
     srand(time(0));
 
-    cublasCreate(&g_blas_handle);
+    init_gru_cublas();  // 使用初始化函数
 
     // Weights.
     Tensor2f W(HIDDEN_DIMS * 3, INPUT_DIMS);  // 对应W_z/W_r/W_h的合并
@@ -699,6 +776,8 @@ int main() {
                         dh_new_quant,
                         quant_parms);
 
+    checkQuantParameters(quant_parms, bx, br, W, R, x, dh, bx_quant, br_quant, W_quant, R_quant, x_quant, dh_new_quant);
+
     checkQuant(W_quant,
                R_quant,
                bx_quant,
@@ -718,7 +797,6 @@ int main() {
                       quant_parms,
                       h_quant_inference);
 
-
     // 运行浮点GRU得到结果1
     Tensor3f h_inference(hidden_size, batch_size, (time_steps + 1));
     h_inference.setZero();
@@ -726,7 +804,7 @@ int main() {
 
     printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
-    if (false) { // Test
+    if (true) { // Test
         std::vector<float> h_inference_tmp(h_inference.data(), h_inference.data() + h_inference.size());
         std::vector<int8_t> h_quant_inference_tmp(h_quant_inference.data(),
                                                   h_quant_inference.data() + h_quant_inference.size());
@@ -740,7 +818,6 @@ int main() {
     }
 
     printf("cudaError(GruInferenceQuant finish): %s\n", cudaGetErrorString(cudaGetLastError()));
-
 
     GruTrain(W, R, bx, br, x, dh, false, false);
 

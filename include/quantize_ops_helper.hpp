@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <algorithm>
+#include <iostream>
+#include <cassert>
 
 #include "devVector.h"
 
@@ -377,8 +379,17 @@ inline int32_t calculate_right_shift_bits(float S, int32_t min_n = 0, int32_t ma
     float log2_S = log2f(S);
     float n_theory = -log2_S;
 
-    // 步骤2：四舍五入到最近整数（C++11+ 支持 roundf 单精度 rounding）
-    int32_t n_candidate = static_cast<int32_t>(roundf(n_theory));
+//    // 步骤2：四舍五入到最近整数（C++11+ 支持 roundf 单精度 rounding）
+//    int32_t n_candidate = static_cast<int32_t>(roundf(n_theory));
+
+    // 步骤2：改进的四舍五入策略 - 考虑相对误差
+    int32_t n_candidate;
+    if (n_theory >= 0) {
+        n_candidate = static_cast<int32_t>(n_theory + 0.5f);  // 标准四舍五入
+    } else {
+        n_candidate = static_cast<int32_t>(n_theory - 0.5f);  // 负数的四舍五入
+    }
+
 
     // 步骤3：边界裁剪，确保n在合理范围（避免移位溢出或数值归零）
     int32_t n = std::max(min_n, std::min(n_candidate, max_n));
@@ -390,6 +401,85 @@ inline int32_t calculate_right_shift_bits(float S, int32_t min_n = 0, int32_t ma
 //              << " | Relative Error: " << relative_error << "%" << std::endl;
 
     return n;
+}
+
+inline void test_basic_cases() {
+    std::cout << "=== 基础测试 ===" << std::endl;
+
+    // 测试 1: S = 1.0，应该返回 n=0 (2^0 = 1)
+    assert(calculate_right_shift_bits(1.0f) == 0);
+    std::cout << "S=1.0 -> n=0 ✓" << std::endl;
+
+    // 测试 2: S = 0.5，应该返回 n=1 (2^-1 = 0.5)
+    assert(calculate_right_shift_bits(0.5f) == 1);
+    std::cout << "S=0.5 -> n=1 ✓" << std::endl;
+
+    // 测试 3: S = 0.25，应该返回 n=2 (2^-2 = 0.25)
+    assert(calculate_right_shift_bits(0.25f) == 2);
+    std::cout << "S=0.25 -> n=2 ✓" << std::endl;
+
+    // 测试 4: S = 0.125，应该返回 n=3 (2^-3 = 0.125)
+    assert(calculate_right_shift_bits(0.125f) == 3);
+    std::cout << "S=0.125 -> n=3 ✓" << std::endl;
+
+    std::cout << "\n=== 边界约束测试 ===" << std::endl;
+
+    // 测试最小边界
+    assert(calculate_right_shift_bits(8.0f, 3, 10) == 3);  // 理论值-3，被裁剪到3
+    std::cout << "min_n=3约束生效 ✓" << std::endl;
+
+    // 测试最大边界
+    assert(calculate_right_shift_bits(0.0001f, 0, 10) == 10);  // 理论值~13，被裁剪到10
+    std::cout << "max_n=10约束生效 ✓" << std::endl;
+
+    // 测试四舍五入
+    assert(calculate_right_shift_bits(0.375f) == 1);  // 理论值1.415 → 四舍五入到1
+    assert(calculate_right_shift_bits(0.625f) == 1);  // 理论值0.678 → 四舍五入到1
+    std::cout << "四舍五入逻辑正确 ✓" << std::endl;
+
+    std::cout << "\n=== 改进的精度验证测试 ===" << std::endl;
+
+    struct TestCase {
+      float S;
+      float max_acceptable_error;  // 可接受的最大相对误差百分比
+    };
+
+    std::vector<TestCase> test_cases = {
+        {1.0f, 1.0f},      // 精确匹配
+        {0.5f, 1.0f},      // 精确匹配
+        {0.25f, 1.0f},     // 精确匹配
+        {0.75f, 35.0f},    // 0.75 ≈ 2^0=1, 误差33% 在可接受范围
+        {0.375f, 35.0f},   // 0.375 ≈ 2^-1=0.5, 误差33% 在可接受范围
+        {0.625f, 25.0f},   // 0.625 ≈ 2^-1=0.5, 误差20% 在可接受范围
+        {0.999f, 1.0f},    // 非常接近1，应该误差很小
+        {1.001f, 1.0f},    // 非常接近1，应该误差很小
+        {0.1f, 50.0f},     // 0.1 ≈ 2^-3=0.125, 误差25% 或 2^-4=0.0625, 误差37.5%
+        {0.9f, 12.0f},     // 0.9 ≈ 2^0=1, 误差11%
+    };
+
+    int passed = 0;
+    int total = 0;
+
+    for (const auto& tc : test_cases) {
+        int n = calculate_right_shift_bits(tc.S);
+        float S_approx = powf(2.0f, -static_cast<float>(n));
+        float relative_error = (fabsf(tc.S - S_approx) / tc.S) * 100.0f;
+
+        std::cout << "S=" << tc.S << " -> n=" << n
+                  << " (近似S=" << S_approx << ")"
+                  << " 误差=" << relative_error << "%";
+
+        if (relative_error <= tc.max_acceptable_error) {
+            std::cout << " ✓" << std::endl;
+            passed++;
+        } else {
+            std::cout << " ✗ 最大可接受误差=" << tc.max_acceptable_error << "%" << std::endl;
+        }
+        total++;
+    }
+
+    std::cout << "精度测试通过率: " << passed << "/" << total << " ("
+              << (passed * 100 / total) << "%)" << std::endl;
 }
 
 /**

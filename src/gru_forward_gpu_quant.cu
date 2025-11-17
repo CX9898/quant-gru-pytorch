@@ -32,10 +32,6 @@ __device__ __forceinline__ int8_t computeZ( // 更新门z
     const int32_t Wx = rshift_round(Wx_val, rescale_params.n_Wx_[channel_idx]) - W_sum_mul_x_zp + rescale_params.zp_Wx_;
     const int32_t Rh = rshift_round(Rh_val, rescale_params.n_Rh_[channel_idx]) - R_sum_mul_h_zp + rescale_params.zp_Rh_;
 
-//    printf("computeZ: Wx_val = %d, Wx = %d, Rh_val = %d, Rh = %d, W_sum_mul_x_zp = %d, R_sum_mul_h_zp = %d,"
-//           "bx_val = %d, br_val = %d\n",
-//           Wx_val, Wx,Rh_val, Rh_val, Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx_val, br_val);
-
     // scale_z_pre是通过效验阶段得到的; 通过sigmoid函数入口前的各项相加:Wx_val+Rh_val+bx_val+br_val的结果的的最大最小值计算得到
     const int8_t z_pre_i8 = dev::clamp<int8_t>( // clamp: 截断到int8的范围
         rshift_round(Wx, rescale_params.n_Wx_to_z_) + // n为: scale_Wx / scale_z_pre ≈ 2^-n
@@ -43,7 +39,22 @@ __device__ __forceinline__ int8_t computeZ( // 更新门z
         rshift_round(bx_val, rescale_params.n_bx_to_z_[channel_idx]) + // n为: scale_bx / scale_z_pre ≈ 2^-n; bx为X的偏置
         rshift_round(br_val, rescale_params.n_br_to_z_[channel_idx]) + // n为: scale_br / scale_z_pre ≈ 2^-n; br为R的偏置
         rescale_params.zp_z_pre_);
-    return dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);
+
+    const int8_t z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);
+
+//    printf("computeZ:z = %d, "
+//           "Wx_val = %d, "
+//           "Wx = %d, "
+//           "Rh_val = %d, "
+//           "Rh = %d, "
+//           "W_sum_mul_x_zp = %d, "
+//           "R_sum_mul_h_zp = %d,"
+//           "bx_val = %d, "
+//           "br_val = %d\n",
+//           z,
+//           Wx_val, Wx, Rh_val, Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx_val, br_val);
+
+    return z;
 }
 
 __device__ __forceinline__ int8_t computeR( // 重置门r
@@ -251,7 +262,7 @@ __global__ void PointwiseOperationsQuant(
 //           r_pre,
 //           g_pre,
 //           h[output_idx]);
-//    printf("Wx_z = %f, Rh_z = %f, bx_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[bz_idx]);
+//    printf("Wx_z = %d, Rh_z = %d, bx_z = %d, br_z = %d\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[b_z_idx]);
 }
 
 //#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
