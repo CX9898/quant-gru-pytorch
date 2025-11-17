@@ -381,6 +381,7 @@ void calibrateGruScales(const Tensor2f &W,
         nullptr);
 
     quant_gru_scales = forward.getGRUQuantitativeParameters();
+
 }
 
 int main() {
@@ -407,17 +408,12 @@ int main() {
     x.setRandom();
     dh.setRandom();
 
+
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);
     const int input_size = x.dimension(0);
     const int hidden_size = R.dimension(1);
 
-    // 运行浮点GRU得到结果1
-    Tensor3f h_inference(hidden_size, batch_size, (time_steps + 1));
-    h_inference.setZero();
-    GruInference(W, R, bx, br, x, h_inference);
-
-    printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
@@ -456,6 +452,14 @@ int main() {
                       x_quant,
                       quant_parms,
                       h_quant_inference);
+
+
+    // 运行浮点GRU得到结果1
+    Tensor3f h_inference(hidden_size, batch_size, (time_steps + 1));
+    h_inference.setZero();
+    GruInference(W, R, bx, br, x, h_inference);
+
+    printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     { // Test
         std::vector<float> h_inference_tmp(h_inference.data(), h_inference.data() + h_inference.size());
