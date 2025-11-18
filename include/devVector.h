@@ -14,6 +14,7 @@ class vector {
   vector(size_t size, T value);
   vector(const vector<T> &src);
   vector(const std::vector<T> &src);
+  vector(const T*src,size_t size);
 
   ~vector() {
       if (data_) { cudaFree(data_); }
@@ -21,6 +22,7 @@ class vector {
 
   void resize(size_t size);
   void clear();
+  void zero();
 
   inline __host__ __device__ size_t size() const {
       return size_;
@@ -100,6 +102,24 @@ inline vector<T>::vector(const std::vector<T> &src) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
     }
     cudaMemcpy(data_, src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice);
+}
+
+template<typename T>
+inline vector<T>::vector(const T *src, size_t size) {
+    size_ = size;
+    if(!size_){
+        return;
+    }
+    cudaMalloc(reinterpret_cast<void **> (&data_), size * sizeof(T));
+    if (!data_) {
+        fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+    }
+    cudaMemcpy(data_, src, size * sizeof(T), cudaMemcpyHostToDevice);
+}
+
+template<typename T>
+inline void vector<T>::zero() {
+    cudaMemset(data_, 0, size_ * sizeof(T));
 }
 
 template<typename T>
