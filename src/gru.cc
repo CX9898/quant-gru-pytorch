@@ -474,31 +474,27 @@ void checkHQuantizationWithCosine(
     }
 }
 
-template<typename QuantT>
-void calibrateGruScales(const Tensor2f &W,
-                        const Tensor2f &R,
-                        const Tensor1f &bx,
-                        const Tensor1f &br,
-                        const Tensor3f &x,
-                        GRUQuantitativeParameters &quant_gru_scales
+void calibrateGruScales_int8(int time_steps, int batch_size, int input_size, int hidden_size,
+                             const float *W,
+                             const float *R,
+                             const float *bx,
+                             const float *br,
+                             const float *x,
+                             GRUQuantitativeParameters &quant_gru_scales
 ) {
-    const int time_steps = x.dimension(2);
-    const int batch_size = x.dimension(1);
-    const int input_size = x.dimension(0);
-    const int hidden_size = R.dimension(1);
 
     // Copy weights over to GPU.
-    device_ptr<Tensor2f> W_dev(W);
-    device_ptr<Tensor2f> R_dev(R);
-    device_ptr<Tensor1f> bx_dev(bx);
-    device_ptr<Tensor1f> br_dev(br);
-    device_ptr<Tensor3f> x_dev(x);
-//    device_ptr<Tensor3f> dh_new_dev(dh_new);
+    dev::vector<float> W_dev(W, hidden_size * 3 * input_size);
+    dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
+    dev::vector<float> bx_dev(bx, hidden_size * 3);
+    dev::vector<float> br_dev(br, hidden_size * 3);
+    dev::vector<float> x_dev(x, input_size * batch_size * time_steps);
+//    dev::vector<float> dh_new_dev(dh_new);
 
-    device_ptr<Tensor2f> h_dev((time_steps + 1) * batch_size * hidden_size);
-    device_ptr<Tensor3f> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    device_ptr<Tensor2f> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
-    device_ptr<Tensor3f> v_dev(time_steps * batch_size * hidden_size * 4);
+    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
+    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
 
     h_dev.zero();
 
@@ -513,15 +509,15 @@ void calibrateGruScales(const Tensor2f &W,
 
     forward.Run(
         time_steps,
-        W_dev.data,
-        R_dev.data,
-        bx_dev.data,
-        br_dev.data,
-        x_dev.data,
-        h_dev.data,
-        v_dev.data,
-        tmp_Wx_dev.data,
-        tmp_Rh_dev.data,
+        W_dev.data(),
+        R_dev.data(),
+        bx_dev.data(),
+        br_dev.data(),
+        x_dev.data(),
+        h_dev.data(),
+        v_dev.data(),
+        tmp_Wx_dev.data(),
+        tmp_Rh_dev.data(),
         0.0f,
         nullptr);
 
@@ -646,7 +642,14 @@ bool checkScale(const float *src, size_t size, const int8_t *quant, float scale,
         const float diff = std::abs(val - req_val);
 
         if (diff > threshold) {
-            printf("Error, src[%d] = %f, req_val[%d] = %f, diff = %f, threshold = %f, scale = %f\n", i, val, i, req_val, diff, threshold, scale);
+            printf("Error, src[%d] = %f, req_val[%d] = %f, diff = %f, threshold = %f, scale = %f\n",
+                   i,
+                   val,
+                   i,
+                   req_val,
+                   diff,
+                   threshold,
+                   scale);
             return false;
         }
     }
@@ -654,9 +657,13 @@ bool checkScale(const float *src, size_t size, const int8_t *quant, float scale,
 }
 
 template<typename QuantT>
-bool checkScalePerChannel(const float *src, size_t channel_size, size_t in_dim, const QuantT *quant, std::vector<float> scale) {
+bool checkScalePerChannel(const float *src,
+                          size_t channel_size,
+                          size_t in_dim,
+                          const QuantT *quant,
+                          std::vector<float> scale) {
     for (int i = 0; i < in_dim; ++i) {
-        for(int j = 0; j < channel_size; ++j) {
+        for (int j = 0; j < channel_size; ++j) {
             const float val = src[i * channel_size + j];
             const float req_val = (quant[i * channel_size + j]) * scale[j];
             const float diff = std::abs(val - req_val);
@@ -666,7 +673,16 @@ bool checkScalePerChannel(const float *src, size_t channel_size, size_t in_dim, 
             // 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
             threshold = std::max(threshold, 1e-6f);
             if (diff > threshold) {
-                printf("Error, src[%d][%d] = %f, req_val[%d][%d] = %f, diff = %f, threshold = %f, scale = %f\n", i, j, val, i, j, req_val, diff, threshold, scale[j]);
+                printf("Error, src[%d][%d] = %f, req_val[%d][%d] = %f, diff = %f, threshold = %f, scale = %f\n",
+                       i,
+                       j,
+                       val,
+                       i,
+                       j,
+                       req_val,
+                       diff,
+                       threshold,
+                       scale[j]);
                 return false;
             }
         }
@@ -675,18 +691,18 @@ bool checkScalePerChannel(const float *src, size_t channel_size, size_t in_dim, 
 }
 
 void checkQuantParameters(const GRUQuantitativeParameters &quant_parms,
-    const Tensor1f &bx,
-    const Tensor1f &br,
-    const Tensor2f &W,
-    const Tensor2f &R,
-    const Tensor3f &x,
-    const Tensor3f &dh,
-    const Tensor1i32 &bx_quant,
-    const Tensor1i32 &br_quant,
-    const Tensor2i8 &W_quant,
-    const Tensor2i8 &R_quant,
-    const Tensor3i8 &x_quant,
-    const Tensor3i8 &dh_new_quant) {
+                          const Tensor1f &bx,
+                          const Tensor1f &br,
+                          const Tensor2f &W,
+                          const Tensor2f &R,
+                          const Tensor3f &x,
+                          const Tensor3f &dh,
+                          const Tensor1i32 &bx_quant,
+                          const Tensor1i32 &br_quant,
+                          const Tensor2i8 &W_quant,
+                          const Tensor2i8 &R_quant,
+                          const Tensor3i8 &x_quant,
+                          const Tensor3i8 &dh_new_quant) {
     checkScale(x.data(), x.size(), x_quant.data(), quant_parms.scale_x_, quant_parms.zp_x_);
     checkScale(dh.data(), dh.size(), dh_new_quant.data(), quant_parms.scale_h_, quant_parms.zp_h_);
     checkScalePerChannel(W.data(), HIDDEN_DIMS * 3, INPUT_DIMS, W_quant.data(), quant_parms.scale_W_);
@@ -751,7 +767,16 @@ int main() {
 
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
-    calibrateGruScales<int8_t>(W, R, bx, br, x, quant_parms);
+    calibrateGruScales_int8(time_steps,
+                            batch_size,
+                            input_size,
+                            hidden_size,
+                            W.data(),
+                            R.data(),
+                            bx.data(),
+                            br.data(),
+                            x.data(),
+                            quant_parms);
 
     // Quant
     Tensor2i8 W_quant(HIDDEN_DIMS * 3, INPUT_DIMS);  // 对应W_z/W_r/W_h的合并
@@ -827,3 +852,4 @@ int main() {
 
     return 0;
 }
+
