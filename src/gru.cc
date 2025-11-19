@@ -13,6 +13,7 @@
 #include "device_ptr.h"
 #include "gru.h"
 #include "gru_quant.h"
+#include "quantized_unit_testing.h"
 
 using Tensor1f = Eigen::Tensor<float, 1>;
 using Tensor2f = Eigen::Tensor<float, 2>;
@@ -441,7 +442,11 @@ void checkHQuantizationWithCosine(
             int8_t quant_val = h_quant_inference[t_offset + idx];
             h_quant_step[idx] = static_cast<float>(quant_val - scaleParam.zp_h_) * scaleParam.scale_h_;
             if ((quant_val == 0 || h_quant_step[idx] == 0) && h_float_step[idx] != 0) {
-                printf("Error!, quant_val = %d, h_quant_step[%d] = %f\n", quant_val, idx, h_quant_step[idx]);
+                printf("Error!, quant_val = %d, h_quant_step[%d] = %f, h_float_step = %f\n",
+                       quant_val,
+                       idx,
+                       h_quant_step[idx],
+                       h_float_step[idx]);
                 return;
             }
         }
@@ -458,7 +463,7 @@ void checkHQuantizationWithCosine(
 
             if (diff > threshold) {
                 count++;
-                if (count < 5) {
+                if (count < 3) {
                     printf("[Warning] t=%d idx=%d diff=%f h_float=%f h_quant=%f\n",
                            t, idx, diff, h_float_step[idx], h_quant_step[idx]);
                 }
@@ -469,8 +474,8 @@ void checkHQuantizationWithCosine(
         float mean_diff = sum_diff / size_per_step;
         float cos_sim = cosineSimilarity(h_float_step, h_quant_step);
 
-        printf("Time step %d: max_diff=%f, mean_diff=%f, cosine_sim=%f, baifenbi = %f\n",
-               t, max_diff, mean_diff, cos_sim, baifenbi);
+        printf("Time step %d: max_diff=%f, mean_diff=%f, cosine_sim=%f, baifenbi = %f%%\n",
+               t, max_diff, mean_diff, cos_sim, baifenbi * 100);
     }
 }
 
@@ -525,191 +530,6 @@ void calibrateGruScales_int8(int time_steps, int batch_size, int input_size, int
 
 }
 
-void printGRUQuantitativeParameters(const GRUQuantitativeParameters &quant_gru_scales) {
-    printf("GRUQuantitativeParameters (量化参数):\n");
-    printf("  scale_x_ = %f\n",
-           quant_gru_scales.scale_x_);
-    printf("  zp_x_    = %d\n", quant_gru_scales.zp_x_);
-    printf("  scale_h_ = %f\n",
-           quant_gru_scales.scale_h_);
-    printf("  zp_h_    = %d\n", quant_gru_scales.zp_h_);
-
-    printf("  scale_W_ (size %zu): ", quant_gru_scales.scale_W_.size());
-    for (size_t i = 0; i < quant_gru_scales.scale_W_.size() && i < 8; ++i) {
-        printf("%f ", quant_gru_scales.scale_W_[i]);
-    }
-    if (quant_gru_scales.scale_W_.size() > 8) printf("...");
-    printf("\n");
-
-    printf("  scale_R_ (size %zu): ", quant_gru_scales.scale_R_.size());
-    for (size_t i = 0; i < quant_gru_scales.scale_R_.size() && i < 8; ++i) {
-        printf("%f ", quant_gru_scales.scale_R_[i]);
-    }
-    if (quant_gru_scales.scale_R_.size() > 8) printf("...");
-    printf("\n");
-
-    printf("  scale_bx_ (size %zu): ", quant_gru_scales.scale_bx_.size());
-    for (size_t i = 0; i < quant_gru_scales.scale_bx_.size() && i < 8; ++i) {
-        printf("%f ", quant_gru_scales.scale_bx_[i]);
-    }
-    if (quant_gru_scales.scale_bx_.size() > 8) printf("...");
-    printf("\n");
-
-    printf("  scale_br_ (size %zu): ", quant_gru_scales.scale_br_.size());
-    for (size_t i = 0; i < quant_gru_scales.scale_br_.size() && i < 8; ++i) {
-        printf("%f ", quant_gru_scales.scale_br_[i]);
-    }
-    if (quant_gru_scales.scale_br_.size() > 8) printf("...");
-    printf("\n");
-
-    printf("  scale_Wx_ = %f, zp_Wx_ = %d \n",
-           quant_gru_scales.scale_Wx_, quant_gru_scales.zp_Wx_);
-    printf("  scale_Rh_ = %f, zp_Rh_ = %d \n",
-           quant_gru_scales.scale_Rh_, quant_gru_scales.zp_Rh_);
-    printf("  scale_z_pre_ = %f, zp_z_pre_ = %d \n",
-           quant_gru_scales.scale_z_pre_, quant_gru_scales.zp_z_pre_);
-    printf("  scale_r_pre_ = %f, zp_r_pre_ = %d\n",
-           quant_gru_scales.scale_r_pre_, quant_gru_scales.zp_r_pre_);
-    printf("  scale_g_pre_ = %f, zp_g_pre_ = %d\n",
-           quant_gru_scales.scale_g_pre_, quant_gru_scales.zp_g_pre_);
-    printf("  scale_one_minus_update_ = %f, zp_one_minus_update_ = %d\n",
-           quant_gru_scales.scale_one_minus_update_,
-           quant_gru_scales.zp_one_minus_update_);
-    printf("  scale_new_contrib_ = %f, zp_new_contrib_ = %d\n",
-           quant_gru_scales.scale_new_contrib_,
-           quant_gru_scales.zp_new_contrib_);
-    printf("  scale_old_contrib_ = %f, zp_old_contrib_ = %d\n",
-           quant_gru_scales.scale_old_contrib_,
-           quant_gru_scales.zp_old_contrib_);
-    printf("  hidden_ = %d\n", quant_gru_scales.hidden_);
-}
-
-void checkQuant(const Tensor2i8 &W_quant,  // 对应W_z/W_r/W_h的合并
-                const Tensor2i8 &R_quant, // 对应R_z/R_r/R_h的合并
-                const Tensor1i32 &bx_quant, // 对应b_z/b_r/b_h的合并. bx 负责给 “输入 x_t 到门控的线性变换” 加偏置
-                const Tensor1i32 &br_quant, // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
-                const Tensor3i8 &x_quant,
-                const Tensor3i8 &dh_new_quant
-) {
-    for (int i = 0; i < W_quant.size(); ++i) {
-        if (W_quant.data()[i] == 0) {
-            printf("Error, W_quant[%d] = %d\n", i, W_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < R_quant.size(); ++i) {
-        if (R_quant.data()[i] == 0) {
-            printf("Error, R_quant[%d] = %d\n", i, R_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < bx_quant.size(); ++i) {
-        if (bx_quant.data()[i] == 0) {
-            printf("Error, bx_quant[%d] = %d\n", i, bx_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < br_quant.size(); ++i) {
-        if (br_quant.data()[i] == 0) {
-            printf("Error, br_quant[%d] = %d\n", i, br_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < x_quant.size(); ++i) {
-        if (x_quant.data()[i] == 0) {
-            printf("Error, x_quant[%d] = %d\n", i, x_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < dh_new_quant.size(); ++i) {
-        if (dh_new_quant.data()[i] == 0) {
-            printf("Error, dh_new_quant[%d] = %d", i, dh_new_quant.data()[i]);
-            break;
-        }
-    }
-    printf("Quant values check over\n");
-}
-
-bool checkScale(const float *src, size_t size, const int8_t *quant, float scale, int32_t zero_point) {
-    // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
-    // 使用 2 * scale 作为阈值，允许一定的误差范围
-    float threshold = 2.0f * scale;
-    // 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
-    threshold = std::max(threshold, 1e-6f);
-    for (int i = 0; i < size; ++i) {
-        const float val = src[i];
-        const float req_val = (quant[i] - zero_point) * scale;
-        const float diff = std::abs(val - req_val);
-
-        if (diff > threshold) {
-            printf("Error, src[%d] = %f, req_val[%d] = %f, diff = %f, threshold = %f, scale = %f\n",
-                   i,
-                   val,
-                   i,
-                   req_val,
-                   diff,
-                   threshold,
-                   scale);
-            return false;
-        }
-    }
-    return true;
-}
-
-template<typename QuantT>
-bool checkScalePerChannel(const float *src,
-                          size_t channel_size,
-                          size_t in_dim,
-                          const QuantT *quant,
-                          std::vector<float> scale) {
-    for (int i = 0; i < in_dim; ++i) {
-        for (int j = 0; j < channel_size; ++j) {
-            const float val = src[i * channel_size + j];
-            const float req_val = (quant[i * channel_size + j]) * scale[j];
-            const float diff = std::abs(val - req_val);
-            // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
-            // 使用 2 * scale 作为阈值，允许一定的误差范围
-            float threshold = 2.0f * scale[j];
-            // 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
-            threshold = std::max(threshold, 1e-6f);
-            if (diff > threshold) {
-                printf("Error, src[%d][%d] = %f, req_val[%d][%d] = %f, diff = %f, threshold = %f, scale = %f\n",
-                       i,
-                       j,
-                       val,
-                       i,
-                       j,
-                       req_val,
-                       diff,
-                       threshold,
-                       scale[j]);
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-void checkQuantParameters(const GRUQuantitativeParameters &quant_parms,
-                          const Tensor1f &bx,
-                          const Tensor1f &br,
-                          const Tensor2f &W,
-                          const Tensor2f &R,
-                          const Tensor3f &x,
-                          const Tensor3f &dh,
-                          const Tensor1i32 &bx_quant,
-                          const Tensor1i32 &br_quant,
-                          const Tensor2i8 &W_quant,
-                          const Tensor2i8 &R_quant,
-                          const Tensor3i8 &x_quant,
-                          const Tensor3i8 &dh_new_quant) {
-    checkScale(x.data(), x.size(), x_quant.data(), quant_parms.scale_x_, quant_parms.zp_x_);
-    checkScale(dh.data(), dh.size(), dh_new_quant.data(), quant_parms.scale_h_, quant_parms.zp_h_);
-    checkScalePerChannel(W.data(), HIDDEN_DIMS * 3, INPUT_DIMS, W_quant.data(), quant_parms.scale_W_);
-    checkScalePerChannel(R.data(), HIDDEN_DIMS * 3, HIDDEN_DIMS, R_quant.data(), quant_parms.scale_R_);
-    checkScalePerChannel(bx.data(), HIDDEN_DIMS * 3, 1, bx_quant.data(), quant_parms.scale_bx_);
-    checkScalePerChannel(br.data(), HIDDEN_DIMS * 3, 1, br_quant.data(), quant_parms.scale_br_);
-}
 
 int main() {
     srand(time(0));
@@ -732,8 +552,9 @@ int main() {
     // 范围: U(-k, k)，其中 k = sqrt(6 / (input_size + hidden_size * 3))
     // 这确保前向和反向传播的方差保持稳定
     W.setRandom();
-    float k_W = sqrtf(6.0f / (static_cast<float>(INPUT_DIMS) + static_cast<float>(HIDDEN_DIMS * 3)));
-    W = W * W.constant(k_W);  // 将 [-1, 1] 缩放到 [-k_W, k_W]
+    W = W * 2.0f - 1.0f;
+//    float k_W = sqrtf(6.0f / (static_cast<float>(INPUT_DIMS) + static_cast<float>(HIDDEN_DIMS * 3)));
+//    W = W * W.constant(k_W);  // 将 [-1, 1] 缩放到 [-k_W, k_W]
 
     // R: 循环权重矩阵，使用较小的初始化范围
     // 范围: U(-k, k)，其中 k = sqrt(1 / hidden_size) 或更保守的 k = 1 / sqrt(hidden_size)
@@ -741,24 +562,28 @@ int main() {
     R.setRandom();
     float k_R = 1.0f / sqrtf(static_cast<float>(HIDDEN_DIMS));
     R = R * R.constant(k_R);
+    R = R * 2.0f - 1.0f;
 
     // bx, br: 偏置通常初始化为0或很小的随机值
     // PyTorch GRU 默认偏置为0，这里使用很小的随机值 [-0.01, 0.01] 以增加一些随机性
     bx.setRandom();
+    bx = bx * 2.0f - 1.0f;
 //    bx = bx * bx.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
     br.setRandom();
+    br = br * 2.0f - 1.0f;
 //    br = br * br.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
 
     // x: 输入数据，通常在 [-1, 1] 范围内（标准化后的输入）
     // 或者根据实际应用场景，可以是归一化后的数据
     // 这里使用 [-1, 1] 范围，模拟标准化后的输入
-    x.setRandom();  // Eigen setRandom() 默认生成 [-1, 1] 的均匀分布
+    x.setRandom();
+    x = x * 2.0f - 1.0f;
 
     // dh: 来自上层或损失函数的梯度，通常在 [-0.01, 0.01] 范围内
     // 实际训练中梯度值通常较小，这里使用合理的范围
     dh.setRandom();
-    dh = dh * dh.constant(0.01f);  // 梯度缩放为 [-0.01, 0.01]
-
+    dh = dh * 2.0f - 1.0f;
+//    dh = dh * dh.constant(0.01f);  // 梯度缩放为 [-0.01, 0.01]
 
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);
@@ -801,15 +626,35 @@ int main() {
                         dh_new_quant,
                         quant_parms);
 
-    checkQuantParameters(quant_parms, bx, br, W, R, x, dh, bx_quant, br_quant, W_quant, R_quant, x_quant, dh_new_quant);
+//    checkQuantParameters(quant_parms, bx, br, W, R, x, dh, bx_quant, br_quant, W_quant, R_quant, x_quant, dh_new_quant);
 
-    checkQuant(W_quant,
-               R_quant,
-               bx_quant,
-               br_quant,
-               x_quant,
-               dh_new_quant);
-    printGRUQuantitativeParameters(quant_parms);
+//    checkQuant(W_quant,
+//               R_quant,
+//               bx_quant,
+//               br_quant,
+//               x_quant,
+//               dh_new_quant);
+
+    Quantized_unit_testing<int8_t> quantized_unit_testing(W.data(),
+                                                          R.data(),
+                                                          bx.data(),
+                                                          br.data(),
+                                                          x.data(),
+                                                          dh.data(),
+                                                          W_quant.data(),
+                                                          R_quant.data(),
+                                                          bx_quant.data(),
+                                                          br_quant.data(),
+                                                          x_quant.data(),
+                                                          dh_new_quant.data(),
+                                                          hidden_size,
+                                                          input_size,
+                                                          batch_size,
+                                                          time_steps,
+                                                          g_blas_handle,
+                                                          quant_parms);
+    quantized_unit_testing.printGRUQuantitativeParameters();
+    quantized_unit_testing.checkQuantParameters();
 
     // 运行量化GRU得到量化结果2
     Tensor3i8 h_quant_inference(hidden_size, batch_size, (time_steps + 1));
@@ -852,4 +697,3 @@ int main() {
 
     return 0;
 }
-
