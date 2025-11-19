@@ -91,13 +91,13 @@ __device__ __forceinline__ int16_t quantize_i32_to_i16(
     return static_cast<int16_t>(tmp);
 }
 
-__device__ __forceinline__ int8_t sigmoid_int8_lut(int8_t x, const int8_t* lut) {
+__device__ __forceinline__ int8_t sigmoid_int8_lut(int8_t x, const int8_t *lut) {
     // x in [-128,127], lut 长度 = 256
     const int8_t x_clamped = max(-128, min(127, x));
     return lut[static_cast<uint8_t>(x_clamped)]; // uint8_t 转索引 [0,255]
 }
 
-__device__ __forceinline__ int8_t tanh_int8_lut(int8_t x, const int8_t* lut) {
+__device__ __forceinline__ int8_t tanh_int8_lut(int8_t x, const int8_t *lut) {
     const int8_t x_clamped = max(-128, min(127, x));
     return lut[static_cast<uint8_t>(x_clamped)];
 }

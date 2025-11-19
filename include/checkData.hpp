@@ -41,9 +41,9 @@ inline bool checkOneData<double>(const double data1, const double data2) {
 
 // 计算均方误差（MSE）来比较两个数据数组
 template<typename T>
-inline float computeMSE(const T* data1, const T* data2, size_t size) {
+inline float computeMSE(const T *data1, const T *data2, size_t size) {
     double mse = 0.0;
-    #pragma omp parallel for reduction(+:mse)
+#pragma omp parallel for reduction(+:mse)
     for (size_t i = 0; i < size; ++i) {
         double diff = static_cast<double>(data1[i]) - static_cast<double>(data2[i]);
         mse += diff * diff;
@@ -53,18 +53,18 @@ inline float computeMSE(const T* data1, const T* data2, size_t size) {
 }
 
 template<typename T>
-inline float computeMSE(const std::vector<T>& data1, const std::vector<T>& data2) {
+inline float computeMSE(const std::vector<T> &data1, const std::vector<T> &data2) {
     if (data1.size() != data2.size() || data1.empty()) return 0.0f;
     return computeMSE(data1.data(), data2.data(), data1.size());
 }
 
-bool checkMSE(const std::vector<float>& data1,
-    const std::vector<float>& data2,
-    float threshold = ERROR_THRESHOLD_MSE_EPSILON,
-    const std::string &name = ""
+bool checkMSE(const std::vector<float> &data1,
+              const std::vector<float> &data2,
+              float threshold = ERROR_THRESHOLD_MSE_EPSILON,
+              const std::string &name = ""
 ) {
     float mse = computeMSE(data1, data2);
-    if(mse > threshold){
+    if (mse > threshold) {
         printf("Error, %s failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
         return false;
     }
