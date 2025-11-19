@@ -148,23 +148,23 @@ void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out, i
                        float scale_r_pre, int32_t zp_r_pre, float scale_r_out, int32_t zp_r_out,
                        float scale_g_pre, int32_t zp_g_pre, float scale_g_out, int32_t zp_g_out) {
     std::vector<int8_t> sigmoid_z_lut = generate_sigmoid_int8_lut(scale_z_pre, zp_z_pre, scale_z_out, zp_z_out);
-    printf("scale_z_pre = %.15f, zp_z_pre = %d, scale_z_out = %.15f, zp_z_out = %d\n",
-           scale_z_pre,
-           zp_z_pre,
-           scale_z_out,
-           zp_z_out);
+//    printf("scale_z_pre = %.15f, zp_z_pre = %d, scale_z_out = %.15f, zp_z_out = %d\n",
+//           scale_z_pre,
+//           zp_z_pre,
+//           scale_z_out,
+//           zp_z_out);
     std::vector<int8_t> sigmoid_r_lut = generate_sigmoid_int8_lut(scale_r_pre, zp_r_pre, scale_r_out, zp_r_out);
-    printf("scale_r_pre = %.15f, zp_r_pre = %d, scale_r_out = %.15f, zp_r_out = %d\n",
-           scale_r_pre,
-           zp_r_pre,
-           scale_r_out,
-           zp_r_out);
+//    printf("scale_r_pre = %.15f, zp_r_pre = %d, scale_r_out = %.15f, zp_r_out = %d\n",
+//           scale_r_pre,
+//           zp_r_pre,
+//           scale_r_out,
+//           zp_r_out);
     std::vector<int8_t> tanh_int8_lut = generate_tanh_int8_lut(scale_g_pre, zp_g_pre, scale_g_out, zp_g_out);
-    printf("scale_g_pre = %.15f, zp_g_pre = %d, scale_g_out = %.15f, zp_g_out = %d\n",
-           scale_g_pre,
-           zp_g_pre,
-           scale_g_out,
-           zp_g_out);
+//    printf("scale_g_pre = %.15f, zp_g_pre = %d, scale_g_out = %.15f, zp_g_out = %d\n",
+//           scale_g_pre,
+//           zp_g_pre,
+//           scale_g_out,
+//           zp_g_out);
 
     cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
     cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
@@ -253,7 +253,9 @@ __global__ void computeWeightSumMulZP(
     for (int j = 0; j < in_dim; ++j) {
         sum += static_cast<int32_t>(W_q[row + j * out_dim]);
     }
-    weight_sum[row] = rshift_round(sum * x_zp, n[row]);
+    sum *= x_zp;
+//    sum = rshift_round(sum, n[row]);
+    weight_sum[row] = sum;
 }
 
 __global__ void applyZeroPointCompensation2D(

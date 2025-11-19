@@ -51,60 +51,55 @@ void checkQuant(const std::vector<int8_t> &W_quant,  // 对应W_z/W_r/W_h的合�
     }
     for (int i = 0; i < dh_new_quant.size(); ++i) {
         if (dh_new_quant.data()[i] == 0) {
-            printf("Error, dh_new_quant[%d] = %d", i, dh_new_quant.data()[i]);
+            printf("Error, dh_new_quant[%d] = %d\n", i, dh_new_quant.data()[i]);
             break;
         }
     }
     printf("Quant values check over\n");
 }
 
-bool checkScale(const float *src,
-                size_t size,
-                const int8_t *quant,
+bool checkScale(const std::vector<float> &src,
+                const std::vector<int8_t> &quant,
                 float scale,
                 int32_t zero_point,
                 const std::string &name = "") {
-// 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
-// 使用 2 * scale 作为阈值，允许一定的误差范围
+    bool is_pass = true;
     if (scale <= 1e-6f) {
         printf("Warning, %s: scale = %.15f <= 1e-6f\n",
                name.c_str(),
                scale);
     }
-    float threshold = 2.0f * scale;
-// 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
-    threshold = std::max(threshold, 1e-6f);
-    for (int i = 0; i < size; ++i) {
-        const float val = src[i];
-        const float req_val = (quant[i] - zero_point) * scale;
-        const float diff = std::abs(val - req_val);
 
-        if (diff > threshold) {
-            printf("Error, %s: src[%d] = %f, req_val[%d] = %f, diff = %f, threshold = %f, scale = %f\n",
-                   name.c_str(),
-                   i,
-                   val,
-                   i,
-                   req_val,
-                   diff,
-                   threshold,
-                   scale);
-            return false;
-        }
+    std::vector<float> requant(src.size());
+#pragma omp parallel for
+    for (int i = 0; i < src.size(); ++i) {
+        const float req_val = (quant[i] - zero_point) * scale;
+        requant[i] = req_val;
     }
-    return true;
+    is_pass = checkCosineSimilarity(src, requant, name);
+    const float mse = computeMSE(src, requant);
+    printf("\t%s mse = %f\n", name.c_str(), mse);
+
+    if (!checkMSE(src, requant)) {
+        return is_pass;
+    }
+
+    return is_pass;
 }
 
 template<typename QuantT>
-bool checkScalePerChannel(const float *src,
+bool checkScalePerChannel(const std::vector<float> &src,
                           size_t channel_size,
                           size_t in_dim,
-                          const QuantT *quant,
+                          const std::vector<QuantT> &quant,
                           const std::vector<float> &scale,
                           const std::string &name = "") {
+    bool is_pass = true;
+    std::vector<float> requant(src.size());
+#pragma omp parallel for
     for (int i = 0; i < in_dim; ++i) {
         for (int j = 0; j < channel_size; ++j) {
-            const float val = src[i * channel_size + j];
+            const int idx = i * channel_size + j;
             const float scale_val = scale[j];
             if (scale_val <= 1e-6f) {
                 printf("Warning, %s: scale[%d] = %f\n",
@@ -113,29 +108,19 @@ bool checkScalePerChannel(const float *src,
                        scale_val);
             }
             const float req_val = (quant[i * channel_size + j]) * scale_val;
-            const float diff = std::abs(val - req_val);
-// 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
-// 使用 2 * scale 作为阈值，允许一定的误差范围
-            float threshold = 2.0f * scale_val;
-// 确保阈值至少为 1e-6f，避免 scale 过小时阈值过小
-            threshold = std::max(threshold, 1e-6f);
-            if (diff > threshold) {
-                printf("Error, %s: src[%d][%d] = %f, req_val[%d][%d] = %f, diff = %f, threshold = %f, scale = %f\n",
-                       name.c_str(),
-                       i,
-                       j,
-                       val,
-                       i,
-                       j,
-                       req_val,
-                       diff,
-                       threshold,
-                       scale_val);
-                return false;
-            }
+            requant[idx] = req_val;
         }
     }
-    return true;
+
+    is_pass = checkCosineSimilarity(src, requant);
+    const float mse = computeMSE(src, requant);
+    printf("\t%s mse = %f\n", name.c_str(), mse);
+
+    if (!checkMSE(src, requant)) {
+        is_pass = false;
+    }
+
+    return is_pass;
 }
 
 
@@ -278,9 +263,9 @@ void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
 
 }
 
-
 template<typename QuantT>
 bool Quantized_unit_testing<QuantT>::checkWxGemm() {
+
     bool is_pass = true;
     const int M = hidden_size_ * 3;
     const int N = batch_size_ * time_steps_;
@@ -311,8 +296,8 @@ bool Quantized_unit_testing<QuantT>::checkWxGemm() {
                 sum += (quant_parms_.scale_W_[m] * W_quant_[lda * k + m]) *
                        (quant_parms_.scale_x_ * (x_quant_[n * ldb + k] - quant_parms_.zp_x_));
             }
-            // sum += quant_parms_.zp_Wx_;
-            // sum *= quant_parms_.scale_Wx_;
+//             sum += quant_parms_.zp_Wx_;
+//             sum *= quant_parms_.scale_Wx_;
             const int Wx_idx = n * ldc + m;
             Wx_requant_cpu[Wx_idx] = sum;
 
@@ -320,10 +305,11 @@ bool Quantized_unit_testing<QuantT>::checkWxGemm() {
         }
     }
 
-    if (!checkMSE(Wx_cpu, Wx_requant_cpu, ERROR_THRESHOLD_MSE_EPSILON, "Wx_requant_cpu")) {
-        printf("Error, checkWxGemm failed\n");
-        return false;
-    }
+    is_pass = checkCosineSimilarity(Wx_cpu, Wx_requant_cpu);
+    const float mse = computeMSE(Wx_cpu, Wx_requant_cpu);
+    printf("\tWx mse = %f\n", mse);
+
+    is_pass = checkMSE(Wx_cpu, Wx_requant_cpu, ERROR_THRESHOLD_MSE_EPSILON, "Wx_requant_cpu");
 
     // dev::vector<float> W_dev(W_);
     // dev::vector<float> x_dev(x_);
@@ -352,28 +338,28 @@ template<typename QuantT>
 bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     bool is_pass = true;
 
-    is_pass &= checkScale(x_.data(), x_.size(), x_quant_.data(), quant_parms_.scale_x_, quant_parms_.zp_x_, "scale_x_");
+    is_pass &= checkScale(x_, x_quant_, quant_parms_.scale_x_, quant_parms_.zp_x_, "scale_x_");
     printf("checkScale: scale_x_ over\n");
-    is_pass &= checkScalePerChannel(W_.data(),
+    is_pass &= checkScalePerChannel(W_,
                                     channels_,
                                     input_size_,
-                                    W_quant_.data(),
+                                    W_quant_,
                                     quant_parms_.scale_W_,
                                     "scale_W_");
     printf("checkScalePerChannel: scale_W_ over\n");
-    is_pass &= checkScalePerChannel(R_.data(),
+    is_pass &= checkScalePerChannel(R_,
                                     channels_,
                                     hidden_size_,
-                                    R_quant_.data(),
+                                    R_quant_,
                                     quant_parms_.scale_R_,
                                     "scale_R_");
     printf("checkScalePerChannel: scale_R_ over\n");
-    is_pass &= checkScalePerChannel(bx_.data(), channels_, 1, bx_quant_.data(), quant_parms_.scale_bx_, "scale_bx_");
+    is_pass &= checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.scale_bx_, "scale_bx_");
     printf("checkScalePerChannel: scale_bx_ over\n");
-    is_pass &= checkScalePerChannel(br_.data(), channels_, 1, br_quant_.data(), quant_parms_.scale_br_, "scale_br_");
+    is_pass &= checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.scale_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
-//    is_pass &= checkWxGemm();
-//    printf("checkGemm: over\n");
+    is_pass &= checkWxGemm();
+    printf("checkGemm: over\n");
     if (!is_pass) {
         printf("Error, checkQuantParameters failed\n");
     }

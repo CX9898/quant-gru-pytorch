@@ -336,17 +336,6 @@ void GruTrain(const Tensor2f &W, // 输入到隐藏层的权重矩阵. [input_si
 
 }
 
-// 计算余弦相似度
-float cosineSimilarity(const std::vector<float> &a, const std::vector<float> &b) {
-    float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
-    for (size_t i = 0; i < a.size(); ++i) {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-    return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f); // 防止除零
-}
-
 void checkHQuantizationWithCosine(
     const std::vector<float> &h_inference,          // 浮点 h, size = (time_steps+1) * batch_size * hidden_size
     const std::vector<int8_t> &h_quant_inference,  // 量化 h, size 同上
@@ -472,7 +461,7 @@ void checkHQuantizationWithCosine(
         const float baifenbi = static_cast<float>(count) / static_cast<float>(size_per_step);
 
         float mean_diff = sum_diff / size_per_step;
-        float cos_sim = cosineSimilarity(h_float_step, h_quant_step);
+        float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
 
         printf("Time step %d: max_diff=%f, mean_diff=%f, cosine_sim=%f, baifenbi = %f%%\n",
                t, max_diff, mean_diff, cos_sim, baifenbi * 100);

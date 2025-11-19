@@ -27,6 +27,11 @@ __device__ __forceinline__ int32_t clamp(int x) {
     return static_cast<int8_t>(max(-32768, min(32767, x)));
 }
 
+template<typename T>
+__device__ __forceinline__ T round(float val) {
+    return clamp<T>(static_cast<int>(roundf(val)));
+}
+
 /**
  * @brief 将 float 转 int8（GPU device 函数），支持 use_inv_scale 和对称量化
  * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）

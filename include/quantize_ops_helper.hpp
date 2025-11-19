@@ -84,18 +84,20 @@ struct QuantGRUReScale {
   dev::vector<float> scale_bx_div_z_;
   dev::vector<int32_t> n_br_div_z_;
   dev::vector<float> scale_br_div_z_;
+  int32_t c7_;
 
   // r门
   int32_t zp_r_pre_;
   int32_t zp_r_out_;
-  int32_t n_Wx_div_r_;
-  float scale_Wx_div_r_;
-  int32_t n_Rh_div_r_;
-  float scale_Rh_div_r_;
+  int32_t n_Wx_div_r_; // n5
+  float scale_Wx_div_r_; // S5
+  int32_t n_Rh_div_r_; // n6
+  float scale_Rh_div_r_; // S6
   dev::vector<int32_t> n_bx_div_r_;
   dev::vector<float> scale_bx_div_r_;
   dev::vector<int32_t> n_br_div_r_;
   dev::vector<float> scale_br_div_r_;
+  int32_t c5_;
 
   // New Gate
   int32_t zp_g_pre_;
@@ -114,6 +116,7 @@ struct QuantGRUReScale {
   float scale_rRh_div_g_pre_; // S11
   dev::vector<int32_t> n_bx_to_g_;
   dev::vector<float> scale_bx_div_g_pre_;
+  int32_t c10_;
 
   // h_new
   int32_t n_z_out_div_one_minus_update__; // n12
