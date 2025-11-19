@@ -9,6 +9,11 @@ enable_language(CXX)
 enable_language(CUDA)
 
 find_package(CUDAToolkit REQUIRED)
+find_package(Torch REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Development)
+
+message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
+message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
 
 # Sets the C++ standard used by the project
 set(CMAKE_CXX_STANDARD 17)
@@ -78,3 +83,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+        ${TORCH_INCLUDE_DIRS}           # Torch 头文件（必须包含！）
+        ${Python3_INCLUDE_DIRS}
+)
+
+message(STATUS "TORCH_INCLUDE_DIRS : ${TORCH_INCLUDE_DIRS}")

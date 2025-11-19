@@ -323,7 +323,7 @@ void dequantizeTensorFixedPoint(const QuantT *quant_data,
  * @param zero_point 零点（对称量化为0，非对称量化通常不为0）
  */
 template<typename QuantT>
-inline void dequantizeTensor(const QuantT* quant_data, float* dequant_data,
+inline void dequantizeTensor(const QuantT *quant_data, float *dequant_data,
                              int size, float scale, int32_t zero_point) {
     for (int i = 0; i < size; ++i) {
         dequant_data[i] = static_cast<float>(quant_data[i] - zero_point) * scale;
@@ -368,10 +368,14 @@ inline void updateHScaleInt8(const int8_t *h_t, size_t size,
  * @return 最优右移位数 n（int 类型，在 [min_n, max_n] 范围内）
  * @throws std::invalid_argument 若 S ≤ 0，抛出异常
  */
-inline int32_t calculate_right_shift_bits(float S, int32_t min_n = 0, int32_t max_n = 30) {
+inline int32_t calculate_right_shift_bits(float S,
+                                          const std::string &name = "",
+                                          int32_t min_n = 0,
+                                          int32_t max_n = 30) {
     // 输入合法性检查：缩放因子必须为正
     if (S <= 0.0f) {
-        throw std::invalid_argument("Scale factor S must be greater than 0. Current value: " + std::to_string(S));
+        throw std::invalid_argument(
+            name + ": Scale factor S must be greater than 0. Current value: " + std::to_string(S));
     }
 
     // 步骤1：计算理论最优n（n = -log2(S)）
@@ -425,11 +429,11 @@ inline void test_basic_cases() {
     std::cout << "\n=== 边界约束测试 ===" << std::endl;
 
     // 测试最小边界
-    assert(calculate_right_shift_bits(8.0f, 3, 10) == 3);  // 理论值-3，被裁剪到3
+    assert(calculate_right_shift_bits(8.0f, "", 3, 10) == 3);  // 理论值-3，被裁剪到3
     std::cout << "min_n=3约束生效 ✓" << std::endl;
 
     // 测试最大边界
-    assert(calculate_right_shift_bits(0.0001f, 0, 10) == 10);  // 理论值~13，被裁剪到10
+    assert(calculate_right_shift_bits(0.0001f, "", 0, 10) == 10);  // 理论值~13，被裁剪到10
     std::cout << "max_n=10约束生效 ✓" << std::endl;
 
     // 测试四舍五入
@@ -460,7 +464,7 @@ inline void test_basic_cases() {
     int passed = 0;
     int total = 0;
 
-    for (const auto& tc : test_cases) {
+    for (const auto &tc : test_cases) {
         int n = calculate_right_shift_bits(tc.S);
         float S_approx = powf(2.0f, -static_cast<float>(n));
         float relative_error = (fabsf(tc.S - S_approx) / tc.S) * 100.0f;
