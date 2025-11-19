@@ -66,49 +66,72 @@ struct QuantGRUReScale {
   int32_t zp_x_;
   int32_t zp_h_;
 
-  dev::vector<int32_t> n_Wx_; // size = hidden
+  dev::vector<int32_t> n_W_mul_x_div_Wx_; // size = hidden
+  dev::vector<float> scale_W_mul_x_div_Wx_;
   int32_t zp_Wx_;
-  dev::vector<int32_t> n_Rh_; // size = hidden
+  dev::vector<int32_t> n_R_mul_h_div_Rh_; // size = hidden
+  dev::vector<float> scale_R_mul_h_div_Rh_;
   int32_t zp_Rh_;
 
   // z门
   int32_t zp_z_pre_;
   int32_t zp_z_out_;
-  int32_t n_Wx_to_z_; // size = hidden
-  int32_t n_Rh_to_z_;
-  dev::vector<int32_t> n_bx_to_z_;
-  dev::vector<int32_t> n_br_to_z_;
+  int32_t n_Wx_div_z_; // size = hidden
+  float scale_Wx_div_z_;
+  int32_t n_Rh_div_z_;
+  float scale_Rh_div_z_;
+  dev::vector<int32_t> n_bx_div_z_;
+  dev::vector<float> scale_bx_div_z_;
+  dev::vector<int32_t> n_br_div_z_;
+  dev::vector<float> scale_br_div_z_;
 
   // r门
   int32_t zp_r_pre_;
   int32_t zp_r_out_;
-  int32_t n_Wx_to_r_;
-  int32_t n_Rh_to_r_;
-  dev::vector<int32_t> n_bx_to_r_;
-  dev::vector<int32_t> n_br_to_r_;
+  int32_t n_Wx_div_r_;
+  float scale_Wx_div_r_;
+  int32_t n_Rh_div_r_;
+  float scale_Rh_div_r_;
+  dev::vector<int32_t> n_bx_div_r_;
+  dev::vector<float> scale_bx_div_r_;
+  dev::vector<int32_t> n_br_div_r_;
+  dev::vector<float> scale_br_div_r_;
 
   // New Gate
   int32_t zp_g_pre_;
   int32_t zp_g_out_;
-  int32_t n_Rh_to_Rh_add_br_;
-  dev::vector<int32_t> n_br_to_Rh_add_br_; // br 是 per-channel
+  int32_t n_Rh_div_Rh_add_br_;
+  float scale_Rh_div_Rh_add_br_;
+  dev::vector<int32_t> n_br_div_Rh_add_br_; // br 是 per-channel
+  dev::vector<float> scale_br_div_Rh_add_br_;
   int32_t zp_Rh_add_br_;
-  int32_t n9_;
+  int32_t n_r_mul_h_div_rRh_; // n9
+  float scale_r_out_mul_h_div_rRh_; // S9
   int32_t zp_rRh_;
-  int32_t n_Wx_to_g_;
-  int32_t n_rRh_to_g_;
+  int32_t n_Wx_div_g_pre_; // n10
+  float scale_Wx_div_g_pre_; // S10
+  int32_t n_rRh_div_g_pre_; // n11
+  float scale_rRh_div_g_pre_; // S11
   dev::vector<int32_t> n_bx_to_g_;
+  dev::vector<float> scale_bx_div_g_pre_;
 
   // h_new
-  int32_t n_one_minus_update_;
+  int32_t n_z_out_div_one_minus_update__; // n12
+  float scale_z_out_div_one_minus_update_; // S12
   int32_t c12_; // 不需要加zp_omu
+
   int32_t zp_new_contrib_;
-  int32_t n13_;
+  int32_t n_one_minus_update_mul_g_div_new_contrib_; // n13
+  float scale_one_minus_update_mul_g_div_new_contrib_; // S13
   int32_t zp_old_contrib_;
-  int32_t n14_;
-  int32_t n15_;
-  int32_t n16_;
-  int32_t c15_;
+  int32_t n_z_mul_h_div_old_contrib_; // n14
+  float scale_z_mul_h_div_old_contrib_; // S14
+  int32_t n_new_contrib_div_h_; // n15
+  float scale_new_contrib_div_h_; // S15
+  int32_t n_old_contrib_div_h_; // n16
+  float scale_old_contrib_div_h_; // S16
+  int32_t c15_; // c15
+
 };
 //
 //struct QuantGRUScales {
