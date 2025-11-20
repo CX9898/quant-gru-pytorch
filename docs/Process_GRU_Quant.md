@@ -4,6 +4,8 @@
 
 ## 量化推理
 
+![haste_GRU_formula.png](haste_GRU_formula.png)
+
 1. 首先调用 cuBlas::GEMM 提前计算好所有时间步的 `Wx_tmp = W * x`. 在每个时间步cell的for循环开始传入对应时间步的Wx.
 2. 因为x是非对称量化, Wx的GEMM结果每一个值需要进行零点补偿. 也就是减去`W_sum_mul_zp_x`
 $$
@@ -17,11 +19,15 @@ $$
    2. 执行逐元素并行运算(CUDA Kernel)
       1. update gate z门计算: 原始haste浮点计算: `z = sigmoid(Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx])`
          - $q_{Wx} = \frac{S_W \cdot S_x}{S_{Wx}} (q_{Wx\_tmp} - q_{W\_sum\_mul\_x\_zp}) + Z_{Wx} $
+         > 其中 $S_W$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
          - $q_{Rh} = \frac{S_R \cdot S_h}{S_{Rh}} (q_{Rh\_tmp} - q_{R\_sum\_mul\_h\_zp}) + Z_{Rh} $
+         > 其中 $S_R$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
          - $q_{Wx\_shifted} = \frac{S_{Wx}}{S_{z\_pre}} (q_{Wx} - Z_{Wx})$
          - $q_{Rh\_shifted} = \frac{S_{Rh}}{S_{z\_pre}} (q_{Rh} - Z_{Rh})$
          - $q_{bx\_shifted} = \frac{S_{bx}}{S_{z\_pre}} (q_{bx})$
+         > 其中 $S_{bx}$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
          - $q_{br\_shifted} = \frac{S_{br}}{S_{z\_pre}} (q_{br})$
+         > 其中 $S_{br}$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
          - $q_{z\_pre\_i32} = q_{Wx\_shifted} + q_{Rh\_shifted} + q_{bx\_shifted} + q_{br\_shifted} + Z_{z\_pre}$
          - $q_{z\_pre\_i8} = clamp<int8>(q_{z\_pre\_i32})$ 截断到int8的范围
          - $z = sigmoid\_int8\_lut(q_{z\_pre\_i8})$
@@ -47,7 +53,7 @@ $$
          - $q_{g\_pre\_i8} = clamp<int8>(q_{g\_pre\_i32})$ 截断到int8的范围
          - $g = tanh\_int8\_lut(q_{g\_pre\_i8})$
       4. 最终h: 原始haste浮点计算: `cur_h_value = z * h_old + (1.0 - z) * g`
-         - $q_{old\_contrib} = \frac{S_{z_out} \cdot S_{h\_old}}{S_{old\_contrib}}(q_{z\_out} - Z_z\_out)(q_{h\_old} - Z_{h}) + Z_{old\_contrib}$
-         - $q_{one\_minus\_update} =  \frac{1.0}{S_{one\_minus\_update}} - \frac{S_{z_out}}{S_{one\_minus\_update}}(q_{z\_out} - Z{z\_out}) + Z_{one\_minus\_update}$
-         - $q_{new\_contrib} = \frac{S_{one\_minus\_update} \cdot S_{g\_out}}{S_{new\_contrib}}(q_{one\_minus\_update} - Z_{one\_minus\_update})(q_{g\_out - Z_{g\_out}}) + Z_{new\_contrib} $
+         - $q_{old\_contrib} = \frac{S_{z_out} \cdot S_{h\_old}}{S_{old\_contrib}}(q_{z\_out} - Z_z\_out)(q_{h\_old} - Z_{h}) + Z_{old\_contrib}$ > 相当于 z * h_old
+         - $q_{one\_minus\_update} =  \frac{1.0}{S_{one\_minus\_update}} - \frac{S_{z_out}}{S_{one\_minus\_update}}(q_{z\_out} - Z{z\_out}) + Z_{one\_minus\_update}$ > 相当于(1.0 - z)
+         - $q_{new\_contrib} = \frac{S_{one\_minus\_update} \cdot S_{g\_out}}{S_{new\_contrib}}(q_{one\_minus\_update} - Z_{one\_minus\_update})(q_{g\_out - Z_{g\_out}}) + Z_{new\_contrib} $ > 相当于(1.0 - z) * g
          - $cur\_h\_value = \frac{S_{old\_contrib}}{S_h}(q_{old\_contrib} - Z_{old\_contrib}) + \frac{S_{new\_contrib}}{S_h}(q_{new\_contrib} - Z_{new\_contrib}) + Z_h$
