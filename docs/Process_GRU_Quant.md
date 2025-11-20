@@ -1,4 +1,8 @@
-# 量化GRU
+# haste 量化 GRU
+
+## 原浮点的各个门控计算
+
+![haste_GRU_formula.png](haste_GRU_formula.png)
 
 ## 量化核心规则说明
 
@@ -79,8 +83,6 @@
 ---
 
 ## 量化推理
-
-![haste_GRU_formula.png](haste_GRU_formula.png)
 
 1. 首先调用 cuBlas::GEMM 提前计算好所有时间步的 `Wx_tmp = W * x`. 在每个时间步cell的for循环开始传入对应时间步的Wx.
 2. 因为x是非对称量化, Wx的GEMM结果每一个值需要进行零点补偿. 也就是减去`W_sum_mul_zp_x`
