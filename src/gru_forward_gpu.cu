@@ -56,11 +56,41 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
     const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
     const T z = sigmoid(z_pre);
 
+//    if (weight_idx == 0) {
+//        printf("haste: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
+//               Wx[z_idx],
+//               Rh[z_idx],
+//               bx[bz_idx],
+//               br[bz_idx],
+//               z_pre,
+//               z);
+//    }
+
     const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
     const T r = sigmoid(r_pre);
 
+//    if (weight_idx == 0) {
+//        printf("haste compute R: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, r_pre_fp=%f, r=%f\n",
+//               Wx[r_idx],
+//               Rh[r_idx],
+//               bx[br_idx],
+//               br[br_idx],
+//               r_pre,
+//               r);
+//    }
+
     const T g_pre = Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx];
     const T g = tanh(g_pre);
+
+    if (weight_idx == 0) {
+        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
+               Wx[g_idx],
+               Rh[g_idx],
+               bx[bg_idx],
+               br[bg_idx],
+               g_pre,
+               g);
+    }
 
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
@@ -72,6 +102,17 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
     }
 
     T cur_h_value = z * h[output_idx] + (static_cast<T>(1.0) - z) * g;
+
+    if (weight_idx == 0) {
+        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
+               z,
+               h[output_idx],
+               z * h[output_idx],
+               (static_cast<T>(1.0) - z),
+               g,
+               (static_cast<T>(1.0) - z) * g,
+               cur_h_value);
+    }
 
     if (ApplyZoneout) {
         if (Training) {
@@ -712,7 +753,6 @@ void calculateScalePerSteps(const T *x_dev,
 
     calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp, name);
 
-    return;
 }
 
 template<typename T, typename QuantT>
@@ -756,6 +796,7 @@ std::vector<int32_t> calculateScalesPerChannels(const T *W_dev, int channel_size
     return exp2_inv_per_channels;
 }
 
+
 template<typename T, typename QuantT>
 void calculateScale(const T *data_dev,
                     const size_t size,
@@ -772,9 +813,9 @@ void calculateScale(const T *data_dev,
         min_val = std::min(min_val, val);
         max_val = std::max(max_val, val);
     }
-    calibrateQuantParams<T, QuantT>(min_val, max_val, use_symmetric, min_val, max_val, exp2_inv, zp, name);
-
-    return;
+    T min_new = min_val;
+    T max_new = max_val;
+    calibrateQuantParams<T, QuantT>(min_val, max_val, use_symmetric, min_new, max_new, exp2_inv, zp, name);
 }
 
 template<typename T, typename QuantT>
@@ -929,6 +970,7 @@ void ForwardPass<T>::Run(
             tmp_Rh + Rh_offset,
             zoneout_prob,
             zoneout_mask ? zoneout_mask + i * NH : nullptr);
+//        break;
     }
 
     cublasSetStream(blas_handle, save_stream);

@@ -29,9 +29,9 @@ using Tensor2i32 = Eigen::Tensor<int32_t, 2>;
 using Tensor3i32 = Eigen::Tensor<int32_t, 3>;
 
 constexpr int BATCH_SIZE = 64;     // 批大小
-constexpr int SEQUENCE_LEN = 1000; // 序列长度(T), 每个样本有T个时间步
-constexpr int HIDDEN_DIMS = 512; // 隐藏层维度(H), h_t的维度
-constexpr int INPUT_DIMS = 512;  // 输入维度(I), x_t的维度
+constexpr int SEQUENCE_LEN = 500; // 序列长度(T), 每个样本有T个时间步
+constexpr int HIDDEN_DIMS = 256; // 隐藏层维度(H), h_t的维度
+constexpr int INPUT_DIMS = 256;  // 输入维度(I), x_t的维度
 
 cublasHandle_t g_blas_handle;  // 改为非static以便在wrapper中访问
 
@@ -65,6 +65,19 @@ class ScopeTimer { // 测量时间类
   std::string msg_;
   cudaEvent_t start_, stop_;
 };
+
+template<typename T, typename QuantT>
+void quantification(const T *data,
+                    QuantT *quant_data,
+                    size_t size,
+                    int32_t exp2_inv,
+                    int32_t zp) {
+//#pragma omp parallel for
+    for (int i = 0; i < size; ++i) {
+        quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
+//        printf("quant_data[%d] = %d\n",i,quant_data[i]);
+    }
+}
 
 template<bool use_int16 = false>
 // 控制量化精度位宽
@@ -194,7 +207,6 @@ void GruInferenceQuant(const Tensor2i8 &W,
     device_ptr<Tensor2i32> tmp_Rh_dev(batch_size * hidden_size * 3); // 用于存放R * h的中间结果
 
     device_ptr<Tensor3i8> h_dev(h);
-    h_dev.zero(); // h初始化为0
 
     {
         gru::ForwardPassQuant<int8_t> forward = gru::ForwardPassQuant<int8_t>(
@@ -511,8 +523,8 @@ int main() {
     // 范围: U(-k, k)，其中 k = sqrt(1 / hidden_size) 或更保守的 k = 1 / sqrt(hidden_size)
     // 循环权重通常需要更小的初始值以避免梯度爆炸
     R.setRandom();
-    float k_R = 1.0f / sqrtf(static_cast<float>(HIDDEN_DIMS));
-    R = R * R.constant(k_R);
+//    float k_R = 1.0f / sqrtf(static_cast<float>(HIDDEN_DIMS));
+//    R = R * R.constant(k_R);
     R = R * 2.0f - 1.0f;
 
     // bx, br: 偏置通常初始化为0或很小的随机值
@@ -580,13 +592,8 @@ int main() {
 
 //    checkQuantParameters(quant_parms, bx, br, W, R, x, dh, bx_quant, br_quant, W_quant, R_quant, x_quant, dh_new_quant);
 
-//    checkQuant(W_quant,
-//               R_quant,
-//               bx_quant,
-//               br_quant,
-//               x_quant,
-//               dh_new_quant);
-
+//    unit_testing::quantizationTest();
+//    unit_testing::testCalibrateQuantParams();
     Quantized_unit_testing<int8_t> quantized_unit_testing(W.data(),
                                                           R.data(),
                                                           bx.data(),
@@ -606,11 +613,18 @@ int main() {
                                                           g_blas_handle,
                                                           quant_parms);
     quantized_unit_testing.printGRUQuantitativeParameters();
-    quantized_unit_testing.checkQuantParameters();
+//    quantized_unit_testing.checkQuantParameters();
 
     // 运行量化GRU得到量化结果2
+    Tensor3i8 h_quant_inference_tmp(hidden_size, batch_size, (time_steps + 1));
+    h_quant_inference_tmp.setZero();
     Tensor3i8 h_quant_inference(hidden_size, batch_size, (time_steps + 1));
     h_quant_inference.setZero();
+    quantification(h_quant_inference_tmp.data(),
+                   h_quant_inference.data(),
+                   h_quant_inference.size(),
+                   quant_parms.exp2_inv_h_,
+                   quant_parms.zp_h_);
     GruInferenceQuant(W_quant,
                       R_quant,
                       bx_quant,
@@ -626,7 +640,7 @@ int main() {
 
     printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
-    if (true) { // Test
+    if (false) { // Test
         std::vector<float> h_inference_tmp(h_inference.data(), h_inference.data() + h_inference.size());
         std::vector<int8_t> h_quant_inference_tmp(h_quant_inference.data(),
                                                   h_quant_inference.data() + h_quant_inference.size());

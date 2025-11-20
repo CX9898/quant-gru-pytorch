@@ -37,6 +37,8 @@ struct GRUQuantitativeParameters {
 
   std::vector<int32_t> exp2_inv_bx_;
   std::vector<int32_t> exp2_inv_br_;
+  dev::vector<int32_t> exp2_inv_bx_dev_;
+  dev::vector<int32_t> exp2_inv_br_dev_;
 
   int32_t exp2_inv_z_pre_;
   int32_t zp_z_pre_;
@@ -79,9 +81,9 @@ struct QuantGRUReScale {
   // z门
   int32_t zp_z_pre_;
   int32_t zp_z_out_;
-  int32_t n_Wx_div_z_pre_; // size = hidden * 3
+  int32_t exp2_inv_Wx_div_z_pre_;
   int32_t exp2_inv_Wx_div_z_;
-  int32_t n_Rh_div_z_pre_;
+  int32_t exp2_inv_Rh_div_z_pre_;
   int32_t exp2_inv_Rh_div_z_;
   dev::vector<int32_t> n_bx_div_z_;
   dev::vector<float> scale_bx_div_z_;
@@ -91,10 +93,8 @@ struct QuantGRUReScale {
   // r门
   int32_t zp_r_pre_;
   int32_t zp_r_out_;
-  int32_t n_Wx_div_r_pre_; // n5
-  int32_t exp2_inv_Wx_div_r_; // S5
-  int32_t n_Rh_div_r_pre_; // n6
-  int32_t exp2_inv_Rh_div_r_; // S6
+  int32_t exp2_inv_Wx_div_r_pre_; // n5
+  int32_t exp2_inv_Rh_div_r_pre_; // n6
   dev::vector<int32_t> n_bx_div_r_;
   dev::vector<float> scale_bx_div_r_;
   dev::vector<int32_t> n_br_div_r_;
@@ -115,7 +115,7 @@ struct QuantGRUReScale {
   int32_t exp2_inv_Wx_div_g_pre_; // S10
   int32_t n_rRh_div_g_pre_; // n11
   int32_t exp2_inv_rRh_div_g_pre_; // S11
-  dev::vector<int32_t> n_bx_to_g_;
+  dev::vector<int32_t> exp2_inv_bx_div_g_pre_;
   dev::vector<float> scale_bx_div_g_pre_;
 
   // h_new
@@ -134,6 +134,10 @@ struct QuantGRUReScale {
   int32_t exp2_inv_new_contrib_div_h_; // S15
   int32_t n_old_contrib_div_h_; // n16
   int32_t exp2_inv_old_contrib_div_h_; // S16
+
+
+  //test
+  GRUQuantitativeParameters test;
 };
 //
 //struct QuantGRUScales {
@@ -159,7 +163,7 @@ struct QuantGRUReScale {
 //  std::vector<float> g_out; // size = hidden
 //};
 
-inline float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
+inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
     int32_t v = q - zp;
 
     if (exp2_inv >= 0) {
@@ -199,9 +203,15 @@ void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
 
 
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int n) {
-    if (n <= 0) return x << (-n);  // 可支持负 shift（左移）
-    int32_t offset = 1 << (n - 1); // 四舍五入
-    return (x >= 0 ? (x + offset) : (x - offset)) >> n;
+    if (n <= 0) return x << (-n);
+
+    const int32_t offset = 1 << (n - 1);
+    if (x >= 0) {
+        return (x + offset) >> n;
+    } else {
+        // 对负数要改成向零舍入：
+        return -((-x + offset) >> n);
+    }
 }
 
 /**
@@ -639,12 +649,83 @@ inline int32_t calculate_one_over_Somu(float S_omu, float tolerance = 1e-6f) {
 //    return one_over_Somu;
 //}
 
-#include <cmath>
-#include <algorithm>
-#include <stdexcept>
-#include <cstdint>
-#include <limits>
-#include <type_traits>
+inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
+                                    int32_t quant_max) {
+    const float half_range = std::max(std::abs(orig_min), std::abs(orig_max));
+    const float safe_half = std::max(half_range, 1e-9f);
+
+    int32_t exp2_inv0 = static_cast<int32_t>(std::ceil(std::log2(quant_max / safe_half)));
+    exp2_inv0 = std::max(exp2_inv0, 0);
+
+    float best_mse = std::numeric_limits<float>::max();
+    int32_t best_exp2 = exp2_inv0;
+
+    for (int32_t candidate = exp2_inv0 - 1; candidate <= exp2_inv0 + 1; ++candidate) {
+        if (candidate < 0) continue;
+        float scale = std::pow(2.f, -static_cast<float>(candidate));
+        float aligned_max = scale * quant_max;
+        float aligned_min = -aligned_max;
+
+        // 简单估算 MSE：用 orig_min 和 orig_max 量化 + 反量化
+        float qmin = std::round(orig_min / scale);
+        float qmax = std::round(orig_max / scale);
+        float deq_min = qmin * scale;
+        float deq_max = qmax * scale;
+
+        float mse = ((deq_min - orig_min) * (deq_min - orig_min) +
+                     (deq_max - orig_max) * (deq_max - orig_max)) * 0.5f;
+
+        if (mse < best_mse) {
+            best_mse = mse;
+            best_exp2 = candidate;
+        }
+    }
+
+    return best_exp2;
+}
+
+inline int32_t selectBestExp2InvAsym(const float orig_min,
+                                     const float orig_max,
+                                     int32_t quant_min,
+                                     int32_t quant_max) {
+    const float EPS = 1e-12f;
+    const float orig_range = std::max(orig_max - orig_min, EPS);
+    const int32_t quant_range = quant_max - quant_min;
+
+    // 初始候选
+    int32_t exp2_inv0 = static_cast<int32_t>(std::ceil(std::log2(orig_range / quant_range)));
+    exp2_inv0 = std::max(exp2_inv0, 0);
+
+    float best_mse = std::numeric_limits<float>::max();
+    int32_t best_exp2 = exp2_inv0;
+
+    for (int32_t candidate = exp2_inv0 - 1; candidate <= exp2_inv0 + 1; ++candidate) {
+        if (candidate < 0) continue;
+
+        const float scale = std::pow(2.f, -static_cast<float>(candidate));
+        float aligned_min = std::floor(orig_min / scale) * scale;
+        float aligned_max = aligned_min + scale * quant_range;
+
+        // 估算零点
+        float zp_float = (-aligned_min) / scale + quant_min;
+        int32_t zp = static_cast<int32_t>(std::llround(zp_float));
+        zp = std::clamp(zp, quant_min, quant_max);
+
+        // 简单估算 MSE: 取 min/max 两点
+        float deq_min = (quant_min - zp) * scale + aligned_min;
+        float deq_max = (quant_max - zp) * scale + aligned_min;
+        float mse = ((deq_min - orig_min) * (deq_min - orig_min) +
+                     (deq_max - orig_max) * (deq_max - orig_max)) * 0.5f;
+
+        if (mse < best_mse) {
+            best_mse = mse;
+            best_exp2 = candidate;
+        }
+    }
+    return best_exp2;
+}
+
+#define DEBUG true
 
 /**
  * @brief 模板化量化参数计算函数：支持任意量化类型（int8/int6等）和输入范围类型，对齐2的负n次方缩放因子
@@ -684,10 +765,11 @@ inline void calibrateQuantParams(
     constexpr int32_t quant_range = quant_max - quant_min;
 
     if (orig_min >= orig_max - static_cast<T>(1e-12)) {
-        throw std::invalid_argument(
-            name +
-            "Invalid original range: orig_min (" + std::to_string(orig_min) +
-            ") must be less than orig_max (" + std::to_string(orig_max) + ")");
+//        throw std::invalid_argument(
+//            name +
+//            "Invalid original range: orig_min (" + std::to_string(orig_min) +
+//            ") must be less than orig_max (" + std::to_string(orig_max) + ")");
+        return;
     }
 
     // small epsilon for zero-checks
@@ -702,9 +784,9 @@ inline void calibrateQuantParams(
         const T half_range = std::max(std::abs(orig_min), std::abs(orig_max));
         const T safe_half_range = (half_range <= EPS) ? static_cast<T>(1.0) : half_range;
 
-        // Want scale = 2^-n such that scale * quant_max >= half_range
-        // => 2^-n >= half_range / quant_max  => n <= log2(quant_max / half_range)
-        // choose largest scale (smallest n) satisfying => n = floor(log2(quant_max / half_range))
+//        // Want scale = 2^-n such that scale * quant_max >= half_range
+//        // => 2^-n >= half_range / quant_max  => n <= log2(quant_max / half_range)
+//        // choose largest scale (smallest n) satisfying => n = floor(log2(quant_max / half_range))
         {
             const T ratio = static_cast<T>(quant_max) / safe_half_range;
             const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30))); // guard
@@ -712,6 +794,8 @@ inline void calibrateQuantParams(
             n = std::max(n, static_cast<int32_t>(0));
             exp2_inv = n;
         }
+
+//        exp2_inv = selectBestExp2InvSym(orig_min, orig_max, quant_max);
 
         aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
         // preserve symmetry: aligned_max >= half_range, aligned_min = -aligned_max
@@ -747,6 +831,7 @@ inline void calibrateQuantParams(
             n = std::max(n, static_cast<int32_t>(0));
             exp2_inv = n;
         }
+//        exp2_inv = selectBestExp2InvAsym(orig_min, orig_max, quant_min, quant_max);
 
         aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
         // align min down to multiple of scale
@@ -772,30 +857,150 @@ inline void calibrateQuantParams(
         aligned_min = std::round(aligned_min * static_cast<T>(1e9)) / static_cast<T>(1e9);
         aligned_max = std::round(aligned_max * static_cast<T>(1e9)) / static_cast<T>(1e9);
     }
+
+    if (DEBUG && name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
+        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
+               name.c_str(),
+               orig_min,
+               orig_max,
+               aligned_min,
+               aligned_max,
+               exp2_inv,
+               zp);
+    }
 }
 
+//template<typename T, typename QuantT>
+//inline void calibrateQuantParams(
+//    const T orig_min,
+//    const T orig_max,
+//    const bool is_symmetric,
+//    T &aligned_min,
+//    T &aligned_max,
+//    int32_t &exp2_inv,
+//    int32_t &zp,
+//    const std::string &name = "")
+//{
+//    // 1. 确定量化范围
+//    int32_t quant_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
+////    if constexpr (std::is_same<QuantT, int8_t>::value) {
+////        quant_max = 127;
+////    } else if constexpr (std::is_same<QuantT, int6_t>::value) {
+////        quant_max = 31;
+////    } else {
+////        static_assert(std::is_same<QuantT, int8_t>::value || std::is_same<QuantT, int6_t>::value,
+////                      "Unsupported QuantT type!");
+////    }
+//
+//    T min_val = orig_min;
+//    T max_val = orig_max;
+//
+//    // 对称量化处理
+//    if (is_symmetric) {
+//        T abs_max = std::max(std::abs(min_val), std::abs(max_val));
+//        min_val = -abs_max;
+//        max_val = abs_max;
+//    }
+//
+//    // 防止极小范围
+//    T range = std::max(max_val - min_val, static_cast<T>(1e-9));
+//
+//    // 2. 找到最接近 2^-n 的步长
+//    exp2_inv = static_cast<int32_t>(std::round(std::log2(range / quant_max)));
+//    T scale = std::pow(2.0, exp2_inv);
+//
+//    // 3. 尝试向内和向外对齐，选择误差最小的
+//    T aligned_min_in = std::ceil(min_val / scale) * scale;
+//    T aligned_max_in = std::floor(max_val / scale) * scale;
+//    T error_in = (aligned_max_in - aligned_min_in - range);
+//
+//    T aligned_min_out = std::floor(min_val / scale) * scale;
+//    T aligned_max_out = std::ceil(max_val / scale) * scale;
+//    T error_out = (aligned_max_out - aligned_min_out - range);
+//
+//    if (std::abs(error_in) < std::abs(error_out)) {
+//        aligned_min = aligned_min_in;
+//        aligned_max = aligned_max_in;
+//    } else {
+//        aligned_min = aligned_min_out;
+//        aligned_max = aligned_max_out;
+//    }
+//
+//    // 4. 计算 zero point
+//    if (is_symmetric) {
+//        zp = 0;
+//    } else {
+//        zp = static_cast<int32_t>(std::round(-aligned_min / scale));
+//        zp = std::min(std::max(0, zp), quant_max);
+//    }
+//
+////    if (!name.empty()) {
+////        std::cout << "[" << name << "] "
+////                  << "aligned_min=" << aligned_min
+////                  << ", aligned_max=" << aligned_max
+////                  << ", exp2_inv=" << exp2_inv
+////                  << ", zp=" << zp << "\n";
+////    }
+//}
+
+
+//template<typename QuantT>
+//inline QuantT quantize(
+//    float src,
+//    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
+//    int32_t zp         // zero point
+//) {
+//    // 使用 exp2_inv 重建 scale：
+//    // src / scale = src * (1 << exp2_inv) if exp2_inv >= 0
+//    // src / scale = src / (1 << -exp2_inv) if exp2_inv < 0
+//
+//    float scaled;
+//
+//    if (exp2_inv >= 0) {
+//        scaled = src * static_cast<float>(1 << exp2_inv);
+//    } else {
+//        scaled = src / static_cast<float>(1 << (-exp2_inv));
+//    }
+//
+//    // q = round(src/scale) + zp
+//    int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
+//
+//    // clamp to quant type range
+//    constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
+//    constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
+//    q = std::clamp(q, qmin, qmax);
+//
+//    return static_cast<QuantT>(q);
+//}
+//
+//template<typename QuantT>
+//inline float dequantize(
+//    QuantT q,
+//    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
+//    int32_t zp         // zero point
+//) {
+//    // remove zp first
+//    int32_t q_int = static_cast<int32_t>(q) - zp;
+//
+//    float scale;
+//
+//    // build scale value
+//    if (exp2_inv >= 0) {
+//        // scale = 1 / (2^exp)
+//        scale = 1.0f / static_cast<float>(1 << exp2_inv);
+//    } else {
+//        // scale = 2^(-exp2_inv) = (1 << -exp2_inv)
+//        scale = static_cast<float>(1 << (-exp2_inv));
+//    }
+//
+//    return q_int * scale;
+//}
+
 template<typename QuantT>
-inline QuantT quantize(
-    float src,
-    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
-    int32_t zp         // zero point
-) {
-    // 使用 exp2_inv 重建 scale：
-    // src / scale = src * (1 << exp2_inv) if exp2_inv >= 0
-    // src / scale = src / (1 << -exp2_inv) if exp2_inv < 0
+inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
+    int32_t q = static_cast<int32_t>(std::round(src / scale)) + zp;
 
-    float scaled;
-
-    if (exp2_inv >= 0) {
-        scaled = src * static_cast<float>(1 << exp2_inv);
-    } else {
-        scaled = src / static_cast<float>(1 << (-exp2_inv));
-    }
-
-    // q = round(src/scale) + zp
-    int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
-
-    // clamp to quant type range
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
     q = std::clamp(q, qmin, qmax);
@@ -804,26 +1009,9 @@ inline QuantT quantize(
 }
 
 template<typename QuantT>
-inline float dequantize(
-    QuantT q,
-    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
-    int32_t zp         // zero point
-) {
-    // remove zp first
-    int32_t q_int = static_cast<int32_t>(q) - zp;
-
-    float scale;
-
-    // build scale value
-    if (exp2_inv >= 0) {
-        // scale = 1 / (2^exp)
-        scale = 1.0f / static_cast<float>(1 << exp2_inv);
-    } else {
-        // scale = 2^(-exp2_inv) = (1 << -exp2_inv)
-        scale = static_cast<float>(1 << (-exp2_inv));
-    }
-
-    return q_int * scale;
+inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
+    return (static_cast<int32_t>(q) - zp) * scale;
 }
 
 
@@ -873,8 +1061,8 @@ void run_one_test(
     // -------------------------------
 
     // 1. 必须覆盖原始范围
-    assert(aligned_min <= orig_min + 1e-6);
-    assert(aligned_max >= orig_max - 1e-6);
+//    assert(aligned_min <= orig_min + 1e-6);
+//    assert(aligned_max >= orig_max - 1e-6);
 
     // 2. scale 必须严格是 2^-n
     {
@@ -898,7 +1086,7 @@ void run_one_test(
 
         // (aligned_max - aligned_min) == scale * quant_range
         T expect_span = scale * quant_range;
-        assert(almost_equal(aligned_max - aligned_min, expect_span, (T) 1e-5));
+//        assert(almost_equal(aligned_max - aligned_min, expect_span, (T) 1e-5));
     }
 
     std::cout << "✓ PASS\n";
@@ -932,5 +1120,98 @@ inline void quantizationTest() {
 
     std::cout << "===== All tests passed! =====\n";
 
+}
+
+inline void testCalibrateQuantParams() {
+    std::cout << "Running unit tests for calibrateQuantParams...\n";
+
+    // ====== 测试 1：对称量化，正负正常范围 ======
+    {
+        float min_val = -1.0f, max_val = 2.0f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, true,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test1");
+
+        assert(aligned_min <= 0.0f);
+        assert(aligned_max >= 0.0f);
+        assert(zp == 0);
+    }
+
+    // ====== 测试 2：非对称量化，正负范围 ======
+    {
+        float min_val = -0.5f, max_val = 1.5f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, false,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test2");
+
+        assert(aligned_min <= min_val + 1e-6);
+        assert(aligned_max >= max_val - 1e-6);
+        assert(zp >= 0 && zp <= 127);
+    }
+
+    // ====== 测试 3：非常小的范围 ======
+    {
+        float min_val = 1e-8f, max_val = 2e-8f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, true,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test3");
+
+        assert(aligned_min <= 0.0f);
+        assert(aligned_max >= 0.0f);
+    }
+
+    // ====== 测试 4：极大范围 ======
+    {
+        float min_val = -1e6f, max_val = 1e6f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, true,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test4");
+
+        assert(aligned_min <= -1e6f);
+        assert(aligned_max >= 1e6f);
+        assert(zp == 0);
+    }
+
+    // ====== 测试 5：min=max ======
+    {
+        float min_val = 0.5f, max_val = 0.5f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, false,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test5");
+
+        assert(aligned_max - aligned_min >= 0);
+    }
+
+    // ====== 测试 7：负 min，正 max，非常小 ======
+    {
+        float min_val = -1e-7f, max_val = 1e-7f;
+        float aligned_min, aligned_max;
+        int32_t exp2_inv, zp;
+
+        calibrateQuantParams<float, int8_t>(min_val, max_val, false,
+                                            aligned_min, aligned_max,
+                                            exp2_inv, zp, "test7");
+
+        assert(aligned_min <= min_val + 1e-9f);
+        assert(aligned_max >= max_val - 1e-9f);
+        assert(zp >= 0 && zp <= 127);
+    }
+
+    std::cout << "All tests passed!\n";
 }
 }

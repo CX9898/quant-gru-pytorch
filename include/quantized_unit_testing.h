@@ -11,53 +11,6 @@
 #include "checkData.hpp"
 #include "quantize_ops_helper.hpp"
 
-
-void checkQuant(const std::vector<int8_t> &W_quant,  // 对应W_z/W_r/W_h的合并
-                const std::vector<int8_t> &R_quant, // 对应R_z/R_r/R_h的合并
-                const std::vector<int32_t> &bx_quant, // 对应b_z/b_r/b_h的合并. bx 负责给 “输入 x_t 到门控的线性变换” 加偏置
-                const std::vector<int32_t> &br_quant, // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
-                const std::vector<int8_t> &x_quant,
-                const std::vector<int8_t> &dh_new_quant
-) {
-    for (int i = 0; i < W_quant.size(); ++i) {
-        if (W_quant.data()[i] == 0) {
-            printf("Error, W_quant[%d] = %d\n", i, W_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < R_quant.size(); ++i) {
-        if (R_quant.data()[i] == 0) {
-            printf("Error, R_quant[%d] = %d\n", i, R_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < bx_quant.size(); ++i) {
-        if (bx_quant.data()[i] == 0) {
-            printf("Error, bx_quant[%d] = %d\n", i, bx_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < br_quant.size(); ++i) {
-        if (br_quant.data()[i] == 0) {
-            printf("Error, br_quant[%d] = %d\n", i, br_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < x_quant.size(); ++i) {
-        if (x_quant.data()[i] == 0) {
-            printf("Error, x_quant[%d] = %d\n", i, x_quant.data()[i]);
-            break;
-        }
-    }
-    for (int i = 0; i < dh_new_quant.size(); ++i) {
-        if (dh_new_quant.data()[i] == 0) {
-            printf("Error, dh_new_quant[%d] = %d\n", i, dh_new_quant.data()[i]);
-            break;
-        }
-    }
-    printf("Quant values check over\n");
-}
-
 bool checkScale(const std::vector<float> &src,
                 const std::vector<int8_t> &quant,
                 float scale,
@@ -158,7 +111,7 @@ bool checkScalePerChannel(const std::vector<float> &src,
 
 template<typename QuantT>
 struct Quantized_unit_testing {
- public:
+
   std::vector<float> W_;
   std::vector<float> R_;
   std::vector<float> bx_;
