@@ -296,9 +296,9 @@ __device__ __forceinline__ int8_t tanh_int16_lut(int16_t x, const int8_t* lut) {
 > - > 量化参数是per-channel. 但是权重部分为三个不同值.
 > - Rh 和 br 是设置为同一个scale吗? Wx 和 bx 是设置为同一个scale吗?
 > - > 不是
-> - 对称和非对称量化的选择:
->   - x: 非对称
->   - h: 非对称
+> - 量化的要求:
+>   - x: 非对称, 平移每个时间步
+>   - h: 非对称, 平移每个时间步
 >   - W: 对称, per-channel
 >   - R: 对称, per-channel
 >   - Wx: 非对称

@@ -588,7 +588,7 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
     h2d(rescale_param_.n_bx_to_g_, n_bx_to_g);
 
     // h_new
-    rescale_param_.one_div_one_minus_update_ =;
+    rescale_param_.one_div_one_minus_update_ = /*1.0 / parms.scale_one_minus_update_*/;
     rescale_param_.n_z_out_div_one_minus_update_ =
         calculate_right_shift_bits(parms.scale_z_pre_ / parms.scale_one_minus_update_, "n_z_out_div_one_minus_update_");
     rescale_param_.zp_one_minus_update_ = parms.zp_one_minus_update_;

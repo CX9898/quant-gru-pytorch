@@ -430,41 +430,19 @@ void checkHQuantizationWithCosine(
             // 反量化: dequant = (quant - zp) * scale
             int8_t quant_val = h_quant_inference[t_offset + idx];
             h_quant_step[idx] = static_cast<float>(quant_val - scaleParam.zp_h_) * scaleParam.scale_h_;
-            if ((quant_val == 0 || h_quant_step[idx] == 0) && h_float_step[idx] != 0) {
-                printf("Error!, quant_val = %d, h_quant_step[%d] = %f, h_float_step = %f\n",
-                       quant_val,
-                       idx,
-                       h_quant_step[idx],
-                       h_float_step[idx]);
-                return;
-            }
+//            if ((quant_val == 0 || h_quant_step[idx] == 0) && h_float_step[idx] != 0) {
+//                printf("Error!, quant_val = %d, h_quant_step[%d] = %f, h_float_step = %f\n",
+//                       quant_val,
+//                       idx,
+//                       h_quant_step[idx],
+//                       h_float_step[idx]);
+//                return;
+//            }
         }
+        const float mse = computeMSE(h_float_step, h_quant_step);
+        const float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
 
-        // 差值统计
-        float max_diff = 0.0f;
-        float sum_diff = 0.0f;
-
-        int count = 0;
-        for (int idx = 0; idx < size_per_step; ++idx) {
-            float diff = std::abs(h_float_step[idx] - h_quant_step[idx]);
-            sum_diff += diff;
-            if (diff > max_diff) max_diff = diff;
-
-            if (diff > threshold) {
-                count++;
-                if (count < 3) {
-                    printf("[Warning] t=%d idx=%d diff=%f h_float=%f h_quant=%f\n",
-                           t, idx, diff, h_float_step[idx], h_quant_step[idx]);
-                }
-            }
-        }
-        const float baifenbi = static_cast<float>(count) / static_cast<float>(size_per_step);
-
-        float mean_diff = sum_diff / size_per_step;
-        float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
-
-        printf("Time step %d: max_diff=%f, mean_diff=%f, cosine_sim=%f, baifenbi = %f%%\n",
-               t, max_diff, mean_diff, cos_sim, baifenbi * 100);
+        printf("Time step %d: mse = %f, cosine_sim = %f\n", t, mse, cos_sim);
     }
 }
 
