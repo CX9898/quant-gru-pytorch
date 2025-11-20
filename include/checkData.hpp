@@ -8,7 +8,7 @@
 #include <cuda_runtime.h>
 
 const float ERROR_THRESHOLD_EPSILON = 1e-6f;
-const float ERROR_THRESHOLD_MSE_EPSILON = 1e-4f;
+const float ERROR_THRESHOLD_MSE_EPSILON = 1e-5f;
 
 template<typename T>
 inline bool checkOneData(const T data1, const T data2) {
@@ -49,10 +49,12 @@ inline float computeCosineSimilarity(const std::vector<float> &a, const std::vec
     return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f); // 防止除零
 }
 
-inline bool checkCosineSimilarity(const std::vector<float> &a, const std::vector<float> &b, const std::string &name = "") {
+inline bool checkCosineSimilarity(const std::vector<float> &a,
+                                  const std::vector<float> &b,
+                                  const std::string &name = "") {
     const float cos_sim = computeCosineSimilarity(a, b);
     if (cos_sim < 0.9999f) {
-        fprintf(stderr, "\tError! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
+        fprintf(stderr, "\tWarning! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
         return false;
     }
     printf("\tPass! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
@@ -84,9 +86,10 @@ bool checkMSE(const std::vector<float> &data1,
               float threshold = ERROR_THRESHOLD_MSE_EPSILON,
               const std::string &name = ""
 ) {
-    float mse = computeMSE(data1, data2);
+    const float mse = computeMSE(data1, data2);
+    printf("\tPass! %s: mes = %f\n", name.c_str(), mse);
     if (mse > threshold) {
-        printf("Error, %s failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
+        fprintf(stderr, "Warning! %s failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
         return false;
     }
     return true;

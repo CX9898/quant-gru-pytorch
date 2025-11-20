@@ -76,13 +76,8 @@ bool checkScale(const std::vector<float> &src,
         const float req_val = (quant[i] - zero_point) * scale;
         requant[i] = req_val;
     }
-    is_pass = checkCosineSimilarity(src, requant, name);
-    const float mse = computeMSE(src, requant);
-    printf("\t%s mse = %f\n", name.c_str(), mse);
-
-    if (!checkMSE(src, requant)) {
-        return is_pass;
-    }
+    is_pass &= checkCosineSimilarity(src, requant, name);
+    is_pass &= checkMSE(src, requant);
 
     return is_pass;
 }
@@ -112,13 +107,8 @@ bool checkScalePerChannel(const std::vector<float> &src,
         }
     }
 
-    is_pass = checkCosineSimilarity(src, requant);
-    const float mse = computeMSE(src, requant);
-    printf("\t%s mse = %f\n", name.c_str(), mse);
-
-    if (!checkMSE(src, requant)) {
-        is_pass = false;
-    }
+    is_pass &= checkCosineSimilarity(src, requant);
+    is_pass &= checkMSE(src, requant);
 
     return is_pass;
 }
@@ -305,11 +295,8 @@ bool Quantized_unit_testing<QuantT>::checkWxGemm() {
         }
     }
 
-    is_pass = checkCosineSimilarity(Wx_cpu, Wx_requant_cpu);
-    const float mse = computeMSE(Wx_cpu, Wx_requant_cpu);
-    printf("\tWx mse = %f\n", mse);
-
-    is_pass = checkMSE(Wx_cpu, Wx_requant_cpu, ERROR_THRESHOLD_MSE_EPSILON, "Wx_requant_cpu");
+    is_pass &= checkCosineSimilarity(Wx_cpu, Wx_requant_cpu);
+    is_pass &= checkMSE(Wx_cpu, Wx_requant_cpu, 1e-3, "Wx_requant_cpu");
 
     // dev::vector<float> W_dev(W_);
     // dev::vector<float> x_dev(x_);

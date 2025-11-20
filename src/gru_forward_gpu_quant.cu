@@ -194,9 +194,10 @@ __device__ __forceinline__ int8_t computeH( // 最终h
         rescale_params.zp_old_contrib_;
 
     const int32_t one_minus_update =
-        rescale_params.c12_ - rshift_round(z, rescale_params.n_z_out_div_one_minus_update__);
+        rescale_params.c12_ - rshift_round(z - rescale_params.zp_z_out_, rescale_params.n_z_out_div_one_minus_update__)
+        + rescale_params.zp_one_minus_update_;
     const int32_t new_contrib =
-        rshift_round(one_minus_update * (g - rescale_params.zp_g_out_),
+        rshift_round((one_minus_update - rescale_params.zp_one_minus_update_) * (g - rescale_params.zp_g_out_),
                      rescale_params.n_one_minus_update_mul_g_div_new_contrib_) +
         rescale_params.zp_new_contrib_;
 
