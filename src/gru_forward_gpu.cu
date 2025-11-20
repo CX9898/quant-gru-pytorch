@@ -9,6 +9,7 @@
 #include "device_assert.h"
 #include "gru.h"
 #include "inline_ops.h"
+#include "quantize_ops_helper.hpp"
 
 namespace {
 
@@ -673,15 +674,20 @@ std::pair<float, int32_t> calculateQuantScale(T min_val, T max_val, bool symmetr
 * @param size_per_step -- 每步输入长度
 * @param steps -- 步数
 * @param use_symmetric -- 是否对称量化
-* @param is_int16 -- 是否量化为int16（否则int8）
-* @return std::pair<float, int32_t> (scale, zp)
+* @param name -- 调试信息
 */
 template<typename T, typename QuantT>
-std::pair<float, int32_t> calculateScaleFromSteps(const T *x_dev,
-                                                  int size_per_step,
-                                                  int steps,
-                                                  bool use_symmetric = false,
-                                                  const std::string &name = "") {
+void calculateScalePerSteps(const T *x_dev,
+                            const int size_per_step,
+                            const int steps,
+                            const bool use_symmetric,
+                            int32_t &exp2_inv,
+                            int32_t &zp,
+                            const std::string &name = "") {
+    if (size_per_step == 0 || steps == 0) {
+        printf("Warning! %s input size = 0\n", name.c_str());
+        return;
+    }
     std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
     std::vector<T> min(steps);
     std::vector<T> max(steps);
@@ -704,42 +710,59 @@ std::pair<float, int32_t> calculateScaleFromSteps(const T *x_dev,
         res_max = 0.9 * res_max + 0.1 * max[t];
     }
 
-    return calculateQuantScale<T, QuantT>(res_min, res_max, use_symmetric, name);
+    calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp, name);
+
+    return;
 }
 
 template<typename T, typename QuantT>
-std::vector<float> calculateWeightScales(const T *W_dev, int out_dim, int in_dim,
-                                         const std::string &name = "") {
+std::vector<int32_t> calculateScalesPerChannels(const T *W_dev, int channel_size, int input_size,
+                                                const std::string &name = "") {
     // 列主序排列
 
-    std::vector<T> W_host = d2h(W_dev, out_dim * in_dim);
+    std::vector<T> W_host = d2h(W_dev, channel_size * input_size);
 
-    std::vector<float> scales(out_dim);
-    std::vector<T> min(out_dim);
-    std::vector<T> max(out_dim);
+    std::vector<int32_t> exp2_inv_per_channels(channel_size);
+    std::vector<T> min(channel_size);
+    std::vector<T> max(channel_size);
 
 #pragma omp parallel for
-    for (int i = 0; i < out_dim; ++i) {
+    for (int i = 0; i < channel_size; ++i) {
         min[i] = W_host[i];
         max[i] = W_host[i];
-        for (int j = 1; j < in_dim; ++j) {
-            min[i] = std::min(min[i], W_host[j * out_dim + i]);
-            max[i] = std::max(max[i], W_host[j * out_dim + i]);
+        for (int j = 1; j < input_size; ++j) {
+            min[i] = std::min(min[i], W_host[j * channel_size + i]);
+            max[i] = std::max(max[i], W_host[j * channel_size + i]);
         }
     }
 
+    std::vector<int32_t> zp_tmp(channel_size);
 #pragma omp parallel for
-    for (int i = 0; i < out_dim; ++i) {
-        scales[i] = calculateQuantScale<T, QuantT>(min[i], max[i], true, name).first;
+    for (int i = 0; i < channel_size; ++i) {
+        if (min[i] == max[i]) {
+            const float half = std::abs(min[i]);
+            min[i] = -half;
+            max[i] = half;
+        }
+        calibrateQuantParams<T, QuantT>(min[i],
+                                        max[i],
+                                        true,
+                                        min[i],
+                                        max[i],
+                                        exp2_inv_per_channels[i],
+                                        zp_tmp[i],
+                                        name);
     }
-    return scales;
+    return exp2_inv_per_channels;
 }
 
 template<typename T, typename QuantT>
-std::pair<float, int32_t> calculateScale(const T *data_dev,
-                                         size_t size,
-                                         bool use_symmetric = true,
-                                         const std::string &name = "") {
+void calculateScale(const T *data_dev,
+                    const size_t size,
+                    const bool use_symmetric,
+                    int32_t &exp2_inv,
+                    int32_t &zp,
+                    const std::string &name = "") {
     std::vector<T> data_host = d2h(data_dev, size);
     T min_val = data_host[0];
     T max_val = data_host[0];
@@ -749,47 +772,12 @@ std::pair<float, int32_t> calculateScale(const T *data_dev,
         min_val = std::min(min_val, val);
         max_val = std::max(max_val, val);
     }
-    return calculateQuantScale<T, QuantT>(min_val, max_val, use_symmetric, name);
+    calibrateQuantParams<T, QuantT>(min_val, max_val, use_symmetric, min_val, max_val, exp2_inv, zp, name);
+
+    return;
 }
 
 template<typename T, typename QuantT>
-std::vector<float> calculateBiasScale(const T *bx_dev,
-                                      size_t size,
-                                      bool use_symmetric = true,
-                                      const std::string &name = "") {
-    std::vector<T> bx_host = d2h(bx_dev, size);
-    std::vector<float> scales(size);
-
-    // 对于偏置，我们需要计算每个偏置值的 scale
-    // 偏置可能是正数或负数，所以使用绝对值
-    // 对于对称量化，scale = abs(bias) / quant_max
-    // 但这里的问题是：如果传入 (0, bias)，那么 abs_max = abs(bias)
-    // 但实际上，偏置的范围应该是 [-abs(bias), abs(bias)]
-
-#pragma omp parallel for
-    for (int i = 0; i < size; ++i) {
-        T bias_val = bx_host[i];
-
-        // 检查偏置值是否太小
-        if (std::abs(bias_val) < 1e-8f) {
-            printf("[WARNING] calculateBiasScale: bias[%d] = %f is too small, using default scale\n",
-                   static_cast<int>(i), bias_val);
-            scales[i] = 1.0f;  // 使用默认 scale
-            continue;
-        }
-
-        // 对于偏置的对称量化，范围应该是 [-abs(bias), abs(bias)]
-        // 所以传入 min_val = -abs(bias), max_val = abs(bias)
-        // 这样 scale = abs(bias) / quant_max
-        T abs_bias = std::abs(bias_val);
-        auto result = calculateQuantScale<T, QuantT>(abs_bias, abs_bias, use_symmetric, name);
-        scales[i] = result.first;
-    }
-    return scales;
-}
-
-
-template<typename T>
 void calculateScaleFromV(const T *v_dev,
                          size_t steps,
                          size_t hidden_size,
@@ -797,9 +785,9 @@ void calculateScaleFromV(const T *v_dev,
                          GRUQuantitativeParameters &quant_parms) {
     std::vector<T> v_host = d2h(v_dev, steps * batch_size * hidden_size * 4);
 
-    T min_z = std::numeric_limits<T>::max(), max_z = std::numeric_limits<T>::min();
-    T min_r = std::numeric_limits<T>::max(), max_r = std::numeric_limits<T>::min();
-    T min_g = std::numeric_limits<T>::max(), max_g = std::numeric_limits<T>::min();
+    T min_z_out = std::numeric_limits<T>::max(), max_z = std::numeric_limits<T>::min();
+    T min_r_out = std::numeric_limits<T>::max(), max_r = std::numeric_limits<T>::min();
+    T min_g_out = std::numeric_limits<T>::max(), max_g = std::numeric_limits<T>::min();
     T min_Rh_add_br_g = std::numeric_limits<T>::max(), max_Rh_add_br_g = std::numeric_limits<T>::min();
     T min_rRh_g = std::numeric_limits<T>::max(), max_rRh_g = std::numeric_limits<T>::min();
 
@@ -815,13 +803,13 @@ void calculateScaleFromV(const T *v_dev,
                 const T Rh_add_br_g_val = v_host[offset + hidden_size * 3 + h];
                 const T rRh_val = r_val * Rh_add_br_g_val;
 
-                min_z = std::min(min_z, z_val);
+                min_z_out = std::min(min_z_out, z_val);
                 max_z = std::max(max_z, z_val);
 
-                min_r = std::min(min_r, r_val);
+                min_r_out = std::min(min_r_out, r_val);
                 max_r = std::max(max_r, r_val);
 
-                min_g = std::min(min_g, g_val);
+                min_g_out = std::min(min_g_out, g_val);
                 max_g = std::max(max_g, g_val);
 
                 min_Rh_add_br_g = std::min(min_Rh_add_br_g, Rh_add_br_g_val);
@@ -833,22 +821,46 @@ void calculateScaleFromV(const T *v_dev,
         }
     }
 
-    std::tie(quant_parms.scale_z_out_, quant_parms.zp_z_out_) = calculateQuantScale<T, int8_t>(min_z,
-                                                                                               max_z,
-                                                                                               false,
-                                                                                               "scale_z_out");
-    std::tie(quant_parms.scale_r_out_, quant_parms.zp_r_out_) = calculateQuantScale<T, int8_t>(min_r,
-                                                                                               max_r,
-                                                                                               false,
-                                                                                               "scale_r_out");
-    std::tie(quant_parms.scale_g_out_, quant_parms.zp_g_out_) = calculateQuantScale<T, int8_t>(min_g,
-                                                                                               max_g,
-                                                                                               false,
-                                                                                               "scale_g_out");
-    std::tie(quant_parms.scale_Rh_add_br_, quant_parms.zp_Rh_add_br_) =
-        calculateQuantScale<T, int8_t>(min_Rh_add_br_g, max_Rh_add_br_g, false, "scale_Rh_add_br");
-    std::tie(quant_parms.scale_rRh_, quant_parms.zp_rRh_) =
-        calculateQuantScale<T, int8_t>(min_rRh_g, max_rRh_g, false, "scale_rRh");
+    calibrateQuantParams<T, QuantT>(min_z_out,
+                                    max_z,
+                                    false,
+                                    min_z_out,
+                                    max_z,
+                                    quant_parms.exp2_inv_z_out_,
+                                    quant_parms.zp_z_out_,
+                                    "scale_z_out");
+    calibrateQuantParams<T, QuantT>(min_r_out,
+                                    max_r,
+                                    false,
+                                    min_r_out,
+                                    max_r,
+                                    quant_parms.exp2_inv_r_out_,
+                                    quant_parms.zp_r_out_,
+                                    "scale_r_out");
+    calibrateQuantParams<T, QuantT>(min_g_out,
+                                    max_g,
+                                    false,
+                                    min_g_out,
+                                    max_g,
+                                    quant_parms.exp2_inv_g_out_,
+                                    quant_parms.zp_g_out_,
+                                    "scale_g_out");
+    calibrateQuantParams<T, QuantT>(min_Rh_add_br_g,
+                                    max_Rh_add_br_g,
+                                    false,
+                                    min_Rh_add_br_g,
+                                    max_Rh_add_br_g,
+                                    quant_parms.exp2_inv_Rh_add_br_,
+                                    quant_parms.zp_Rh_add_br_,
+                                    "scale_Rh_add_br_g");
+    calibrateQuantParams<T, QuantT>(min_rRh_g,
+                                    max_rRh_g,
+                                    false,
+                                    min_rRh_g,
+                                    max_rRh_g,
+                                    quant_parms.exp2_inv_rRh_,
+                                    quant_parms.zp_rRh_,
+                                    "scale_rRh_g");
 }
 
 template<typename T>
@@ -925,48 +937,94 @@ void ForwardPass<T>::Run(
         // 同步所有 GPU 操作，确保数据计算完成
         quant_parms_.hidden_ = data_->hidden_size;
         if (!use_int16_quant_) {
-            std::tie(quant_parms_.scale_x_, quant_parms_.zp_x_) = calculateScaleFromSteps<T, int8_t>(x,
-                                                                                                     NH,
-                                                                                                     steps,
-                                                                                                     false,
-                                                                                                     "scale_x");
-            std::tie(quant_parms_.scale_h_, quant_parms_.zp_h_) = calculateScaleFromSteps<T, int8_t>(h,
-                                                                                                     NH,
-                                                                                                     steps + 1,
-                                                                                                     false,
-                                                                                                     "scale_h");
 
-            quant_parms_.scale_W_ = calculateWeightScales<T, int8_t>(W, hidden_size * 3, input_size);
-            quant_parms_.scale_R_ = calculateWeightScales<T, int8_t>(R, hidden_size * 3, hidden_size);
+            calculateScalePerSteps<T, int8_t>(x,
+                                              NH,
+                                              steps,
+                                              false,
+                                              quant_parms_.exp2_inv_x_,
+                                              quant_parms_.zp_x_,
+                                              "scale_x");
+            calculateScalePerSteps<T, int8_t>(h,
+                                              NH,
+                                              steps + 1,
+                                              false,
+                                              quant_parms_.exp2_inv_h_,
+                                              quant_parms_.zp_h_,
+                                              "scale_h");
 
-            std::tie(quant_parms_.scale_Wx_, quant_parms_.zp_Wx_) =
-                calculateScale<T, int8_t>(tmp_Wx, steps * batch_size * hidden_size * 3, false, "scale_Wx");
-            std::tie(quant_parms_.scale_Rh_, quant_parms_.zp_Rh_) =
-                calculateScale<T, int8_t>(tmp_Rh, steps * batch_size * hidden_size * 3, false, "scale_Rh");
+            quant_parms_.exp2_inv_W_ = calculateScalesPerChannels<T, int8_t>(W,
+                                                                             hidden_size * 3,
+                                                                             input_size,
+                                                                             "exp2_inv_W");
+            quant_parms_.exp2_inv_R_ = calculateScalesPerChannels<T, int8_t>(R,
+                                                                             hidden_size * 3,
+                                                                             hidden_size,
+                                                                             "exp2_inv_R");
 
-            quant_parms_.scale_bx_ = calculateBiasScale<T, int8_t>(bx, hidden_size * 3, true, "scale_bx");
-            quant_parms_.scale_br_ = calculateBiasScale<T, int8_t>(br, hidden_size * 3, true, "scale_br");
+            calculateScale<T, int8_t>(tmp_Wx,
+                                      steps * batch_size * hidden_size * 3,
+                                      false,
+                                      quant_parms_.exp2_inv_Wx_,
+                                      quant_parms_.zp_Wx_,
+                                      "scale_Wx");
+            calculateScale<T, int8_t>(tmp_Rh,
+                                      steps * batch_size * hidden_size * 3,
+                                      false,
+                                      quant_parms_.exp2_inv_Rh_,
+                                      quant_parms_.zp_Rh_,
+                                      "scale_Rh");
 
-            std::tie(quant_parms_.scale_z_pre_, quant_parms_.zp_z_pre_) =
-                calculateScale<T, int8_t>(z_pres_.data(), z_pres_.size(), false, "scale_z_pre");
-            std::tie(quant_parms_.scale_r_pre_, quant_parms_.zp_r_pre_) =
-                calculateScale<T, int8_t>(r_pres_.data(), r_pres_.size(), false, "scale_r_pre");
-            std::tie(quant_parms_.scale_g_pre_, quant_parms_.zp_g_pre_) =
-                calculateScale<T, int8_t>(g_pres_.data(), g_pres_.size(), false, "scale_g_pre");
+            quant_parms_.exp2_inv_bx_ = calculateScalesPerChannels<T, int8_t>(bx,
+                                                                              hidden_size * 3,
+                                                                              1,
+                                                                              "scale_bx");
+            quant_parms_.exp2_inv_br_ = calculateScalesPerChannels<T, int8_t>(br,
+                                                                              hidden_size * 3,
+                                                                              1,
+                                                                              "scale_br");
 
-            calculateScaleFromV(v, steps, hidden_size, batch_size, quant_parms_);
+            calculateScale<T, int8_t>(z_pres_.data(),
+                                      z_pres_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_z_pre_,
+                                      quant_parms_.zp_z_pre_,
+                                      "scale_z_pre");
+            calculateScale<T, int8_t>(r_pres_.data(),
+                                      r_pres_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_r_pre_,
+                                      quant_parms_.zp_r_pre_,
+                                      "scale_r_pre");
+            calculateScale<T, int8_t>(g_pres_.data(),
+                                      g_pres_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_g_pre_,
+                                      quant_parms_.zp_g_pre_,
+                                      "scale_g_pre");
 
-            std::tie(quant_parms_.scale_one_minus_update_, quant_parms_.zp_one_minus_update_) =
-                calculateScale<T, int8_t>(one_minus_update_.data(),
-                                          one_minus_update_.size(),
-                                          false,
-                                          "scale_one_minus_update");
+            calculateScaleFromV<T, int8_t>(v, steps, hidden_size, batch_size, quant_parms_);
 
-            std::tie(quant_parms_.scale_new_contrib_, quant_parms_.zp_new_contrib_) =
-                calculateScale<T, int8_t>(new_contrib_.data(), new_contrib_.size(), false, "scale_new_contrib");
+            calculateScale<T, int8_t>(one_minus_update_.data(),
+                                      one_minus_update_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_one_minus_update_,
+                                      quant_parms_.zp_one_minus_update_,
+                                      "scale_one_minus_update");
 
-            std::tie(quant_parms_.scale_old_contrib_, quant_parms_.zp_old_contrib_) =
-                calculateScale<T, int8_t>(old_contrib_.data(), old_contrib_.size(), false, "scale_old_contrib");
+            calculateScale<T, int8_t>(new_contrib_.data(),
+                                      new_contrib_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_new_contrib_,
+                                      quant_parms_.zp_new_contrib_,
+                                      "scale_new_contrib");
+
+            calculateScale<T, int8_t>(old_contrib_.data(),
+                                      old_contrib_.size(),
+                                      false,
+                                      quant_parms_.exp2_inv_old_contrib_,
+                                      quant_parms_.zp_old_contrib_,
+                                      "scale_old_contrib");
         }
     }
 
