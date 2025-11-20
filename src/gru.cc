@@ -69,6 +69,10 @@ class ScopeTimer { // 测量时间类
 template<bool use_int16 = false>
 // 控制量化精度位宽
 void GruQuantInit(
+    const int time_steps,
+    const int batch_size,
+    const int input_size,
+    const int hidden_size,
     const Tensor2f &W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
     const Tensor2f &R,  // 隐藏层到隐藏层的循环权重矩阵
     const Tensor1f &bx, // 输入偏置项（input bias），来自输入路径
@@ -83,51 +87,41 @@ void GruQuantInit(
     Tensor3i8 &dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams
 ) {
-    const int time_steps = x.dimension(2);
-    const int batch_size = x.dimension(1);
-    const int input_size = x.dimension(0);
-    const int hidden_size = R.dimension(1);
-
+    const int channel_size = hidden_size * 3;
     // N : batch_size
     // C : input_size
     if (!use_int16) { // int8量化
         // 权重是per-channel的，大小为H * 3（hidden_size * 3）
         // W: [H*3, C]，W_quant: [H*3, C]，scale_W_: [H*3]
-        for (int i = 0; i < W.dimension(0); ++i) {  // i: [0, H*3)
-            float scale_W = gruRescaleParams.scale_W_[i];
+        for (int i = 0; i < channel_size; ++i) {  // i: [0, H*3)
+            const int32_t exp2_inv = gruRescaleParams.exp2_inv_W_[i];
             for (int j = 0; j < W.dimension(1); ++j) {  // j: [0, input_size)
-                float real = W(i, j);
+                const float real = W(i, j);
                 // 对称量化到int8：clip到[-128,127]
-                int32_t q = static_cast<int32_t>(std::round(real / scale_W));
-                q = std::max(-128, std::min(127, q));
-                W_quant(i, j) = static_cast<int8_t>(q);
+                W_quant(i, j) = quantize<int8_t>(real, exp2_inv, 0);
             }
         }
         // R: [H*3, H]，R_quant: [H*3, H]，scale_R_: [H*3]
         for (int i = 0; i < R.dimension(0); ++i) {  // i: [0, H*3)
-            float scale_R = gruRescaleParams.scale_R_[i];
+            const int32_t exp2_inv = gruRescaleParams.exp2_inv_R_[i];
             for (int j = 0; j < R.dimension(1); ++j) {  // j: [0, hidden_size)
                 float real = R(i, j);
-                int32_t q = static_cast<int32_t>(std::round(real / scale_R));
-                q = std::max(-128, std::min(127, q));
-                R_quant(i, j) = static_cast<int8_t>(q);
+                R_quant(i, j) = quantize<int8_t>(real, exp2_inv, 0);
             }
         }
 
         // 偏置per-channel，H*3
         // bx_quant: [H*3], scale_bx_: [H*3]
         for (int i = 0; i < bx.dimension(0); ++i) {  // i: [0, H*3)
-            float scale_bx = gruRescaleParams.scale_bx_[i];
-            float real = bx(i);
-            int32_t q = static_cast<int32_t>(std::round(real / scale_bx));
-            bx_quant(i) = q;
+            const int32_t exp2_inv = gruRescaleParams.exp2_inv_bx_[i];
+            const float real = bx(i);
+            bx_quant(i) = quantize<int32_t>(real, exp2_inv, 0);
         }
         // br_quant: [H*3], scale_br_: [H*3]
         for (int i = 0; i < br.dimension(0); ++i) {  // i: [0, H*3)
-            float scale_br = gruRescaleParams.scale_br_[i];
+            const int32_t exp2_inv = gruRescaleParams.exp2_inv_br_[i];
             float real = br(i);
-            int32_t q = static_cast<int32_t>(std::round(real / scale_br));
-            br_quant(i) = q;
+            br_quant(i) = quantize<int32_t>(real, exp2_inv, 0);
         }
 
         // x: [C, N, T], x_quant: [C, N, T]
@@ -136,10 +130,7 @@ void GruQuantInit(
             for (int n = 0; n < x.dimension(1); ++n) {  // n: [0, batch_size)
                 for (int c = 0; c < x.dimension(0); ++c) {  // c: [0, input_size)
                     float real = x(c, n, t);
-                    int32_t q =
-                        static_cast<int32_t>(std::round(real / gruRescaleParams.scale_x_)) + gruRescaleParams.zp_x_;
-                    q = std::max(-128, std::min(127, q));
-                    x_quant(c, n, t) = static_cast<int8_t>(q);
+                    x_quant(c, n, t) = quantize<int8_t>(real, gruRescaleParams.exp2_inv_x_, gruRescaleParams.zp_x_);
                 }
             }
         }
@@ -150,10 +141,9 @@ void GruQuantInit(
             for (int n = 0; n < dh_new.dimension(1); ++n) { // n: [0, batch_size)
                 for (int h = 0; h < dh_new.dimension(0); ++h) { // h: [0, hidden_size)
                     float real = dh_new(h, n, t);
-                    int32_t q =
-                        static_cast<int32_t>(std::round(real / gruRescaleParams.scale_h_)) + gruRescaleParams.zp_h_;
-                    q = std::max(-128, std::min(127, q));
-                    dh_new_quant(h, n, t) = static_cast<int8_t>(q);
+                    dh_new_quant(h, n, t) = quantize<int8_t>(real,
+                                                             gruRescaleParams.exp2_inv_h_,
+                                                             gruRescaleParams.zp_h_);
                 }
             }
         }
@@ -180,9 +170,18 @@ void GruInferenceQuant(const Tensor2i8 &W,
     const int input_size = x.dimension(0);
     const int hidden_size = R.dimension(1);
 
-    generate_int8_lut(quant_parms.scale_z_pre_, quant_parms.zp_z_pre_, quant_parms.scale_z_out_, quant_parms.zp_z_out_,
-                      quant_parms.scale_r_pre_, quant_parms.zp_r_pre_, quant_parms.scale_r_out_, quant_parms.zp_r_out_,
-                      quant_parms.scale_g_pre_, quant_parms.zp_g_pre_, quant_parms.scale_g_out_, quant_parms.zp_g_out_);
+    generate_int8_lut_from_exp2_inv(quant_parms.exp2_inv_z_pre_,
+                                    quant_parms.zp_z_pre_,
+                                    quant_parms.exp2_inv_z_out_,
+                                    quant_parms.zp_z_out_,
+                                    quant_parms.exp2_inv_r_pre_,
+                                    quant_parms.zp_r_pre_,
+                                    quant_parms.exp2_inv_r_out_,
+                                    quant_parms.zp_r_out_,
+                                    quant_parms.exp2_inv_g_pre_,
+                                    quant_parms.zp_g_pre_,
+                                    quant_parms.exp2_inv_g_out_,
+                                    quant_parms.zp_g_out_);
 
     // Copy weights over to GPU.
     device_ptr<Tensor2i8> W_dev(W);
@@ -342,14 +341,8 @@ void checkHQuantizationWithCosine(
     int time_steps,
     int batch_size,
     int hidden_size,
-    const GRUQuantitativeParameters &scaleParam,
-    float threshold = -1.0f                         // 超阈值，如果 < 0 则自动计算
+    const GRUQuantitativeParameters &scaleParam
 ) {
-    // 计算阈值：量化误差的理论最大值是 scale / 2（四舍五入误差）
-    // 使用 2 * scale 作为阈值，允许一定的误差范围
-    if (threshold < 0.0f) {
-        threshold = 2.0f * scaleParam.scale_h_;
-    }
 
     const int size_per_step = batch_size * hidden_size;
 
@@ -367,8 +360,8 @@ void checkHQuantizationWithCosine(
 
     printf("checkHQuantizationWithCosine: time_steps=%d, batch_size=%d, hidden_size=%d\n",
            time_steps, batch_size, hidden_size);
-    printf("  scale_h_=%f, zp_h_=%d, threshold=%f\n",
-           scaleParam.scale_h_, scaleParam.zp_h_, threshold);
+    printf("  exp2_inv_h_=%d, zp_h_=%d\n",
+           scaleParam.exp2_inv_h_, scaleParam.zp_h_);
 
     // 检查前几个数据点的值
     printf("  Sample data check:\n");
@@ -427,17 +420,8 @@ void checkHQuantizationWithCosine(
         for (int idx = 0; idx < size_per_step; ++idx) {
             h_float_step[idx] = h_inference[t_offset + idx];
 
-            // 反量化: dequant = (quant - zp) * scale
-            int8_t quant_val = h_quant_inference[t_offset + idx];
-            h_quant_step[idx] = static_cast<float>(quant_val - scaleParam.zp_h_) * scaleParam.scale_h_;
-//            if ((quant_val == 0 || h_quant_step[idx] == 0) && h_float_step[idx] != 0) {
-//                printf("Error!, quant_val = %d, h_quant_step[%d] = %f, h_float_step = %f\n",
-//                       quant_val,
-//                       idx,
-//                       h_quant_step[idx],
-//                       h_float_step[idx]);
-//                return;
-//            }
+            const int8_t quant_val = h_quant_inference[t_offset + idx];
+            h_quant_step[idx] = dequantize<int8_t>(quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
         }
         const float mse = computeMSE(h_float_step, h_quant_step);
         const float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
@@ -579,7 +563,8 @@ int main() {
     Tensor3i8 dh_new_quant(HIDDEN_DIMS, BATCH_SIZE, SEQUENCE_LEN + 1);
 
     // 使用固定量化参数将输入量化
-    GruQuantInit<false>(W,
+    GruQuantInit<false>(time_steps, batch_size, input_size, hidden_size,
+                        W,
                         R,
                         bx,
                         br,

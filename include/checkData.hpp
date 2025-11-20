@@ -51,13 +51,18 @@ inline float computeCosineSimilarity(const std::vector<float> &a, const std::vec
 
 inline bool checkCosineSimilarity(const std::vector<float> &a,
                                   const std::vector<float> &b,
-                                  const std::string &name = "") {
+                                  const std::string &name = "",
+                                  const float threshold = 0.9999f) {
     const float cos_sim = computeCosineSimilarity(a, b);
-    if (cos_sim < 0.9999f) {
-        fprintf(stderr, "\tWarning! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
+    if (cos_sim < threshold) {
+        fprintf(stderr,
+                "Warning! %s check cosine similarity failed: cosine similarity = %f, threshold = %f\n",
+                name.c_str(),
+                cos_sim,
+                threshold);
         return false;
     }
-    printf("\tPass! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
+    printf("\tCheck cosine similarity Pass! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
     return true;
 }
 
@@ -83,15 +88,15 @@ inline float computeMSE(const std::vector<T> &data1, const std::vector<T> &data2
 
 bool checkMSE(const std::vector<float> &data1,
               const std::vector<float> &data2,
-              float threshold = ERROR_THRESHOLD_MSE_EPSILON,
-              const std::string &name = ""
+              const std::string &name = "",
+              float threshold = ERROR_THRESHOLD_MSE_EPSILON
 ) {
     const float mse = computeMSE(data1, data2);
-    printf("\tPass! %s: mes = %f\n", name.c_str(), mse);
     if (mse > threshold) {
-        fprintf(stderr, "Warning! %s failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
+        fprintf(stderr, "Warning! %s check mse failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
         return false;
     }
+    printf("\tCheck mes Pass! %s: mes = %f\n", name.c_str(), mse);
     return true;
 }
 

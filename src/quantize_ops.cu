@@ -171,6 +171,83 @@ void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out, i
     cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
 }
 
+std::vector<int8_t> generate_sigmoid_int8_lut_exp2(
+    int32_t exp2_inv_z_pre,
+    int zp_z_pre,
+    int32_t exp2_inv_z,
+    int zp_z) {
+    std::vector<int8_t> lut(256);
+
+    for (int i = 0; i < 256; i++) {
+        int x_i8 = i - 128;
+
+        // （1）反量化 x
+        float x_fp = dequant_from_exp2(x_i8, exp2_inv_z_pre, zp_z_pre);
+
+        // （2）计算 sigmoid
+        float y_fp = 1.f / (1.f + std::exp(-x_fp));
+
+        // （3）量化 y
+        int y_i8 = quant_from_exp2(y_fp, exp2_inv_z, zp_z);
+
+        lut[i] = static_cast<int8_t>(y_i8);
+    }
+
+    return lut;
+}
+
+std::vector<int8_t> generate_tanh_int8_lut_exp2(
+    int32_t exp2_inv_pre,
+    int zp_pre,
+    int32_t exp2_inv_out,
+    int zp_out) {
+    std::vector<int8_t> lut(256);
+
+    for (int i = 0; i < 256; i++) {
+        int x_i8 = i - 128;
+
+        // （1）反量化 x
+        float x_fp = dequant_from_exp2(x_i8, exp2_inv_pre, zp_pre);
+
+        // （2）tanh
+        float y_fp = std::tanh(x_fp);
+
+        // （3）量化 y
+        int y_i8 = quant_from_exp2(y_fp, exp2_inv_out, zp_out);
+
+        lut[i] = static_cast<int8_t>(y_i8);
+    }
+
+    return lut;
+}
+
+void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
+                                     int32_t zp_z_pre,
+                                     int32_t exp2_inv_z_out,
+                                     int32_t zp_z_out,
+                                     int32_t exp2_inv_r_pre,
+                                     int32_t zp_r_pre,
+                                     int32_t exp2_inv_r_out,
+                                     int32_t zp_r_out,
+                                     int32_t exp2_inv_g_pre,
+                                     int32_t zp_g_pre,
+                                     int32_t exp2_inv_g_out,
+                                     int32_t zp_g_out) {
+    std::vector<int8_t> sigmoid_z_lut = generate_sigmoid_int8_lut_exp2(exp2_inv_z_pre,
+                                                                       zp_z_pre,
+                                                                       exp2_inv_z_out,
+                                                                       zp_z_out);
+    std::vector<int8_t> sigmoid_r_lut = generate_sigmoid_int8_lut_exp2(exp2_inv_r_pre,
+                                                                       zp_r_pre,
+                                                                       exp2_inv_r_out,
+                                                                       zp_r_out);
+    std::vector<int8_t> tanh_int8_lut = generate_tanh_int8_lut_exp2(exp2_inv_g_pre, zp_g_pre, exp2_inv_g_out, zp_g_out);
+
+    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(), sizeof(int8_t) * 256);
+}
+
 
 //template<typename T>
 //void calculateScaleZeroPoint(const T *host_data, size_t size, float &scale, T &zero_point) {
