@@ -95,7 +95,7 @@ bool checkScale(const std::vector<float> &src,
         requant[i] = req_val;
     }
     is_pass &= checkCosineSimilarity(src, requant, name);
-    is_pass &= checkMSE(src, requant);
+    is_pass &= checkMSE(src, requant, name);
     return is_pass;
 }
 
@@ -124,8 +124,8 @@ bool checkScalePerChannel(const std::vector<float> &src,
         }
     }
 
-    is_pass &= checkCosineSimilarity(src, requant);
-    is_pass &= checkMSE(src, requant);
+    is_pass &= checkCosineSimilarity(src, requant, name);
+    is_pass &= checkMSE(src, requant, name);
 
     return is_pass;
 }
@@ -150,8 +150,8 @@ bool checkScalePerChannel(const std::vector<float> &src,
             requant[idx] = req_val;
         }
     }
-    is_pass &= checkCosineSimilarity(src, requant);
-    is_pass &= checkMSE(src, requant);
+    is_pass &= checkCosineSimilarity(src, requant, name);
+    is_pass &= checkMSE(src, requant, name);
     return is_pass;
 }
 
@@ -339,7 +339,7 @@ inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
         }
     }
 
-    is_pass &= checkCosineSimilarity(Wx_cpu, Wx_requant_cpu);
+    is_pass &= checkCosineSimilarity(Wx_cpu, Wx_requant_cpu, "Wx_requant_cpu");
     is_pass &= checkMSE(Wx_cpu, Wx_requant_cpu, "Wx_requant_cpu", 1e-3);
 
     // dev::vector<float> W_dev(W_);
@@ -389,8 +389,8 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     printf("checkScalePerChannel: scale_bx_ over\n");
     is_pass &= checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.exp2_inv_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
-//    is_pass &= checkWxGemm();
-//    printf("checkGemm: over\n");
+    is_pass &= checkWxGemm();
+    printf("checkGemm: over\n");
     if (!is_pass) {
         printf("Error, checkQuantParameters failed\n");
     }
