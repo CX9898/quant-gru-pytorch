@@ -17,48 +17,51 @@ struct GRUQuantitativeParametersInCalibration {
   dev::vector<T> old_contrib_;
 };
 
+// GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
+// 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale = 2^(-exp2_inv_xxx)
+// zp_xxx 表示量化零点（zero point），用于浮点数与整数的映射：量化值 q = round(x / scale + zp)，反量化 x = (q - zp) * scale
 struct GRUQuantitativeParameters {
-  int hidden_;
-  float scale_x_;
+  int hidden_; // channel = hidden * 3
+  int32_t exp2_inv_x_;
   int32_t zp_x_;
-  float scale_h_;
+  int32_t exp2_inv_h_;
   int32_t zp_h_;
 
-  std::vector<float> scale_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一行一个scale)
-  std::vector<float> scale_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一行一个scale)
+  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一行一个scale)
+  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一行一个scale)
 
-  float scale_Wx_;
+  int32_t exp2_inv_Wx_;
   int32_t zp_Wx_;
-  float scale_Rh_;
+  int32_t exp2_inv_Rh_;
   int32_t zp_Rh_;
 
-  std::vector<float> scale_bx_;
-  std::vector<float> scale_br_;
+  std::vector<int32_t> exp2_inv_bx_;
+  std::vector<int32_t> exp2_inv_br_;
 
-  float scale_z_pre_;
+  int32_t exp2_inv_z_pre_;
   int32_t zp_z_pre_;
-  float scale_r_pre_;
+  int32_t exp2_inv_r_pre_;
   int32_t zp_r_pre_;
-  float scale_g_pre_;
+  int32_t exp2_inv_g_pre_;
   int32_t zp_g_pre_;
 
-  float scale_z_out_;
+  int32_t exp2_inv_z_out_;
   int32_t zp_z_out_;
-  float scale_r_out_;
+  int32_t exp2_inv_r_out_;
   int32_t zp_r_out_;
-  float scale_g_out_;
+  int32_t exp2_inv_g_out_;
   int32_t zp_g_out_;
 
-  float scale_Rh_add_br_;
+  int32_t exp2_inv_Rh_add_br_;
   int32_t zp_Rh_add_br_;
-  float scale_rRh_;
+  int32_t exp2_inv_rRh_;
   int32_t zp_rRh_;
 
-  float scale_one_minus_update_;
+  int32_t exp2_inv_one_minus_update_;
   int32_t zp_one_minus_update_;
-  float scale_new_contrib_;
+  int32_t exp2_inv_new_contrib_;
   int32_t zp_new_contrib_;
-  float scale_old_contrib_;
+  int32_t exp2_inv_old_contrib_;
   int32_t zp_old_contrib_;
 };
 
@@ -77,9 +80,9 @@ struct QuantGRUReScale {
   int32_t zp_z_pre_;
   int32_t zp_z_out_;
   int32_t n_Wx_div_z_pre_; // size = hidden * 3
-  float scale_Wx_div_z_;
+  int32_t exp2_inv_Wx_div_z_;
   int32_t n_Rh_div_z_pre_;
-  float scale_Rh_div_z_;
+  int32_t exp2_inv_Rh_div_z_;
   dev::vector<int32_t> n_bx_div_z_;
   dev::vector<float> scale_bx_div_z_;
   dev::vector<int32_t> n_br_div_z_;
@@ -89,9 +92,9 @@ struct QuantGRUReScale {
   int32_t zp_r_pre_;
   int32_t zp_r_out_;
   int32_t n_Wx_div_r_pre_; // n5
-  float scale_Wx_div_r_; // S5
+  int32_t exp2_inv_Wx_div_r_; // S5
   int32_t n_Rh_div_r_pre_; // n6
-  float scale_Rh_div_r_; // S6
+  int32_t exp2_inv_Rh_div_r_; // S6
   dev::vector<int32_t> n_bx_div_r_;
   dev::vector<float> scale_bx_div_r_;
   dev::vector<int32_t> n_br_div_r_;
@@ -101,47 +104,46 @@ struct QuantGRUReScale {
   int32_t zp_g_pre_;
   int32_t zp_g_out_;
   int32_t n_Rh_div_Rh_add_br_;
-  float scale_Rh_div_Rh_add_br_;
+  int32_t exp2_inv_Rh_div_Rh_add_br_;
   dev::vector<int32_t> n_br_div_Rh_add_br_; // br 是 per-channel
   dev::vector<float> scale_br_div_Rh_add_br_;
   int32_t zp_Rh_add_br_;
   int32_t n_r_mul_Rh_add_br_div_rRh_; // n9
-  float scale_r_out_mul_h_div_rRh_; // S9
+  int32_t exp2_inv_r_out_mul_h_div_rRh_; // S9
   int32_t zp_rRh_;
   int32_t n_Wx_div_g_pre_; // n10
-  float scale_Wx_div_g_pre_; // S10
+  int32_t exp2_inv_Wx_div_g_pre_; // S10
   int32_t n_rRh_div_g_pre_; // n11
-  float scale_rRh_div_g_pre_; // S11
+  int32_t exp2_inv_rRh_div_g_pre_; // S11
   dev::vector<int32_t> n_bx_to_g_;
   dev::vector<float> scale_bx_div_g_pre_;
 
   // h_new
   int32_t one_div_one_minus_update_;
   int32_t n_z_out_div_one_minus_update_; // n12
-  float scale_z_out_div_one_minus_update_; // S12
+  int32_t exp2_inv_z_out_div_one_minus_update_; // S12
   int32_t zp_one_minus_update_;
 
   int32_t zp_new_contrib_;
   int32_t n_one_minus_update_mul_g_div_new_contrib_; // n13
-  float scale_one_minus_update_mul_g_div_new_contrib_; // S13
+  int32_t exp2_inv_one_minus_update_mul_g_div_new_contrib_; // S13
   int32_t zp_old_contrib_;
   int32_t n_z_mul_h_div_old_contrib_; // n14
-  float scale_z_mul_h_div_old_contrib_; // S14
+  int32_t exp2_inv_z_mul_h_div_old_contrib_; // S14
   int32_t n_new_contrib_div_h_; // n15
-  float scale_new_contrib_div_h_; // S15
+  int32_t exp2_inv_new_contrib_div_h_; // S15
   int32_t n_old_contrib_div_h_; // n16
-  float scale_old_contrib_div_h_; // S16
-
+  int32_t exp2_inv_old_contrib_div_h_; // S16
 };
 //
 //struct QuantGRUScales {
 //  int hidden_;
-//  float scale_x_;
+//  int32_t exp2_inv_x_;
 //  int32_t zp_x_;
-//  float scale_h_;
+//  int32_t exp2_inv_h_;
 //  int32_t zp_h_;
-//  float scale_bx_;
-//  float scale_br_;
+//  int32_t exp2_inv_bx_;
+//  int32_t exp2_inv_br_;
 //  std::vector<float> Wx; // size = hidden. per-channel
 //  std::vector<float> Rh; // size = hidden
 //
@@ -157,9 +159,9 @@ struct QuantGRUReScale {
 //  std::vector<float> g_out; // size = hidden
 //};
 
-void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out, int32_t zp_z_out,
-                       float scale_r_pre, int32_t zp_r_pre, float scale_r_out, int32_t zp_r_out,
-                       float scale_g_pre, int32_t zp_g_pre, float scale_g_out, int32_t zp_g_out);
+void generate_int8_lut(int32_t exp2_inv_z_pre, int32_t zp_z_pre, int32_t exp2_inv_z_out, int32_t zp_z_out,
+                       int32_t exp2_inv_r_pre, int32_t zp_r_pre, int32_t exp2_inv_r_out, int32_t zp_r_out,
+                       int32_t exp2_inv_g_pre, int32_t zp_g_pre, int32_t exp2_inv_g_out, int32_t zp_g_out);
 
 
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int n) {

@@ -677,11 +677,11 @@ std::pair<float, int32_t> calculateQuantScale(T min_val, T max_val, bool symmetr
 * @return std::pair<float, int32_t> (scale, zp)
 */
 template<typename T, typename QuantT>
-std::pair<float, int32_t> calculateXScale(const T *x_dev,
-                                          int size_per_step,
-                                          int steps,
-                                          bool use_symmetric = true,
-                                          const std::string &name = "") {
+std::pair<float, int32_t> calculateScaleFromSteps(const T *x_dev,
+                                                  int size_per_step,
+                                                  int steps,
+                                                  bool use_symmetric = false,
+                                                  const std::string &name = "") {
     std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
     std::vector<T> min(steps);
     std::vector<T> max(steps);
@@ -925,16 +925,16 @@ void ForwardPass<T>::Run(
         // 同步所有 GPU 操作，确保数据计算完成
         quant_parms_.hidden_ = data_->hidden_size;
         if (!use_int16_quant_) {
-            std::tie(quant_parms_.scale_x_, quant_parms_.zp_x_) = calculateXScale<T, int8_t>(x,
-                                                                                             NH,
-                                                                                             steps,
-                                                                                             false,
-                                                                                             "scale_x");
-            std::tie(quant_parms_.scale_h_, quant_parms_.zp_h_) = calculateXScale<T, int8_t>(h,
-                                                                                             NH,
-                                                                                             steps + 1,
-                                                                                             false,
-                                                                                             "scale_h");
+            std::tie(quant_parms_.scale_x_, quant_parms_.zp_x_) = calculateScaleFromSteps<T, int8_t>(x,
+                                                                                                     NH,
+                                                                                                     steps,
+                                                                                                     false,
+                                                                                                     "scale_x");
+            std::tie(quant_parms_.scale_h_, quant_parms_.zp_h_) = calculateScaleFromSteps<T, int8_t>(h,
+                                                                                                     NH,
+                                                                                                     steps + 1,
+                                                                                                     false,
+                                                                                                     "scale_h");
 
             quant_parms_.scale_W_ = calculateWeightScales<T, int8_t>(W, hidden_size * 3, input_size);
             quant_parms_.scale_R_ = calculateWeightScales<T, int8_t>(R, hidden_size * 3, hidden_size);

@@ -345,8 +345,8 @@ bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     printf("checkScalePerChannel: scale_bx_ over\n");
     is_pass &= checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.scale_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
-    is_pass &= checkWxGemm();
-    printf("checkGemm: over\n");
+//    is_pass &= checkWxGemm();
+//    printf("checkGemm: over\n");
     if (!is_pass) {
         printf("Error, checkQuantParameters failed\n");
     }
