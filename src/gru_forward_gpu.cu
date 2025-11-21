@@ -10,6 +10,7 @@
 #include "gru.h"
 #include "inline_ops.h"
 #include "quantize_ops_helper.hpp"
+#include "quantized_unit_testing.h"
 
 namespace {
 
@@ -82,15 +83,15 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
     const T g_pre = Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx];
     const T g = tanh(g_pre);
 
-    if (weight_idx == 0) {
-        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
-               Wx[g_idx],
-               Rh[g_idx],
-               bx[bg_idx],
-               br[bg_idx],
-               g_pre,
-               g);
-    }
+//    if (weight_idx == 0) {
+//        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
+//               Wx[g_idx],
+//               Rh[g_idx],
+//               bx[bg_idx],
+//               br[bg_idx],
+//               g_pre,
+//               g);
+//    }
 
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
@@ -103,16 +104,16 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
 
     T cur_h_value = z * h[output_idx] + (static_cast<T>(1.0) - z) * g;
 
-    if (weight_idx == 0) {
-        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
-               z,
-               h[output_idx],
-               z * h[output_idx],
-               (static_cast<T>(1.0) - z),
-               g,
-               (static_cast<T>(1.0) - z) * g,
-               cur_h_value);
-    }
+//    if (weight_idx == 0) {
+//        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
+//               z,
+//               h[output_idx],
+//               z * h[output_idx],
+//               (static_cast<T>(1.0) - z),
+//               g,
+//               (static_cast<T>(1.0) - z) * g,
+//               cur_h_value);
+//    }
 
     if (ApplyZoneout) {
         if (Training) {
@@ -870,6 +871,7 @@ void calculateScaleFromV(const T *v_dev,
                                     quant_parms.exp2_inv_z_out_,
                                     quant_parms.zp_z_out_,
                                     "scale_z_out");
+    // checkScale<T, int8_t>(min_z_out, max_z, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_, "scale_z_out");
     calibrateQuantParams<T, QuantT>(min_r_out,
                                     max_r,
                                     false,
@@ -878,6 +880,7 @@ void calculateScaleFromV(const T *v_dev,
                                     quant_parms.exp2_inv_r_out_,
                                     quant_parms.zp_r_out_,
                                     "scale_r_out");
+    // checkScale<T, int8_t>(min_r_out, max_r, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_, "scale_r_out");
     calibrateQuantParams<T, QuantT>(min_g_out,
                                     max_g,
                                     false,
@@ -987,6 +990,12 @@ void ForwardPass<T>::Run(
                                               quant_parms_.exp2_inv_x_,
                                               quant_parms_.zp_x_,
                                               "scale_x");
+            std::vector<T> x_host = d2h(x, NH * steps);
+            checkScale<T, int8_t>(x_host,
+                                  quant_parms_.exp2_inv_x_,
+                                  quant_parms_.zp_x_,
+                                  "scale_x");
+
             calculateScalePerSteps<T, int8_t>(h,
                                               NH,
                                               steps + 1,
@@ -994,15 +1003,34 @@ void ForwardPass<T>::Run(
                                               quant_parms_.exp2_inv_h_,
                                               quant_parms_.zp_h_,
                                               "scale_h");
+            std::vector<T> h_host = d2h(h, NH * (steps + 1));
+            checkScale<T, int8_t>(h_host,
+                                  quant_parms_.exp2_inv_h_,
+                                  quant_parms_.zp_h_,
+                                  "scale_h");
 
             quant_parms_.exp2_inv_W_ = calculateScalesPerChannels<T, int8_t>(W,
                                                                              hidden_size * 3,
                                                                              input_size,
                                                                              "exp2_inv_W");
+
+            std::vector<T> W_host = d2h(W, hidden_size * 3 * input_size);
+            checkScalePerChannel<T, int8_t>(W_host,
+                                            hidden_size * 3,
+                                            input_size,
+                                            quant_parms_.exp2_inv_W_,
+                                            "scale_W");
+
             quant_parms_.exp2_inv_R_ = calculateScalesPerChannels<T, int8_t>(R,
                                                                              hidden_size * 3,
                                                                              hidden_size,
                                                                              "exp2_inv_R");
+            std::vector<T> R_host = d2h(R, hidden_size * 3 * hidden_size);
+            checkScalePerChannel<T, int8_t>(R_host,
+                                            hidden_size * 3,
+                                            hidden_size,
+                                            quant_parms_.exp2_inv_R_,
+                                            "scale_R");
 
             calculateScale<T, int8_t>(tmp_Wx,
                                       steps * batch_size * hidden_size * 3,
@@ -1010,21 +1038,44 @@ void ForwardPass<T>::Run(
                                       quant_parms_.exp2_inv_Wx_,
                                       quant_parms_.zp_Wx_,
                                       "scale_Wx");
+            std::vector<T> tmp_Wx_host = d2h(tmp_Wx, steps * batch_size * hidden_size * 3);
+            checkScale<T, int8_t>(tmp_Wx_host,
+                                  quant_parms_.exp2_inv_Wx_,
+                                  quant_parms_.zp_Wx_,
+                                  "scale_Wx");
+
             calculateScale<T, int8_t>(tmp_Rh,
                                       steps * batch_size * hidden_size * 3,
                                       false,
                                       quant_parms_.exp2_inv_Rh_,
                                       quant_parms_.zp_Rh_,
                                       "scale_Rh");
+            std::vector<T> tmp_Rh_host = d2h(tmp_Rh, steps * batch_size * hidden_size * 3);
+            checkScale<T, int8_t>(tmp_Rh_host,
+                                  quant_parms_.exp2_inv_Rh_,
+                                  quant_parms_.zp_Rh_,
+                                  "scale_Rh");
 
             quant_parms_.exp2_inv_bx_ = calculateScalesPerChannels<T, int8_t>(bx,
                                                                               hidden_size * 3,
                                                                               1,
                                                                               "scale_bx");
+            std::vector<T> bx_host = d2h(bx, hidden_size * 3);
+            checkScalePerChannel<T, int8_t>(bx_host,
+                                            hidden_size * 3,
+                                            1,
+                                            quant_parms_.exp2_inv_bx_,
+                                            "scale_bx");
             quant_parms_.exp2_inv_br_ = calculateScalesPerChannels<T, int8_t>(br,
                                                                               hidden_size * 3,
                                                                               1,
                                                                               "scale_br");
+            std::vector<T> br_host = d2h(br, hidden_size * 3);
+            checkScalePerChannel<T, int8_t>(br_host,
+                                            hidden_size * 3,
+                                            1,
+                                            quant_parms_.exp2_inv_br_,
+                                            "scale_br");
 
             calculateScale<T, int8_t>(z_pres_.data(),
                                       z_pres_.size(),
@@ -1032,18 +1083,33 @@ void ForwardPass<T>::Run(
                                       quant_parms_.exp2_inv_z_pre_,
                                       quant_parms_.zp_z_pre_,
                                       "scale_z_pre");
+            std::vector<T> z_pres_host = d2h(z_pres_.data(), z_pres_.size());
+            checkScale<T, int8_t>(z_pres_host,
+                                  quant_parms_.exp2_inv_z_pre_,
+                                  quant_parms_.zp_z_pre_,
+                                  "scale_z_pre");
             calculateScale<T, int8_t>(r_pres_.data(),
                                       r_pres_.size(),
                                       false,
                                       quant_parms_.exp2_inv_r_pre_,
                                       quant_parms_.zp_r_pre_,
                                       "scale_r_pre");
+            std::vector<T> r_pres_host = d2h(r_pres_.data(), r_pres_.size());
+            checkScale<T, int8_t>(r_pres_host,
+                                  quant_parms_.exp2_inv_r_pre_,
+                                  quant_parms_.zp_r_pre_,
+                                  "scale_r_pre");
             calculateScale<T, int8_t>(g_pres_.data(),
                                       g_pres_.size(),
                                       false,
                                       quant_parms_.exp2_inv_g_pre_,
                                       quant_parms_.zp_g_pre_,
                                       "scale_g_pre");
+            std::vector<T> g_pres_host = d2h(g_pres_.data(), g_pres_.size());
+            checkScale<T, int8_t>(g_pres_host,
+                                  quant_parms_.exp2_inv_g_pre_,
+                                  quant_parms_.zp_g_pre_,
+                                  "scale_g_pre");
 
             calculateScaleFromV<T, int8_t>(v, steps, hidden_size, batch_size, quant_parms_);
 
@@ -1053,20 +1119,33 @@ void ForwardPass<T>::Run(
                                       quant_parms_.exp2_inv_one_minus_update_,
                                       quant_parms_.zp_one_minus_update_,
                                       "scale_one_minus_update");
-
+            std::vector<T> one_minus_update_host = d2h(one_minus_update_.data(), one_minus_update_.size());
+            checkScale<T, int8_t>(one_minus_update_host,
+                                  quant_parms_.exp2_inv_one_minus_update_,
+                                  quant_parms_.zp_one_minus_update_,
+                                  "scale_one_minus_update");
             calculateScale<T, int8_t>(new_contrib_.data(),
                                       new_contrib_.size(),
                                       false,
                                       quant_parms_.exp2_inv_new_contrib_,
                                       quant_parms_.zp_new_contrib_,
                                       "scale_new_contrib");
-
+            std::vector<T> new_contrib_host = d2h(new_contrib_.data(), new_contrib_.size());
+            checkScale<T, int8_t>(new_contrib_host,
+                                  quant_parms_.exp2_inv_new_contrib_,
+                                  quant_parms_.zp_new_contrib_,
+                                  "scale_new_contrib");
             calculateScale<T, int8_t>(old_contrib_.data(),
                                       old_contrib_.size(),
                                       false,
                                       quant_parms_.exp2_inv_old_contrib_,
                                       quant_parms_.zp_old_contrib_,
                                       "scale_old_contrib");
+            std::vector<T> old_contrib_host = d2h(old_contrib_.data(), old_contrib_.size());
+            checkScale<T, int8_t>(old_contrib_host,
+                                  quant_parms_.exp2_inv_old_contrib_,
+                                  quant_parms_.zp_old_contrib_,
+                                  "scale_old_contrib");
         }
     }
 

@@ -175,7 +175,8 @@ inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int 
     }
 }
 
-inline int quant_from_exp2(float src, int32_t exp2_inv, int zp) {
+template<typename T, typename QuantT>
+inline QuantT quant_from_exp2(T src, int32_t exp2_inv, int zp) {
     float scaled;
     if (exp2_inv >= 0) {
         scaled = src * static_cast<float>(1 << exp2_inv);
@@ -184,8 +185,10 @@ inline int quant_from_exp2(float src, int32_t exp2_inv, int zp) {
     }
 
     int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
-    q = std::clamp(q, -128, 127);
-    return q;
+    constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
+    constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
+    q = std::clamp(q, qmin, qmax);
+    return static_cast<QuantT>(q);
 }
 
 void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,

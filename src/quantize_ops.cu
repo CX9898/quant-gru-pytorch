@@ -188,7 +188,7 @@ std::vector<int8_t> generate_sigmoid_int8_lut_exp2(
         float y_fp = 1.f / (1.f + std::exp(-x_fp));
 
         // （3）量化 y
-        int y_i8 = quant_from_exp2(y_fp, exp2_inv_z, zp_z);
+        int y_i8 = quant_from_exp2<float, int8_t>(y_fp, exp2_inv_z, zp_z);
 
         lut[i] = static_cast<int8_t>(y_i8);
     }
@@ -213,7 +213,7 @@ std::vector<int8_t> generate_tanh_int8_lut_exp2(
         float y_fp = std::tanh(x_fp);
 
         // （3）量化 y
-        int y_i8 = quant_from_exp2(y_fp, exp2_inv_out, zp_out);
+        int y_i8 = quant_from_exp2<float, int8_t>(y_fp, exp2_inv_out, zp_out);
 
         lut[i] = static_cast<int8_t>(y_i8);
     }

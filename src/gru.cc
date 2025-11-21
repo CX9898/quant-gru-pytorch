@@ -407,17 +407,6 @@ void checkHQuantizationWithCosine(
     }
     printf("\n");
 
-    // 检查是否有非零值
-    int non_zero_float = 0, non_zero_quant = 0;
-    for (size_t i = 0; i < h_inference.size(); ++i) {
-        if (std::abs(h_inference[i]) > 1e-6f) non_zero_float++;
-    }
-    for (size_t i = 0; i < h_quant_inference.size(); ++i) {
-        if (h_quant_inference[i] != 0) non_zero_quant++;
-    }
-    printf("    Non-zero values: h_inference=%d/%zu, h_quant_inference=%d/%zu\n",
-           non_zero_float, h_inference.size(), non_zero_quant, h_quant_inference.size());
-
     std::vector<float> h_float_step(size_per_step);
     std::vector<float> h_quant_step(size_per_step);
 
@@ -640,7 +629,7 @@ int main() {
 
     printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
-    if (false) { // Test
+    if (true) { // Test
         std::vector<float> h_inference_tmp(h_inference.data(), h_inference.data() + h_inference.size());
         std::vector<int8_t> h_quant_inference_tmp(h_quant_inference.data(),
                                                   h_quant_inference.data() + h_quant_inference.size());

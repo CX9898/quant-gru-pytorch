@@ -39,7 +39,8 @@ inline bool checkOneData<double>(const double data1, const double data2) {
 }
 
 // 计算余弦相似度
-inline float computeCosineSimilarity(const std::vector<float> &a, const std::vector<float> &b) {
+template<typename T>
+inline float computeCosineSimilarity(const std::vector<T> &a, const std::vector<T> &b) {
     float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
     for (size_t i = 0; i < a.size(); ++i) {
         dot += a[i] * b[i];
@@ -49,8 +50,9 @@ inline float computeCosineSimilarity(const std::vector<float> &a, const std::vec
     return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f); // 防止除零
 }
 
-inline bool checkCosineSimilarity(const std::vector<float> &a,
-                                  const std::vector<float> &b,
+template<typename T>
+inline bool checkCosineSimilarity(const std::vector<T> &a,
+                                  const std::vector<T> &b,
                                   const std::string &name = "",
                                   const float threshold = 0.9999f) {
     const float cos_sim = computeCosineSimilarity(a, b);
@@ -62,7 +64,10 @@ inline bool checkCosineSimilarity(const std::vector<float> &a,
                 threshold);
         return false;
     }
-    printf("\tCheck cosine similarity Pass! %s: cosine similarity = %f\n", name.c_str(), cos_sim);
+    printf("\t%s: Check cosine similarity Pass! cosine similarity = %f, threshold = %f\n",
+           name.c_str(),
+           cos_sim,
+           threshold);
     return true;
 }
 
@@ -86,8 +91,9 @@ inline float computeMSE(const std::vector<T> &data1, const std::vector<T> &data2
     return computeMSE(data1.data(), data2.data(), data1.size());
 }
 
-bool checkMSE(const std::vector<float> &data1,
-              const std::vector<float> &data2,
+template<typename T>
+bool checkMSE(const std::vector<T> &data1,
+              const std::vector<T> &data2,
               const std::string &name = "",
               float threshold = ERROR_THRESHOLD_MSE_EPSILON
 ) {
@@ -96,7 +102,7 @@ bool checkMSE(const std::vector<float> &data1,
         fprintf(stderr, "Warning! %s check mse failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
         return false;
     }
-    printf("\tCheck mes Pass! %s: mes = %f\n", name.c_str(), mse);
+    printf("\t%s: Check mes Pass! mes = %f, threshold = %f\n", name.c_str(), mse, threshold);
     return true;
 }
 

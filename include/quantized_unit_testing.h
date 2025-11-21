@@ -11,11 +11,11 @@
 #include "checkData.hpp"
 #include "quantize_ops_helper.hpp"
 
-bool checkScale(const std::vector<float> &src,
-                const std::vector<int8_t> &quant,
-                float scale,
-                int32_t zero_point,
-                const std::string &name = "") {
+inline bool checkScale(const std::vector<float> &src,
+                       const std::vector<int8_t> &quant,
+                       float scale,
+                       int32_t zero_point,
+                       const std::string &name = "") {
     bool is_pass = true;
     if (scale <= 1e-6f) {
         printf("Warning, %s: scale = %.15f <= 1e-6f\n",
@@ -35,13 +35,15 @@ bool checkScale(const std::vector<float> &src,
     return is_pass;
 }
 
-bool checkScale(const std::vector<float> &src,
-                const std::vector<int8_t> &quant,
-                int32_t exp2_inv,
-                int32_t zero_point,
-                const std::string &name = "") {
+
+template<typename T, typename QuantT>
+inline bool checkScale(const std::vector<T> &src,
+                       const std::vector<QuantT> &quant,
+                       int32_t exp2_inv,
+                       int32_t zero_point,
+                       const std::string &name = "") {
     bool is_pass = true;
-    std::vector<float> requant(src.size());
+    std::vector<T> requant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < src.size(); ++i) {
         const float req_val = dequant_from_exp2(quant[i], exp2_inv, zero_point);
@@ -52,13 +54,28 @@ bool checkScale(const std::vector<float> &src,
     return is_pass;
 }
 
+template<typename T, typename QuantT>
+inline bool checkScale(const std::vector<T> &src,
+                       int32_t exp2_inv,
+                       int32_t zero_point,
+                       const std::string &name = "") {
+
+    std::vector<QuantT> quant(src.size());
+#pragma omp parallel for
+    for (int i = 0; i < src.size(); ++i) {
+        const QuantT req_val = quant_from_exp2<T, QuantT>(src[i], exp2_inv, zero_point);
+        quant[i] = req_val;
+    }
+    return checkScale<T, QuantT>(src, quant, exp2_inv, zero_point, name);
+}
+
 template<typename QuantT>
-bool checkScalePerChannel(const std::vector<float> &src,
-                          size_t channel_size,
-                          size_t in_dim,
-                          const std::vector<QuantT> &quant,
-                          const std::vector<float> &scale,
-                          const std::string &name = "") {
+inline bool checkScalePerChannel(const std::vector<float> &src,
+                                 size_t channel_size,
+                                 size_t in_dim,
+                                 const std::vector<QuantT> &quant,
+                                 const std::vector<float> &scale,
+                                 const std::string &name = "") {
     bool is_pass = true;
     std::vector<float> requant(src.size());
 #pragma omp parallel for
@@ -83,29 +100,50 @@ bool checkScalePerChannel(const std::vector<float> &src,
     return is_pass;
 }
 
-template<typename QuantT>
-bool checkScalePerChannel(const std::vector<float> &src,
-                          size_t channel_size,
-                          size_t in_dim,
-                          const std::vector<QuantT> &quant,
-                          const std::vector<int32_t> &exp2_inv,
-                          const std::string &name = "") {
+template<typename T, typename QuantT>
+inline bool checkScalePerChannel(const std::vector<T> &src,
+                                 size_t channel_size,
+                                 size_t in_dim,
+                                 const std::vector<QuantT> &quant,
+                                 const std::vector<int32_t> &exp2_inv,
+                                 const std::string &name = "") {
 
     bool is_pass = true;
-    std::vector<float> requant(src.size());
+    std::vector<T> requant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < in_dim; ++i) {
         for (int j = 0; j < channel_size; ++j) {
             const int idx = i * channel_size + j;
             const int exp2_inv_val = exp2_inv[j];
             const int zp_val = 0;
-            const float req_val = dequant_from_exp2(quant[idx], exp2_inv_val, zp_val);
+            const T req_val = dequant_from_exp2(quant[idx], exp2_inv_val, zp_val);
             requant[idx] = req_val;
         }
     }
     is_pass &= checkCosineSimilarity(src, requant, name);
     is_pass &= checkMSE(src, requant, name);
     return is_pass;
+}
+
+template<typename T, typename QuantT>
+inline bool checkScalePerChannel(const std::vector<T> &src,
+                                 size_t channel_size,
+                                 size_t in_dim,
+                                 const std::vector<int32_t> &exp2_inv,
+                                 const std::string &name = "") {
+
+    std::vector<QuantT> quant(src.size());
+#pragma omp parallel for
+    for (int i = 0; i < in_dim; ++i) {
+        for (int j = 0; j < channel_size; ++j) {
+            const int idx = i * channel_size + j;
+            const int exp2_inv_val = exp2_inv[j];
+            const int zp_val = 0;
+            const QuantT quant_val = quant_from_exp2<T, QuantT>(src[idx], exp2_inv_val, zp_val);
+            quant[idx] = quant_val;
+        }
+    }
+    return checkScalePerChannel<T, QuantT>(src, channel_size, in_dim, quant, exp2_inv, name);
 }
 
 
