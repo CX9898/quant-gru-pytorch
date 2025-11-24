@@ -747,12 +747,13 @@ inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
 
 #define DEBUG true
 
-inline int32_t selectBestExp2InvAsym(
-    float orig_min,
-    float orig_max,
-    int32_t quant_min,
-    int32_t quant_max)
-{
+inline void selectBestExp2InvAsym(
+    const float orig_min,
+    const float orig_max,
+    const int32_t quant_min,
+    const int32_t quant_max,
+    int32_t &exp2_inv,
+    int32_t &zp) {
     const float EPS = 1e-12f;
 
     float orig_range = orig_max - orig_min;
@@ -772,12 +773,13 @@ inline int32_t selectBestExp2InvAsym(
     n_candidates[0] = std::max(0, n_raw - 1);
     n_candidates[1] = std::max(0, n_raw);
     n_candidates[2] = std::max(0, n_raw + 1);
-    for (int& n : n_candidates)
+    for (int &n : n_candidates)
         n = std::min(n, MAX_EXP2_INV);
 
     // Evaluate 3 candidates by actual MSE and pick best
     float best_mse = 1e30f;
     int best_n = n_candidates[0];
+    int res_zp = 0;
 
     for (int n : n_candidates) {
         float scale = std::pow(2.0f, -n);
@@ -794,7 +796,7 @@ inline int32_t selectBestExp2InvAsym(
 
         // compute zp for this n
         float zp_float = (-aligned_min) / scale;
-        int32_t zp_int = (int32_t)std::llround(zp_float) + quant_min;
+        int32_t zp_int = (int32_t) std::llround(zp_float) + quant_min;
         zp_int = std::clamp(zp_int, quant_min, quant_max);
 
         // Evaluate MSE approximation: assume uniform distribution
@@ -805,10 +807,12 @@ inline int32_t selectBestExp2InvAsym(
         if (mse < best_mse) {
             best_mse = mse;
             best_n = n;
+            res_zp = zp_int;
         }
     }
+    exp2_inv = best_n;
+    zp = res_zp;
 
-    return best_n;
 }
 
 /**
@@ -829,6 +833,138 @@ inline int32_t selectBestExp2InvAsym(
  *       5. 自动适配量化范围：通过std::numeric_limits<QuantT>获取quant_min/quant_max，无需手动配置；
  *       6. 异常处理：原始min ≥ orig_max、QuantT非有符号整数、T非浮点类型时抛出异常。
  */
+//template<typename T, typename QuantT>
+//inline void calibrateQuantParams(
+//    const T orig_min,
+//    const T orig_max,
+//    const bool is_symmetric,
+//    T &aligned_min,
+//    T &aligned_max,
+//    int32_t &exp2_inv,
+//    int32_t &zp,
+//    const std::string &name = "") {
+//
+//    static_assert(std::is_floating_point_v<T>, "T must be floating point");
+//    static_assert(std::is_signed_v<QuantT> && std::is_integral_v<QuantT>, "QuantT must be signed integer");
+//
+//    constexpr int32_t quant_min = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
+//    constexpr int32_t quant_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
+//    // difference (quant_max - quant_min)
+//    constexpr int32_t quant_range = quant_max - quant_min;
+//
+//    if (name == "scale_x") {
+//        printf("!!!\n");
+//    }
+//
+//    if (orig_min >= orig_max - static_cast<T>(1e-12)) {
+////        throw std::invalid_argument(
+////            name +
+////            "Invalid original range: orig_min (" + std::to_string(orig_min) +
+////            ") must be less than orig_max (" + std::to_string(orig_max) + ")");
+//        return;
+//    }
+//
+//    // small epsilon for zero-checks
+//    const T EPS = static_cast<T>(1e-12);
+//    T aligned_scale = static_cast<T>(1.0);
+//
+//    if (is_symmetric) {
+//        // symmetric quantization: zp == 0
+//        zp = static_cast<QuantT>(0);
+//
+//        // half_range = max(|min|, |max|)
+//        const T half_range = std::max(std::abs(orig_min), std::abs(orig_max));
+//        const T safe_half_range = (half_range <= EPS) ? static_cast<T>(1.0) : half_range;
+//
+////        // Want scale = 2^-n such that scale * quant_max >= half_range
+////        // => 2^-n >= half_range / quant_max  => n <= log2(quant_max / half_range)
+////        // choose largest scale (smallest n) satisfying => n = floor(log2(quant_max / half_range))
+//        {
+//            const T ratio = static_cast<T>(quant_max) / safe_half_range;
+//            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30))); // guard
+//            int32_t n = static_cast<int32_t>(std::floor(log2_val));
+//            n = std::max(n, static_cast<int32_t>(0));
+//            exp2_inv = n;
+//        }
+//
+//        exp2_inv = selectBestExp2InvSym(orig_min, orig_max, quant_max);
+//
+//        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
+//        // preserve symmetry: aligned_max >= half_range, aligned_min = -aligned_max
+//        aligned_max = aligned_scale * static_cast<T>(quant_max);
+//        if (aligned_max < safe_half_range) {
+//            // should not happen because of floor logic, but guard anyway by reducing exp2_inv
+//            // if happens, decrease exp2_inv until coverage satisfied (rare)
+//            while (exp2_inv > 0 && (aligned_scale * static_cast<T>(quant_max) < safe_half_range)) {
+//                --exp2_inv;
+//                aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
+//                aligned_max = aligned_scale * static_cast<T>(quant_max);
+//            }
+//        }
+//        // final symmetric aligned range
+//        aligned_max = std::max(aligned_max, safe_half_range);
+//        aligned_min = -aligned_max;
+//
+//        // Finally ensure we cover original min/max (preserve symmetry)
+//        if (aligned_min > orig_min) aligned_min = -aligned_max; // keep symmetric
+//        if (aligned_max < orig_max) aligned_max = aligned_max; // already symmetric
+//    } else {
+//        // asymmetric quantization
+//        T orig_range = orig_max - orig_min;
+//        orig_range = (orig_range <= EPS) ? static_cast<T>(1.0) : orig_range;
+//
+//        // Want scale = 2^-n such that scale * quant_range >= orig_range
+//        // => 2^-n >= orig_range / quant_range => n <= log2(quant_range / orig_range)
+//        // choose largest scale satisfying => n = floor(log2(quant_range / orig_range))
+////        {
+////            const T ratio = static_cast<T>(quant_range) / orig_range;
+////            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30)));
+////            int32_t n = static_cast<int32_t>(std::floor(log2_val));
+////            n = std::max(n, static_cast<int32_t>(0));
+////            exp2_inv = n;
+////        }
+//        selectBestExp2InvAsym(orig_min, orig_max, quant_min, quant_max, exp2_inv, zp);
+//
+////        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
+////        // align min down to multiple of scale
+////        aligned_min = std::floor(orig_min / aligned_scale) * aligned_scale;
+////        aligned_max = aligned_min + aligned_scale * static_cast<T>(quant_range);
+//
+//        aligned_min = aligned_scale * (quant_min - zp);
+//        aligned_max = aligned_scale * (quant_max - zp);
+//
+//        // if due to numerical error we still don't cover orig_max, expand by one step
+//        if (aligned_max < orig_max - EPS) {
+//            aligned_min -= aligned_scale;
+//            aligned_max += aligned_scale;
+//        }
+//
+//        // zero point: quant_min + round( (-aligned_min) / scale )
+////        const T zp_float = (-aligned_min) / aligned_scale;
+////        int32_t zp_int = static_cast<int32_t>(std::llround(zp_float)); // round to nearest
+////        // convert to quant space by offsetting quant_min
+////        zp_int = quant_min + zp_int;
+////        // clamp
+////        zp_int = std::clamp(zp_int, quant_min, quant_max);
+////        zp = static_cast<QuantT>(zp_int);
+//
+//        // small numerical cleanup
+//        aligned_min = std::round(aligned_min * static_cast<T>(1e9)) / static_cast<T>(1e9);
+//        aligned_max = std::round(aligned_max * static_cast<T>(1e9)) / static_cast<T>(1e9);
+//    }
+//
+//    if (DEBUG && name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
+//        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
+//               name.c_str(),
+//               orig_min,
+//               orig_max,
+//               aligned_min,
+//               aligned_max,
+//               exp2_inv,
+//               zp);
+//    }
+//}
+
 template<typename T, typename QuantT>
 inline void calibrateQuantParams(
     const T orig_min,
@@ -838,119 +974,59 @@ inline void calibrateQuantParams(
     T &aligned_max,
     int32_t &exp2_inv,
     int32_t &zp,
-    const std::string &name = "") {
+    const std::string &name = ""
+) {
+    static_assert(std::is_floating_point<T>::value, "T must be float or double");
+    static_assert(std::is_signed<QuantT>::value, "QuantT must be a signed integer type");
 
-    static_assert(std::is_floating_point_v<T>, "T must be floating point");
-    static_assert(std::is_signed_v<QuantT> && std::is_integral_v<QuantT>, "QuantT must be signed integer");
+    // 量化类型的范围
+    const int32_t quant_min = std::numeric_limits<QuantT>::min();
+    const int32_t quant_max = std::numeric_limits<QuantT>::max();
 
-    constexpr int32_t quant_min = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-    constexpr int32_t quant_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    // difference (quant_max - quant_min)
-    constexpr int32_t quant_range = quant_max - quant_min;
-
-    if (orig_min >= orig_max - static_cast<T>(1e-12)) {
-//        throw std::invalid_argument(
-//            name +
-//            "Invalid original range: orig_min (" + std::to_string(orig_min) +
-//            ") must be less than orig_max (" + std::to_string(orig_max) + ")");
-        return;
-    }
-
-    // small epsilon for zero-checks
-    const T EPS = static_cast<T>(1e-12);
-    T aligned_scale = static_cast<T>(1.0);
-
+    float scale;
     if (is_symmetric) {
-        // symmetric quantization: zp == 0
-        zp = static_cast<QuantT>(0);
+        // 对称量化，zero point 固定为 0
+        zp = 0;
 
-        // half_range = max(|min|, |max|)
-        const T half_range = std::max(std::abs(orig_min), std::abs(orig_max));
-        const T safe_half_range = (half_range <= EPS) ? static_cast<T>(1.0) : half_range;
+        // 取绝对值范围，保证对称
+        T abs_max = std::max(std::abs(orig_min), std::abs(orig_max));
+        abs_max = std::max(abs_max, static_cast<T>(1e-9)); // 避免除零
 
-//        // Want scale = 2^-n such that scale * quant_max >= half_range
-//        // => 2^-n >= half_range / quant_max  => n <= log2(quant_max / half_range)
-//        // choose largest scale (smallest n) satisfying => n = floor(log2(quant_max / half_range))
-        {
-            const T ratio = static_cast<T>(quant_max) / safe_half_range;
-            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30))); // guard
-            int32_t n = static_cast<int32_t>(std::floor(log2_val));
-            n = std::max(n, static_cast<int32_t>(0));
-            exp2_inv = n;
-        }
-
-        exp2_inv = selectBestExp2InvSym(orig_min, orig_max, quant_max);
-
-        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-        // preserve symmetry: aligned_max >= half_range, aligned_min = -aligned_max
-        aligned_max = aligned_scale * static_cast<T>(quant_max);
-        if (aligned_max < safe_half_range) {
-            // should not happen because of floor logic, but guard anyway by reducing exp2_inv
-            // if happens, decrease exp2_inv until coverage satisfied (rare)
-            while (exp2_inv > 0 && (aligned_scale * static_cast<T>(quant_max) < safe_half_range)) {
-                --exp2_inv;
-                aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-                aligned_max = aligned_scale * static_cast<T>(quant_max);
-            }
-        }
-        // final symmetric aligned range
-        aligned_max = std::max(aligned_max, safe_half_range);
+        // scale = abs_max / quant_max => 对齐到 2^-n
+        T raw_scale = abs_max / quant_max;
+// scale >= raw_scale
+        exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale))); // floor instead of ceil
+        scale = std::pow(2.0, -exp2_inv);
+        aligned_max = scale * quant_max;
         aligned_min = -aligned_max;
-
-        // Finally ensure we cover original min/max (preserve symmetry)
-        if (aligned_min > orig_min) aligned_min = -aligned_max; // keep symmetric
-        if (aligned_max < orig_max) aligned_max = aligned_max; // already symmetric
     } else {
-        // asymmetric quantization
-        T orig_range = orig_max - orig_min;
-        orig_range = (orig_range <= EPS) ? static_cast<T>(1.0) : orig_range;
+        // 非对称量化
+        T range = orig_max - orig_min;
+        range = std::max(range, static_cast<T>(1e-9));
 
-        // Want scale = 2^-n such that scale * quant_range >= orig_range
-        // => 2^-n >= orig_range / quant_range => n <= log2(quant_range / orig_range)
-        // choose largest scale satisfying => n = floor(log2(quant_range / orig_range))
-        {
-            const T ratio = static_cast<T>(quant_range) / orig_range;
-            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30)));
-            int32_t n = static_cast<int32_t>(std::floor(log2_val));
-            n = std::max(n, static_cast<int32_t>(0));
-            exp2_inv = n;
-        }
-        exp2_inv = selectBestExp2InvAsym(orig_min, orig_max, quant_min, quant_max);
+        T raw_scale = range / (quant_max - quant_min);
 
-        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-        // align min down to multiple of scale
-        aligned_min = std::floor(orig_min / aligned_scale) * aligned_scale;
-        aligned_max = aligned_min + aligned_scale * static_cast<T>(quant_range);
+        // scale >= raw_scale 对齐到 2^-n
+        exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));
+        scale = std::pow(2.0, -exp2_inv); // 取2的负exp2_inv次方
 
-        // if due to numerical error we still don't cover orig_max, expand by one step
-        if (aligned_max < orig_max - EPS) {
-            aligned_min -= aligned_scale;
-            aligned_max += aligned_scale;
-        }
+        aligned_min = std::floor(orig_min / scale) * scale;
+        aligned_max = std::ceil(orig_max / scale) * scale;
 
-        // zero point: quant_min + round( (-aligned_min) / scale )
-        const T zp_float = (-aligned_min) / aligned_scale;
-        int32_t zp_int = static_cast<int32_t>(std::llround(zp_float)); // round to nearest
-        // convert to quant space by offsetting quant_min
-        zp_int = quant_min + zp_int;
-        // clamp
-        zp_int = std::clamp(zp_int, quant_min, quant_max);
-        zp = static_cast<QuantT>(zp_int);
-
-        // small numerical cleanup
-        aligned_min = std::round(aligned_min * static_cast<T>(1e9)) / static_cast<T>(1e9);
-        aligned_max = std::round(aligned_max * static_cast<T>(1e9)) / static_cast<T>(1e9);
+        // 计算 zero-point
+        T zp_fp = quant_min - aligned_min / scale;
+        zp = std::round(zp_fp);
+//        zp = std::clamp(zp, quant_min, quant_max);
     }
 
-    if (DEBUG && name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
-        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
-               name.c_str(),
-               orig_min,
-               orig_max,
-               aligned_min,
-               aligned_max,
-               exp2_inv,
-               zp);
+    // 可选调试打印
+    if (!name.empty()) {
+        std::cout << "[QuantParam][" << name << "] "
+                  << "orig_min=" << orig_min << ", orig_max=" << orig_max
+                  << ", aligned_min=" << aligned_min << ", aligned_max=" << aligned_max
+                  << ", scale=" << scale
+                  << ", exp2_inv=" << exp2_inv << ", zp=" << zp
+                  << ", is_symmetric=" << is_symmetric << std::endl;
     }
 }
 

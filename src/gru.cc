@@ -523,6 +523,9 @@ int main() {
     x.setRandom();
     x = x * 2.0f - 1.0f;
     x = x * 0.8f;
+    for(int i = 0; i < x.size(); ++i){
+        x.data()[i] += 0.1f;
+    }
 
     dh.setRandom();
     dh = dh * 2.0f - 1.0f;

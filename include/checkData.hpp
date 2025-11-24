@@ -41,7 +41,7 @@ inline bool checkOneData<double>(const double data1, const double data2) {
 // 计算余弦相似度
 template<typename T>
 inline float computeCosineSimilarity(const std::vector<T> &a, const std::vector<T> &b) {
-    float dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+    double dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
     for (size_t i = 0; i < a.size(); ++i) {
         dot += a[i] * b[i];
         norm_a += a[i] * a[i];
