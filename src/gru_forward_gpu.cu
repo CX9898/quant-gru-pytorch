@@ -16,7 +16,8 @@ namespace {
 
 namespace op {
 template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
-__device__ __forceinline__ void PointwiseOperations(const int batch_dim,
+__device__ __forceinline__ void PointwiseOperations(int steps_idx,
+                                                    const int batch_dim,
                                                     const int hidden_dim,
                                                     const T *Wx,
                                                     const T *Rh,
@@ -57,15 +58,15 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
     const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
     const T z = sigmoid(z_pre);
 
-//    if (weight_idx == 0) {
-//        printf("haste: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
-//               Wx[z_idx],
-//               Rh[z_idx],
-//               bx[bz_idx],
-//               br[bz_idx],
-//               z_pre,
-//               z);
-//    }
+    if (weight_idx == 1 && steps_idx <= 2) {
+        printf("haste compute Z: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
+               Wx[z_idx],
+               Rh[z_idx],
+               bx[bz_idx],
+               br[bz_idx],
+               z_pre,
+               z);
+    }
 
     const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
     const T r = sigmoid(r_pre);
@@ -104,16 +105,16 @@ __device__ __forceinline__ void PointwiseOperations(const int batch_dim,
 
     T cur_h_value = z * h[output_idx] + (static_cast<T>(1.0) - z) * g;
 
-//    if (weight_idx == 0) {
-//        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
-//               z,
-//               h[output_idx],
-//               z * h[output_idx],
-//               (static_cast<T>(1.0) - z),
-//               g,
-//               (static_cast<T>(1.0) - z) * g,
-//               cur_h_value);
-//    }
+    if (weight_idx == 1 && steps_idx <= 2) {
+        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
+               z,
+               h[output_idx],
+               z * h[output_idx],
+               (static_cast<T>(1.0) - z),
+               g,
+               (static_cast<T>(1.0) - z) * g,
+               cur_h_value);
+    }
 
     if (ApplyZoneout) {
         if (Training) {
@@ -151,7 +152,7 @@ __global__ void PointwiseOperations(const int batch_dim,
                                     const T zoneout_prob,
                                     const T *zoneout_mask
 ) {
-    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(batch_dim,
+    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(0,batch_dim,
                                                                     hidden_dim,
                                                                     Wx,
                                                                     Rh,
@@ -171,7 +172,8 @@ __global__ void PointwiseOperations(const int batch_dim,
 }
 
 template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
-__global__ void PointwiseOperations(const int batch_dim,
+__global__ void PointwiseOperations(int steps_idx,
+                                    const int batch_dim,
                                     const int hidden_dim,
                                     const T *Wx,
                                     const T *Rh,
@@ -189,7 +191,8 @@ __global__ void PointwiseOperations(const int batch_dim,
                                     T *new_contrib,
                                     T *old_contrib
 ) {
-    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(batch_dim,
+    op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(steps_idx,
+                                                                    batch_dim,
                                                                     hidden_dim,
                                                                     Wx,
                                                                     Rh,
@@ -383,6 +386,7 @@ void ForwardPass<T>::IterateInternal(
     if (calibration_mode_) {
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, true, true, true><<<gridDim, blockDim, 0, stream1>>>(
+                steps_idx,
                 batch_size,
                 hidden_size,
                 tmp_Wx,
@@ -402,6 +406,7 @@ void ForwardPass<T>::IterateInternal(
                 old_contrib_.data() + offset);
         } else {
             PointwiseOperations<T, true, false, true><<<gridDim, blockDim, 0, stream1>>>(
+                steps_idx,
                 batch_size,
                 hidden_size,
                 tmp_Wx,

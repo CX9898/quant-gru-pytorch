@@ -505,37 +505,28 @@ int main() {
     // 这确保前向和反向传播的方差保持稳定
     W.setRandom();
     W = W * 2.0f - 1.0f;
-//    float k_W = sqrtf(6.0f / (static_cast<float>(INPUT_DIMS) + static_cast<float>(HIDDEN_DIMS * 3)));
-//    W = W * W.constant(k_W);  // 将 [-1, 1] 缩放到 [-k_W, k_W]
+    W = W * 0.5f;
+    W = W * 0.01f;
 
-    // R: 循环权重矩阵，使用较小的初始化范围
-    // 范围: U(-k, k)，其中 k = sqrt(1 / hidden_size) 或更保守的 k = 1 / sqrt(hidden_size)
-    // 循环权重通常需要更小的初始值以避免梯度爆炸
     R.setRandom();
-//    float k_R = 1.0f / sqrtf(static_cast<float>(HIDDEN_DIMS));
-//    R = R * R.constant(k_R);
     R = R * 2.0f - 1.0f;
+    R = R * 0.5f;
+    R = R * 0.01f;
 
-    // bx, br: 偏置通常初始化为0或很小的随机值
-    // PyTorch GRU 默认偏置为0，这里使用很小的随机值 [-0.01, 0.01] 以增加一些随机性
     bx.setRandom();
-    bx = bx * 2.0f - 1.0f;
-//    bx = bx * bx.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
+//    bx = bx * 2.0f - 1.0f;
+    bx = bx * 0.15f;
     br.setRandom();
-    br = br * 2.0f - 1.0f;
-//    br = br * br.constant(0.01f);  // 偏置缩放为 [-0.01, 0.01]
+//    br = br * 2.0f - 1.0f;
+    br = br * 0.15f;
 
-    // x: 输入数据，通常在 [-1, 1] 范围内（标准化后的输入）
-    // 或者根据实际应用场景，可以是归一化后的数据
-    // 这里使用 [-1, 1] 范围，模拟标准化后的输入
     x.setRandom();
     x = x * 2.0f - 1.0f;
+    x = x * 0.8f;
 
-    // dh: 来自上层或损失函数的梯度，通常在 [-0.01, 0.01] 范围内
-    // 实际训练中梯度值通常较小，这里使用合理的范围
     dh.setRandom();
     dh = dh * 2.0f - 1.0f;
-//    dh = dh * dh.constant(0.01f);  // 梯度缩放为 [-0.01, 0.01]
+    dh = dh * 0.5f;
 
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);
@@ -604,7 +595,7 @@ int main() {
     quantized_unit_testing.printGRUQuantitativeParameters();
 //    quantized_unit_testing.checkQuantParameters();
 
-    // 运行量化GRU得到量化结果2
+
     Tensor3i8 h_quant_inference_tmp(hidden_size, batch_size, (time_steps + 1));
     h_quant_inference_tmp.setZero();
     Tensor3i8 h_quant_inference(hidden_size, batch_size, (time_steps + 1));
@@ -614,6 +605,7 @@ int main() {
                    h_quant_inference.size(),
                    quant_parms.exp2_inv_h_,
                    quant_parms.zp_h_);
+    // 运行量化GRU得到量化结果2
     GruInferenceQuant(W_quant,
                       R_quant,
                       bx_quant,
