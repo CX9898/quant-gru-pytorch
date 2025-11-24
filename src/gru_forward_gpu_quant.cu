@@ -367,34 +367,34 @@ __global__ void PointwiseOperationsQuant(
     /* GRU前向计算 */
 
 
-    QuantT z = computeZ<QuantT>(b_z_idx,
-                     Wx[z_idx],
-                     Rh[z_idx],
-                     W_sum_mul_x_zp[b_z_idx],
-                     R_sum_mul_h_zp[b_z_idx],
-                     bx[b_z_idx],
-                     br[b_z_idx],
-                     re_scale_param); // 更新门z
+    const QuantT z = computeZ<QuantT>(b_z_idx,
+                                      Wx[z_idx],
+                                      Rh[z_idx],
+                                      W_sum_mul_x_zp[b_z_idx],
+                                      R_sum_mul_h_zp[b_z_idx],
+                                      bx[b_z_idx],
+                                      br[b_z_idx],
+                                      re_scale_param); // 更新门z
 
-    QuantT r = computeR<QuantT>(b_r_idx,
-    Wx[r_idx],
-    Rh[r_idx],
-    W_sum_mul_x_zp[b_r_idx],
-    R_sum_mul_h_zp[b_r_idx],
-    bx[b_r_idx],
-    br[b_r_idx],
-    re_scale_param); // 重置门r
+    const QuantT r = computeR<QuantT>(b_r_idx,
+                                      Wx[r_idx],
+                                      Rh[r_idx],
+                                      W_sum_mul_x_zp[b_r_idx],
+                                      R_sum_mul_h_zp[b_r_idx],
+                                      bx[b_r_idx],
+                                      br[b_r_idx],
+                                      re_scale_param); // 重置门r
 
-    QuantT g = computeG<QuantT>(b_g_idx,
-    Wx[g_idx],
-    Rh[g_idx],
-    W_sum_mul_x_zp[b_g_idx],
-    R_sum_mul_h_zp[b_g_idx],
-    bx[b_g_idx],
-    br[b_g_idx],
-    r,
-    re_scale_param); // New Gate
-        // 候选状态~ht
+    const QuantT g = computeG<QuantT>(b_g_idx,
+                                      Wx[g_idx],
+                                      Rh[g_idx],
+                                      W_sum_mul_x_zp[b_g_idx],
+                                      R_sum_mul_h_zp[b_g_idx],
+                                      bx[b_g_idx],
+                                      br[b_g_idx],
+                                      r,
+                                      re_scale_param); // New Gate
+    // 候选状态~ht
 
     /* 训练模式 */
     // Store internal activations if we're eventually going to backprop.
@@ -566,8 +566,8 @@ void ForwardPassQuant<QuantT>::IterateInternal(
 
     cublasSetStream(blas_handle, stream1);
     blas<QuantT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3,
-                  batch_size, hidden_size, &alpha, R, hidden_size * 3, h,
-                  hidden_size, &beta, tmp_Rh, hidden_size * 3);
+                       batch_size, hidden_size, &alpha, R, hidden_size * 3, h,
+                       hidden_size, &beta, tmp_Rh, hidden_size * 3);
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -699,17 +699,17 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
 // T = time_steps(时间步), N = batch_size(批量大小)
 template<typename QuantT>
 void ForwardPassQuant<QuantT>::Run(const int steps, // 时间步数, 序列长度T
-                              const QuantT *W,   // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）, 对应 GRU 的三个门（z、r、h）。C 是输入特征维度，H 是隐藏状态维度, （行主序，计算 x @ W）
-                              const QuantT *R,   // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh），对应 GRU 的三个门（z、r、h）. （行主序，计算 h @ R）
-                              const int32_t *bx,  // [H*3], 输入偏置（bias for W），对应 z、r、h 门
-                              const int32_t *br,  // [H*3], 隐状态偏置（bias for R），对应 z、r、h 门
-                              const QuantT *x,   // [N,C], 输入序列，batch_size = N，特征维度 = C
-                              QuantT *h,         // [N,H], 输出隐藏状态，每个时间步保存的 GRU 隐状态
-                              QuantT *v,         // [N,H*4], 临时存储向量/中间计算值，通常保存 z, r, h_tilde, h_new 的中间值，用于后向传播或 zoneout
-                              int32_t *tmp_Wx,    // [N,H*3], W * x 的临时结果
-                              int32_t *tmp_Rh,    // [N,H*3], R * h 的临时结果
-                              const float zoneout_prob, // Zoneout 概率，用于随机丢弃部分隐藏状态
-                              const QuantT *zoneout_mask // Zoneout mask，0/1 矩阵，控制哪些隐藏单元被保留,  // Zoneout mask [N,H]
+                                   const QuantT *W,   // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）, 对应 GRU 的三个门（z、r、h）。C 是输入特征维度，H 是隐藏状态维度, （行主序，计算 x @ W）
+                                   const QuantT *R,   // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh），对应 GRU 的三个门（z、r、h）. （行主序，计算 h @ R）
+                                   const int32_t *bx,  // [H*3], 输入偏置（bias for W），对应 z、r、h 门
+                                   const int32_t *br,  // [H*3], 隐状态偏置（bias for R），对应 z、r、h 门
+                                   const QuantT *x,   // [N,C], 输入序列，batch_size = N，特征维度 = C
+                                   QuantT *h,         // [N,H], 输出隐藏状态，每个时间步保存的 GRU 隐状态
+                                   QuantT *v,         // [N,H*4], 临时存储向量/中间计算值，通常保存 z, r, h_tilde, h_new 的中间值，用于后向传播或 zoneout
+                                   int32_t *tmp_Wx,    // [N,H*3], W * x 的临时结果
+                                   int32_t *tmp_Rh,    // [N,H*3], R * h 的临时结果
+                                   const float zoneout_prob, // Zoneout 概率，用于随机丢弃部分隐藏状态
+                                   const QuantT *zoneout_mask // Zoneout mask，0/1 矩阵，控制哪些隐藏单元被保留,  // Zoneout mask [N,H]
 ) {
     static const int32_t alpha = static_cast<int32_t>(1);
     static const int32_t beta = static_cast<int32_t>(0);
@@ -730,9 +730,9 @@ void ForwardPassQuant<QuantT>::Run(const int steps, // 时间步数, 序列长�
 
     cublasSetStream(blas_handle, stream2);
     blas<QuantT>::gemm(blas_handle,  // 提前使用cuBlas计算W * x
-                  CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
-                  input_size, &alpha, W, hidden_size * 3, x, input_size, &beta,
-                  tmp_Wx, hidden_size * 3);
+                       CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
+                       input_size, &alpha, W, hidden_size * 3, x, input_size, &beta,
+                       tmp_Wx, hidden_size * 3);
 
     // 计算W_sum_mul_zp用于补偿x_zp
     dev::vector<int32_t> W_sum_mul_x_zp(hidden_size * 3);
