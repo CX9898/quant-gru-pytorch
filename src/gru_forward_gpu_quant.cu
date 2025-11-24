@@ -50,40 +50,35 @@ __device__ __forceinline__ int8_t computeZ( // 更新门z
 
     const int8_t z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);
 
-//    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
-//    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
-//    const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh] 的展开索引
-//    if (weight_idx == 0) {
-//        float Wx_fp = dequant_from_exp2(Wx,rescale_params.test.exp2_inv_Wx_,rescale_params.zp_Wx_);
-//        float Rh_fp = dequant_from_exp2(Rh, rescale_params.test.exp2_inv_Rh_, rescale_params.zp_Rh_);
-//        float bx_fp = dequant_from_exp2(bx_val, rescale_params.test.exp2_inv_bx_dev_[channel_idx], 0);
-//        float br_fp = dequant_from_exp2(br_val, rescale_params.test.exp2_inv_br_dev_[channel_idx], 0);
-//        float z_pre_fp = dequant_from_exp2(z_pre_i8, rescale_params.test.exp2_inv_z_pre_, rescale_params.zp_z_pre_);
-//        float Wx_shifted_fp = dequant_from_exp2(Wx_shifted, rescale_params.exp2_inv_Wx_div_z_pre_, rescale_params.zp_Wx_);
-//        float Rh_shifted_fp = dequant_from_exp2(Rh_shifted, rescale_params.exp2_inv_Rh_div_z_pre_, rescale_params.zp_Rh_);
-//        float bx_shifted_fp = dequant_from_exp2(bx_shifted, rescale_params.n_bx_div_z_[channel_idx], 0);
-//        float br_shifted_fp = dequant_from_exp2(br_shifted, rescale_params.n_br_div_z_[channel_idx], 0);
-//        float z_fp = dequant_from_exp2(z,rescale_params.test.exp2_inv_z_out_,rescale_params.test.zp_z_out_);
-//        printf("quant haste: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, Wx_shifted_fp=%f, Rh_shifted_fp=%f, bx_shifted_fp=%f, br_shifted_fp=%f\n", Wx_fp, Rh_fp, bx_fp, br_fp, z_pre_fp, Wx_shifted_fp, Rh_shifted_fp, bx_shifted_fp, br_shifted_fp);
-//        printf("computeZ: "
-//               "Wx_val = %d, "
-//               "W_sum_mul_x_zp = %d, "
-//               "Wx = %d, "
-//               "Rh_val = %d, "
-//               "R_sum_mul_h_zp = %d, "
-//               "Rh = %d, "
-//               "bx_val = %d, "
-//               "br_val = %d, "
-//               "Wx_shifted=%d, Rh_shifted=%d, bx_shifted=%d, br_shifted=%d, "
-//               "z_pre_i32 = %d, "
-//               "z_pre_i8 = %d, "
-//               "z = %d, "
-//               "z_pre_fp = %f, "
-//               "z_fp = %f"
-//               "\n",
-//               Wx_val, W_sum_mul_x_zp, Wx, Rh_val, R_sum_mul_h_zp, Rh, bx_val, br_val,
-//               Wx_shifted, Rh_shifted, bx_shifted, br_shifted, z_pre_i32, z_pre_i8, z, z_pre_fp,z_fp);
-//    }
+    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
+    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
+    const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh] 的展开索引
+    if (weight_idx == 1) {
+        float Wx_fp = dequant_from_exp2(Wx, rescale_params.test.exp2_inv_Wx_, rescale_params.zp_Wx_);
+        float Rh_fp = dequant_from_exp2(Rh, rescale_params.test.exp2_inv_Rh_, rescale_params.zp_Rh_);
+        float bx_fp = dequant_from_exp2(bx_val, rescale_params.test.exp2_inv_bx_dev_[channel_idx], 0);
+        float br_fp = dequant_from_exp2(br_val, rescale_params.test.exp2_inv_br_dev_[channel_idx], 0);
+        float z_pre_fp = dequant_from_exp2(z_pre_i8, rescale_params.test.exp2_inv_z_pre_, rescale_params.zp_z_pre_);
+        float Wx_shifted_fp = dequant_from_exp2(Wx_shifted,
+                                                rescale_params.exp2_inv_Wx_div_z_pre_,
+                                                rescale_params.zp_Wx_);
+        float Rh_shifted_fp = dequant_from_exp2(Rh_shifted,
+                                                rescale_params.exp2_inv_Rh_div_z_pre_,
+                                                rescale_params.zp_Rh_);
+        float bx_shifted_fp = dequant_from_exp2(bx_shifted, rescale_params.n_bx_div_z_[channel_idx], 0);
+        float br_shifted_fp = dequant_from_exp2(br_shifted, rescale_params.n_br_div_z_[channel_idx], 0);
+        float z_fp = dequant_from_exp2(z, rescale_params.test.exp2_inv_z_out_, rescale_params.test.zp_z_out_);
+        printf("quant haste computeZ: "
+               "Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z_out_fp=%f"
+               "Wx_q = %d, "
+               "Rh_q = %d, "
+               "z_pre_i32_q = %d, "
+               "z_pre_i8_q = %d, "
+               "z_out_q = %d"
+               "\n",
+               Wx_fp, Rh_fp, bx_fp, br_fp, z_pre_fp, z_fp,
+               Wx, Rh, z_pre_i32, z_pre_i8, z);
+    }
 
 
     return z;
@@ -318,42 +313,40 @@ __device__ __forceinline__ int8_t computeH( // 最终h
 
     const int8_t h = dev::clamp<int8_t>(h_i32);
 
-//    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
-//    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
-//    const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh] 的展开索引
-//    if (weight_idx == 0) {
-//        float z_fp = dequant_from_exp2(z, rescale_params.test.exp2_inv_z_out_, rescale_params.zp_z_out_);
-//        float g_fp = dequant_from_exp2(g, rescale_params.test.exp2_inv_g_out_, rescale_params.zp_g_out_);
-//        float h_old_fp = dequant_from_exp2(h_old, rescale_params.test.exp2_inv_h_, rescale_params.zp_h_);
-//        float old_contrib_fp = dequant_from_exp2(old_contrib, rescale_params.test.exp2_inv_old_contrib_,
-//                                                 rescale_params.test.zp_old_contrib_);
-//        float one_minus_update_fp = dequant_from_exp2(one_minus_update,
-//                                                      rescale_params.test.exp2_inv_one_minus_update_,
-//                                                      rescale_params.zp_one_minus_update_);
-//        float new_contrib_fp = dequant_from_exp2(new_contrib,
-//                                                 rescale_params.test.exp2_inv_new_contrib_,
-//                                                 rescale_params.test.zp_new_contrib_);
-//        float h_fp = dequant_from_exp2(h, rescale_params.test.exp2_inv_h_, rescale_params.test.zp_h_);
-//        printf("quant haste computeH: "
-//               "z = %d, "
-//               "g = %d, "
-//               "h_old = %d, "
-//               "old_contrib = %d, "
-//               "one_minus_update = %d, "
-//               "new_contrib = %d, "
-//               "h = %d, "
-//               "",
-//               z, g, h_old, old_contrib, one_minus_update, new_contrib, h);
-//        printf(
-//            " z_fp=%f, g_fp=%f, h_old_fp=%f, old_contrib_fp=%f, one_minus_update_fp=%f, new_contrib_fp=%f, h_fp=%f\n",
-//            z_fp,
-//            g_fp,
-//            h_old_fp,
-//            old_contrib_fp,
-//            one_minus_update_fp,
-//            new_contrib_fp,
-//            h_fp);
-//    }
+    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
+    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
+    const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh] 的展开索引
+    if (weight_idx == 1) {
+        float z_fp = dequant_from_exp2(z, rescale_params.test.exp2_inv_z_out_, rescale_params.zp_z_out_);
+        float g_fp = dequant_from_exp2(g, rescale_params.test.exp2_inv_g_out_, rescale_params.zp_g_out_);
+        float h_old_fp = dequant_from_exp2(h_old, rescale_params.test.exp2_inv_h_, rescale_params.zp_h_);
+        float old_contrib_fp = dequant_from_exp2(old_contrib, rescale_params.test.exp2_inv_old_contrib_,
+                                                 rescale_params.test.zp_old_contrib_);
+        float one_minus_update_fp = dequant_from_exp2(one_minus_update,
+                                                      rescale_params.test.exp2_inv_one_minus_update_,
+                                                      rescale_params.zp_one_minus_update_);
+        float new_contrib_fp = dequant_from_exp2(new_contrib,
+                                                 rescale_params.test.exp2_inv_new_contrib_,
+                                                 rescale_params.test.zp_new_contrib_);
+        float h_fp = dequant_from_exp2(h, rescale_params.test.exp2_inv_h_, rescale_params.test.zp_h_);
+        printf("quant haste computeH: "
+               "z_q = %d, "
+               "g_q = %d, "
+               "h_old_q = %d, "
+               "old_contrib_q = %d, "
+               "one_minus_update_q = %d, "
+               "new_contrib_q = %d, "
+               "h_q = %d, "
+               " z_fp=%f, g_fp=%f, h_old_fp=%f, old_contrib_fp=%f, one_minus_update_fp=%f, new_contrib_fp=%f, h_fp=%f\n",
+               z, g, h_old, old_contrib, one_minus_update, new_contrib, h,
+               z_fp,
+               g_fp,
+               h_old_fp,
+               old_contrib_fp,
+               one_minus_update_fp,
+               new_contrib_fp,
+               h_fp);
+    }
 
     return h;
 }
@@ -825,7 +818,7 @@ void ForwardPassQuant<T>::Run(const int steps, // 时间步数, 序列长度T
         IterateInternal(R, bx, br, h + i * NH, h + (i + 1) * NH, v + i * NH * 4,
                         tmp_Wx + i * NH * 3, tmp_Rh, W_sum_mul_x_zp.data(), R_sum_mul_h_zp.data(), zoneout_prob,
                         zoneout_mask ? zoneout_mask + i * NH : nullptr);
-//        break;
+//        if (i >= 2) { break; }
     }
 
     cublasSetStream(blas_handle, save_stream);
