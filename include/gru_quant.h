@@ -8,7 +8,7 @@
 
 namespace gru {
 
-template<typename T>
+template<typename QuantT>
 class ForwardPassQuant {
  public:
   // training: `true` if the caller intends to perform a backward pass to compute gradients.
@@ -58,47 +58,47 @@ class ForwardPassQuant {
   //     following a Bernoulli(1-zoneout_prob) distribution. A different mask is typically
   //     used for each iteration.
   void Iterate(
-      const T *W,
-      const T *R,
+      const QuantT *W,
+      const QuantT *R,
       const int32_t *bx,
       const int32_t *br,
-      const T *x,
-      const T *h,
-      T *h_out,
-      T *v,
+      const QuantT *x,
+      const QuantT *h,
+      QuantT *h_out,
+      QuantT *v,
       int32_t *tmp_Wx,
       int32_t *tmp_Rh,
       const float zoneout_prob,
-      const T *zoneout_mask);
+      const QuantT *zoneout_mask);
 
   void Run(
       const int steps,
-      const T *W,
-      const T *R,
+      const QuantT *W,
+      const QuantT *R,
       const int32_t *bx,
       const int32_t *br,
-      const T *x,
-      T *h,
-      T *v,
+      const QuantT *x,
+      QuantT *h,
+      QuantT *v,
       int32_t *tmp_Wx,
       int32_t *tmp_Rh,
       const float zoneout_prob,
-      const T *zoneout_mask);
+      const QuantT *zoneout_mask);
 
  private:
   void IterateInternal(
-      const T *R,
+      const QuantT *R,
       const int32_t *bx,
       const int32_t *br,
-      const T *h,
-      T *h_out,
-      T *v,
+      const QuantT *h,
+      QuantT *h_out,
+      QuantT *v,
       const int32_t *tmp_Wx,
       int32_t *tmp_Rh,
       const int* W_sum_mul_x_zp, // hidden_size * 3
       const int* R_sum_mul_h_zp, // hidden_size * 3
       const float zoneout_prob,
-      const T *zoneout_mask);
+      const QuantT *zoneout_mask);
 
   struct private_data;
   private_data *data_;

@@ -72,10 +72,9 @@ void quantification(const T *data,
                     size_t size,
                     int32_t exp2_inv,
                     int32_t zp) {
-//#pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < size; ++i) {
         quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
-//        printf("quant_data[%d] = %d\n",i,quant_data[i]);
     }
 }
 
@@ -523,7 +522,7 @@ int main() {
     x.setRandom();
     x = x * 2.0f - 1.0f;
     x = x * 0.8f;
-    for(int i = 0; i < x.size(); ++i){
+    for (int i = 0; i < x.size(); ++i) {
         x.data()[i] += 0.1f;
     }
 
@@ -573,10 +572,6 @@ int main() {
                         dh_new_quant,
                         quant_parms);
 
-//    checkQuantParameters(quant_parms, bx, br, W, R, x, dh, bx_quant, br_quant, W_quant, R_quant, x_quant, dh_new_quant);
-
-//    unit_testing::quantizationTest();
-//    unit_testing::testCalibrateQuantParams();
     Quantized_unit_testing<int8_t> quantized_unit_testing(W.data(),
                                                           R.data(),
                                                           bx.data(),
@@ -597,7 +592,6 @@ int main() {
                                                           quant_parms);
     quantized_unit_testing.printGRUQuantitativeParameters();
 //    quantized_unit_testing.checkQuantParameters();
-
 
     Tensor3i8 h_quant_inference_tmp(hidden_size, batch_size, (time_steps + 1));
     h_quant_inference_tmp.setZero();
