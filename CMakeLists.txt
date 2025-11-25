@@ -10,7 +10,11 @@ enable_language(CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 find_package(Torch REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Development)
+set(Python3_ROOT_DIR "/home/zcx/miniconda3/envs/torchcuda")
+set(Python3_EXECUTABLE "/home/zcx/miniconda3/envs/torchcuda/bin/python")
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
+find_package(pybind11 REQUIRED)
 
 message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
@@ -34,6 +38,8 @@ message(STATUS "Src files: ${SRC_FILES}")
 
 # Add generate target
 add_executable(${PROJECT_NAME})
+
+#pybind11_add_module(gru_calibration_module MODULE bindings.cpp gru_calibration.cpp)
 
 ## Print kernel function register information
 #set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --resource-usage")

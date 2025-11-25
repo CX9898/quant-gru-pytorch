@@ -14,6 +14,7 @@
 #include "gru.h"
 #include "gru_quant.h"
 #include "quantized_unit_testing.h"
+#include "gru_calibration.hpp"
 
 using Tensor1f = Eigen::Tensor<float, 1>;
 using Tensor2f = Eigen::Tensor<float, 2>;
@@ -430,57 +431,6 @@ void checkHQuantizationWithCosine(
     }
 }
 
-void calibrateGruScales_int8(int time_steps, int batch_size, int input_size, int hidden_size,
-                             const float *W,
-                             const float *R,
-                             const float *bx,
-                             const float *br,
-                             const float *x,
-                             GRUQuantitativeParameters &quant_gru_scales
-) {
-
-    // Copy weights over to GPU.
-    dev::vector<float> W_dev(W, hidden_size * 3 * input_size);
-    dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
-    dev::vector<float> bx_dev(bx, hidden_size * 3);
-    dev::vector<float> br_dev(br, hidden_size * 3);
-    dev::vector<float> x_dev(x, input_size * batch_size * time_steps);
-//    dev::vector<float> dh_new_dev(dh_new);
-
-    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
-
-    h_dev.zero();
-
-    gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-        true,  // training
-        batch_size,
-        input_size,
-        hidden_size,
-        g_blas_handle);
-
-    forward.setCalibrationMode(true, false);
-
-    forward.Run(
-        time_steps,
-        W_dev.data(),
-        R_dev.data(),
-        bx_dev.data(),
-        br_dev.data(),
-        x_dev.data(),
-        h_dev.data(),
-        v_dev.data(),
-        tmp_Wx_dev.data(),
-        tmp_Rh_dev.data(),
-        0.0f,
-        nullptr);
-
-    quant_gru_scales = forward.getGRUQuantitativeParameters();
-
-}
-
 
 int main() {
     srand(time(0));
@@ -537,16 +487,17 @@ int main() {
 
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
-    calibrateGruScales_int8(time_steps,
-                            batch_size,
-                            input_size,
-                            hidden_size,
-                            W.data(),
-                            R.data(),
-                            bx.data(),
-                            br.data(),
-                            x.data(),
-                            quant_parms);
+    calibrateGruScales(0,
+                       time_steps,
+                       batch_size,
+                       input_size,
+                       hidden_size,
+                       W.data(),
+                       R.data(),
+                       bx.data(),
+                       br.data(),
+                       x.data(),
+                       quant_parms);
 
     // Quant
     Tensor2i8 W_quant(HIDDEN_DIMS * 3, INPUT_DIMS);  // 对应W_z/W_r/W_h的合并

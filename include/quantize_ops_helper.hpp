@@ -37,8 +37,6 @@ struct GRUQuantitativeParameters {
 
   std::vector<int32_t> exp2_inv_bx_;
   std::vector<int32_t> exp2_inv_br_;
-  dev::vector<int32_t> exp2_inv_bx_dev_;
-  dev::vector<int32_t> exp2_inv_br_dev_;
 
   int32_t exp2_inv_z_pre_;
   int32_t zp_z_pre_;
@@ -162,6 +160,17 @@ struct QuantGRUReScale {
 //  std::vector<float> r_out; // size = hidden
 //  std::vector<float> g_out; // size = hidden
 //};
+
+void calibrateGruScales(
+    bool use_int16,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W,
+    const float *R,
+    const float *bx,
+    const float *br,
+    const float *x,
+    GRUQuantitativeParameters &quant_gru_scales
+);
 
 inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
     int32_t v = q - zp;
