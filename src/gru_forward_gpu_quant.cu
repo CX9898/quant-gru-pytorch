@@ -30,6 +30,7 @@ __device__ __forceinline__ QuantT computeZ( // 更新门z
 ) {
     // z = sigmoid(Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx]);
 
+	// TODO: 优化计算
     const int32_t Wx =
         rshift_round(Wx_val - W_sum_mul_x_zp, rescale_params.n_W_mul_x_div_Wx_[channel_idx]) + rescale_params.zp_Wx_;
     const int32_t Rh =
@@ -189,12 +190,12 @@ __device__ __forceinline__ QuantT computeG( // New Gate
         rshift_round(Wx_val - W_sum_mul_x_zp, rescale_params.n_W_mul_x_div_Wx_[channel_idx]) + rescale_params.zp_Wx_;
     const int32_t Rh =
         rshift_round(Rh_val - R_sum_mul_h_zp, rescale_params.n_R_mul_h_div_Rh_[channel_idx]) + rescale_params.zp_Rh_;
-    const int32_t Rh_add_br = rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
+    const int32_t Rh_add_br_g = rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
                               rshift_round(br_val, rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
                               rescale_params.zp_Rh_add_br_;
 
     const int32_t rRh = rshift_round(
-        (r - rescale_params.zp_r_out_) * (Rh_add_br - rescale_params.zp_Rh_add_br_),
+        (r - rescale_params.zp_r_out_) * (Rh_add_br_g - rescale_params.zp_Rh_add_br_),
         rescale_params.n_r_mul_Rh_add_br_div_rRh_) +
                         rescale_params.zp_rRh_;
 
@@ -396,6 +397,8 @@ __global__ void PointwiseOperationsQuant(
                                       re_scale_param); // New Gate
     // 候选状态~ht
 
+
+
     /* 训练模式 */
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
@@ -403,7 +406,10 @@ __global__ void PointwiseOperationsQuant(
         v[base_v_idx + 0 * hidden_dim] = z;
         v[base_v_idx + 1 * hidden_dim] = r;
         v[base_v_idx + 2 * hidden_dim] = g;
-        v[base_v_idx + 3 * hidden_dim] = Rh[g_idx] + br[b_g_idx];
+    const int8_t Rh_add_br_g = rshift_round(Rh[g_idx] - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
+                              rshift_round(br[b_g_idx], rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
+                              rescale_params.zp_Rh_add_br_;
+        v[base_v_idx + 3 * hidden_dim] = Rh_add_br_g;
     }
 
     QuantT cur_h_value = computeH(z, g, h[output_idx], re_scale_param);

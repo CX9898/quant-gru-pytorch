@@ -6,10 +6,10 @@
 #include "gru.h"
 #include "inline_ops.h"
 
-namespace {
+namespace op {
 
-template<typename T, bool ApplyZoneout>
-__global__
+template<typename T, bool ApplyZoneout, bool Calibration = false>
+__device__
 void PointwiseOperations(const int batch_dim,
                          const int hidden_dim,
                          const T* h,
@@ -17,10 +17,13 @@ void PointwiseOperations(const int batch_dim,
                          const T* dh_new,
                          T* dbx_out,
                          T* dbr_out,
-                         T* dh_inout,
+                         T* dh_inout, // 未初始化
                          T* dp_out,
                          T* dq_out,
-                         const T* zoneout_mask) {  // Zoneout mask (only used if ApplyZoneout==true)
+                         const T* zoneout_mask,  // Zoneout mask (only used if ApplyZoneout==true)
+						 T* dh_totals,
+						T* 	dgs,
+) {
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
     const int col = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -29,7 +32,8 @@ void PointwiseOperations(const int batch_dim,
 
     const int base_idx = col * hidden_dim + row;
 
-    T dh_total = dh_new[base_idx] + dh_inout[base_idx];
+    T dh_total = dh_new[base_idx] + dh_inout[base_idx]; // dh_inout 未初始化
+	dh_totals[base_idx] = dh_total;
 
     const int stride4_base_idx = col * (hidden_dim * 4) + row;
     const int z_idx = stride4_base_idx + 0 * hidden_dim;
@@ -52,7 +56,9 @@ void PointwiseOperations(const int batch_dim,
     }
 
     const T dg = (static_cast<T>(1.0) - z) * dh_total;
+	dgs[base_idx] = dg;
     const T dz = (h[base_idx] - g) * dh_total;
+	dzs[base_idx] = dz;
     const T dp_g = d_tanh(g) * dg;
     const T dq_g = dp_g * r;
     const T dr = dp_g * q_g;
@@ -98,7 +104,34 @@ void PointwiseOperations(const int batch_dim,
 }
 #endif
 
-}  // anonymous namespace
+}  // op namespace
+
+template<typename T, bool ApplyZoneout, bool Calibration = false>
+__global__
+void PointwiseOperations(const int batch_dim,
+                         const int hidden_dim,
+                         const T* h,
+                         const T* v,
+                         const T* dh_new,
+                         T* dbx_out,
+                         T* dbr_out,
+                         T* dh_inout,
+                         T* dp_out,
+                         T* dq_out,
+                         const T* zoneout_mask)
+{
+	PointwiseOperations<T, ApplyZoneout, Calibration>()(batch_dim,
+	hidden_dim,
+h,
+v,
+dh_new,
+dbx_out,
+dbr_out,
+dh_inout,
+dp_out,
+dq_out,
+zoneout_mask);
+}
 
 namespace gru {
 
@@ -240,7 +273,7 @@ void BackwardPass<T>::IterateInternal(
     const T* dh_new,  // [N,H]
     T* dbx,           // [H*3]
     T* dbr,           // [H*3]
-    T* dh,            // [N,H]
+    T* dh,            // [N,H], 未初始化
     T* dp,            // [N,H*3]
     T* dq,            // [N,H*3]
     const T* zoneout_mask) {  // [N,H]
@@ -317,7 +350,7 @@ void BackwardPass<T>::Run(
     T* dR,
     T* dbx,
     T* dbr,
-    T* dh,
+    T* dh, // 未初始化
     T* dp,
     T* dq,
     const T* zoneout_mask) {
@@ -391,7 +424,7 @@ void BackwardPass<T>::Run(
     cublasSetStream(blas_handle, save_stream);
 }
 
-template struct BackwardPass<half>;
+//template struct BackwardPass<half>;
 template struct BackwardPass<float>;
 template struct BackwardPass<double>;
 
