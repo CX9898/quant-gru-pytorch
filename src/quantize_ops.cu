@@ -1,13 +1,14 @@
-#include <thrust/extrema.h>
 #include <thrust/copy.h>
-#include <thrust/reduce.h>
 #include <thrust/count.h>
 #include <thrust/device_ptr.h>
-#include <limits>
-#include <algorithm>
+#include <thrust/extrema.h>
+#include <thrust/reduce.h>
 
-#include "quantize_ops_helper.hpp"
+#include <algorithm>
+#include <limits>
+
 #include "quantize_ops.cuh"
+#include "quantize_ops_helper.hpp"
 
 __constant__ int8_t d_sigmoid_int8_z_lut[256];
 __constant__ int8_t d_sigmoid_int8_r_lut[256];
@@ -25,17 +26,14 @@ __constant__ int8_t d_tanh_int8_g_lut[256];
  * @param scale      量化 scale
  * @param zero_point 量化 zero_point（非对称量化有效）
  */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
-void quantizeFloatToInt(const float *src_dev,
-                        QuantT *dst_dev,
-                        uint32_t size,
-                        float scale,
-                        int32_t zero_point) {
+template <typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
+void quantizeFloatToInt(const float *src_dev, QuantT *dst_dev, uint32_t size,
+                        float scale, int32_t zero_point) {
     uint32_t block = 512;
     uint32_t grid = (size + block - 1) / block;
 
     dev::quantizeFloatToInt<QuantT, use_inv_scale, symmetric, clamp>
-    <<<grid, block>>>(src_dev, dst_dev, size, scale, zero_point);
+        <<<grid, block>>>(src_dev, dst_dev, size, scale, zero_point);
 }
 
 template void quantizeFloatToInt<int8_t, true, true, true>(const float *src_dev,
@@ -44,24 +42,17 @@ template void quantizeFloatToInt<int8_t, true, true, true>(const float *src_dev,
                                                            float scale,
                                                            int32_t zero_point);
 
-template void quantizeFloatToInt<int8_t, true, true, false>(const float *src_dev,
-                                                            int8_t *dst_dev,
-                                                            uint32_t size,
-                                                            float scale,
-                                                            int32_t zero_point);
+template void quantizeFloatToInt<int8_t, true, true, false>(
+    const float *src_dev, int8_t *dst_dev, uint32_t size, float scale,
+    int32_t zero_point);
 
-template void quantizeFloatToInt<int32_t, true, true, false>(const float *src_dev,
-                                                             int32_t *dst_dev,
-                                                             uint32_t size,
-                                                             float scale,
-                                                             int32_t zero_point);
+template void quantizeFloatToInt<int32_t, true, true, false>(
+    const float *src_dev, int32_t *dst_dev, uint32_t size, float scale,
+    int32_t zero_point);
 
-template void quantizeFloatToInt<int32_t, false, false, true>(const float *src_dev,
-                                                              int32_t *dst_dev,
-                                                              uint32_t size,
-                                                              float scale,
-                                                              int32_t zero_point);
-
+template void quantizeFloatToInt<int32_t, false, false, true>(
+    const float *src_dev, int32_t *dst_dev, uint32_t size, float scale,
+    int32_t zero_point);
 
 /**
  * @brief 在 GPU 上将 float 数据量化为 int8/int16（支持每个时间步独立 scale）
@@ -72,37 +63,33 @@ template void quantizeFloatToInt<int32_t, false, false, true>(const float *src_d
  * @param src_dev       输入 float 指针（GPU 内存）
  * @param dst_dev       输出 int8/int16 指针（GPU 内存）
  * @param size          总元素数量
- * @param scale_per_t   每个时间步的量化 scale 数组（GPU 内存，长度为 time_steps）
+ * @param scale_per_t   每个时间步的量化 scale 数组（GPU 内存，长度为
+ * time_steps）
  * @param zero_point_per_t    每个时间步的量化 zero_point（非对称量化有效）
  * @param time_step_size 每个时间步的元素数（例如 batch_size * input_dim）
  */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
-void quantizeFloatToIntPerStep(const float *src_dev,
-                               QuantT *dst_dev,
-                               size_t size,
-                               const float *scale_per_t,
+template <typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
+void quantizeFloatToIntPerStep(const float *src_dev, QuantT *dst_dev,
+                               size_t size, const float *scale_per_t,
                                const int32_t *zero_point_per_t,
                                int time_step_size) {
     uint32_t block = 512;
     uint32_t grid = (size + block - 1) / block;
 
     dev::quantizeFloatToIntPerStep<QuantT, use_inv_scale, symmetric, clamp>
-    <<<grid, block>>>(src_dev, dst_dev, size, scale_per_t, zero_point_per_t, time_step_size);
+        <<<grid, block>>>(src_dev, dst_dev, size, scale_per_t, zero_point_per_t,
+                          time_step_size);
 }
 
-template void quantizeFloatToIntPerStep<int8_t, false, false, true>(const float *src_dev,
-                                                                    int8_t *dst_dev,
-                                                                    size_t size,
-                                                                    const float *scale_per_t,
-                                                                    const int32_t *zero_point_per_t,
-                                                                    int time_step_size);
+template void quantizeFloatToIntPerStep<int8_t, false, false, true>(
+    const float *src_dev, int8_t *dst_dev, size_t size,
+    const float *scale_per_t, const int32_t *zero_point_per_t,
+    int time_step_size);
 
-template void quantizeFloatToIntPerStep<int16_t, false, false, true>(const float *src_dev,
-                                                                     int16_t *dst_dev,
-                                                                     size_t size,
-                                                                     const float *scale_per_t,
-                                                                     const int32_t *zero_point_per_t,
-                                                                     int time_step_size);
+template void quantizeFloatToIntPerStep<int16_t, false, false, true>(
+    const float *src_dev, int16_t *dst_dev, size_t size,
+    const float *scale_per_t, const int32_t *zero_point_per_t,
+    int time_step_size);
 
 std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int zp_z_pre,
                                               float scale_z, int zp_z) {
@@ -121,7 +108,6 @@ std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int zp_z_pre,
         lut[i] = static_cast<int8_t>(y_i8);
     }
     return lut;
-
 }
 
 std::vector<int8_t> generate_tanh_int8_lut(float scale_pre, int zp_pre,
@@ -141,41 +127,52 @@ std::vector<int8_t> generate_tanh_int8_lut(float scale_pre, int zp_pre,
         lut[i] = static_cast<int8_t>(y_i8);
     }
     return lut;
-
 }
 
-void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out, int32_t zp_z_out,
-                       float scale_r_pre, int32_t zp_r_pre, float scale_r_out, int32_t zp_r_out,
-                       float scale_g_pre, int32_t zp_g_pre, float scale_g_out, int32_t zp_g_out) {
-    std::vector<int8_t> sigmoid_z_lut = generate_sigmoid_int8_lut(scale_z_pre, zp_z_pre, scale_z_out, zp_z_out);
-//    printf("scale_z_pre = %.15f, zp_z_pre = %d, scale_z_out = %.15f, zp_z_out = %d\n",
-//           scale_z_pre,
-//           zp_z_pre,
-//           scale_z_out,
-//           zp_z_out);
-    std::vector<int8_t> sigmoid_r_lut = generate_sigmoid_int8_lut(scale_r_pre, zp_r_pre, scale_r_out, zp_r_out);
-//    printf("scale_r_pre = %.15f, zp_r_pre = %d, scale_r_out = %.15f, zp_r_out = %d\n",
-//           scale_r_pre,
-//           zp_r_pre,
-//           scale_r_out,
-//           zp_r_out);
-    std::vector<int8_t> tanh_int8_lut = generate_tanh_int8_lut(scale_g_pre, zp_g_pre, scale_g_out, zp_g_out);
-//    printf("scale_g_pre = %.15f, zp_g_pre = %d, scale_g_out = %.15f, zp_g_out = %d\n",
-//           scale_g_pre,
-//           zp_g_pre,
-//           scale_g_out,
-//           zp_g_out);
+void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out,
+                       int32_t zp_z_out, float scale_r_pre, int32_t zp_r_pre,
+                       float scale_r_out, int32_t zp_r_out, float scale_g_pre,
+                       int32_t zp_g_pre, float scale_g_out, int32_t zp_g_out) {
+    std::vector<int8_t> sigmoid_z_lut =
+        generate_sigmoid_int8_lut(scale_z_pre, zp_z_pre, scale_z_out, zp_z_out);
+    //    printf("scale_z_pre = %.15f, zp_z_pre = %d, scale_z_out = %.15f,
+    //    zp_z_out = %d\n",
+    //           scale_z_pre,
+    //           zp_z_pre,
+    //           scale_z_out,
+    //           zp_z_out);
+    std::vector<int8_t> sigmoid_r_lut =
+        generate_sigmoid_int8_lut(scale_r_pre, zp_r_pre, scale_r_out, zp_r_out);
+    //    printf("scale_r_pre = %.15f, zp_r_pre = %d, scale_r_out = %.15f,
+    //    zp_r_out = %d\n",
+    //           scale_r_pre,
+    //           zp_r_pre,
+    //           scale_r_out,
+    //           zp_r_out);
+    std::vector<int8_t> tanh_int8_lut =
+        generate_tanh_int8_lut(scale_g_pre, zp_g_pre, scale_g_out, zp_g_out);
+    //    printf("scale_g_pre = %.15f, zp_g_pre = %d, scale_g_out = %.15f,
+    //    zp_g_out = %d\n",
+    //           scale_g_pre,
+    //           zp_g_pre,
+    //           scale_g_out,
+    //           zp_g_out);
 
-    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
-    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
-    cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(), sizeof(int8_t) * 256); // 从host端拷贝到device端中编译期固定的地址
+    cudaMemcpyToSymbol(
+        d_sigmoid_int8_z_lut, sigmoid_z_lut.data(),
+        sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
+    cudaMemcpyToSymbol(
+        d_sigmoid_int8_r_lut, sigmoid_r_lut.data(),
+        sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
+    cudaMemcpyToSymbol(
+        d_tanh_int8_g_lut, tanh_int8_lut.data(),
+        sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
 }
 
-std::vector<int8_t> generate_sigmoid_int8_lut_exp2(
-    int32_t exp2_inv_z_pre,
-    int zp_z_pre,
-    int32_t exp2_inv_z,
-    int zp_z) {
+std::vector<int8_t> generate_sigmoid_int8_lut_exp2(int32_t exp2_inv_z_pre,
+                                                   int zp_z_pre,
+                                                   int32_t exp2_inv_z,
+                                                   int zp_z) {
     std::vector<int8_t> lut(256);
 
     for (int i = 0; i < 256; i++) {
@@ -196,11 +193,10 @@ std::vector<int8_t> generate_sigmoid_int8_lut_exp2(
     return lut;
 }
 
-std::vector<int8_t> generate_tanh_int8_lut_exp2(
-    int32_t exp2_inv_pre,
-    int zp_pre,
-    int32_t exp2_inv_out,
-    int zp_out) {
+std::vector<int8_t> generate_tanh_int8_lut_exp2(int32_t exp2_inv_pre,
+                                                int zp_pre,
+                                                int32_t exp2_inv_out,
+                                                int zp_out) {
     std::vector<int8_t> lut(256);
 
     for (int i = 0; i < 256; i++) {
@@ -221,65 +217,64 @@ std::vector<int8_t> generate_tanh_int8_lut_exp2(
     return lut;
 }
 
-void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
-                                     int32_t zp_z_pre,
-                                     int32_t exp2_inv_z_out,
-                                     int32_t zp_z_out,
-                                     int32_t exp2_inv_r_pre,
-                                     int32_t zp_r_pre,
-                                     int32_t exp2_inv_r_out,
-                                     int32_t zp_r_out,
-                                     int32_t exp2_inv_g_pre,
-                                     int32_t zp_g_pre,
-                                     int32_t exp2_inv_g_out,
-                                     int32_t zp_g_out) {
-    std::vector<int8_t> sigmoid_z_lut = generate_sigmoid_int8_lut_exp2(exp2_inv_z_pre,
-                                                                       zp_z_pre,
-                                                                       exp2_inv_z_out,
-                                                                       zp_z_out);
-    std::vector<int8_t> sigmoid_r_lut = generate_sigmoid_int8_lut_exp2(exp2_inv_r_pre,
-                                                                       zp_r_pre,
-                                                                       exp2_inv_r_out,
-                                                                       zp_r_out);
-    std::vector<int8_t> tanh_int8_lut = generate_tanh_int8_lut_exp2(exp2_inv_g_pre, zp_g_pre, exp2_inv_g_out, zp_g_out);
+void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,
+                                     int32_t exp2_inv_z_out, int32_t zp_z_out,
+                                     int32_t exp2_inv_r_pre, int32_t zp_r_pre,
+                                     int32_t exp2_inv_r_out, int32_t zp_r_out,
+                                     int32_t exp2_inv_g_pre, int32_t zp_g_pre,
+                                     int32_t exp2_inv_g_out, int32_t zp_g_out) {
+    std::vector<int8_t> sigmoid_z_lut = generate_sigmoid_int8_lut_exp2(
+        exp2_inv_z_pre, zp_z_pre, exp2_inv_z_out, zp_z_out);
+    std::vector<int8_t> sigmoid_r_lut = generate_sigmoid_int8_lut_exp2(
+        exp2_inv_r_pre, zp_r_pre, exp2_inv_r_out, zp_r_out);
+    std::vector<int8_t> tanh_int8_lut = generate_tanh_int8_lut_exp2(
+        exp2_inv_g_pre, zp_g_pre, exp2_inv_g_out, zp_g_out);
 
-    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(int8_t) * 256);
-    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(int8_t) * 256);
-    cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(), sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(),
+                       sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(),
+                       sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(),
+                       sizeof(int8_t) * 256);
 }
 
-
-//template<typename T>
-//void calculateScaleZeroPoint(const T *host_data, size_t size, float &scale, T &zero_point) {
-//    const auto max_it = thrust::max_element(thrust::host, host_data, host_data + size);
-//    const auto min_it = thrust::min_element(thrust::host, host_data, host_data + size);
+// template<typename T>
+// void calculateScaleZeroPoint(const T *host_data, size_t size, float &scale, T
+// &zero_point) {
+//     const auto max_it = thrust::max_element(thrust::host, host_data,
+//     host_data + size); const auto min_it = thrust::min_element(thrust::host,
+//     host_data, host_data + size);
 //
-//    T max_val, min_val;
-//    thrust::copy(max_it, max_it + 1, &max_val);
-//    thrust::copy(min_it, min_it + 1, &min_val);
+//     T max_val, min_val;
+//     thrust::copy(max_it, max_it + 1, &max_val);
+//     thrust::copy(min_it, min_it + 1, &min_val);
 //
-//    constexpr int int_min = std::numeric_limits<T>::min();
-//    constexpr int int_max = std::numeric_limits<T>::max();
+//     constexpr int int_min = std::numeric_limits<T>::min();
+//     constexpr int int_max = std::numeric_limits<T>::max();
 //
-//    scale = static_cast<float>(max_val - min_val) / static_cast<float>(int_max - int_min);
+//     scale = static_cast<float>(max_val - min_val) /
+//     static_cast<float>(int_max - int_min);
 //
-//    // 安全计算zero point
-//    int zp_temp = static_cast<int>(std::round(-static_cast<float>(min_val) / scale)) + int_min;
-//    zero_point = static_cast<T>(std::clamp(zp_temp, static_cast<int>(int_min), static_cast<int>(int_max)));
-//}
+//     // 安全计算zero point
+//     int zp_temp = static_cast<int>(std::round(-static_cast<float>(min_val) /
+//     scale)) + int_min; zero_point = static_cast<T>(std::clamp(zp_temp,
+//     static_cast<int>(int_min), static_cast<int>(int_max)));
+// }
 //
-//template void calculateScaleZeroPoint<int8_t>(const int8_t *dev_data, size_t size, float &scale, int8_t &zero_point);
+// template void calculateScaleZeroPoint<int8_t>(const int8_t *dev_data, size_t
+// size, float &scale, int8_t &zero_point);
 //
-//template void calculateScaleZeroPoint<int16_t>(const int16_t *dev_data, size_t size, float &scale, int16_t &zero_point);
+// template void calculateScaleZeroPoint<int16_t>(const int16_t *dev_data,
+// size_t size, float &scale, int16_t &zero_point);
 
 namespace kernel {
 
-template<typename T>
+template <typename T>
 __global__ void computeWeightSumTiled(
-    const T *__restrict__ W_q, // [out_dim, in_dim] 权重量化矩阵
-    int32_t *__restrict__ weight_sum, // [out_dim] 输出数组
-    int out_dim, // 输出通道数 (M)
-    int in_dim // 输入通道数 (K)
+    const T *__restrict__ W_q,         // [out_dim, in_dim] 权重量化矩阵
+    int32_t *__restrict__ weight_sum,  // [out_dim] 输出数组
+    int out_dim,                       // 输出通道数 (M)
+    int in_dim                         // 输入通道数 (K)
 ) {
     const int row = blockIdx.x;
     if (row >= out_dim) {
@@ -311,14 +306,15 @@ __global__ void computeWeightSumTiled(
     }
 }
 
-template<typename T>
+template <typename T>
 __global__ void computeWeightSumMulZP(
-    const T *__restrict__ W_q,   // [out_dim, in_dim] 权重量化矩阵, 列主序储存
-    int32_t *__restrict__ weight_sum, // [out_dim] 输出数组
+    const T *__restrict__ W_q,  // [out_dim, in_dim] 权重量化矩阵, 列主序储存
+    int32_t *__restrict__ weight_sum,  // [out_dim] 输出数组
     int x_zp,
-    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,                      // 输出通道数 (M)
-    int in_dim                        // 输入通道数 (K)
+    const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
+                                    // per-channel
+    int out_dim,                    // 输出通道数 (M)
+    int in_dim                      // 输入通道数 (K)
 ) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= out_dim) {
@@ -331,19 +327,15 @@ __global__ void computeWeightSumMulZP(
         sum += static_cast<int32_t>(W_q[row + j * out_dim]);
     }
     sum *= x_zp;
-//    sum = rshift_round(sum, n[row]);
+    //    sum = rshift_round(sum, n[row]);
     weight_sum[row] = sum;
 }
 
 __global__ void applyZeroPointCompensation2D(
-    int32_t *__restrict__ Y_int32,
-    const int32_t *__restrict__ weight_sum,
-    const int32_t *__restrict__ x_zp,
-    int out_dim,
-    int batch_size
-) {
-    int m = blockIdx.y * blockDim.y + threadIdx.y; // 输出维度方向
-    int b = blockIdx.x * blockDim.x + threadIdx.x; // batch方向
+    int32_t *__restrict__ Y_int32, const int32_t *__restrict__ weight_sum,
+    const int32_t *__restrict__ x_zp, int out_dim, int batch_size) {
+    int m = blockIdx.y * blockDim.y + threadIdx.y;  // 输出维度方向
+    int b = blockIdx.x * blockDim.x + threadIdx.x;  // batch方向
 
     if (m >= out_dim || b >= batch_size) return;
 
@@ -351,77 +343,80 @@ __global__ void applyZeroPointCompensation2D(
     Y_int32[idx] -= x_zp[b] * weight_sum[m];
 }
 
-} // kernel namespace
+template <typename T, typename QuantT>
+__global__ void quantification(const T *data, QuantT *quant_data, size_t size,
+                               int32_t exp2_inv, int32_t zp) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) {
+        return;
+    }
 
-template<typename T>
+    quant_data[idx] = quantize<QuantT>(data[idx], exp2_inv, zp);
+}
+
+}  // namespace kernel
+
+template <typename T>
 void computeWeightSumMulzp(
-    const T *W_q,// [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,// [out_dim] 输出数组
+    const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
+    int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
-    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,// 输出通道数 (M)
-    int in_dim,// 输入通道数 (K)
-    cudaStream_t stream
-) {
-//    if (in_dim < 4096) {
-//        int threads = 256;
-//        int shared_mem = threads * sizeof(int32_t);
-//        kernel::computeWeightSumTiled<<<out_dim, threads, shared_mem, stream>>>(
-//            W_q, weight_sum, out_dim, in_dim
-//        );
-//    } else {
+    const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
+                                    // per-channel
+    int out_dim,                    // 输出通道数 (M)
+    int in_dim,                     // 输入通道数 (K)
+    cudaStream_t stream) {
+    //    if (in_dim < 4096) {
+    //        int threads = 256;
+    //        int shared_mem = threads * sizeof(int32_t);
+    //        kernel::computeWeightSumTiled<<<out_dim, threads, shared_mem,
+    //        stream>>>(
+    //            W_q, weight_sum, out_dim, in_dim
+    //        );
+    //    } else {
     int threads = 256;
     int blocks = (out_dim + threads - 1) / threads;
-    kernel::computeWeightSumMulZP<<<blocks, threads, 0, stream>>>(W_q, weight_sum, x_zp, n, out_dim, in_dim);
-//    }
+    kernel::computeWeightSumMulZP<<<blocks, threads, 0, stream>>>(
+        W_q, weight_sum, x_zp, n, out_dim, in_dim);
+    //    }
 }
 
 template void computeWeightSumMulzp<int8_t>(
-    const int8_t *W_q,// [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,// [out_dim] 输出数组
+    const int8_t *W_q,    // [out_dim, in_dim] 权重量化矩阵
+    int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
-    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,// 输出通道数 (M)
-    int in_dim,// 输入通道数 (K)
-    cudaStream_t stream
-);
+    const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
+                                    // per-channel
+    int out_dim,                    // 输出通道数 (M)
+    int in_dim,                     // 输入通道数 (K)
+    cudaStream_t stream);
 
 template void computeWeightSumMulzp<int16_t>(
-    const int16_t *W_q,// [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,// [out_dim] 输出数组
+    const int16_t *W_q,   // [out_dim, in_dim] 权重量化矩阵
+    int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
-    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,// 输出通道数 (M)
-    int in_dim,// 输入通道数 (K)
-    cudaStream_t stream
-);
+    const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
+                                    // per-channel
+    int out_dim,                    // 输出通道数 (M)
+    int in_dim,                     // 输入通道数 (K)
+    cudaStream_t stream);
 
-void applyZeroPointCompensation2D(
-    int32_t *Y_int32,
-    const int32_t *weight_sum,
-    const int32_t *x_zp,
-    int out_dim,
-    int batch_size,
-    cudaStream_t stream
-) {
+void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum,
+                                  const int32_t *x_zp, int out_dim,
+                                  int batch_size, cudaStream_t stream) {
     dim3 threads(16, 16);
     dim3 blocks((batch_size + 15) / 16, (out_dim + 15) / 16);
     kernel::applyZeroPointCompensation2D<<<blocks, threads, 0, stream>>>(
-        Y_int32, weight_sum, x_zp, out_dim, batch_size
-    );
+        Y_int32, weight_sum, x_zp, out_dim, batch_size);
 }
 
 /**
  * @brief 从 GPU 上的量化数据计算 scale（使用最大最小值）
  */
-template<typename QuantT>
-void calculateScaleZeroPointFromDevice(
-    const QuantT *h_dev,
-    size_t size,
-    float &scale,
-    int32_t &zero_point,
-    bool symmetric,
-    cudaStream_t stream) {
+template <typename QuantT>
+void calculateScaleZeroPointFromDevice(const QuantT *h_dev, size_t size,
+                                       float &scale, int32_t &zero_point,
+                                       bool symmetric, cudaStream_t stream) {
     if (h_dev == nullptr || size == 0) {
         scale = 1.0f;
         zero_point = 0;
@@ -431,7 +426,8 @@ void calculateScaleZeroPointFromDevice(
     // 使用 thrust 或自定义 kernel 计算最大最小值
     // 这里使用简单的 CPU 方法（需要将数据拷贝到 host）
     std::vector<QuantT> h_host(size);
-    cudaMemcpyAsync(h_host.data(), h_dev, size * sizeof(QuantT), cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(h_host.data(), h_dev, size * sizeof(QuantT),
+                    cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
 
     // 计算最大最小值
@@ -443,36 +439,57 @@ void calculateScaleZeroPointFromDevice(
     }
 
     // 计算 scale 和 zero_point
-    const int32_t int_min = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-    const int32_t int_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
+    const int32_t int_min =
+        static_cast<int32_t>(std::numeric_limits<QuantT>::min());
+    const int32_t int_max =
+        static_cast<int32_t>(std::numeric_limits<QuantT>::max());
 
     if (symmetric) {
-        float abs_max = std::max(std::abs(static_cast<float>(max_val)), std::abs(static_cast<float>(min_val)));
+        float abs_max = std::max(std::abs(static_cast<float>(max_val)),
+                                 std::abs(static_cast<float>(min_val)));
         scale = abs_max / static_cast<float>(int_max);
         zero_point = 0;
     } else {
-        scale = static_cast<float>(max_val - min_val) / static_cast<float>(int_max - int_min);
+        scale = static_cast<float>(max_val - min_val) /
+                static_cast<float>(int_max - int_min);
         if (scale < 1e-12f) scale = 1e-12f;
-        zero_point = static_cast<int32_t>(std::round(int_min - static_cast<float>(min_val) / scale));
+        zero_point = static_cast<int32_t>(
+            std::round(int_min - static_cast<float>(min_val) / scale));
         zero_point = std::clamp(zero_point, int_min, int_max);
     }
 }
 
 template void calculateScaleZeroPointFromDevice<int8_t>(
-    const int8_t *h_dev, size_t size, float &scale, int32_t &zero_point, bool symmetric, cudaStream_t stream);
+    const int8_t *h_dev, size_t size, float &scale, int32_t &zero_point,
+    bool symmetric, cudaStream_t stream);
 
 template void calculateScaleZeroPointFromDevice<int16_t>(
-    const int16_t *h_dev, size_t size, float &scale, int32_t &zero_point, bool symmetric, cudaStream_t stream);
+    const int16_t *h_dev, size_t size, float &scale, int32_t &zero_point,
+    bool symmetric, cudaStream_t stream);
+
+namespace dev {
+
+template <typename T, typename QuantT>
+inline void quantification(const T *data, QuantT *quant_data, size_t size,
+                           int32_t exp2_inv, int32_t zp) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::quantification<grid, block>(data, quant_data, size, exp2_inv, zp);
+    cudaDeviceSynchronize();
+}
+}  // namespace dev
+
 //
-//template<typename T>
-//T findMaxValueFromDev(const T *dev_data, size_t size) {
+// template<typename T>
+// T findMaxValueFromDev(const T *dev_data, size_t size) {
 //    if (size == 0) {
 //        // 边界处理：空数据返回最小值（避免访问非法内存）
 //        return std::numeric_limits<T>::lowest();
 //    }
 //
 //    // 直接用 thrust::max_element 找设备端最大值的迭代器
-//    const T *max_it = thrust::max_element(thrust::device, dev_data, dev_data + size);
+//    const T *max_it = thrust::max_element(thrust::device, dev_data, dev_data +
+//    size);
 //
 //    T max_val;
 //    // 把设备端的最大值拷贝到主机端
@@ -485,21 +502,25 @@ template void calculateScaleZeroPointFromDevice<int16_t>(
 ////                          thrust::maximum<T>());
 //}
 //
-//template int8_t findMaxValueFromDev<int8_t>(const int8_t *dev_data, size_t size);
+// template int8_t findMaxValueFromDev<int8_t>(const int8_t *dev_data, size_t
+// size);
 //
-//template int16_t findMaxValueFromDev<int16_t>(const int16_t *dev_data, size_t size);
+// template int16_t findMaxValueFromDev<int16_t>(const int16_t *dev_data, size_t
+// size);
 //
-//template float findMaxValueFromDev<float>(const float *dev_data, size_t size);
+// template float findMaxValueFromDev<float>(const float *dev_data, size_t
+// size);
 //
-//template<typename T>
-//T findMinValueFromDev(const T *dev_data, size_t size) {
+// template<typename T>
+// T findMinValueFromDev(const T *dev_data, size_t size) {
 //    if (size == 0) {
 //        // 边界处理：空数据返回最大值（避免访问非法内存）
 //        return std::numeric_limits<T>::max();
 //    }
 //
 //    // 直接用 thrust::max_element 找设备端最大值的迭代器
-//    const T *min_it = thrust::min_element(thrust::device, dev_data, dev_data + size);
+//    const T *min_it = thrust::min_element(thrust::device, dev_data, dev_data +
+//    size);
 //
 //    T min_val;
 //    // 把设备端的最大值拷贝到主机端
@@ -512,8 +533,11 @@ template void calculateScaleZeroPointFromDevice<int16_t>(
 ////                          thrust::maximum<T>());
 //}
 //
-//template int8_t findMinValueFromDev<int8_t>(const int8_t *dev_data, size_t size);
+// template int8_t findMinValueFromDev<int8_t>(const int8_t *dev_data, size_t
+// size);
 //
-//template int16_t findMinValueFromDev<int16_t>(const int16_t *dev_data, size_t size);
+// template int16_t findMinValueFromDev<int16_t>(const int16_t *dev_data, size_t
+// size);
 //
-//template float findMinValueFromDev<float>(const float *dev_data, size_t size);
+// template float findMinValueFromDev<float>(const float *dev_data, size_t
+// size);

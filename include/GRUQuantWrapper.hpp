@@ -80,8 +80,11 @@
 //         bx_quant_ = torch::empty({3 * hidden_size_}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 //         br_quant_ = torch::empty({3 * hidden_size_}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 //
-//         quantification(x, x_quant, time_steps * batch_size * input_size, gruRescaleParams.exp2_inv_x_,
-//                        gruRescaleParams.zp_x_);
+//         at::Tensor x_quant = torch::empty({input_size_, batch_size_, time_steps_}, options_int);
+//
+//         dev::quantification(x_for_calib.data_ptr<float>(), x_quant.data_ptr<options_int>(),
+//                        time_steps_ * batch_size_ * input_size_, quant_gru_scales_.exp2_inv_x_,
+//                        quant_gru_scales_.zp_x_);
 //
 //         // 量化权重
 //         GruQuantInit(
@@ -113,7 +116,9 @@
 //                                   .device(torch::kCUDA);
 //
 //         auto h_quant = torch::empty({time_steps_ + 1, batch_size_, hidden_size_}, opt_q);
-//
+//         dev::quantification(x_for_calib.data_ptr<float>(), x_quant.data_ptr<options_int>(),
+//                        time_steps_ * batch_size_ * input_size_, quant_gru_scales_.exp2_inv_x_,
+//                        quant_gru_scales_.zp_x_);
 //         GruInferenceQuant(
 //             W_quant_, R_quant_,
 //             bx_quant_, br_quant_,

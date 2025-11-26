@@ -1048,7 +1048,7 @@ inline void calibrateQuantParams(
 }
 
 template<typename QuantT>
-inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+inline __host__ __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
     int32_t q = static_cast<int32_t>(std::round(src / scale)) + zp;
 
@@ -1078,6 +1078,15 @@ inline void quantification(const T* data,
         quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
     }
 }
+namespace dev{
+
+template <typename T, typename QuantT>
+inline void quantification(const T* data,
+                           QuantT* quant_data,
+                           size_t size,
+                           int32_t exp2_inv,
+                           int32_t zp);
+} // dev namespace
 
 template <typename T, typename QuantT>
 inline void quantificationPerChannel(const T* src,

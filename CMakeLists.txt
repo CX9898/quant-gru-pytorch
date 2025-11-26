@@ -1,5 +1,5 @@
 # Specify the minimum version of cmake
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 2.8)
 
 # Project Information
 project(gru)
@@ -21,8 +21,14 @@ message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
 
 # Sets the C++ standard used by the project
+# 设置 C++17
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)   # GNU 扩展，和 PyTorch 推荐一致
+
+# CUDA 也使用 C++17
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Specifies which GPU architectures are supported when compiling CUDA code (optional)
 #set(CMAKE_CUDA_ARCHITECTURES 86)
