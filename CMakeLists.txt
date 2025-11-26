@@ -1,5 +1,5 @@
 # Specify the minimum version of cmake
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.18)
 
 # Project Information
 project(gru)
@@ -10,12 +10,17 @@ enable_language(CUDA)
 
 find_package(CUDAToolkit REQUIRED)
 
-set(Python3_ROOT_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch")
-set(Python3_EXECUTABLE "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/bin/python")
-set(Torch_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/lib/python3.9/site-packages/torch/share/cmake/Torch")
-set(pybind11_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/share/cmake/pybind11")
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
+##set(Python3_ROOT_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch")
+##set(Python3_EXECUTABLE "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/bin/python")
+##set(Torch_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/lib/python3.9/site-packages/torch/share/cmake/Torch")
+#set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
+#message("PYBIND11_DIR = ${pybind11_DIR}")
+#
+## 找到 pybind11
+## 指定 pybind11_DIR 为 CMake 配置文件所在路径
+#set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
 find_package(pybind11 REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
 find_package(Torch REQUIRED)
 message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
