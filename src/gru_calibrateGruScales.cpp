@@ -5,15 +5,14 @@
 void calibrateGruScales(
     bool use_int16,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float* W,
-    const float* R,
-    const float* bx,
-    const float* br,
-    const float* x,
-    const cublasHandle_t& g_blas_handle,
-    GRUQuantitativeParameters& quant_gru_scales
-)
-{
+    const float *W,
+    const float *R,
+    const float *bx,
+    const float *br,
+    const float *x,
+    const cublasHandle_t &g_blas_handle,
+    GRUQuantitativeParameters &quant_gru_scales
+) {
     // Copy weights over to GPU.
     dev::vector<float> W_dev(W, hidden_size * 3 * input_size);
     dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
@@ -55,27 +54,26 @@ void calibrateGruScales(
     quant_gru_scales = forward.getGRUQuantitativeParameters();
 }
 
-template <typename QuantT>
+template<typename QuantT>
 void GruQuantInit(
     const int time_steps,
     const int batch_size,
     const int input_size,
     const int hidden_size,
-    const float* W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float* R, // 隐藏层到隐藏层的循环权重矩阵
-    const float* bx, // 输入偏置项（input bias），来自输入路径
-    const float* br, // 循环偏置项（recurrent bias），来自循环路径
-    const float* x, // 输入序列张量
-    const float* dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
-    QuantT* W_quant,
-    QuantT* R_quant,
-    int32_t* bx_quant,
-    int32_t* br_quant,
-    QuantT* x_quant,
-    QuantT* dh_new_quant,
-    const GRUQuantitativeParameters& gruRescaleParams
-)
-{
+    const float *W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float *R, // 隐藏层到隐藏层的循环权重矩阵
+    const float *bx, // 输入偏置项（input bias），来自输入路径
+    const float *br, // 循环偏置项（recurrent bias），来自循环路径
+    const float *x, // 输入序列张量
+    const float *dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    QuantT *W_quant,
+    QuantT *R_quant,
+    int32_t *bx_quant,
+    int32_t *br_quant,
+    QuantT *x_quant,
+    QuantT *dh_new_quant,
+    const GRUQuantitativeParameters &gruRescaleParams
+) {
     const int channel_size = hidden_size * 3;
     // N : batch_size
     // C : input_size
@@ -109,19 +107,19 @@ void GruQuantInit<int8_t>(
     const int batch_size,
     const int input_size,
     const int hidden_size,
-    const float* W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float* R, // 隐藏层到隐藏层的循环权重矩阵
-    const float* bx, // 输入偏置项（input bias），来自输入路径
-    const float* br, // 循环偏置项（recurrent bias），来自循环路径
-    const float* x, // 输入序列张量
-    const float* dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
-    int8_t* W_quant,
-    int8_t* R_quant,
-    int32_t* bx_quant,
-    int32_t* br_quant,
-    int8_t* x_quant,
-    int8_t* dh_new_quant,
-    const GRUQuantitativeParameters& gruRescaleParams
+    const float *W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float *R, // 隐藏层到隐藏层的循环权重矩阵
+    const float *bx, // 输入偏置项（input bias），来自输入路径
+    const float *br, // 循环偏置项（recurrent bias），来自循环路径
+    const float *x, // 输入序列张量
+    const float *dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    int8_t *W_quant,
+    int8_t *R_quant,
+    int32_t *bx_quant,
+    int32_t *br_quant,
+    int8_t *x_quant,
+    int8_t *dh_new_quant,
+    const GRUQuantitativeParameters &gruRescaleParams
 );
 
 template
@@ -130,17 +128,17 @@ void GruQuantInit<int16_t>(
     const int batch_size,
     const int input_size,
     const int hidden_size,
-    const float* W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float* R, // 隐藏层到隐藏层的循环权重矩阵
-    const float* bx, // 输入偏置项（input bias），来自输入路径
-    const float* br, // 循环偏置项（recurrent bias），来自循环路径
-    const float* x, // 输入序列张量
-    const float* dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
-    int16_t* W_quant,
-    int16_t* R_quant,
-    int32_t* bx_quant,
-    int32_t* br_quant,
-    int16_t* x_quant,
-    int16_t* dh_new_quant,
-    const GRUQuantitativeParameters& gruRescaleParams
+    const float *W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float *R, // 隐藏层到隐藏层的循环权重矩阵
+    const float *bx, // 输入偏置项（input bias），来自输入路径
+    const float *br, // 循环偏置项（recurrent bias），来自循环路径
+    const float *x, // 输入序列张量
+    const float *dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    int16_t *W_quant,
+    int16_t *R_quant,
+    int32_t *bx_quant,
+    int32_t *br_quant,
+    int16_t *x_quant,
+    int16_t *dh_new_quant,
+    const GRUQuantitativeParameters &gruRescaleParams
 );

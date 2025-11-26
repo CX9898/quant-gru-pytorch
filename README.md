@@ -1,1 +1,1 @@
-# grn-pytouch
+# quant-gru-pytouch

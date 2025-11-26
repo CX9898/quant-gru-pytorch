@@ -14,13 +14,16 @@ find_package(CUDAToolkit REQUIRED)
 ##set(Python3_EXECUTABLE "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/bin/python")
 ##set(Torch_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/lib/python3.9/site-packages/torch/share/cmake/Torch")
 #set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
-#message("PYBIND11_DIR = ${pybind11_DIR}")
 #
 ## 找到 pybind11
 ## 指定 pybind11_DIR 为 CMake 配置文件所在路径
 #set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
+
+set(pybind11_DIR /usr/share/cmake/pybind11)
+message("pybind11_DIR = ${pybind11_DIR}")
 find_package(pybind11 REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
+set(Torch_DIR /usr/local/lib/python3.10/dist-packages/torch/share/cmake/Torch)
 find_package(Torch REQUIRED)
 message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
@@ -105,9 +108,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ${TORCH_LIBRARIES})
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
 
 # Eigen库
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
+#set(CMAKE_PREFIX_PATH "/usr/share/eigen3" CACHE PATH "Additional search path")
+#set(Eigen3_DIR "/usr/local/share/eigen3/cmake" CACHE PATH "Path to Eigen3Config.cmake")
+#find_package(Eigen3 3.3 REQUIRED NO_MODULE
+#        PATHS /usr/share/eigen3/cmake
+#        NO_DEFAULT_PATH
+#)
+#target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${TORCH_INCLUDE_DIRS}           # Torch 头文件（必须包含！）
