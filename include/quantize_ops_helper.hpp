@@ -140,8 +140,6 @@ struct QuantGRUReScale {
 };
 
 
-
-
 template<typename T>
 inline T clamp_val(T v, T lo, T hi) {
     return (v < lo) ? lo : (v > hi) ? hi : v;
@@ -159,25 +157,25 @@ void calibrateGruScales(
     GRUQuantitativeParameters &quant_gru_scales
 );
 
-template <typename QuantT>
+template<typename QuantT>
 void GruQuantInit(
     const int time_steps,
     const int batch_size,
     const int input_size,
     const int hidden_size,
-    const float* W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float* R, // 隐藏层到隐藏层的循环权重矩阵
-    const float* bx, // 输入偏置项（input bias），来自输入路径
-    const float* br, // 循环偏置项（recurrent bias），来自循环路径
-    const float* x, // 输入序列张量
-    const float* dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
-    QuantT* W_quant,
-    QuantT* R_quant,
-    int32_t* bx_quant,
-    int32_t* br_quant,
-    QuantT* x_quant,
-    QuantT* dh_new_quant,
-    const GRUQuantitativeParameters& gruRescaleParams
+    const float *W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float *R, // 隐藏层到隐藏层的循环权重矩阵
+    const float *bx, // 输入偏置项（input bias），来自输入路径
+    const float *br, // 循环偏置项（recurrent bias），来自循环路径
+    const float *x, // 输入序列张量
+    const float *dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    QuantT *W_quant,
+    QuantT *R_quant,
+    int32_t *bx_quant,
+    int32_t *br_quant,
+    QuantT *x_quant,
+    QuantT *dh_new_quant,
+    const GRUQuantitativeParameters &gruRescaleParams
 );
 
 inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
@@ -1065,34 +1063,29 @@ inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
     return (static_cast<int32_t>(q) - zp) * scale;
 }
 
-template <typename T, typename QuantT>
-inline void quantification(const T* data,
-                    QuantT* quant_data,
-                    size_t size,
-                    int32_t exp2_inv,
-                    int32_t zp)
-{
+template<typename T, typename QuantT>
+inline void quantification(const T *data,
+                           QuantT *quant_data,
+                           size_t size,
+                           int32_t exp2_inv,
+                           int32_t zp) {
 #pragma omp parallel for
-    for (int i = 0; i < size; ++i)
-    {
+    for (int i = 0; i < size; ++i) {
         quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
     }
 }
 
-template <typename T, typename QuantT>
-inline void quantificationPerChannel(const T* src,
-                              QuantT* quant_data,
-                              size_t input_size,
-                              size_t channel_size,
-                              const std::vector<int32_t>& exp2_invs)
-{
+template<typename T, typename QuantT>
+inline void quantificationPerChannel(const T *src,
+                                     QuantT *quant_data,
+                                     size_t input_size,
+                                     size_t channel_size,
+                                     const std::vector<int32_t> &exp2_invs) {
 #pragma omp parallel for
-    for (int i = 0; i < channel_size; ++i)
-    {
+    for (int i = 0; i < channel_size; ++i) {
         // i: [0, H*3)
         const int32_t exp2_inv = exp2_invs[i];
-        for (int j = 0; j < input_size; ++j)
-        {
+        for (int j = 0; j < input_size; ++j) {
             // j: [0, input_size)
             const int idx = j * channel_size + i;
             // 对称量化到int8：clip到[-128,127]
@@ -1101,21 +1094,54 @@ inline void quantificationPerChannel(const T* src,
     }
 }
 
-namespace dev{
+namespace dev {
 
-template <typename T, typename QuantT>
-void quantification(const T* data,
-                           QuantT* quant_data,
-                           size_t size,
-                           int32_t exp2_inv,
-                           int32_t zp);
-template <typename T, typename QuantT>
-void quantificationPerChannel(const T* src,
-                              QuantT* quant_data,
+template<typename T, typename QuantT>
+void quantification(const T *data,
+                    QuantT *quant_data,
+                    size_t size,
+                    int32_t exp2_inv,
+                    int32_t zp);
+
+template<typename T, typename QuantT>
+void quantificationPerChannel(const T *src,
+                              QuantT *quant_data,
                               size_t input_size,
                               size_t channel_size,
-                              const dev::vector<int32_t>& exp2_invs);
+                              const dev::vector<int32_t> &exp2_invs);
 } // dev namespace
+
+#include <random>
+#include <limits>
+
+/**
+ * @brief Fill a vector with random values from a normal distribution, and clamp to range.
+ *
+ * @param data [in/out]     The vector to fill with random values.
+ * @param min_value [in]    Minimum allowed value.
+ * @param max_value [in]    Maximum allowed value.
+ */
+inline void fillVectorWithNormalDistribution(
+    std::vector<float> &data,
+    float min_value,
+    float max_value) {
+    float mean = (min_value + max_value) / 2.0f;
+    float stddev = (max_value - min_value) / 6.0f;  // 3σ 刚好覆盖范围
+
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 gen(rd());
+    std::normal_distribution<float> dist(mean, stddev);
+
+    for (auto &value : data) {
+        float sample;
+        // 截断采样：直到落入范围
+        do {
+            sample = dist(gen);
+        } while (sample < min_value || sample > max_value);
+
+        value = sample;
+    }
+}
 
 
 namespace unit_testing {
@@ -1224,6 +1250,7 @@ inline void quantizationTest() {
     std::cout << "===== All tests passed! =====\n";
 
 }
+
 
 inline void testCalibrateQuantParams() {
     std::cout << "Running unit tests for calibrateQuantParams...\n";
