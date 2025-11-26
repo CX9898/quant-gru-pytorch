@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cassert>
+#include <cublas_v2.h>
 
 #include "devVector.h"
 
@@ -27,8 +28,8 @@ struct GRUQuantitativeParameters {
   int32_t exp2_inv_h_;
   int32_t zp_h_;
 
-  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一行一个scale)
-  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一行一个scale)
+  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
+  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
 
   int32_t exp2_inv_Wx_;
   int32_t zp_Wx_;
@@ -137,29 +138,14 @@ struct QuantGRUReScale {
   //test
   GRUQuantitativeParameters test;
 };
-//
-//struct QuantGRUScales {
-//  int hidden_;
-//  int32_t exp2_inv_x_;
-//  int32_t zp_x_;
-//  int32_t exp2_inv_h_;
-//  int32_t zp_h_;
-//  int32_t exp2_inv_bx_;
-//  int32_t exp2_inv_br_;
-//  std::vector<float> Wx; // size = hidden. per-channel
-//  std::vector<float> Rh; // size = hidden
-//
-//  std::vector<float> Wx_add_bx; // size = hidden
-//  std::vector<float> Rh_add_br; // size = hidden
-//
-//  std::vector<float> z_pre; // size = hidden
-//  std::vector<float> r_pre; // size = hidden
-//  std::vector<float> g_pre; // size = hidden
-//
-//  std::vector<float> z_out; // size = hidden
-//  std::vector<float> r_out; // size = hidden
-//  std::vector<float> g_out; // size = hidden
-//};
+
+
+
+
+template<typename T>
+inline T clamp_val(T v, T lo, T hi) {
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
 
 void calibrateGruScales(
     bool use_int16,
@@ -169,7 +155,29 @@ void calibrateGruScales(
     const float *bx,
     const float *br,
     const float *x,
+    const cublasHandle_t &g_blas_handle,
     GRUQuantitativeParameters &quant_gru_scales
+);
+
+template <typename QuantT>
+void GruQuantInit(
+    const int time_steps,
+    const int batch_size,
+    const int input_size,
+    const int hidden_size,
+    const float* W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float* R, // 隐藏层到隐藏层的循环权重矩阵
+    const float* bx, // 输入偏置项（input bias），来自输入路径
+    const float* br, // 循环偏置项（recurrent bias），来自循环路径
+    const float* x, // 输入序列张量
+    const float* dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    QuantT* W_quant,
+    QuantT* R_quant,
+    int32_t* bx_quant,
+    int32_t* br_quant,
+    QuantT* x_quant,
+    QuantT* dh_new_quant,
+    const GRUQuantitativeParameters& gruRescaleParams
 );
 
 inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
@@ -196,7 +204,7 @@ inline QuantT quant_from_exp2(T src, int32_t exp2_inv, int zp) {
     int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = std::clamp(q, qmin, qmax);
+    q = clamp_val(q, qmin, qmax);
     return static_cast<QuantT>(q);
 }
 
@@ -806,7 +814,7 @@ inline void selectBestExp2InvAsym(
         // compute zp for this n
         float zp_float = (-aligned_min) / scale;
         int32_t zp_int = (int32_t) std::llround(zp_float) + quant_min;
-        zp_int = std::clamp(zp_int, quant_min, quant_max);
+        zp_int = clamp_val(zp_int, quant_min, quant_max);
 
         // Evaluate MSE approximation: assume uniform distribution
         // MSE ≈ scale² / 12  （误差近似）
@@ -1039,396 +1047,14 @@ inline void calibrateQuantParams(
     }
 }
 
-//template<typename T, typename QuantT>
-//inline void calibrateQuantParams(
-//    const T orig_min,
-//    const T orig_max,
-//    const bool is_symmetric,
-//    T &aligned_min,
-//    T &aligned_max,
-//    int32_t &exp2_inv,
-//    int32_t &zp,
-//    const std::string &name = "") {
-//
-//    if (orig_min > orig_max) {
-//        throw std::invalid_argument("Original min (" + std::to_string(orig_min) +
-//                                    ") is greater than original max (" + std::to_string(orig_max) +
-//                                    ") in " + name);
-//    }
-//
-//    const int32_t quant_min = std::numeric_limits<QuantT>::min();
-//    const int32_t quant_max = std::numeric_limits<QuantT>::max();
-//    const int32_t quant_range = quant_max - quant_min;
-//
-//    if (quant_range <= 0) {
-//        throw std::logic_error("Quantization range is non-positive for type " +
-//                               std::string(typeid(QuantT).name()) + " in " + name);
-//    }
-//
-//    if (is_symmetric) {
-//        // ... (对称量化逻辑，使用之前带while循环的版本) ...
-//        const T max_abs = std::max(std::abs(orig_min), std::abs(orig_max));
-//        if (max_abs == 0) { /* ... */ }
-//
-//        T log2_value = std::log2(static_cast<T>(quant_max) / max_abs);
-//        exp2_inv = static_cast<int32_t>(std::floor(log2_value));
-//
-//        T scale = 1.0 / static_cast<T>(1LL << exp2_inv);
-//        aligned_max = scale * static_cast<T>(quant_max);
-//
-//        int safety_counter = 0;
-//        while (aligned_max < max_abs && safety_counter < 32) {
-//            exp2_inv--;
-//            scale = 1.0 / static_cast<T>(1LL << exp2_inv);
-//            aligned_max = scale * static_cast<T>(quant_max);
-//            safety_counter++;
-//        }
-//        if (safety_counter >= 32) { /* ... */ }
-//
-//        aligned_min = -aligned_max;
-//        zp = 0;
-//
-//        if (orig_min < aligned_min || orig_max > aligned_max) { /* ... */ }
-//
-//    } else { // 非对称量化
-//        const T orig_range = orig_max - orig_min;
-//
-//        if (orig_range == 0) {
-//            aligned_min = orig_min;
-//            aligned_max = orig_max;
-//            exp2_inv = 0;
-//            zp = quant_min; // 或 quant_max / 2，通常不影响
-//            return;
-//        }
-//
-//        // 1. 计算理想的 scale
-//        const T ideal_scale = orig_range / static_cast<T>(quant_range);
-//        if (ideal_scale <= 0) { /* ... */ }
-//
-//        // 2. 找到最接近的、不大于理想值的 1/(2^exp2_inv)
-//        const T log2_scale = std::log2(ideal_scale);
-//        exp2_inv = static_cast<int32_t>(std::floor(-log2_scale));
-//        const T scale = 1.0 / static_cast<T>(1LL << exp2_inv);
-//
-//        // 3. 计算理论上的 zp
-//        const T ideal_zp = static_cast<T>(quant_min) - orig_min / scale;
-//        zp = static_cast<int32_t>(std::round(ideal_zp));
-//        zp = std::max(quant_min, std::min(quant_max, zp)); // 钳位
-//
-//        // 4. 计算理论上的对齐范围
-//        T theo_aligned_min = scale * (static_cast<T>(quant_min) - static_cast<T>(zp));
-//        T theo_aligned_max = scale * (static_cast<T>(quant_max) - static_cast<T>(zp));
-//
-//        // 5. **应用你的思路：扩展范围以确保覆盖**
-//        //    "补偿"的核心就是确保 aligned_min <= orig_min 和 aligned_max >= orig_max
-//        aligned_min = std::min(theo_aligned_min, orig_min);
-//        aligned_max = std::max(theo_aligned_max, orig_max);
-//
-//        // 最终检查（这一步现在应该总是通过的）
-//        if (!(aligned_min <= orig_min && orig_max <= aligned_max)) {
-//            throw std::logic_error("Aligned range [" + std::to_string(aligned_min) + ", " + std::to_string(aligned_max) +
-//                                   "] does not cover original range [" + std::to_string(orig_min) + ", " + std::to_string(orig_max) +
-//                                   "] in asymmetric mode for " + name);
-//        }
-//    }
-////    if (name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
-////        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
-////               name.c_str(),
-////               orig_min,
-////               orig_max,
-////               aligned_min,
-////               aligned_max,
-////               exp2_inv,
-////               zp);
-////    }
-//}
-
-// calibrateQuantParams:
-// - orig_min/orig_max: 原始浮点范围（可能 orig_min > orig_max，会交换）
-// - is_symmetric: true -> 对称量化 (zp = 0)，否则非对称量化 (zp != 0)
-// - aligned_min/aligned_max: 输出，基于选定 scale 和 zp 的可表示浮点边界
-// - exp2_inv: 输出，scale = 2^-exp2_inv
-// - zp: 输出，zero point（当 is_symmetric 时设为 0）
-// - name: 可选名字，仅用于日志/调试（不强制打印）
-//template<typename T, typename QuantT>
-//inline void calibrateQuantParams(
-//    const T orig_min,
-//    const T orig_max,
-//    const bool is_symmetric,
-//    T &aligned_min,
-//    T &aligned_max,
-//    int32_t &exp2_inv,
-//    int32_t &zp,
-//    const std::string &name = "") {
-//    static_assert(std::is_floating_point<T>::value, "T must be float/double");
-//    static_assert(std::is_integral<QuantT>::value, "QuantT must be integer type");
-//
-//    // quant range
-//    const int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-//    const int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-//
-//    // Ensure rmin <= rmax
-//    T rmin = orig_min;
-//    T rmax = orig_max;
-//    if (rmin > rmax) std::swap(rmin, rmax);
-//
-//    // Small epsilon to avoid div-by-zero
-//    const T EPS = static_cast<T>(1e-12);
-//
-//    // Controls:
-//    const T THRESHOLD_RATIO = static_cast<T>(1.10); // when to consider downward pick (10% by default)
-//    const int32_t ALLOW_OVERFLOW = 0; // conservative: do not allow overflow
-//
-//    // Helper: compute power-of-two scale from n
-//    auto scale_from_n = [](int32_t n) -> T {
-//      return std::ldexp(static_cast<T>(1.0), -n); // 2^-n
-//    };
-//
-//    // --------- Symmetric branch ----------
-//    if (is_symmetric) {
-//        zp = 0;
-//
-//        // max absolute value
-//        T max_abs = std::max(std::abs(rmin), std::abs(rmax));
-//        T safe_max = std::max(max_abs, EPS);
-//
-//        // float target scale (best)
-//        T target_scale = safe_max / static_cast<T>(qmax);
-//        if (target_scale <= static_cast<T>(0)) target_scale = EPS;
-//
-//        // compute allowed interval (to avoid overflow)
-//        // for symmetric, constraint is: |x|/scale <= qmax -> scale >= safe_max / qmax
-//        T scale_low = safe_max / static_cast<T>(qmax);
-//        if (scale_low <= static_cast<T>(0)) scale_low = EPS;
-//
-//        T scale_high = std::numeric_limits<T>::max(); // no practical upper bound
-//
-//        // Candidate power-of-two selection:
-//        // n1: floor(-log2(scale_low)) => scale1 = 2^-n1 >= scale_low (first pow2 >= scale_low)
-//        int32_t n1 = static_cast<int32_t>(std::floor(-std::log2(scale_low)));
-//        T scale1 = scale_from_n(n1);
-//
-//        // n2: ceil(-log2(scale_high)) => scale2 = 2^-n2 <= scale_high (first pow2 <= scale_high)
-//        // but since scale_high is huge, scale2 likely very small; compute safely
-//        int32_t n2 = static_cast<int32_t>(std::ceil(-std::log2(std::min(scale_high, static_cast<T>(1e38)))));
-//        T scale2 = scale_from_n(n2);
-//
-//        // Choose scale: prioritize one that is within [scale_low, scale_high]
-//        T chosen_scale;
-//        int32_t chosen_n;
-//        if (scale1 >= scale_low && scale1 <= scale_high) {
-//            chosen_scale = scale1;
-//            chosen_n = n1;
-//        } else if (scale2 >= scale_low && scale2 <= scale_high) {
-//            chosen_scale = scale2;
-//            chosen_n = n2;
-//        } else {
-//            // No power-of-two falls exactly into interval: choose safe one (scale1 >= scale_low)
-//            chosen_scale = scale1;
-//            chosen_n = n1;
-//            // scale1 should be >= scale_low by construction; if not (rare numerical), fallback to target
-//            if (chosen_scale < scale_low) {
-//                // make sure we don't pick a too-small scale — increase until >= scale_low
-//                while (chosen_scale < scale_low) {
-//                    chosen_n -= 1;
-//                    chosen_scale = scale_from_n(chosen_n);
-//                }
-//            }
-//        }
-//
-//        // Optionally try downward (smaller) scale to improve precision if safe and close to target
-//        T lower_scale = scale_from_n(chosen_n + 1); // smaller value (higher precision)
-//        T ratio_to_lower = target_scale / std::max(lower_scale, EPS);
-//        if (ratio_to_lower <= THRESHOLD_RATIO) {
-//            // Check if lower_scale is still safe (no overflow)
-//            if (safe_max / lower_scale <= static_cast<T>(qmax + ALLOW_OVERFLOW)) {
-//                chosen_scale = lower_scale;
-//                chosen_n = chosen_n + 1;
-//            }
-//        }
-//
-//        exp2_inv = chosen_n;
-//        aligned_min = -static_cast<T>(qmax) * chosen_scale;
-//        aligned_max = +static_cast<T>(qmax) * chosen_scale;
-//
-//        if (name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
-//            printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
-//                   name.c_str(),
-//                   orig_min,
-//                   orig_max,
-//                   aligned_min,
-//                   aligned_max,
-//                   exp2_inv,
-//                   zp);
-//        }
-//        return;
-//    }
-//
-//    // --------- Asymmetric branch ----------
-//    // Float best scale/zp (linear mapping)
-//    T float_scale = (rmax - rmin) / static_cast<T>((qmax - qmin));
-//    if (float_scale <= static_cast<T>(0)) float_scale = EPS;
-//
-//    T zp_fp = static_cast<T>(qmin) - rmin / float_scale;
-//    int32_t zp_i = static_cast<int32_t>(std::round(zp_fp));
-//    zp_i = std::max(qmin, std::min(qmax, zp_i));
-//    zp = zp_i;
-//
-//    // Compute conservative interval [scale_low, scale_high] that ensures endpoints map into integer range
-//    // Derived conservatively as:
-//    // scale_low  = abs(rmin / (qmin - zp))   (if denom != 0)
-//    // scale_high = abs(rmax / (qmax - zp))   (if denom != 0)
-//    // Then require scale in [scale_low, scale_high] (swap if necessary).
-//    T scale_low = EPS;
-//    T scale_high = std::numeric_limits<T>::max();
-//
-//    T denom_min = static_cast<T>(qmin - zp);
-//    T denom_max = static_cast<T>(qmax - zp);
-//
-//    if (std::abs(denom_min) > 0) {
-//        scale_low = std::abs(rmin / denom_min);
-//    }
-//    if (std::abs(denom_max) > 0) {
-//        scale_high = std::abs(rmax / denom_max);
-//    }
-//
-//    // If either bound computed as zero or nonsensical, clamp
-//    if (scale_low <= static_cast<T>(0)) scale_low = EPS;
-//    if (scale_high <= static_cast<T>(0)) scale_high = std::numeric_limits<T>::max();
-//    if (scale_high < scale_low) std::swap(scale_low, scale_high);
-//
-//    // target scale
-//    T target_scale = float_scale;
-//    if (target_scale <= static_cast<T>(0)) target_scale = EPS;
-//
-//    // Candidate selection:
-//    // n1 = floor(-log2(scale_low)) => scale1 = 2^-n1 >= scale_low (first pow2 >= scale_low)
-//    int32_t n1 = static_cast<int32_t>(std::floor(-std::log2(scale_low)));
-//    T scale1 = scale_from_n(n1);
-//
-//    // n2 = ceil(-log2(scale_high)) => scale2 = 2^-n2 <= scale_high (first pow2 <= scale_high)
-//    int32_t n2 = static_cast<int32_t>(std::ceil(-std::log2(std::min(scale_high, static_cast<T>(1e38)))));
-//    T scale2 = scale_from_n(n2);
-//
-//    // Choose strategy:
-//    T chosen_scale;
-//    int32_t chosen_n;
-//    if (scale1 >= scale_low && scale1 <= scale_high) {
-//        chosen_scale = scale1;
-//        chosen_n = n1;
-//    } else if (scale2 >= scale_low && scale2 <= scale_high) {
-//        chosen_scale = scale2;
-//        chosen_n = n2;
-//    } else {
-//        // No exact power-of-two inside interval:
-//        // Prefer scale1 (first >= scale_low) to avoid overflow.
-//        chosen_scale = scale1;
-//        chosen_n = n1;
-//        // Ensure it's >= scale_low (numerical guard)
-//        if (chosen_scale < scale_low) {
-//            while (chosen_scale < scale_low) {
-//                chosen_n -= 1;
-//                chosen_scale = scale_from_n(chosen_n);
-//            }
-//        }
-//    }
-//
-//    // Try downward pick (smaller scale -> higher precision) only if safe
-//    T lower_scale = scale_from_n(chosen_n + 1);
-//    T ratio_to_lower = target_scale / std::max(lower_scale, EPS);
-//    if (ratio_to_lower <= THRESHOLD_RATIO) {
-//        // Check if lower_scale still maps endpoints into quant range (no overflow)
-//        // conservative integer check:
-//        // required qmin = floor(rmin / lower_scale) + zp
-//        // required qmax = ceil (rmax / lower_scale) + zp
-//        long long req_qmin = static_cast<long long>(std::floor(rmin / lower_scale)) + static_cast<long long>(zp);
-//        long long req_qmax = static_cast<long long>(std::ceil(rmax / lower_scale)) + static_cast<long long>(zp);
-//
-//        if (req_qmin >= static_cast<long long>(qmin - ALLOW_OVERFLOW) &&
-//            req_qmax <= static_cast<long long>(qmax + ALLOW_OVERFLOW)) {
-//            chosen_scale = lower_scale;
-//            chosen_n = chosen_n + 1;
-//        }
-//    }
-//
-//    exp2_inv = chosen_n;
-//    aligned_min = static_cast<T>((static_cast<int32_t>(qmin) - zp)) * chosen_scale;
-//    aligned_max = static_cast<T>((static_cast<int32_t>(qmax) - zp)) * chosen_scale;
-//
-//    if (name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
-//        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
-//               name.c_str(),
-//               orig_min,
-//               orig_max,
-//               aligned_min,
-//               aligned_max,
-//               exp2_inv,
-//               zp);
-//    }
-//    return;
-//}
-
-
-//template<typename QuantT>
-//inline QuantT quantize(
-//    float src,
-//    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
-//    int32_t zp         // zero point
-//) {
-//    // 使用 exp2_inv 重建 scale：
-//    // src / scale = src * (1 << exp2_inv) if exp2_inv >= 0
-//    // src / scale = src / (1 << -exp2_inv) if exp2_inv < 0
-//
-//    float scaled;
-//
-//    if (exp2_inv >= 0) {
-//        scaled = src * static_cast<float>(1 << exp2_inv);
-//    } else {
-//        scaled = src / static_cast<float>(1 << (-exp2_inv));
-//    }
-//
-//    // q = round(src/scale) + zp
-//    int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
-//
-//    // clamp to quant type range
-//    constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-//    constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-//    q = std::clamp(q, qmin, qmax);
-//
-//    return static_cast<QuantT>(q);
-//}
-//
-//template<typename QuantT>
-//inline float dequantize(
-//    QuantT q,
-//    int32_t exp2_inv,  // scale = 2^(-exp2_inv)
-//    int32_t zp         // zero point
-//) {
-//    // remove zp first
-//    int32_t q_int = static_cast<int32_t>(q) - zp;
-//
-//    float scale;
-//
-//    // build scale value
-//    if (exp2_inv >= 0) {
-//        // scale = 1 / (2^exp)
-//        scale = 1.0f / static_cast<float>(1 << exp2_inv);
-//    } else {
-//        // scale = 2^(-exp2_inv) = (1 << -exp2_inv)
-//        scale = static_cast<float>(1 << (-exp2_inv));
-//    }
-//
-//    return q_int * scale;
-//}
-
 template<typename QuantT>
-inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+inline __host__ __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
     int32_t q = static_cast<int32_t>(std::round(src / scale)) + zp;
 
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = std::clamp(q, qmin, qmax);
+    q = clamp_val(q, qmin, qmax);
 
     return static_cast<QuantT>(q);
 }
@@ -1438,6 +1064,58 @@ inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
     return (static_cast<int32_t>(q) - zp) * scale;
 }
+
+template <typename T, typename QuantT>
+inline void quantification(const T* data,
+                    QuantT* quant_data,
+                    size_t size,
+                    int32_t exp2_inv,
+                    int32_t zp)
+{
+#pragma omp parallel for
+    for (int i = 0; i < size; ++i)
+    {
+        quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
+    }
+}
+
+template <typename T, typename QuantT>
+inline void quantificationPerChannel(const T* src,
+                              QuantT* quant_data,
+                              size_t input_size,
+                              size_t channel_size,
+                              const std::vector<int32_t>& exp2_invs)
+{
+#pragma omp parallel for
+    for (int i = 0; i < channel_size; ++i)
+    {
+        // i: [0, H*3)
+        const int32_t exp2_inv = exp2_invs[i];
+        for (int j = 0; j < input_size; ++j)
+        {
+            // j: [0, input_size)
+            const int idx = j * channel_size + i;
+            // 对称量化到int8：clip到[-128,127]
+            quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);
+        }
+    }
+}
+
+namespace dev{
+
+template <typename T, typename QuantT>
+void quantification(const T* data,
+                           QuantT* quant_data,
+                           size_t size,
+                           int32_t exp2_inv,
+                           int32_t zp);
+template <typename T, typename QuantT>
+void quantificationPerChannel(const T* src,
+                              QuantT* quant_data,
+                              size_t input_size,
+                              size_t channel_size,
+                              const dev::vector<int32_t>& exp2_invs);
+} // dev namespace
 
 
 namespace unit_testing {

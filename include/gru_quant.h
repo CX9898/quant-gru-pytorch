@@ -2,7 +2,6 @@
 
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
-#include <optional>
 
 #include "quantize_ops_helper.hpp"
 

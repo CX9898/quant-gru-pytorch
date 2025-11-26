@@ -1,5 +1,5 @@
 # Specify the minimum version of cmake
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 2.8)
 
 # Project Information
 project(gru)
@@ -9,19 +9,29 @@ enable_language(CXX)
 enable_language(CUDA)
 
 find_package(CUDAToolkit REQUIRED)
-find_package(Torch REQUIRED)
-set(Python3_ROOT_DIR "/home/zcx/miniconda3/envs/torchcuda")
-set(Python3_EXECUTABLE "/home/zcx/miniconda3/envs/torchcuda/bin/python")
 
+set(Python3_ROOT_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch")
+set(Python3_EXECUTABLE "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/bin/python")
+set(Torch_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/lib/python3.9/site-packages/torch/share/cmake/Torch")
+set(pybind11_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/share/cmake/pybind11")
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
 find_package(pybind11 REQUIRED)
-
+find_package(Torch REQUIRED)
 message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
 
+# Find OpenMP package
+find_package(OpenMP REQUIRED)
+
 # Sets the C++ standard used by the project
+# 设置 C++17
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)   # GNU 扩展，和 PyTorch 推荐一致
+
+# CUDA 也使用 C++17
 set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # Specifies which GPU architectures are supported when compiling CUDA code (optional)
 #set(CMAKE_CUDA_ARCHITECTURES 86)
@@ -79,8 +89,12 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cublas)
 # Linked cuSPARSE library
 #target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cusparse)
 
-# Find OpenMP package
-find_package(OpenMP REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${Python3_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${Python3_LIBRARIES})
+
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${TORCH_LIBRARIES})
 
 # Linked OpenMP library
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
