@@ -28,8 +28,8 @@ struct GRUQuantitativeParameters {
   int32_t exp2_inv_h_;
   int32_t zp_h_;
 
-  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一行一个scale)
-  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一行一个scale)
+  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
+  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
 
   int32_t exp2_inv_Wx_;
   int32_t zp_Wx_;
@@ -1078,15 +1078,6 @@ inline void quantification(const T* data,
         quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
     }
 }
-namespace dev{
-
-template <typename T, typename QuantT>
-inline void quantification(const T* data,
-                           QuantT* quant_data,
-                           size_t size,
-                           int32_t exp2_inv,
-                           int32_t zp);
-} // dev namespace
 
 template <typename T, typename QuantT>
 inline void quantificationPerChannel(const T* src,
@@ -1109,6 +1100,22 @@ inline void quantificationPerChannel(const T* src,
         }
     }
 }
+
+namespace dev{
+
+template <typename T, typename QuantT>
+void quantification(const T* data,
+                           QuantT* quant_data,
+                           size_t size,
+                           int32_t exp2_inv,
+                           int32_t zp);
+template <typename T, typename QuantT>
+void quantificationPerChannel(const T* src,
+                              QuantT* quant_data,
+                              size_t input_size,
+                              size_t channel_size,
+                              const dev::vector<int32_t>& exp2_invs);
+} // dev namespace
 
 
 namespace unit_testing {

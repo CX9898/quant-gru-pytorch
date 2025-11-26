@@ -354,6 +354,22 @@ __global__ void quantification(const T *data, QuantT *quant_data, size_t size,
     quant_data[idx] = quantize<QuantT>(data[idx], exp2_inv, zp);
 }
 
+template <typename T, typename QuantT>
+__global__ void quantificationPerChannel(const T *src, QuantT *quant_data,
+                                         size_t input_size, size_t channel_size,
+                                         const int32_t *exp2_invs) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockIdx.y + threadIdx.y;
+    if (channel_idx >= channel_size || input_idx >= input_size) {
+        return;
+    }
+
+    const int32_t exp2_inv = exp2_invs[channel_idx];
+
+    const size_t idx = input_idx * channel_size + channel_idx;
+    quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);
+}
+
 }  // namespace kernel
 
 template <typename T>
@@ -470,11 +486,24 @@ template void calculateScaleZeroPointFromDevice<int16_t>(
 namespace dev {
 
 template <typename T, typename QuantT>
-inline void quantification(const T *data, QuantT *quant_data, size_t size,
-                           int32_t exp2_inv, int32_t zp) {
+void quantification(const T *data, QuantT *quant_data, size_t size,
+                    int32_t exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::quantification<grid, block>(data, quant_data, size, exp2_inv, zp);
+    cudaDeviceSynchronize();
+}
+
+template <typename T, typename QuantT>
+void quantificationPerChannel(const T *src, QuantT *quant_data,
+                              size_t input_size, size_t channel_size,
+                              const dev::vector<int32_t> &exp2_invs) {
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+
+    kernel::quantificationPerChannel<gridDim, blockDim>(
+        src, quant_data, input_size, channel_size, exp2_invs.data());
     cudaDeviceSynchronize();
 }
 }  // namespace dev

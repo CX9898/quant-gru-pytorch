@@ -20,6 +20,9 @@ find_package(Torch REQUIRED)
 message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
 message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
 
+# Find OpenMP package
+find_package(OpenMP REQUIRED)
+
 # Sets the C++ standard used by the project
 # 设置 C++17
 set(CMAKE_CXX_STANDARD 17)
@@ -86,8 +89,12 @@ target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cublas)
 # Linked cuSPARSE library
 #target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cusparse)
 
-# Find OpenMP package
-find_package(OpenMP REQUIRED)
+target_include_directories(${PROJECT_NAME} PRIVATE ${Python3_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${Python3_LIBRARIES})
+
+
+target_include_directories(${PROJECT_NAME} PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${TORCH_LIBRARIES})
 
 # Linked OpenMP library
 target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
