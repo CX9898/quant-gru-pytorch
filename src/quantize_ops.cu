@@ -26,7 +26,7 @@ __constant__ int8_t d_tanh_int8_g_lut[256];
  * @param scale      量化 scale
  * @param zero_point 量化 zero_point（非对称量化有效）
  */
-template <typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
+template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
 void quantizeFloatToInt(const float *src_dev, QuantT *dst_dev, uint32_t size,
                         float scale, int32_t zero_point) {
     uint32_t block = 512;
@@ -68,7 +68,7 @@ template void quantizeFloatToInt<int32_t, false, false, true>(
  * @param zero_point_per_t    每个时间步的量化 zero_point（非对称量化有效）
  * @param time_step_size 每个时间步的元素数（例如 batch_size * input_dim）
  */
-template <typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
+template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
 void quantizeFloatToIntPerStep(const float *src_dev, QuantT *dst_dev,
                                size_t size, const float *scale_per_t,
                                const int32_t *zero_point_per_t,
@@ -269,7 +269,7 @@ void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,
 
 namespace kernel {
 
-template <typename T>
+template<typename T>
 __global__ void computeWeightSumTiled(
     const T *__restrict__ W_q,         // [out_dim, in_dim] 权重量化矩阵
     int32_t *__restrict__ weight_sum,  // [out_dim] 输出数组
@@ -306,13 +306,13 @@ __global__ void computeWeightSumTiled(
     }
 }
 
-template <typename T>
+template<typename T>
 __global__ void computeWeightSumMulZP(
     const T *__restrict__ W_q,  // [out_dim, in_dim] 权重量化矩阵, 列主序储存
     int32_t *__restrict__ weight_sum,  // [out_dim] 输出数组
     int x_zp,
     const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
-                                    // per-channel
+    // per-channel
     int out_dim,                    // 输出通道数 (M)
     int in_dim                      // 输入通道数 (K)
 ) {
@@ -343,7 +343,7 @@ __global__ void applyZeroPointCompensation2D(
     Y_int32[idx] -= x_zp[b] * weight_sum[m];
 }
 
-template <typename T, typename QuantT>
+template<typename T, typename QuantT>
 __global__ void quantification(const T *data, QuantT *quant_data, size_t size,
                                int32_t exp2_inv, int32_t zp) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -354,7 +354,18 @@ __global__ void quantification(const T *data, QuantT *quant_data, size_t size,
     quant_data[idx] = quantize<QuantT>(data[idx], exp2_inv, zp);
 }
 
-template <typename T, typename QuantT>
+template<typename T, typename QuantT>
+__global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
+                                 int32_t exp2_inv, int32_t zp) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) {
+        return;
+    }
+
+    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
+}
+
+template<typename T, typename QuantT>
 __global__ void quantificationPerChannel(const T *src, QuantT *quant_data,
                                          size_t input_size, size_t channel_size,
                                          const int32_t *exp2_invs) {
@@ -372,13 +383,13 @@ __global__ void quantificationPerChannel(const T *src, QuantT *quant_data,
 
 }  // namespace kernel
 
-template <typename T>
+template<typename T>
 void computeWeightSumMulzp(
     const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
     const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
-                                    // per-channel
+    // per-channel
     int out_dim,                    // 输出通道数 (M)
     int in_dim,                     // 输入通道数 (K)
     cudaStream_t stream) {
@@ -402,7 +413,7 @@ template void computeWeightSumMulzp<int8_t>(
     int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
     const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
-                                    // per-channel
+    // per-channel
     int out_dim,                    // 输出通道数 (M)
     int in_dim,                     // 输入通道数 (K)
     cudaStream_t stream);
@@ -412,7 +423,7 @@ template void computeWeightSumMulzp<int16_t>(
     int32_t *weight_sum,  // [out_dim] 输出数组
     int x_zp,
     const int32_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
-                                    // per-channel
+    // per-channel
     int out_dim,                    // 输出通道数 (M)
     int in_dim,                     // 输入通道数 (K)
     cudaStream_t stream);
@@ -429,7 +440,7 @@ void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum,
 /**
  * @brief 从 GPU 上的量化数据计算 scale（使用最大最小值）
  */
-template <typename QuantT>
+template<typename QuantT>
 void calculateScaleZeroPointFromDevice(const QuantT *h_dev, size_t size,
                                        float &scale, int32_t &zero_point,
                                        bool symmetric, cudaStream_t stream) {
@@ -485,7 +496,7 @@ template void calculateScaleZeroPointFromDevice<int16_t>(
 
 namespace dev {
 
-template <typename T, typename QuantT>
+template<typename T, typename QuantT>
 void quantification(const T *data, QuantT *quant_data, size_t size,
                     int32_t exp2_inv, int32_t zp) {
     size_t block = 256;
@@ -494,7 +505,16 @@ void quantification(const T *data, QuantT *quant_data, size_t size,
     cudaDeviceSynchronize();
 }
 
-template <typename T, typename QuantT>
+template<typename T, typename QuantT>
+void dequantification(const QuantT *quant_data, T *data, size_t size,
+                      int32_t exp2_inv, int32_t zp) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::dequantification<grid, block>(quant_data, data, size, exp2_inv, zp);
+    cudaDeviceSynchronize();
+}
+
+template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data,
                               size_t input_size, size_t channel_size,
                               const dev::vector<int32_t> &exp2_invs) {

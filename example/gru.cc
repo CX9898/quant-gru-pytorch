@@ -2,33 +2,17 @@
 
 #include <cuda_runtime_api.h>
 
-//#include <Eigen/Dense>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
 #include <string>
-//#include <unsupported/Eigen/CXX11/Tensor>
 #include <vector>
 
 #include "devVector.h"
-#include "device_ptr.h"
 #include "gru_quant.h"
 #include "quantized_unit_testing.h"
-
-//using std::vector<float> = Eigen::Tensor<float, 1>;
-//using std::vector<float> = Eigen::Tensor<float, 2>;
-//using std::vector<float> = Eigen::Tensor<float, 3>;
-//using Tensor1i8 = Eigen::Tensor<int8_t, 1>;
-//using int8_t = Eigen::Tensor<int8_t, 2>;
-//using int8_t = Eigen::Tensor<int8_t, 3>;
-//using Tensor1i16 = Eigen::Tensor<int16_t, 1>;
-//using Tensor2i16 = Eigen::Tensor<int16_t, 2>;
-//using Tensor3i16 = Eigen::Tensor<int16_t, 3>;
-//using int32_t = Eigen::Tensor<int32_t, 1>;
-//using Tensor2i32 = Eigen::Tensor<int32_t, 2>;
-//using Tensor3i32 = Eigen::Tensor<int32_t, 3>;
 
 constexpr int BATCH_SIZE = 64;     // 批大小
 constexpr int SEQUENCE_LEN = 500;  // 序列长度(T), 每个样本有T个时间步
@@ -45,28 +29,28 @@ void init_gru_cublas() {
 }
 
 class ScopeTimer {
-  // 测量时间类
+    // 测量时间类
  public:
-  ScopeTimer(const std::string &msg) : msg_(msg) {
-      cudaEventCreate(&start_);
-      cudaEventCreate(&stop_);
-      cudaDeviceSynchronize();
-      cudaEventRecord(start_);
-  }
+    ScopeTimer(const std::string &msg) : msg_(msg) {
+        cudaEventCreate(&start_);
+        cudaEventCreate(&stop_);
+        cudaDeviceSynchronize();
+        cudaEventRecord(start_);
+    }
 
-  ~ScopeTimer() {
-      float elapsed_ms;
-      cudaEventRecord(stop_);
-      cudaEventSynchronize(stop_);
-      cudaEventElapsedTime(&elapsed_ms, start_, stop_);
-      printf("%s %fms\n", msg_.c_str(), elapsed_ms);
-      cudaEventDestroy(start_);
-      cudaEventDestroy(stop_);
-  }
+    ~ScopeTimer() {
+        float elapsed_ms;
+        cudaEventRecord(stop_);
+        cudaEventSynchronize(stop_);
+        cudaEventElapsedTime(&elapsed_ms, start_, stop_);
+        printf("%s %fms\n", msg_.c_str(), elapsed_ms);
+        cudaEventDestroy(start_);
+        cudaEventDestroy(stop_);
+    }
 
  private:
-  std::string msg_;
-  cudaEvent_t start_, stop_;
+    std::string msg_;
+    cudaEvent_t start_, stop_;
 };
 
 template<typename QuantT>
@@ -167,13 +151,13 @@ void GruTrain(const int time_steps,
               const int input_size,
               const int hidden_size,
               const float *W,  // 输入到隐藏层的权重矩阵. [input_size,
-    // hidden_size * 3] 对应三个门
+                                               // hidden_size * 3] 对应三个门
               const float *R,   // 隐藏层到隐藏层的循环权重矩阵
               const float *bx,  // 输入偏置项（input bias），来自输入路径
               const float *br,  // 循环偏置项（recurrent bias），来自循环路径
               const float *x,   // 输入序列张量
               const float *dh_new,  // 来自上层网络或损失函数的反向梯度.
-    // [hidden_size, batch_size, time_steps]
+                                               // [hidden_size, batch_size, time_steps]
               bool enable_quantitative = false,  // 是否启用量化推理模式
               bool use_int16 = false             // 控制量化精度位宽
 ) {

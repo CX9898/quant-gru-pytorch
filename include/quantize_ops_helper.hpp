@@ -10,133 +10,133 @@
 
 template<typename T>
 struct GRUQuantitativeParametersInCalibration {
-  dev::vector<T> z_pres_;
-  dev::vector<T> r_pres_;
-  dev::vector<T> g_pres_;
-  dev::vector<T> one_minus_update_;
-  dev::vector<T> new_contrib_;
-  dev::vector<T> old_contrib_;
+    dev::vector<T> z_pres_;
+    dev::vector<T> r_pres_;
+    dev::vector<T> g_pres_;
+    dev::vector<T> one_minus_update_;
+    dev::vector<T> new_contrib_;
+    dev::vector<T> old_contrib_;
 };
 
 // GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
 // 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale = 2^(-exp2_inv_xxx)
 // zp_xxx 表示量化零点（zero point），用于浮点数与整数的映射：量化值 q = round(x / scale + zp)，反量化 x = (q - zp) * scale
 struct GRUQuantitativeParameters {
-  int hidden_; // channel = hidden * 3
-  int32_t exp2_inv_x_;
-  int32_t zp_x_;
-  int32_t exp2_inv_h_;
-  int32_t zp_h_;
+    int hidden_; // channel = hidden * 3
+    int32_t exp2_inv_x_;
+    int32_t zp_x_;
+    int32_t exp2_inv_h_;
+    int32_t zp_h_;
 
-  std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
-  std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
+    std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
+    std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
 
-  int32_t exp2_inv_Wx_;
-  int32_t zp_Wx_;
-  int32_t exp2_inv_Rh_;
-  int32_t zp_Rh_;
+    int32_t exp2_inv_Wx_;
+    int32_t zp_Wx_;
+    int32_t exp2_inv_Rh_;
+    int32_t zp_Rh_;
 
-  std::vector<int32_t> exp2_inv_bx_;
-  std::vector<int32_t> exp2_inv_br_;
+    std::vector<int32_t> exp2_inv_bx_;
+    std::vector<int32_t> exp2_inv_br_;
 
-  int32_t exp2_inv_z_pre_;
-  int32_t zp_z_pre_;
-  int32_t exp2_inv_r_pre_;
-  int32_t zp_r_pre_;
-  int32_t exp2_inv_g_pre_;
-  int32_t zp_g_pre_;
+    int32_t exp2_inv_z_pre_;
+    int32_t zp_z_pre_;
+    int32_t exp2_inv_r_pre_;
+    int32_t zp_r_pre_;
+    int32_t exp2_inv_g_pre_;
+    int32_t zp_g_pre_;
 
-  int32_t exp2_inv_z_out_;
-  int32_t zp_z_out_;
-  int32_t exp2_inv_r_out_;
-  int32_t zp_r_out_;
-  int32_t exp2_inv_g_out_;
-  int32_t zp_g_out_;
+    int32_t exp2_inv_z_out_;
+    int32_t zp_z_out_;
+    int32_t exp2_inv_r_out_;
+    int32_t zp_r_out_;
+    int32_t exp2_inv_g_out_;
+    int32_t zp_g_out_;
 
-  int32_t exp2_inv_Rh_add_br_;
-  int32_t zp_Rh_add_br_;
-  int32_t exp2_inv_rRh_;
-  int32_t zp_rRh_;
+    int32_t exp2_inv_Rh_add_br_;
+    int32_t zp_Rh_add_br_;
+    int32_t exp2_inv_rRh_;
+    int32_t zp_rRh_;
 
-  int32_t exp2_inv_one_minus_update_;
-  int32_t zp_one_minus_update_;
-  int32_t exp2_inv_new_contrib_;
-  int32_t zp_new_contrib_;
-  int32_t exp2_inv_old_contrib_;
-  int32_t zp_old_contrib_;
+    int32_t exp2_inv_one_minus_update_;
+    int32_t zp_one_minus_update_;
+    int32_t exp2_inv_new_contrib_;
+    int32_t zp_new_contrib_;
+    int32_t exp2_inv_old_contrib_;
+    int32_t zp_old_contrib_;
 };
 
 struct QuantGRUReScale {
-  int32_t zp_x_;
-  int32_t zp_h_;
+    int32_t zp_x_;
+    int32_t zp_h_;
 
-  dev::vector<int32_t> n_W_mul_x_div_Wx_; // size = hidden * 3
-  dev::vector<float> scale_W_mul_x_div_Wx_;
-  int32_t zp_Wx_;
-  dev::vector<int32_t> n_R_mul_h_div_Rh_; // size = hidden * 3
-  dev::vector<float> scale_R_mul_h_div_Rh_;
-  int32_t zp_Rh_;
+    dev::vector<int32_t> n_W_mul_x_div_Wx_; // size = hidden * 3
+    dev::vector<float> scale_W_mul_x_div_Wx_;
+    int32_t zp_Wx_;
+    dev::vector<int32_t> n_R_mul_h_div_Rh_; // size = hidden * 3
+    dev::vector<float> scale_R_mul_h_div_Rh_;
+    int32_t zp_Rh_;
 
-  // z门
-  int32_t zp_z_pre_;
-  int32_t zp_z_out_;
-  int32_t exp2_inv_Wx_div_z_pre_;
-  int32_t exp2_inv_Wx_div_z_;
-  int32_t exp2_inv_Rh_div_z_pre_;
-  int32_t exp2_inv_Rh_div_z_;
-  dev::vector<int32_t> n_bx_div_z_;
-  dev::vector<float> scale_bx_div_z_;
-  dev::vector<int32_t> n_br_div_z_;
-  dev::vector<float> scale_br_div_z_;
+    // z门
+    int32_t zp_z_pre_;
+    int32_t zp_z_out_;
+    int32_t exp2_inv_Wx_div_z_pre_;
+    int32_t exp2_inv_Wx_div_z_;
+    int32_t exp2_inv_Rh_div_z_pre_;
+    int32_t exp2_inv_Rh_div_z_;
+    dev::vector<int32_t> n_bx_div_z_;
+    dev::vector<float> scale_bx_div_z_;
+    dev::vector<int32_t> n_br_div_z_;
+    dev::vector<float> scale_br_div_z_;
 
-  // r门
-  int32_t zp_r_pre_;
-  int32_t zp_r_out_;
-  int32_t exp2_inv_Wx_div_r_pre_; // n5
-  int32_t exp2_inv_Rh_div_r_pre_; // n6
-  dev::vector<int32_t> n_bx_div_r_;
-  dev::vector<float> scale_bx_div_r_;
-  dev::vector<int32_t> n_br_div_r_;
-  dev::vector<float> scale_br_div_r_;
+    // r门
+    int32_t zp_r_pre_;
+    int32_t zp_r_out_;
+    int32_t exp2_inv_Wx_div_r_pre_; // n5
+    int32_t exp2_inv_Rh_div_r_pre_; // n6
+    dev::vector<int32_t> n_bx_div_r_;
+    dev::vector<float> scale_bx_div_r_;
+    dev::vector<int32_t> n_br_div_r_;
+    dev::vector<float> scale_br_div_r_;
 
-  // New Gate
-  int32_t zp_g_pre_;
-  int32_t zp_g_out_;
-  int32_t n_Rh_div_Rh_add_br_;
-  int32_t exp2_inv_Rh_div_Rh_add_br_;
-  dev::vector<int32_t> n_br_div_Rh_add_br_; // br 是 per-channel
-  dev::vector<float> scale_br_div_Rh_add_br_;
-  int32_t zp_Rh_add_br_;
-  int32_t n_r_mul_Rh_add_br_div_rRh_; // n9
-  int32_t exp2_inv_r_out_mul_h_div_rRh_; // S9
-  int32_t zp_rRh_;
-  int32_t n_Wx_div_g_pre_; // n10
-  int32_t exp2_inv_Wx_div_g_pre_; // S10
-  int32_t n_rRh_div_g_pre_; // n11
-  int32_t exp2_inv_rRh_div_g_pre_; // S11
-  dev::vector<int32_t> exp2_inv_bx_div_g_pre_;
-  dev::vector<float> scale_bx_div_g_pre_;
+    // New Gate
+    int32_t zp_g_pre_;
+    int32_t zp_g_out_;
+    int32_t n_Rh_div_Rh_add_br_;
+    int32_t exp2_inv_Rh_div_Rh_add_br_;
+    dev::vector<int32_t> n_br_div_Rh_add_br_; // br 是 per-channel
+    dev::vector<float> scale_br_div_Rh_add_br_;
+    int32_t zp_Rh_add_br_;
+    int32_t n_r_mul_Rh_add_br_div_rRh_; // n9
+    int32_t exp2_inv_r_out_mul_h_div_rRh_; // S9
+    int32_t zp_rRh_;
+    int32_t n_Wx_div_g_pre_; // n10
+    int32_t exp2_inv_Wx_div_g_pre_; // S10
+    int32_t n_rRh_div_g_pre_; // n11
+    int32_t exp2_inv_rRh_div_g_pre_; // S11
+    dev::vector<int32_t> exp2_inv_bx_div_g_pre_;
+    dev::vector<float> scale_bx_div_g_pre_;
 
-  // h_new
-  int32_t one_div_one_minus_update_;
-  int32_t n_z_out_div_one_minus_update_; // n12
-  int32_t exp2_inv_z_out_div_one_minus_update_; // S12
-  int32_t zp_one_minus_update_;
+    // h_new
+    int32_t one_div_one_minus_update_;
+    int32_t n_z_out_div_one_minus_update_; // n12
+    int32_t exp2_inv_z_out_div_one_minus_update_; // S12
+    int32_t zp_one_minus_update_;
 
-  int32_t zp_new_contrib_;
-  int32_t n_one_minus_update_mul_g_div_new_contrib_; // n13
-  int32_t exp2_inv_one_minus_update_mul_g_div_new_contrib_; // S13
-  int32_t zp_old_contrib_;
-  int32_t n_z_mul_h_div_old_contrib_; // n14
-  int32_t exp2_inv_z_mul_h_div_old_contrib_; // S14
-  int32_t n_new_contrib_div_h_; // n15
-  int32_t exp2_inv_new_contrib_div_h_; // S15
-  int32_t n_old_contrib_div_h_; // n16
-  int32_t exp2_inv_old_contrib_div_h_; // S16
+    int32_t zp_new_contrib_;
+    int32_t n_one_minus_update_mul_g_div_new_contrib_; // n13
+    int32_t exp2_inv_one_minus_update_mul_g_div_new_contrib_; // S13
+    int32_t zp_old_contrib_;
+    int32_t n_z_mul_h_div_old_contrib_; // n14
+    int32_t exp2_inv_z_mul_h_div_old_contrib_; // S14
+    int32_t n_new_contrib_div_h_; // n15
+    int32_t exp2_inv_new_contrib_div_h_; // S15
+    int32_t n_old_contrib_div_h_; // n16
+    int32_t exp2_inv_old_contrib_div_h_; // S16
 
 
-  //test
-  GRUQuantitativeParameters test;
+    //test
+    GRUQuantitativeParameters test;
 };
 
 
@@ -470,8 +470,8 @@ inline int32_t calculate_right_shift_bits(float S,
     float log2_S = log2f(S);
     float n_theory = -log2_S;
 
-//    // 步骤2：四舍五入到最近整数（C++11+ 支持 roundf 单精度 rounding）
-//    int32_t n_candidate = static_cast<int32_t>(roundf(n_theory));
+    //    // 步骤2：四舍五入到最近整数（C++11+ 支持 roundf 单精度 rounding）
+    //    int32_t n_candidate = static_cast<int32_t>(roundf(n_theory));
 
     // 步骤2：改进的四舍五入策略 - 考虑相对误差
     int32_t n_candidate;
@@ -485,11 +485,11 @@ inline int32_t calculate_right_shift_bits(float S,
     // 步骤3：边界裁剪，确保n在合理范围（避免移位溢出或数值归零）
     int32_t n = std::max(min_n, std::min(n_candidate, max_n));
 
-//    // （可选）验证近似效果（调试用，发布时可注释）
-//    float S_approx = powf(2.0f, -static_cast<float>(n));
-//    float relative_error = (fabsf(S - S_approx) / S) * 100.0f;
-//    std::cout << "[DEBUG] S: " << S << " | Approx S=2^(-" << n << "): " << S_approx
-//              << " | Relative Error: " << relative_error << "%" << std::endl;
+    //    // （可选）验证近似效果（调试用，发布时可注释）
+    //    float S_approx = powf(2.0f, -static_cast<float>(n));
+    //    float relative_error = (fabsf(S - S_approx) / S) * 100.0f;
+    //    std::cout << "[DEBUG] S: " << S << " | Approx S=2^(-" << n << "): " << S_approx
+    //              << " | Relative Error: " << relative_error << "%" << std::endl;
 
     return n;
 }
@@ -531,8 +531,8 @@ inline void test_basic_cases() {
     std::cout << "\n=== 改进的精度验证测试 ===" << std::endl;
 
     struct TestCase {
-      float S;
-      float max_acceptable_error;  // 可接受的最大相对误差百分比
+        float S;
+        float max_acceptable_error;  // 可接受的最大相对误差百分比
     };
 
     std::vector<TestCase> test_cases = {
@@ -1009,7 +1009,7 @@ inline void calibrateQuantParams(
 
         // scale = abs_max / quant_max => 对齐到 2^-n
         T raw_scale = abs_max / quant_max;
-// scale >= raw_scale
+        // scale >= raw_scale
         exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale))); // floor instead of ceil
         scale = std::pow(2.0, -exp2_inv);
         aligned_max = scale * quant_max;
@@ -1031,7 +1031,7 @@ inline void calibrateQuantParams(
         // 计算 zero-point
         T zp_fp = quant_min - aligned_min / scale;
         zp = std::round(zp_fp);
-//        zp = std::clamp(zp, quant_min, quant_max);
+        //        zp = std::clamp(zp, quant_min, quant_max);
     }
 
     // 可选调试打印
@@ -1102,6 +1102,10 @@ void quantification(const T *data,
                     size_t size,
                     int32_t exp2_inv,
                     int32_t zp);
+
+template<typename T, typename QuantT>
+void dequantification(const QuantT *quant_data, T *data, size_t size,
+                      int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src,
@@ -1190,8 +1194,8 @@ void run_one_test(
     // -------------------------------
 
     // 1. 必须覆盖原始范围
-//    assert(aligned_min <= orig_min + 1e-6);
-//    assert(aligned_max >= orig_max - 1e-6);
+    //    assert(aligned_min <= orig_min + 1e-6);
+    //    assert(aligned_max >= orig_max - 1e-6);
 
     // 2. scale 必须严格是 2^-n
     {
@@ -1215,7 +1219,7 @@ void run_one_test(
 
         // (aligned_max - aligned_min) == scale * quant_range
         T expect_span = scale * quant_range;
-//        assert(almost_equal(aligned_max - aligned_min, expect_span, (T) 1e-5));
+        //        assert(almost_equal(aligned_max - aligned_min, expect_span, (T) 1e-5));
     }
 
     std::cout << "✓ PASS\n";

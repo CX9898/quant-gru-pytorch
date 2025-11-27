@@ -1,124 +1,80 @@
-# Specify the minimum version of cmake
 cmake_minimum_required(VERSION 3.18)
 
-# Project Information
-project(gru)
+project(gru LANGUAGES CXX CUDA)
 
-# Add languages needed when building the project
-enable_language(CXX)
-enable_language(CUDA)
-
-find_package(CUDAToolkit REQUIRED)
-
-##set(Python3_ROOT_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch")
-##set(Python3_EXECUTABLE "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/bin/python")
-##set(Torch_DIR "$ENV{HOME}/miniconda3/envs/quant-gru-pytouch/lib/python3.9/site-packages/torch/share/cmake/Torch")
-#set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
-#
-## 找到 pybind11
-## 指定 pybind11_DIR 为 CMake 配置文件所在路径
-#set(pybind11_DIR "/opt/conda/lib/python3.11/site-packages/pybind11/share/cmake/pybind11")
-
-set(pybind11_DIR /usr/share/cmake/pybind11)
-message("pybind11_DIR = ${pybind11_DIR}")
-find_package(pybind11 REQUIRED)
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development Development.Embed)
-set(Torch_DIR /usr/local/lib/python3.10/dist-packages/torch/share/cmake/Torch)
-find_package(Torch REQUIRED)
-message(STATUS "Python3 Include Dir: ${Python3_INCLUDE_DIRS}")  # 打印 Python 头文件路径
-message(STATUS "Python3 Libraries: ${Python3_LIBRARIES}")        # 打印 Python 库路径
-
-# Find OpenMP package
-find_package(OpenMP REQUIRED)
-
-# Sets the C++ standard used by the project
-# 设置 C++17
+# ------------------------------
+# C++ / CUDA 标准
+# ------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS ON)   # GNU 扩展，和 PyTorch 推荐一致
-
-# CUDA 也使用 C++17
+set(CMAKE_CXX_EXTENSIONS ON)        # GNU 扩展
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# Specifies which GPU architectures are supported when compiling CUDA code (optional)
-#set(CMAKE_CUDA_ARCHITECTURES 86)
-
-# Save the folder path in a variable
+# ------------------------------
+# include / src 路径
+# ------------------------------
 set(INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
 set(SRC_DIR "${CMAKE_SOURCE_DIR}/src")
 
-# All source files in src folder are stored in SRC_FILES variable
-file(GLOB SRC_FILES "${SRC_DIR}/*.c" "${SRC_DIR}/*.cpp" "${SRC_DIR}/*.cc" "${SRC_DIR}/*.cxx" "${SRC_DIR}/*.cu")
-
-# Output file list information
+# 所有源码文件
+file(GLOB SRC_FILES
+        "${SRC_DIR}/*.c"
+        "${SRC_DIR}/*.cpp"
+        "${SRC_DIR}/*.cc"
+        "${SRC_DIR}/*.cxx"
+        "${SRC_DIR}/*.cu"
+)
 message(STATUS "Src files: ${SRC_FILES}")
 
-# Add generate target
-add_executable(${PROJECT_NAME})
+# ------------------------------
+# CUDA / OpenMP
+# ------------------------------
+find_package(CUDAToolkit REQUIRED)
+find_package(OpenMP REQUIRED)
 
-#pybind11_add_module(gru_calibration_module MODULE bindings.cpp gru_calibration.cpp)
+# ------------------------------
+# 编译静态库和动态库
+# ------------------------------
+add_library(gru_quant_static STATIC ${SRC_FILES})
+add_library(gru_quant_shared SHARED ${SRC_FILES})
 
-## Print kernel function register information
-#set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --resource-usage")
-
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
-
-# Set the CUDA separable compilation property
-set_target_properties(${PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-# Link the source file to the build target
-target_sources(${PROJECT_NAME} PRIVATE ${SRC_FILES})
-
-# Set the installation Path
-set(CMAKE_INSTALL_PREFIX "${CMAKE_SOURCE_DIR}")
-
-# Set installation rules
-install(TARGETS ${PROJECT_NAME} DESTINATION bin)
-
-# Add header directory (locally)
-target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR})
-
-# Linked cuda Runtime library
-target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cudart)
-
-# Linked cuBLAS library
-target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cublas)
-
-# Linked cuFFT library
-#target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cufft)
-
-# Linked cuRAND library
-#target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::curand)
-
-# Linked cuSOLVER library
-#target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cusolver)
-
-# Linked cuSPARSE library
-#target_link_libraries(${PROJECT_NAME} PRIVATE CUDA::cusparse)
-
-target_include_directories(${PROJECT_NAME} PRIVATE ${Python3_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} PRIVATE ${Python3_LIBRARIES})
-
-
-target_include_directories(${PROJECT_NAME} PRIVATE ${TORCH_INCLUDE_DIRS})
-target_link_libraries(${PROJECT_NAME} PRIVATE ${TORCH_LIBRARIES})
-
-# Linked OpenMP library
-target_link_libraries(${PROJECT_NAME} PRIVATE OpenMP::OpenMP_CXX)
-
-# Eigen库
-#set(CMAKE_PREFIX_PATH "/usr/share/eigen3" CACHE PATH "Additional search path")
-#set(Eigen3_DIR "/usr/local/share/eigen3/cmake" CACHE PATH "Path to Eigen3Config.cmake")
-#find_package(Eigen3 3.3 REQUIRED NO_MODULE
-#        PATHS /usr/share/eigen3/cmake
-#        NO_DEFAULT_PATH
-#)
-#target_link_libraries(${PROJECT_NAME} PRIVATE Eigen3::Eigen)
-
-target_include_directories(${PROJECT_NAME} PRIVATE
-        ${TORCH_INCLUDE_DIRS}           # Torch 头文件（必须包含！）
-        ${Python3_INCLUDE_DIRS}
+# 输出目录
+set_target_properties(gru_quant_static PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
+)
+set_target_properties(gru_quant_shared PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
 )
 
-message(STATUS "TORCH_INCLUDE_DIRS : ${TORCH_INCLUDE_DIRS}")
+# ------------------------------
+# 可执行程序
+# ------------------------------
+add_executable(gru_example "${CMAKE_SOURCE_DIR}/example/gru.cc")
+
+# 让可执行程序链接共享库
+target_link_libraries(gru_example PRIVATE gru_quant_shared)
+
+# ------------------------------
+# 包含目录
+# ------------------------------
+target_include_directories(gru_quant_static PUBLIC ${INCLUDE_DIR})
+target_include_directories(gru_quant_shared PUBLIC ${INCLUDE_DIR})
+target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
+
+# Torch / Python3 include (如果你需要调用 Torch API)
+# find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+# target_include_directories(gru_quant_shared PRIVATE ${Python3_INCLUDE_DIRS})
+
+# ------------------------------
+# 链接库
+# ------------------------------
+target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
+target_link_libraries(gru_quant_shared PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
+target_link_libraries(gru_example PRIVATE CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
+
+# 可选：CUDA优化
+set_target_properties(gru_quant_static PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(gru_quant_shared PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
