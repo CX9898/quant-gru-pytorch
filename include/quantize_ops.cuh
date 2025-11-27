@@ -65,6 +65,54 @@ __device__ __forceinline__ int8_t quantize_float_to_int8(
     return static_cast<int8_t>(clamped);
 }
 
+
+template<typename T>
+struct QuantLimits;
+
+template<>
+struct QuantLimits<int8_t> {
+  static __device__ __forceinline__ constexpr int32_t min() { return -128; }
+
+  static __device__ __forceinline__ constexpr int32_t max() { return 127; }
+};
+
+template<>
+struct QuantLimits<int16_t> {
+  static __device__ __forceinline__ constexpr int32_t min() { return -32768; }
+
+  static __device__ __forceinline__ constexpr int32_t max() { return 32767; }
+};
+
+// int32_t 特化
+template<>
+struct QuantLimits<int32_t> {
+  static __host__ __device__ constexpr int min() { return -2147483648; }
+
+  static __host__ __device__ constexpr int max() { return 2147483647; }
+};
+
+
+template<typename QuantT>
+inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+
+    // CUDA device code: 使用CUDA内置函数
+    float scale = powf(2.0f, -static_cast<float>(exp2_inv));
+    int32_t q = __float2int_rn(src / scale) + zp;
+
+    q = clamp<QuantT>(q);
+
+    return static_cast<QuantT>(q);
+}
+
+template<typename QuantT>
+inline __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+    // CUDA device code: 使用CUDA内置函数
+    float scale = powf(2.0f, -static_cast<float>(exp2_inv));
+
+    return (static_cast<int32_t>(q) - zp) * scale;
+}
+
+
 __device__ __forceinline__ int8_t quantize_i32_to_i8(
     const int32_t value,
     const int32_t M,
@@ -172,31 +220,6 @@ __device__ __forceinline__ int32_t rescale(
 
     return scaled;
 }
-
-template<typename T>
-struct QuantLimits;
-
-template<>
-struct QuantLimits<int8_t> {
-  static __device__ __forceinline__ constexpr int32_t min() { return -128; }
-
-  static __device__ __forceinline__ constexpr int32_t max() { return 127; }
-};
-
-template<>
-struct QuantLimits<int16_t> {
-  static __device__ __forceinline__ constexpr int32_t min() { return -32768; }
-
-  static __device__ __forceinline__ constexpr int32_t max() { return 32767; }
-};
-
-// int32_t 特化
-template<>
-struct QuantLimits<int32_t> {
-  static __host__ __device__ constexpr int min() { return -2147483648; }
-
-  static __host__ __device__ constexpr int max() { return 2147483647; }
-};
 
 /**
  * @brief 对单个 float 元素执行量化 (设备端函数)

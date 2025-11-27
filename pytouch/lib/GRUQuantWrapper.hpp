@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cublas_v2.h>
+#include <iostream>
 #include <torch/extension.h>
 
 #include "gru.h"
@@ -59,7 +60,7 @@ class GRUQuantWrapper {
         x_quant_.resize(time_steps * batch_size * input_size);
         h_quant_.resize((time_steps + 1) * batch_size * hidden_size);
 
-        h_ = torch::empty({time_steps_ + 1, batch_size_, hidden_size_},  // 形状：[T+1, B, H]
+        h_ = torch::empty({time_steps_ + 1, batch_size_, hidden_size_},// 形状：[T+1, B, H]
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
@@ -75,20 +76,21 @@ class GRUQuantWrapper {
 
         // 校准量化参数
         bool use_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
-//        calibrateGruScales(use_int16, time_steps_, batch_size_, input_size_,
-//                           hidden_size_, W.data_ptr<float>(),
-//                           R.data_ptr<float>(), bx.data_ptr<float>(),
-//                           br.data_ptr<float>(), x_for_calib.data_ptr<float>(),
-//                           g_blas_handle, quant_parms_);
+        //        calibrateGruScales(use_int16, time_steps_, batch_size_, input_size_,
+        //                           hidden_size_, W.data_ptr<float>(),
+        //                           R.data_ptr<float>(), bx.data_ptr<float>(),
+        //                           br.data_ptr<float>(), x_for_calib.data_ptr<float>(),
+        //                           g_blas_handle, quant_parms_);
         dev::vector<float> h_dev((time_steps_ + 1) * batch_size_ * hidden_size_);
         dev::vector<float> tmp_Wx_dev(time_steps_ * batch_size_ * hidden_size_ * 3);
         dev::vector<float> tmp_Rh_dev(time_steps_ * batch_size_ * hidden_size_ * 3);
         dev::vector<float> v_dev(time_steps_ * batch_size_ * hidden_size_ * 4);
 
+
         h_dev.zero();
 
         gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-            true, // training
+            true,// training
             batch_size_,
             input_size_,
             hidden_size_,
@@ -137,15 +139,23 @@ class GRUQuantWrapper {
     at::Tensor forward(const at::Tensor &x) {
         TORCH_CHECK(x.is_cuda(), "x must be CUDA tensor");
         TORCH_CHECK(x.dtype() == torch::kFloat32, "x must be float32");
-
+        std::cout << "All elements: " << x.flatten() << std::endl;
+        printf("size = %d, exp2_inv = %d, zp = %d\n", time_steps_ * batch_size_ * input_size_,
+               quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
         dev::quantification(x.data_ptr<float>(), x_quant_.data(),
                             time_steps_ * batch_size_ * input_size_,
                             quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
 
+        std::vector<float> x_host = d2h(x.data_ptr<float>(), time_steps_ * batch_size_ * input_size_);
+        std::vector<QuantT> x_tmp(time_steps_ * batch_size_ * input_size_);
+        for (int i = 0; i < 3; ++i) {
+            printf("cpu test: src=%.4f → q=%d\n",
+                   x_host[i], quantize<QuantT>(x_host[i], quant_parms_.exp2_inv_x_, quant_parms_.zp_x_));
+        }
         std::vector<QuantT> x_quant_host = d2h(x_quant_);
         printf("x_quant : ");
-        for(int i =0 ;i < x_quant_.size(); ++i){
-            printf("%d ",x_quant_host[i]);
+        for (int i = 0; i < x_quant_.size(); ++i) {
+            printf("%d ", x_quant_host[i]);
         }
         printf("\n");
 
@@ -161,7 +171,7 @@ class GRUQuantWrapper {
 
         gru::ForwardPassQuant<QuantT> forward =
             gru::ForwardPassQuant<QuantT>(
-                false, // training
+                false,// training
                 batch_size_, input_size_, hidden_size_, g_blas_handle);
 
         forward.setRescaleParam(quant_parms_);
@@ -181,8 +191,8 @@ class GRUQuantWrapper {
 
         std::vector<QuantT> h_quant_host = d2h(h_quant_);
         printf("h_quant : ");
-        for(int i =0 ;i < h_quant_.size(); ++i){
-            printf("%d ",h_quant_host[i]);
+        for (int i = 0; i < h_quant_.size(); ++i) {
+            printf("%d ", h_quant_host[i]);
         }
         printf("\n");
 
