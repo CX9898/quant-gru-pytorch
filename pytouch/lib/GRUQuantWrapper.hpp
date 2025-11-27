@@ -142,7 +142,7 @@ class GRUQuantWrapper {
                     nullptr);
 
         dev::dequantification(h_quant_.data(),
-                              h_.data_ptr<QuantT>(),
+                              h_.data_ptr<float>(),
                               h_quant_.size(),
                               quant_parms_.exp2_inv_h_,
                               quant_parms_.zp_h_);

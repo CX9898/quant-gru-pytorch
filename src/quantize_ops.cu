@@ -525,6 +525,8 @@ template void quantification<float, int8_t>(const float *data, int8_t *quant_dat
                                             int32_t exp2_inv, int32_t zp);
 template void quantification<float, int16_t>(const float *data, int16_t *quant_data, size_t size,
                                              int32_t exp2_inv, int32_t zp);
+template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
+                                               int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size,
@@ -539,6 +541,8 @@ template void dequantification<float, int8_t>(const int8_t *quant_data, float *d
                                               int32_t exp2_inv, int32_t zp);
 template void dequantification<float, int16_t>(const int16_t *quant_data, float *data, size_t size,
                                                int32_t exp2_inv, int32_t zp);
+//template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
+//                                               int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data,
@@ -560,6 +564,9 @@ template void quantificationPerChannel<float, int8_t>(const float *src, int8_t *
 template void quantificationPerChannel<float, int16_t>(const float *src, int16_t *quant_data,
                                                        size_t input_size, size_t channel_size,
                                                        const dev::vector<int32_t> &exp2_invs);
+template void quantificationPerChannel<float, int32_t>(const float *src, int32_t *quant_data,
+                                                       size_t input_size, size_t channel_size,
+                                                       const dev::vector<int32_t> &exp2_invs);
 
 template<typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data,
@@ -578,6 +585,9 @@ template void dequantificationPerChannel<float, int8_t>(const int8_t *quant_data
                                                         size_t input_size, size_t channel_size,
                                                         const dev::vector<int32_t> &exp2_invs);
 template void dequantificationPerChannel<float, int16_t>(const int16_t *quant_data, float *data,
+                                                         size_t input_size, size_t channel_size,
+                                                         const dev::vector<int32_t> &exp2_invs);
+template void dequantificationPerChannel<float, int32_t>(const int32_t *quant_data, float *data,
                                                          size_t input_size, size_t channel_size,
                                                          const dev::vector<int32_t> &exp2_invs);
 }// namespace dev
