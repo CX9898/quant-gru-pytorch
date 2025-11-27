@@ -517,18 +517,28 @@ void quantification(const T *data, QuantT *quant_data, size_t size,
                     int32_t exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
-    kernel::quantification<grid, block>(data, quant_data, size, exp2_inv, zp);
+    kernel::quantification<<<grid, block>>>(data, quant_data, size, exp2_inv, zp);
     cudaDeviceSynchronize();
 }
+
+template void quantification<float, int8_t>(const float *data, int8_t *quant_data, size_t size,
+                                            int32_t exp2_inv, int32_t zp);
+template void quantification<float, int16_t>(const float *data, int16_t *quant_data, size_t size,
+                                             int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size,
                       int32_t exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
-    kernel::dequantification<grid, block>(quant_data, data, size, exp2_inv, zp);
+    kernel::dequantification<<<grid, block>>>(quant_data, data, size, exp2_inv, zp);
     cudaDeviceSynchronize();
 }
+
+template void dequantification<float, int8_t>(const int8_t *quant_data, float *data, size_t size,
+                                              int32_t exp2_inv, int32_t zp);
+template void dequantification<float, int16_t>(const int16_t *quant_data, float *data, size_t size,
+                                               int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data,
@@ -538,10 +548,18 @@ void quantificationPerChannel(const T *src, QuantT *quant_data,
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
 
-    kernel::quantificationPerChannel<gridDim, blockDim>(
+    kernel::quantificationPerChannel<<<gridDim, blockDim>>>(
         src, quant_data, input_size, channel_size, exp2_invs.data());
     cudaDeviceSynchronize();
 }
+
+template void quantificationPerChannel<float, int8_t>(const float *src, int8_t *quant_data,
+                                                      size_t input_size, size_t channel_size,
+                                                      const dev::vector<int32_t> &exp2_invs);
+
+template void quantificationPerChannel<float, int16_t>(const float *src, int16_t *quant_data,
+                                                       size_t input_size, size_t channel_size,
+                                                       const dev::vector<int32_t> &exp2_invs);
 
 template<typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data,
@@ -551,10 +569,17 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data,
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
 
-    kernel::dequantificationPerChannel<gridDim, blockDim>(
+    kernel::dequantificationPerChannel<<<gridDim, blockDim>>>(
         quant_data, data, input_size, channel_size, exp2_invs.data());
     cudaDeviceSynchronize();
 }
+
+template void dequantificationPerChannel<float, int8_t>(const int8_t *quant_data, float *data,
+                                                        size_t input_size, size_t channel_size,
+                                                        const dev::vector<int32_t> &exp2_invs);
+template void dequantificationPerChannel<float, int16_t>(const int16_t *quant_data, float *data,
+                                                         size_t input_size, size_t channel_size,
+                                                         const dev::vector<int32_t> &exp2_invs);
 }// namespace dev
 
 //

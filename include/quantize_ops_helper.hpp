@@ -1058,7 +1058,7 @@ inline __host__ __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t 
 }
 
 template<typename QuantT>
-inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+inline __host__ __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
     return (static_cast<int32_t>(q) - zp) * scale;
 }
