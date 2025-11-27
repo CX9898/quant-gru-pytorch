@@ -121,7 +121,7 @@ void GruInference(const int time_steps,
     dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
     dev::vector<float> bx_dev(bx, hidden_size * 3);
     dev::vector<float> br_dev(br, hidden_size * 3);
-    dev::vector<float> x_dev(x, hidden_size * 3 * input_size * batch_size);
+    dev::vector<float> x_dev(x, time_steps * input_size * batch_size);
 
     dev::vector<float> h_dev(hidden_size * batch_size * (time_steps + 1));
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
@@ -167,7 +167,7 @@ void GruTrain(const int time_steps,
     dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
     dev::vector<float> bx_dev(bx, hidden_size * 3);
     dev::vector<float> br_dev(br, hidden_size * 3);
-    dev::vector<float> x_dev(x, hidden_size * 3 * input_size * batch_size);
+    dev::vector<float> x_dev(x, time_steps * input_size * batch_size);
 
     dev::vector<float> dh_new_dev(dh_new, HIDDEN_DIMS * BATCH_SIZE * (SEQUENCE_LEN + 1));
 
@@ -329,14 +329,12 @@ int main() {
     // 这确保前向和反向传播的方差保持稳定
     fillVectorWithNormalDistribution(W, -1, 1);
     for (int i = 0; i < W.size(); ++i) {
-        W[i] = W[i] * 2.0f - 0.1f;
-        W[i] = W[i] * 0.5f;
+        W[i] = W[i] * 0.1f;
         W[i] *= 0.01f;
     }
 
     fillVectorWithNormalDistribution(R, -1, 1);
     for (int i = 0; i < R.size(); ++i) {
-        R[i] = R[i] * 2.0f - 0.1f;
         R[i] = R[i] * 0.5f;
         R[i] *= 0.01f;
     }
@@ -352,14 +350,12 @@ int main() {
 
     fillVectorWithNormalDistribution(x, -1, 1);
     for (int i = 0; i < x.size(); ++i) {
-        x[i] = x[i] * 2.0f - 0.1f;
         x[i] = x[i] * 0.8f;
         x[i] += 0.1f;
     }
 
     fillVectorWithNormalDistribution(dh, -1, 1);
     for (int i = 0; i < dh.size(); ++i) {
-        dh[i] = dh[i] * 2.0f - 0.1f;
         dh[i] = dh[i] * 0.5f;
     }
 
