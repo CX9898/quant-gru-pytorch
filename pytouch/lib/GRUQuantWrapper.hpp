@@ -74,12 +74,43 @@ class GRUQuantWrapper {
         TORCH_CHECK(x_for_calib.is_cuda(), "x_for_calib must be CUDA tensor");
 
         // 校准量化参数
-        bool use_int16_ = std::is_same_v<QuantT, int16_t> ? true : false;
-        calibrateGruScales(use_int16_, time_steps_, batch_size_, input_size_,
-                           hidden_size_, W.data_ptr<float>(),
-                           R.data_ptr<float>(), bx.data_ptr<float>(),
-                           br.data_ptr<float>(), x_for_calib.data_ptr<float>(),
-                           g_blas_handle, quant_parms_);
+        bool use_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
+//        calibrateGruScales(use_int16, time_steps_, batch_size_, input_size_,
+//                           hidden_size_, W.data_ptr<float>(),
+//                           R.data_ptr<float>(), bx.data_ptr<float>(),
+//                           br.data_ptr<float>(), x_for_calib.data_ptr<float>(),
+//                           g_blas_handle, quant_parms_);
+        dev::vector<float> h_dev((time_steps_ + 1) * batch_size_ * hidden_size_);
+        dev::vector<float> tmp_Wx_dev(time_steps_ * batch_size_ * hidden_size_ * 3);
+        dev::vector<float> tmp_Rh_dev(time_steps_ * batch_size_ * hidden_size_ * 3);
+        dev::vector<float> v_dev(time_steps_ * batch_size_ * hidden_size_ * 4);
+
+        h_dev.zero();
+
+        gru::ForwardPass<float> forward = gru::ForwardPass<float>(
+            true, // training
+            batch_size_,
+            input_size_,
+            hidden_size_,
+            g_blas_handle);
+
+        forward.setCalibrationMode(true, use_int16);
+
+        forward.Run(
+            time_steps_,
+            W.data_ptr<float>(),
+            R.data_ptr<float>(),
+            bx.data_ptr<float>(),
+            br.data_ptr<float>(),
+            x_for_calib.data_ptr<float>(),
+            h_dev.data(),
+            v_dev.data(),
+            tmp_Wx_dev.data(),
+            tmp_Rh_dev.data(),
+            0.0f,
+            nullptr);
+
+        quant_parms_ = forward.getGRUQuantitativeParameters();
 
         dev::quantificationPerChannel(
             W.data_ptr<float>(), W_quant_.data(), input_size_,
@@ -111,6 +142,13 @@ class GRUQuantWrapper {
                             time_steps_ * batch_size_ * input_size_,
                             quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
 
+        std::vector<QuantT> x_quant_host = d2h(x_quant_);
+        printf("x_quant : ");
+        for(int i =0 ;i < x_quant_.size(); ++i){
+            printf("%d ",x_quant_host[i]);
+        }
+        printf("\n");
+
         generate_int8_lut_from_exp2_inv(
             quant_parms_.exp2_inv_z_pre_, quant_parms_.zp_z_pre_,
             quant_parms_.exp2_inv_z_out_, quant_parms_.zp_z_out_,
@@ -140,6 +178,13 @@ class GRUQuantWrapper {
                     tmp_Rh_quant_.data(),
                     0.0f,
                     nullptr);
+
+        std::vector<QuantT> h_quant_host = d2h(h_quant_);
+        printf("h_quant : ");
+        for(int i =0 ;i < h_quant_.size(); ++i){
+            printf("%d ",h_quant_host[i]);
+        }
+        printf("\n");
 
         dev::dequantification(h_quant_.data(),
                               h_.data_ptr<float>(),

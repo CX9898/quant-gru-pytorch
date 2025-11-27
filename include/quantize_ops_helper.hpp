@@ -1036,14 +1036,14 @@ inline void calibrateQuantParams(
 
     // 可选调试打印
 #ifdef DEBUG
-//    if (!name.empty()) {
-//        std::cout << "[QuantParam][" << name << "] "
-//                  << "orig_min=" << orig_min << ", orig_max=" << orig_max
-//                  << ", aligned_min=" << aligned_min << ", aligned_max=" << aligned_max
-//                  << ", scale=" << scale
-//                  << ", exp2_inv=" << exp2_inv << ", zp=" << zp
-//                  << ", is_symmetric=" << is_symmetric << std::endl;
-//    }
+    if (!name.empty() && name == "scale_x") {
+        std::cout << "[QuantParam][" << name << "] "
+                  << "orig_min=" << orig_min << ", orig_max=" << orig_max
+                  << ", aligned_min=" << aligned_min << ", aligned_max=" << aligned_max
+                  << ", scale=" << scale
+                  << ", exp2_inv=" << exp2_inv << ", zp=" << zp
+                  << ", is_symmetric=" << is_symmetric << std::endl;
+    }
 #endif
 }
 
