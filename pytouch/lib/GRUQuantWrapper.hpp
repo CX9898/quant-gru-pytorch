@@ -59,8 +59,8 @@ class GRUQuantWrapper {
         x_quant_.resize(time_steps * batch_size * input_size);
         h_quant_.resize((time_steps + 1) * batch_size * hidden_size);
 
-        h_ = torch::empty({(time_steps + 1) * batch_size * hidden_size},
-                          torch::dtype(torch::kInt32).device(torch::kCUDA));
+        h_ = torch::empty({time_steps_ + 1, batch_size_, hidden_size_},  // 形状：[T+1, B, H]
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
     // --------------------------------------------------

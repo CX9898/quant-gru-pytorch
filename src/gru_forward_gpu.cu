@@ -1,9 +1,9 @@
 #include <cstdint>
 #include <cublas_v2.h>
-#include <cuda_runtime_api.h>
 #include <cuda_fp16.h>
-#include <utility>
+#include <cuda_runtime_api.h>
 #include <tuple>
+#include <utility>
 
 #include "blas.h"
 #include "device_assert.h"
@@ -30,9 +30,9 @@ __device__ __forceinline__ void PointwiseOperations(int steps_idx,
                                                     const T *zoneout_mask,
                                                     T *z_pres,
                                                     T *r_pres,
-                                                    T *g_pres) {  // Zoneout mask (only used if ApplyZoneout==true)
-    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元. hidden_idx
-    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本. batch_idx
+                                                    T *g_pres) {// Zoneout mask (only used if ApplyZoneout==true)
+    const int row = blockDim.x * blockIdx.x + threadIdx.x;      // 当前线程对应的隐藏单元. hidden_idx
+    const int col = blockDim.y * blockIdx.y + threadIdx.y;      // 当前线程对应的batch样本. batch_idx
 
     if (row >= hidden_dim || col >= batch_dim)
         return;
@@ -55,41 +55,41 @@ __device__ __forceinline__ void PointwiseOperations(int steps_idx,
     const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
     const T z = sigmoid(z_pre);
 
-//    if (weight_idx == 1 && steps_idx <= 2) {
-//        printf("haste compute Z: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
-//               Wx[z_idx],
-//               Rh[z_idx],
-//               bx[bz_idx],
-//               br[bz_idx],
-//               z_pre,
-//               z);
-//    }
+    //    if (weight_idx == 1 && steps_idx <= 2) {
+    //        printf("haste compute Z: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
+    //               Wx[z_idx],
+    //               Rh[z_idx],
+    //               bx[bz_idx],
+    //               br[bz_idx],
+    //               z_pre,
+    //               z);
+    //    }
 
     const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
     const T r = sigmoid(r_pre);
 
-//    if (weight_idx == 0) {
-//        printf("haste compute R: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, r_pre_fp=%f, r=%f\n",
-//               Wx[r_idx],
-//               Rh[r_idx],
-//               bx[br_idx],
-//               br[br_idx],
-//               r_pre,
-//               r);
-//    }
+    //    if (weight_idx == 0) {
+    //        printf("haste compute R: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, r_pre_fp=%f, r=%f\n",
+    //               Wx[r_idx],
+    //               Rh[r_idx],
+    //               bx[br_idx],
+    //               br[br_idx],
+    //               r_pre,
+    //               r);
+    //    }
 
     const T g_pre = Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx];
     const T g = tanh(g_pre);
 
-//    if (weight_idx == 0) {
-//        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
-//               Wx[g_idx],
-//               Rh[g_idx],
-//               bx[bg_idx],
-//               br[bg_idx],
-//               g_pre,
-//               g);
-//    }
+    //    if (weight_idx == 0) {
+    //        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
+    //               Wx[g_idx],
+    //               Rh[g_idx],
+    //               bx[bg_idx],
+    //               br[bg_idx],
+    //               g_pre,
+    //               g);
+    //    }
 
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
@@ -102,16 +102,16 @@ __device__ __forceinline__ void PointwiseOperations(int steps_idx,
 
     T cur_h_value = z * h[output_idx] + (static_cast<T>(1.0) - z) * g;
 
-//    if (weight_idx == 1 && steps_idx <= 2) {
-//        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
-//               z,
-//               h[output_idx],
-//               z * h[output_idx],
-//               (static_cast<T>(1.0) - z),
-//               g,
-//               (static_cast<T>(1.0) - z) * g,
-//               cur_h_value);
-//    }
+    //    if (weight_idx == 1 && steps_idx <= 2) {
+    //        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f, new_contrib=%f, h=%f\n",
+    //               z,
+    //               h[output_idx],
+    //               z * h[output_idx],
+    //               (static_cast<T>(1.0) - z),
+    //               g,
+    //               (static_cast<T>(1.0) - z) * g,
+    //               cur_h_value);
+    //    }
 
     if (ApplyZoneout) {
         if (Training) {
@@ -128,10 +128,10 @@ __device__ __forceinline__ void PointwiseOperations(int steps_idx,
     }
 
     h_out[output_idx] = cur_h_value;
-//    printf("h_out = %f, z = %f, r = %f, g = %f,z_pre = %f, r_pre = %f, g_pre = %f, h_old = %f\n", cur_h_value, z, r, g,z_pre,r_pre,g_pre, h[output_idx]);
-//    printf("Wx_z = %f, Rh_z = %f, bx_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[bz_idx]);
+    //    printf("h_out = %f, z = %f, r = %f, g = %f,z_pre = %f, r_pre = %f, g_pre = %f, h_old = %f\n", cur_h_value, z, r, g,z_pre,r_pre,g_pre, h[output_idx]);
+    //    printf("Wx_z = %f, Rh_z = %f, bx_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[bz_idx]);
 }
-} // op namespace
+}// namespace op
 
 template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
 __global__ void PointwiseOperations(const int batch_dim,
@@ -144,8 +144,7 @@ __global__ void PointwiseOperations(const int batch_dim,
                                     T *h_out,
                                     T *v,
                                     const T zoneout_prob,
-                                    const T *zoneout_mask
-) {
+                                    const T *zoneout_mask) {
     op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(0, batch_dim,
                                                                     hidden_dim,
                                                                     Wx,
@@ -177,8 +176,7 @@ __global__ void PointwiseOperations(int steps_idx,
                                     const T *zoneout_mask,
                                     T *z_pres,
                                     T *r_pres,
-                                    T *g_pres
-) {
+                                    T *g_pres) {
     op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(steps_idx,
                                                                     batch_dim,
                                                                     hidden_dim,
@@ -199,37 +197,36 @@ __global__ void PointwiseOperations(int steps_idx,
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
 
 template<typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
-__global__
-void PointwiseOperations(const int batch_dim,
-                         const int hidden_dim,
-                         const half *Wx,
-                         const half *Rh,
-                         const half *bx,
-                         const half *br,
-                         const half *h,
-                         half *h_out,
-                         half *v,
-                         const half zoneout_prob,
-                         const half *zoneout_mask) {
+__global__ void PointwiseOperations(const int batch_dim,
+                                    const int hidden_dim,
+                                    const half *Wx,
+                                    const half *Rh,
+                                    const half *bx,
+                                    const half *br,
+                                    const half *h,
+                                    half *h_out,
+                                    half *v,
+                                    const half zoneout_prob,
+                                    const half *zoneout_mask) {
     device_assert_fail("FP16 is not supported on compute capability < 7.0.");
 }
 
 #endif
 
-}  // anonymous namespace
+}// anonymous namespace
 
 namespace gru {
 
 template<typename T>
 struct ForwardPass<T>::private_data {
-  bool training;
-  int batch_size;
-  int input_size;
-  int hidden_size;
-  cublasHandle_t blas_handle;
-  cudaStream_t stream[2];
-  cudaEvent_t event;
-  cudaStream_t sync_stream;
+    bool training;
+    int batch_size;
+    int input_size;
+    int hidden_size;
+    cublasHandle_t blas_handle;
+    cudaStream_t stream[2];
+    cudaEvent_t event;
+    cudaStream_t sync_stream;
 };
 
 template<typename T>
@@ -270,18 +267,18 @@ ForwardPass<T>::~ForwardPass() {
 
 template<typename T>
 void ForwardPass<T>::Iterate(
-    const T *W,  // [C,H*3]
-    const T *R,  // [H,H*3]
-    const T *bx, // [H*3]
-    const T *br, // [H*3]
-    const T *x,  // [N,C]
-    const T *h,  // [N,H]
-    T *h_out,    // [N,H]
-    T *v,        // [N,H*4]
-    T *tmp_Wx,   // [N,H*3]
-    T *tmp_Rh,   // [N,H*3]
+    const T *W, // [C,H*3]
+    const T *R, // [H,H*3]
+    const T *bx,// [H*3]
+    const T *br,// [H*3]
+    const T *x, // [N,C]
+    const T *h, // [N,H]
+    T *h_out,   // [N,H]
+    T *v,       // [N,H*4]
+    T *tmp_Wx,  // [N,H*3]
+    T *tmp_Rh,  // [N,H*3]
     const float zoneout_prob,
-    const T *zoneout_mask) { // Zoneout mask [N,H]
+    const T *zoneout_mask) {// Zoneout mask [N,H]
     static const T alpha = static_cast<T>(1.0);
     static const T beta = static_cast<T>(0.0);
 
@@ -327,16 +324,16 @@ void ForwardPass<T>::Iterate(
 template<typename T>
 void ForwardPass<T>::IterateInternal(
     int steps_idx,
-    const T *R,  // [H,H*3]
-    const T *bx, // [H*3]
-    const T *br, // [H*3]
-    const T *h,  // [N,H]
-    T *h_out,    // [N,H]
-    T *v,        // [N,H*4]
-    T *tmp_Wx,   // [N,H*3]
-    T *tmp_Rh,   // [N,H*3]
+    const T *R, // [H,H*3]
+    const T *bx,// [H*3]
+    const T *br,// [H*3]
+    const T *h, // [N,H]
+    T *h_out,   // [N,H]
+    T *v,       // [N,H*4]
+    T *tmp_Wx,  // [N,H*3]
+    T *tmp_Rh,  // [N,H*3]
     const float zoneout_prob,
-    const T *zoneout_mask) { // Zoneout mask [N,H]
+    const T *zoneout_mask) {// Zoneout mask [N,H]
     // Constants for GEMM
     static const T alpha = static_cast<T>(1.0);
     static const T beta = static_cast<T>(0.0);
@@ -737,7 +734,6 @@ void calculateScalePerSteps(const T *x_dev,
     }
 
     calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp, name);
-
 }
 
 template<typename T, typename QuantT>
@@ -790,7 +786,7 @@ void calculateScale(const std::vector<T> &data_host,
                     const std::string &name = "") {
     T min_val = data_host[0];
     T max_val = data_host[0];
-#pragma omp parallel for reduction(min:min_val, max:max_val)
+#pragma omp parallel for reduction(min : min_val, max : max_val)
     for (int i = 1; i < data_host.size(); ++i) {
         const T val = data_host[i];
         min_val = std::min(min_val, val);
@@ -812,6 +808,73 @@ void calculateScale(const T *data_dev,
     calculateScale<T, QuantT>(data_host, use_symmetric, exp2_inv, zp, name);
 }
 
+void printParms(const GRUQuantitativeParameters &quant_parms) {
+
+    printf("GRUQuantitativeParameters (量化参数):\n");
+    printf("  hidden_ = %d\n", quant_parms.hidden_);
+    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n",
+           quant_parms.exp2_inv_x_, quant_parms.zp_x_);
+    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n",
+           quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+
+    printf("  exp2_inv_W_ (size %zu): ", quant_parms.exp2_inv_W_.size());
+    for (size_t i = 0; i < quant_parms.exp2_inv_W_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms.exp2_inv_W_[i]);
+    }
+    if (quant_parms.exp2_inv_W_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  exp2_inv_R_ (size %zu): ", quant_parms.exp2_inv_R_.size());
+    for (size_t i = 0; i < quant_parms.exp2_inv_R_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms.exp2_inv_R_[i]);
+    }
+    if (quant_parms.exp2_inv_R_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  exp2_inv_bx_ (size %zu): ", quant_parms.exp2_inv_bx_.size());
+    for (size_t i = 0; i < quant_parms.exp2_inv_bx_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms.exp2_inv_bx_[i]);
+    }
+    if (quant_parms.exp2_inv_bx_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  exp2_inv_br_ (size %zu): ", quant_parms.exp2_inv_br_.size());
+    for (size_t i = 0; i < quant_parms.exp2_inv_br_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms.exp2_inv_br_[i]);
+    }
+    if (quant_parms.exp2_inv_br_.size() > 8) printf("...");
+    printf("\n");
+
+    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n",
+           quant_parms.exp2_inv_Wx_, quant_parms.zp_Wx_);
+    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n",
+           quant_parms.exp2_inv_Rh_, quant_parms.zp_Rh_);
+    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n",
+           quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_);
+    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n",
+           quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_);
+    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n",
+           quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_);
+    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n",
+           quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_);
+    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n",
+           quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_);
+    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n",
+           quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n",
+           quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n",
+           quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_);
+    printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
+           quant_parms.exp2_inv_one_minus_update_,
+           quant_parms.zp_one_minus_update_);
+    printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
+           quant_parms.exp2_inv_new_contrib_,
+           quant_parms.zp_new_contrib_);
+    printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
+           quant_parms.exp2_inv_old_contrib_,
+           quant_parms.zp_old_contrib_);
+}
 template<typename T, typename QuantT>
 void calculateScaleFromV(const std::vector<T> &h_host,
                          const T *v_dev,
@@ -831,7 +894,7 @@ void calculateScaleFromV(const std::vector<T> &h_host,
     std::vector<T> new_contrib(output_size);
     std::vector<T> old_contrib(output_size);
 
-//#pragma omp parallel for
+    //#pragma omp parallel for
     for (int t = 0; t < steps; ++t) {
         const size_t offset_v_per_step = t * batch_size * hidden_size * 4;
         for (int b = 0; b < batch_size; ++b) {
@@ -1072,32 +1135,35 @@ void calculateGRUQuantitativeParameters(const int steps,
                           quant_parms_.exp2_inv_g_pre_,
                           quant_parms_.zp_g_pre_,
                           "scale_g_pre");
+
+    // print quant_parms
+    printParms(quant_parms_);
 #endif
 }
 
 template<typename T>
 void ForwardPass<T>::Run(
     const int steps,
-    const T *W,  // [C,H*3]
-    const T *R,  // [H,H*3]
-    const T *bx, // [H*3]
-    const T *br, // [H*3]
-    const T *x,  // [N,C]
-    T *h,        // [N,H]
-    T *v,        // [N,H*4]
-    T *tmp_Wx,   // [N,H*3]
-    T *tmp_Rh,   // [N,H*3]
+    const T *W, // [C,H*3]
+    const T *R, // [H,H*3]
+    const T *bx,// [H*3]
+    const T *br,// [H*3]
+    const T *x, // [N,C]
+    T *h,       // [N,H]
+    T *v,       // [N,H*4]
+    T *tmp_Wx,  // [N,H*3]
+    T *tmp_Rh,  // [N,H*3]
     const float zoneout_prob,
-    const T *zoneout_mask) { // Zoneout mask [N,H]
+    const T *zoneout_mask) {// Zoneout mask [N,H]
     static const T alpha = static_cast<T>(1.0);
     static const T beta = static_cast<T>(0.0);
 
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
-    const int batch_size = data_->batch_size; // N
-    const int input_size = data_->input_size; // C
-    const int hidden_size = data_->hidden_size; // H
+    const int batch_size = data_->batch_size;  // N
+    const int input_size = data_->input_size;  // C
+    const int hidden_size = data_->hidden_size;// H
     const cublasHandle_t blas_handle = data_->blas_handle;
     const cudaStream_t stream2 = data_->stream[1];
     const cudaEvent_t event = data_->event;
@@ -1138,7 +1204,7 @@ void ForwardPass<T>::Run(
             tmp_Rh + Rh_offset,
             zoneout_prob,
             zoneout_mask ? zoneout_mask + i * NH : nullptr);
-//        break;
+        //        break;
     }
 
     cublasSetStream(blas_handle, save_stream);
@@ -1152,14 +1218,11 @@ void ForwardPass<T>::Run(
             calculateGRUQuantitativeParameters<T, int16_t>(steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh, z_pres_, r_pres_, g_pres_, quant_parms_);
         }
     }
-
 }
 
 //template
 //struct ForwardPass<half>;
-template
-struct ForwardPass<float>;
-template
-struct ForwardPass<double>;
+template struct ForwardPass<float>;
+template struct ForwardPass<double>;
 
-}  // namespace gru
+}// namespace gru
