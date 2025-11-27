@@ -139,12 +139,6 @@ struct QuantGRUReScale {
     GRUQuantitativeParameters test;
 };
 
-
-template<typename T>
-inline T clamp_val(T v, T lo, T hi) {
-    return (v < lo) ? lo : (v > hi) ? hi : v;
-}
-
 void calibrateGruScales(
     bool use_int16,
     int time_steps, int batch_size, int input_size, int hidden_size,
@@ -190,6 +184,8 @@ inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int 
     }
 }
 
+
+
 template<typename T, typename QuantT>
 inline QuantT quant_from_exp2(T src, int32_t exp2_inv, int zp) {
     float scaled;
@@ -202,7 +198,7 @@ inline QuantT quant_from_exp2(T src, int32_t exp2_inv, int zp) {
     int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = clamp_val(q, qmin, qmax);
+    q = std::clamp(q, qmin, qmax);
     return static_cast<QuantT>(q);
 }
 
@@ -812,7 +808,7 @@ inline void selectBestExp2InvAsym(
         // compute zp for this n
         float zp_float = (-aligned_min) / scale;
         int32_t zp_int = (int32_t) std::llround(zp_float) + quant_min;
-        zp_int = clamp_val(zp_int, quant_min, quant_max);
+        zp_int = std::clamp(zp_int, quant_min, quant_max);
 
         // Evaluate MSE approximation: assume uniform distribution
         // MSE ≈ scale² / 12  （误差近似）
@@ -1048,20 +1044,23 @@ inline void calibrateQuantParams(
 }
 
 template<typename QuantT>
-inline __host__ __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+    // Host code: 使用标准库函数
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
     int32_t q = static_cast<int32_t>(std::round(src / scale)) + zp;
 
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = clamp_val(q, qmin, qmax);
+    q = std::clamp(q, qmin, qmax);
 
     return static_cast<QuantT>(q);
 }
 
 template<typename QuantT>
-inline __host__ __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+    // Host code: 使用标准库函数
     float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
+
     return (static_cast<int32_t>(q) - zp) * scale;
 }
 

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "devVector.h"
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.hpp"
 
@@ -351,7 +352,7 @@ __global__ void quantification(const T *data, QuantT *quant_data, size_t size,
         return;
     }
 
-    quant_data[idx] = quantize<QuantT>(data[idx], exp2_inv, zp);
+    quant_data[idx] = dev::quantize<QuantT>(data[idx], exp2_inv, zp);
 }
 
 template<typename T, typename QuantT>
@@ -362,7 +363,7 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
         return;
     }
 
-    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
+    data[idx] = dev::dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
 }
 
 template<typename T, typename QuantT>
@@ -378,7 +379,7 @@ __global__ void quantificationPerChannel(const T *src, QuantT *quant_data,
     const int32_t exp2_inv = exp2_invs[channel_idx];
 
     const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);
+    quant_data[idx] = dev::quantize<QuantT>(src[idx], exp2_inv, 0);
 }
 
 template<typename T, typename QuantT>
@@ -394,7 +395,7 @@ __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data,
     const int32_t exp2_inv = exp2_invs[channel_idx];
 
     const size_t idx = input_idx * channel_size + channel_idx;
-    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, 0);
+    data[idx] = dev::dequantize<QuantT>(quant_data[idx], exp2_inv, 0);
 }
 
 }// namespace kernel
@@ -518,6 +519,11 @@ void quantification(const T *data, QuantT *quant_data, size_t size,
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::quantification<<<grid, block>>>(data, quant_data, size, exp2_inv, zp);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
     cudaDeviceSynchronize();
 }
 
