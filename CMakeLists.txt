@@ -69,6 +69,12 @@ target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
 # target_include_directories(gru_quant_shared PRIVATE ${Python3_INCLUDE_DIRS})
 
 # ------------------------------
+# eigen库
+# ------------------------------
+#find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+#target_link_libraries(gru_example PRIVATE Eigen3::Eigen)
+
+# ------------------------------
 # 链接库
 # ------------------------------
 target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
