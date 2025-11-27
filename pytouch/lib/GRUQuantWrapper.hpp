@@ -3,9 +3,9 @@
 #include <cublas_v2.h>
 #include <torch/extension.h>
 
-#include "quantize_ops_helper.hpp"
 #include "gru.h"
 #include "gru_quant.h"
+#include "quantize_ops_helper.hpp"
 
 // 全局 cublas handle
 static cublasHandle_t g_blas_handle = nullptr;
@@ -121,9 +121,9 @@ class GRUQuantWrapper {
 
         h_quant_.setVal(quant_parms_.zp_h_);
 
-        gru::ForwardPassQuant<int16_t> forward =
-            gru::ForwardPassQuant<int16_t>(
-                false,  // training
+        gru::ForwardPassQuant<QuantT> forward =
+            gru::ForwardPassQuant<QuantT>(
+                false, // training
                 batch_size_, input_size_, hidden_size_, g_blas_handle);
 
         forward.setRescaleParam(quant_parms_);
@@ -141,7 +141,7 @@ class GRUQuantWrapper {
                     0.0f,
                     nullptr);
 
-        dev::dequantification(h_quant_,
+        dev::dequantification(h_quant_.data(),
                               h_.data_ptr<QuantT>(),
                               h_quant_.size(),
                               quant_parms_.exp2_inv_h_,
@@ -154,45 +154,29 @@ class GRUQuantWrapper {
         TORCH_CHECK(dh_new.is_cuda(), "dh_new must be CUDA tensor");
         TORCH_CHECK(dh_new.dtype() == torch::kFloat32, "dh_new must be float32");
 
-        dev::vector<float> dx_dev(time_steps_ *batch_size_
-                                  *input_size_);  // 输入序列梯度
-        dev::vector<float> dW_dev(input_size_ *hidden_size_
-                                  *3);  // 对输入权重的梯度
-        dev::vector<float> dR_dev(hidden_size_ *hidden_size_
-                                  *3);                 // 对循环权重的梯度
-        dev::vector<float> dbx_dev(hidden_size_ *3);  // 对输入偏置的梯度
-        dev::vector<float> dbr_dev(hidden_size_ *3);  // 对循环偏置的梯度
-        dev::vector<float> dh_dev(batch_size_ *hidden_size_);  // 对最后隐藏状态的梯度
-        dev::vector<float> dp_dev(time_steps_ *batch_size_*hidden_size_ *3);  // 临时缓存梯度（内部结构用）
-        dev::vector<float> dq_dev(time_steps_ *batch_size_*hidden_size_ *3);  // 临时缓存梯度（内部结构用）
+        dev::dequantificationPerChannel(W_quant_.data(),
+                                        W_dequant_.data(),
+                                        W_dequant_.size(),
+                                        quant_parms_.exp2_inv_h_,
+                                        quant_parms_.zp_h_);
 
-        h_quant_.setVal(quant_parms_.zp_h_);
+        dev::vector<float> dx_dev(time_steps_ * batch_size_ * input_size_);     // 输入序列梯度
+        dev::vector<float> dW_dev(input_size_ * hidden_size_ * 3);              // 对输入权重的梯度
+        dev::vector<float> dR_dev(hidden_size_ * hidden_size_ * 3);             // 对循环权重的梯度
+        dev::vector<float> dbx_dev(hidden_size_ * 3);                           // 对输入偏置的梯度
+        dev::vector<float> dbr_dev(hidden_size_ * 3);                           // 对循环偏置的梯度
+        dev::vector<float> dh_dev(batch_size_ * hidden_size_);                  // 对最后隐藏状态的梯度
+        dev::vector<float> dp_dev(time_steps_ * batch_size_ * hidden_size_ * 3);// 临时缓存梯度（内部结构用）
+        dev::vector<float> dq_dev(time_steps_ * batch_size_ * hidden_size_ * 3);// 临时缓存梯度（内部结构用）
 
-        gru::ForwardPassQuant<int16_t> forward =
-            gru::ForwardPassQuant<int16_t>(
-                false,  // training
-                batch_size_, input_size_, hidden_size_, g_blas_handle);
-
-        forward.setRescaleParam(quant_parms_);
-
-        forward.Run(time_steps_,
-                    W_quant_.data(),
-                    R_quant_.data(),
-                    bx_quant_.data(),
-                    br_quant_.data(),
-                    x_quant_.data(),
-                    h_quant_.data(),
-                    nullptr,
-                    tmp_Wx_quant_.data(),
-                    tmp_Rh_quant_.data(),
-                    0.0f,
-                    nullptr);
-
-        dev::dequantification(h_quant_,
-                              h_.data_ptr<QuantT>(),
-                              h_quant_.size(),
-                              quant_parms_.exp2_inv_h_,
-                              quant_parms_.zp_h_);
+        //        gru::BackwardPass<float> backward(batch_size, input_size, hidden_size,
+        //                                          g_blas_handle);
+        //
+        //        backward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
+        //                     br_dev.data(), x_dev.data(), h_dev.data(), v_dev.data(),
+        //                     dh_new_dev.data(), dx_dev.data(), dW_dev.data(), dR_dev.data(),
+        //                     dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
+        //                     dq_dev.data(), nullptr);
 
         return h_;
     }
@@ -206,6 +190,9 @@ class GRUQuantWrapper {
     // 量化后的权重（GPU int8/int16）
     dev::vector<QuantT> W_quant_, R_quant_;
     dev::vector<int32_t> bx_quant_, br_quant_;
+
+    dev::vector<float> W_dequant_, R_dequant_;
+    dev::vector<float> bx_dequant_, br_dequant_;
 
     // tmp
     dev::vector<QuantT> x_quant_, h_quant_;

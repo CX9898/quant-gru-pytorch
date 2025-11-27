@@ -1113,6 +1113,11 @@ void quantificationPerChannel(const T *src,
                               size_t input_size,
                               size_t channel_size,
                               const dev::vector<int32_t> &exp2_invs);
+
+template<typename T, typename QuantT>
+void dequantificationPerChannel(const QuantT *quant_data, T *data,
+                                size_t input_size, size_t channel_size,
+                                const dev::vector<int32_t> &exp2_invs);
 } // dev namespace
 
 #include <random>
