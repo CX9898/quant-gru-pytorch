@@ -344,6 +344,7 @@ template void quantGRUForward<int8_t>(
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
+    const float *h0,  // 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
     float *h);
@@ -352,6 +353,7 @@ template void quantGRUForward<int16_t>(
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
+    const float *h0,  // 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
     float *h);
