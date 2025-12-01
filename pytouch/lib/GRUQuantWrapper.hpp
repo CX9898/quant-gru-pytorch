@@ -186,7 +186,7 @@ class GRUQuantWrapper {
 
         dev::dequantification(h_quant_.data() + hidden_size_ * batch_size_,
                               h_.data_ptr<float>(),
-                              h_quant_.size(),
+                              time_steps_ * batch_size_ * hidden_size_,
                               quant_parms_.exp2_inv_h_,
                               quant_parms_.zp_h_);
 

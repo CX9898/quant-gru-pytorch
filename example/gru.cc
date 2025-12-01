@@ -11,15 +11,16 @@
 #include <vector>
 
 #include "devVector.h"
+#include "gru_interface.hpp"
 #include "gru_quant.h"
 #include "quantized_unit_testing.h"
 
-constexpr int BATCH_SIZE = 64;     // 批大小
-constexpr int SEQUENCE_LEN = 500;  // 序列长度(T), 每个样本有T个时间步
-constexpr int HIDDEN_DIMS = 256;   // 隐藏层维度(H), h_t的维度
-constexpr int INPUT_DIMS = 256;    // 输入维度(I), x_t的维度
+constexpr int BATCH_SIZE = 64;   // 批大小
+constexpr int SEQUENCE_LEN = 500;// 序列长度(T), 每个样本有T个时间步
+constexpr int HIDDEN_DIMS = 256; // 隐藏层维度(H), h_t的维度
+constexpr int INPUT_DIMS = 256;  // 输入维度(I), x_t的维度
 
-cublasHandle_t g_blas_handle;  // 改为非static以便在wrapper中访问
+cublasHandle_t g_blas_handle;// 改为非static以便在wrapper中访问
 
 // 初始化函数，供Python绑定调用
 void init_gru_cublas() {
@@ -59,7 +60,7 @@ void GruInferenceQuant(
     const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
     const int32_t *br, const float *x,
     const GRUQuantitativeParameters &quant_parms,
-    int8_t *h_quant_out  // (time_steps + 1) * batch_size * hidden_size
+    int8_t *h_quant_out// (time_steps + 1) * batch_size * hidden_size
 ) {
     generate_int8_lut_from_exp2_inv(
         quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
@@ -87,13 +88,13 @@ void GruInferenceQuant(
     dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
 
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-                                    3);  // 用于存放W * x的中间结果
+                                    3);// 用于存放W * x的中间结果
     dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size *
-                                    3);  // 用于存放R * h的中间结果
+                                    3);// 用于存放R * h的中间结果
 
     {
         gru::ForwardPassQuant<int8_t> forward = gru::ForwardPassQuant<int8_t>(
-            false,  // training
+            false,// training
             batch_size, input_size, hidden_size, g_blas_handle);
 
         // 得到量化GRU中使用的rescale参数
@@ -125,17 +126,17 @@ void GruInference(const int time_steps,
 
     dev::vector<float> h_dev(hidden_size * batch_size * (time_steps + 1));
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-                                  3);  // 用于存放W * x的中间结果
+                                  3);// 用于存放W * x的中间结果
     dev::vector<float> tmp_Rh_dev(batch_size * hidden_size *
-                                  3);  // 用于存放R * h的中间结果
+                                  3);// 用于存放R * h的中间结果
 
-    h_dev.zero();  // h初始化为0
+    h_dev.zero();// h初始化为0
 
     {
         ScopeTimer t("Inference:");
 
         gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-            false,  // training
+            false,// training
             batch_size, input_size, hidden_size, g_blas_handle);
 
         forward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
@@ -150,16 +151,16 @@ void GruTrain(const int time_steps,
               const int batch_size,
               const int input_size,
               const int hidden_size,
-              const float *W,  // 输入到隐藏层的权重矩阵. [input_size,
+              const float *W,                  // 输入到隐藏层的权重矩阵. [input_size,
                                                // hidden_size * 3] 对应三个门
-              const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-              const float *bx,  // 输入偏置项（input bias），来自输入路径
-              const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-              const float *x,   // 输入序列张量
-              const float *dh_new,  // 来自上层网络或损失函数的反向梯度.
+              const float *R,                  // 隐藏层到隐藏层的循环权重矩阵
+              const float *bx,                 // 输入偏置项（input bias），来自输入路径
+              const float *br,                 // 循环偏置项（recurrent bias），来自循环路径
+              const float *x,                  // 输入序列张量
+              const float *dh_new,             // 来自上层网络或损失函数的反向梯度.
                                                // [hidden_size, batch_size, time_steps]
-              bool enable_quantitative = false,  // 是否启用量化推理模式
-              bool use_int16 = false             // 控制量化精度位宽
+              bool enable_quantitative = false,// 是否启用量化推理模式
+              bool use_int16 = false           // 控制量化精度位宽
 ) {
 
     // Copy weights over to GPU.
@@ -181,7 +182,7 @@ void GruTrain(const int time_steps,
     {
         ScopeTimer t("Train forward:");
         gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-            true,  // training
+            true,// training
             batch_size, input_size, hidden_size, g_blas_handle);
 
         forward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
@@ -190,19 +191,19 @@ void GruTrain(const int time_steps,
     }
 
     dev::vector<float> dx_dev(time_steps * batch_size *
-                              input_size);  // 输入序列梯度
+                              input_size);// 输入序列梯度
     dev::vector<float> dW_dev(input_size * hidden_size *
-                              3);  // 对输入权重的梯度
+                              3);// 对输入权重的梯度
     dev::vector<float> dR_dev(hidden_size * hidden_size *
-                              3);                 // 对循环权重的梯度
-    dev::vector<float> dbx_dev(hidden_size * 3);  // 对输入偏置的梯度
-    dev::vector<float> dbr_dev(hidden_size * 3);  // 对循环偏置的梯度
+                              3);               // 对循环权重的梯度
+    dev::vector<float> dbx_dev(hidden_size * 3);// 对输入偏置的梯度
+    dev::vector<float> dbr_dev(hidden_size * 3);// 对循环偏置的梯度
     dev::vector<float> dh_dev(batch_size *
-                              hidden_size);  // 对最后隐藏状态的梯度
+                              hidden_size);// 对最后隐藏状态的梯度
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size *
-                              3);  // 临时缓存梯度（内部结构用）
+                              3);// 临时缓存梯度（内部结构用）
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size *
-                              3);  // 临时缓存梯度（内部结构用）
+                              3);// 临时缓存梯度（内部结构用）
 
     {
         ScopeTimer t("Train backward:");
@@ -218,9 +219,9 @@ void GruTrain(const int time_steps,
 }
 
 void checkHQuantizationWithCosine(
-    const std::vector<float> &h_inference,  // 浮点 h, size = (time_steps+1) *
+    const std::vector<float> &h_inference,// 浮点 h, size = (time_steps+1) *
     // batch_size * hidden_size
-    const std::vector<int8_t> &h_quant_inference,  // 量化 h, size 同上
+    const std::vector<int8_t> &h_quant_inference,// 量化 h, size 同上
     int time_steps, int batch_size, int hidden_size,
     const GRUQuantitativeParameters &scaleParam) {
     const int size_per_step = batch_size * hidden_size;
@@ -308,14 +309,14 @@ void checkHQuantizationWithCosine(
 int main() {
     srand(time(0));
 
-    init_gru_cublas();  // 使用初始化函数
+    init_gru_cublas();// 使用初始化函数
 
     // Weights.
-    std::vector<float> W(HIDDEN_DIMS * 3 * INPUT_DIMS);   // 对应W_z/W_r/W_h的合并
-    std::vector<float> R(HIDDEN_DIMS * 3 * HIDDEN_DIMS);  // 对应R_z/R_r/R_h的合并
-    std::vector<float> bx(HIDDEN_DIMS * 3);  // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t
+    std::vector<float> W(HIDDEN_DIMS * 3 * INPUT_DIMS); // 对应W_z/W_r/W_h的合并
+    std::vector<float> R(HIDDEN_DIMS * 3 * HIDDEN_DIMS);// 对应R_z/R_r/R_h的合并
+    std::vector<float> bx(HIDDEN_DIMS * 3);             // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t
     // 到门控的线性变换" 加偏置
-    std::vector<float> br(HIDDEN_DIMS * 3);  // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态
+    std::vector<float> br(HIDDEN_DIMS * 3);// br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态
     // h_{t-1} 到门控的线性变换" 加偏置
 
     // Input.
@@ -367,15 +368,15 @@ int main() {
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
     calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size,
-                       W.data(), R.data(), bx.data(), br.data(), x.data(),
+                       W, R, bx, br, x,
                        g_blas_handle, quant_parms);
 
     // Quant
-    std::vector<int8_t> W_quant(HIDDEN_DIMS * 3 * INPUT_DIMS);   // 对应W_z/W_r/W_h的合并
-    std::vector<int8_t> R_quant(HIDDEN_DIMS * 3 * HIDDEN_DIMS);  // 对应R_z/R_r/R_h的合并
-    std::vector<int32_t> bx_quant(HIDDEN_DIMS * 3);  // 对应b_z/b_r/b_h的合并. bx 负责给
+    std::vector<int8_t> W_quant(HIDDEN_DIMS * 3 * INPUT_DIMS); // 对应W_z/W_r/W_h的合并
+    std::vector<int8_t> R_quant(HIDDEN_DIMS * 3 * HIDDEN_DIMS);// 对应R_z/R_r/R_h的合并
+    std::vector<int32_t> bx_quant(HIDDEN_DIMS * 3);            // 对应b_z/b_r/b_h的合并. bx 负责给
     // “输入 x_t 到门控的线性变换” 加偏置
-    std::vector<int32_t> br_quant(HIDDEN_DIMS * 3);  // br: 3H(部分实现中偏置分输出\隐藏层. br
+    std::vector<int32_t> br_quant(HIDDEN_DIMS * 3);// br: 3H(部分实现中偏置分输出\隐藏层. br
     // 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
     std::vector<int8_t> x_quant(INPUT_DIMS * BATCH_SIZE * SEQUENCE_LEN);
     std::vector<int8_t> dh_new_quant(HIDDEN_DIMS * BATCH_SIZE * (SEQUENCE_LEN + 1));
