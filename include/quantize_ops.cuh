@@ -94,9 +94,15 @@ struct QuantLimits<int32_t> {
 
 template<typename QuantT>
 inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
-
-    // CUDA device code: 使用CUDA内置函数
-    float scale = powf(2.0f, -static_cast<float>(exp2_inv));
+    // CUDA device code: 与CPU版本保持一致，使用位运算
+    float scale;
+    if (exp2_inv >= 0) {
+        // scale = 2^(-exp2) = 1 / (1 << exp2)
+        scale = __fdividef(1.0f, static_cast<float>(1 << exp2_inv));
+    } else {
+        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
+        scale = static_cast<float>(1 << (-exp2_inv));
+    }
     int32_t q = __float2int_rn(src / scale) + zp;
 
     q = clamp<QuantT>(q);
@@ -106,7 +112,8 @@ inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
 
 template<typename QuantT>
 inline __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
-    int32_t v = q - zp;
+    // 与CPU版本保持一致，显式转换为int32_t
+    int32_t v = static_cast<int32_t>(q) - zp;
 
     if (exp2_inv >= 0) {
         // scale = 2^(-exp2) = 1 / (1 << exp2)

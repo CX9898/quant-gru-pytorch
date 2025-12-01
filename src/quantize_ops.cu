@@ -418,7 +418,7 @@ __global__ void quantificationPerChannel(const T *src, QuantT *quant_data,
                                          size_t input_size, size_t channel_size,
                                          const int32_t *exp2_invs) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t input_idx = blockIdx.y * blockIdx.y + threadIdx.y;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (channel_idx >= channel_size || input_idx >= input_size) {
         return;
     }
@@ -434,7 +434,7 @@ __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data,
                                            size_t input_size, size_t channel_size,
                                            const int32_t *exp2_invs) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t input_idx = blockIdx.y * blockIdx.y + threadIdx.y;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (channel_idx >= channel_size || input_idx >= input_size) {
         return;
     }
