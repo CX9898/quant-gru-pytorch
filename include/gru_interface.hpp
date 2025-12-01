@@ -6,6 +6,13 @@
 #include "gru.h"
 #include "gru_quant.h"
 
+// 初始化函数，供Python绑定调用
+void init_gru_cublas(cublasHandle_t &g_blas_handle) {
+    if (g_blas_handle == nullptr) {
+        cublasCreate(&g_blas_handle);
+    }
+}
+
 void calibrateGruScales(
     bool use_int16,
     int time_steps, int batch_size, int input_size, int hidden_size,

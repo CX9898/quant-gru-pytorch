@@ -304,3 +304,32 @@ template void GruQuantInit<int16_t>(
     int16_t *x_quant,
     int16_t *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams);
+
+// 显式实例化 quantitativeWeight 和 quantGRUForward 模板函数，供 Python 绑定使用
+template void quantitativeWeight<int8_t>(
+    const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br,
+    const GRUQuantitativeParameters &quant_parms,
+    int8_t *W_quant, int8_t *R_quant, int32_t *bx_quant, int32_t *br_quant);
+
+template void quantitativeWeight<int16_t>(
+    const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br,
+    const GRUQuantitativeParameters &quant_parms,
+    int16_t *W_quant, int16_t *R_quant, int32_t *bx_quant, int32_t *br_quant);
+
+template void quantGRUForward<int8_t>(
+    const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx,
+    const int32_t *br, const float *x,
+    const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle,
+    float *h);
+
+template void quantGRUForward<int16_t>(
+    const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx,
+    const int32_t *br, const float *x,
+    const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle,
+    float *h);
