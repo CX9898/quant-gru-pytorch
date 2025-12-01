@@ -106,10 +106,15 @@ inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
 
 template<typename QuantT>
 inline __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
-    // CUDA device code: 使用CUDA内置函数
-    float scale = powf(2.0f, -static_cast<float>(exp2_inv));
+    int32_t v = q - zp;
 
-    return (static_cast<int32_t>(q) - zp) * scale;
+    if (exp2_inv >= 0) {
+        // scale = 2^(-exp2) = 1 / (1 << exp2)
+        return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);
+    } else {
+        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
+        return static_cast<float>(v) * static_cast<float>(1 << (-exp2_inv));
+    }
 }
 
 

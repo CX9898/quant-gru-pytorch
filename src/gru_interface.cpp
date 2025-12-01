@@ -115,7 +115,7 @@ void hasteGRUForward(const int time_steps,
                 br, x, h_dev.data(), nullptr,
                 tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
 
-    d2d(h, h_dev.data(), time_steps * batch_size * hidden_size);
+    d2d(h, h_dev.data() + batch_size * hidden_size, time_steps * batch_size * hidden_size);
 }
 
 template<typename QuantT>
