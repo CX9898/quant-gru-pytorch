@@ -139,18 +139,6 @@ struct QuantGRUReScale {
     GRUQuantitativeParameters test;
 };
 
-void calibrateGruScales(
-    bool use_int16,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W,
-    const float *R,
-    const float *bx,
-    const float *br,
-    const float *x,
-    const cublasHandle_t &g_blas_handle,
-    GRUQuantitativeParameters &quant_gru_scales
-);
-
 template<typename QuantT>
 void GruQuantInit(
     const int time_steps,
