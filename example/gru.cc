@@ -147,30 +147,184 @@ void GruInference(const int time_steps,
     d2h(h, h_dev.data(), h_dev.size());
 }
 
+template<typename QuantT>
+void GruTrainQuant(const int time_steps,
+                   const int batch_size,
+                   const int input_size,
+                   const int hidden_size,
+                   const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
+                                                   // hidden_size * 3] 对应三个门
+                   const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
+                   const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
+                   const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
+                   const std::vector<float> &x,    // 输入序列张量
+                   const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
+                                                   // [hidden_size, batch_size, time_steps]
+
+) {
+    // 步骤1: 先校验出量化参数
+    GRUQuantitativeParameters quant_parms;
+    {
+        ScopeTimer t("Calibrate quant params:");
+        calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size,
+                           W, R, bx, br, x,
+                           g_blas_handle, quant_parms);
+    }
+
+    // 步骤2: 将权重量化和x量化
+    const int channel_size = hidden_size * 3;
+    std::vector<QuantT> W_quant(input_size * hidden_size * 3);
+    std::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
+    std::vector<int32_t> bx_quant(hidden_size * 3);
+    std::vector<int32_t> br_quant(hidden_size * 3);
+    const std::size_t x_size = time_steps * batch_size * input_size;
+    std::vector<QuantT> x_quant(x_size);
+
+    {
+        ScopeTimer t("Quantize weights and x:");
+        // 权重量化 (per-channel)
+        quantificationPerChannel(W.data(), W_quant.data(), input_size, channel_size,
+                                 quant_parms.exp2_inv_W_);
+        quantificationPerChannel(R.data(), R_quant.data(), hidden_size, channel_size,
+                                 quant_parms.exp2_inv_R_);
+        // 偏置量化 (per-channel)
+        quantificationPerChannel(bx.data(), bx_quant.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_bx_);
+        quantificationPerChannel(br.data(), br_quant.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_br_);
+        // x量化 (全局)
+        quantification(x.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
+                       quant_parms.zp_x_);
+    }
+
+    // 生成LUT表
+    generate_int8_lut_from_exp2_inv(
+        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
+        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
+        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
+        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
+        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+
+    // Copy量化后的数据到GPU
+    dev::vector<QuantT> W_quant_dev(W_quant);
+    dev::vector<QuantT> R_quant_dev(R_quant);
+    dev::vector<int32_t> bx_quant_dev(bx_quant);
+    dev::vector<int32_t> br_quant_dev(br_quant);
+    dev::vector<QuantT> x_quant_dev(x_quant);
+
+    const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
+    dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
+    dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
+
+    dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);
+
+    // 步骤3: 运行量化GRU (training模式)
+    {
+        ScopeTimer t("Train forward quant:");
+        gru::ForwardPassQuant<QuantT> forward = gru::ForwardPassQuant<QuantT>(
+            true,// training
+            batch_size, input_size, hidden_size, g_blas_handle);
+
+        forward.setRescaleParam(quant_parms);
+
+        forward.Run(time_steps, W_quant_dev.data(), R_quant_dev.data(),
+                    bx_quant_dev.data(), br_quant_dev.data(), x_quant_dev.data(),
+                    h_quant_dev.data(), v_quant_dev.data(), tmp_Wx_dev.data(),
+                    tmp_Rh_dev.data(), 0.0f, nullptr);
+    }
+
+    // 步骤4: 将所有量化值反量化
+    dev::vector<float> W_dequant_dev(input_size * hidden_size * 3);
+    dev::vector<float> R_dequant_dev(hidden_size * hidden_size * 3);
+    dev::vector<float> bx_dequant_dev(hidden_size * 3);
+    dev::vector<float> br_dequant_dev(hidden_size * 3);
+    dev::vector<float> x_dequant_dev(x_size);
+    dev::vector<float> h_dequant_dev(h_size);
+    dev::vector<float> v_dequant_dev(time_steps * batch_size * hidden_size * 4);
+
+    {
+        ScopeTimer t("Dequantize all values:");
+        // 反量化权重 (per-channel)
+        dev::dequantificationPerChannel(W_quant_dev.data(), W_dequant_dev.data(),
+                                        input_size, channel_size,
+                                        quant_parms.exp2_inv_W_);
+        dev::dequantificationPerChannel(R_quant_dev.data(), R_dequant_dev.data(),
+                                        hidden_size, channel_size,
+                                        quant_parms.exp2_inv_R_);
+        // 反量化偏置 (per-channel)
+        dev::dequantificationPerChannel(bx_quant_dev.data(), bx_dequant_dev.data(),
+                                        1, channel_size,
+                                        quant_parms.exp2_inv_bx_);
+        dev::dequantificationPerChannel(br_quant_dev.data(), br_dequant_dev.data(),
+                                        1, channel_size,
+                                        quant_parms.exp2_inv_br_);
+        // 反量化x (全局)
+        dev::dequantification(x_quant_dev.data(), x_dequant_dev.data(), x_size,
+                              quant_parms.exp2_inv_x_, quant_parms.zp_x_);
+        // 反量化h (全局，但h的量化参数可能随时间步变化，这里使用固定参数)
+        dev::dequantification(h_quant_dev.data(), h_dequant_dev.data(), h_size,
+                              quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+        // 反量化v (v包含4个部分，每个部分使用不同的量化参数)
+        dev::dequantificationV(v_quant_dev.data(), v_dequant_dev.data(),
+                               time_steps, batch_size, hidden_size,
+                               quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+                               quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
+                               quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
+                               quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+    }
+
+    // Copy dh_new到GPU
+    dev::vector<float> dh_new_dev(dh_new);
+
+    // 步骤5: 反量化后传入BackwardPass<float>进行反向传播
+    dev::vector<float> dx_dev(time_steps * batch_size * input_size);
+    dev::vector<float> dW_dev(input_size * hidden_size * 3);
+    dev::vector<float> dR_dev(hidden_size * hidden_size * 3);
+    dev::vector<float> dbx_dev(hidden_size * 3);
+    dev::vector<float> dbr_dev(hidden_size * 3);
+    dev::vector<float> dh_dev(batch_size * hidden_size);
+    dev::vector<float> dp_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<float> dq_dev(time_steps * batch_size * hidden_size * 3);
+
+    {
+        ScopeTimer t("Train backward:");
+        gru::BackwardPass<float> backward(batch_size, input_size, hidden_size,
+                                          g_blas_handle);
+
+        backward.Run(time_steps, W_dequant_dev.data(), R_dequant_dev.data(),
+                     bx_dequant_dev.data(), br_dequant_dev.data(),
+                     x_dequant_dev.data(), h_dequant_dev.data(), v_dequant_dev.data(),
+                     dh_new_dev.data(), dx_dev.data(), dW_dev.data(), dR_dev.data(),
+                     dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
+                     dq_dev.data(), nullptr);
+    }
+}
+
 void GruTrain(const int time_steps,
               const int batch_size,
               const int input_size,
               const int hidden_size,
-              const float *W,                  // 输入到隐藏层的权重矩阵. [input_size,
-                                               // hidden_size * 3] 对应三个门
-              const float *R,                  // 隐藏层到隐藏层的循环权重矩阵
-              const float *bx,                 // 输入偏置项（input bias），来自输入路径
-              const float *br,                 // 循环偏置项（recurrent bias），来自循环路径
-              const float *x,                  // 输入序列张量
-              const float *dh_new,             // 来自上层网络或损失函数的反向梯度.
-                                               // [hidden_size, batch_size, time_steps]
-              bool enable_quantitative = false,// 是否启用量化推理模式
-              bool use_int16 = false           // 控制量化精度位宽
+              const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
+                                              // hidden_size * 3] 对应三个门
+              const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
+              const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
+              const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
+              const std::vector<float> &x,    // 输入序列张量
+              const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
+                                              // [hidden_size, batch_size, time_steps]
+
 ) {
 
     // Copy weights over to GPU.
-    dev::vector<float> W_dev(W, hidden_size * 3 * input_size);
-    dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
-    dev::vector<float> bx_dev(bx, hidden_size * 3);
-    dev::vector<float> br_dev(br, hidden_size * 3);
-    dev::vector<float> x_dev(x, time_steps * input_size * batch_size);
+    dev::vector<float> W_dev(W);
+    dev::vector<float> R_dev(R);
+    dev::vector<float> bx_dev(bx);
+    dev::vector<float> br_dev(br);
+    dev::vector<float> x_dev(x);
 
-    dev::vector<float> dh_new_dev(dh_new, HIDDEN_DIMS * BATCH_SIZE * (SEQUENCE_LEN + 1));
+    dev::vector<float> dh_new_dev(dh_new);
 
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
@@ -435,10 +589,8 @@ int main() {
     printf("cudaError(GruInferenceQuant finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
 
-    GruTrain(time_steps,
-             batch_size,
-             input_size,
-             hidden_size, W.data(), R.data(), bx.data(), br.data(), x.data(), dh.data(), false, false);
+    GruTrain(time_steps, batch_size, input_size, hidden_size,
+             W, R, bx, br, x, dh);
 
     printf("cudaError(GruTrain finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));

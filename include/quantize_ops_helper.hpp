@@ -1,10 +1,10 @@
 #pragma once
 
-#include <vector>
 #include <algorithm>
-#include <iostream>
 #include <cassert>
 #include <cublas_v2.h>
+#include <iostream>
+#include <vector>
 
 #include "devVector.h"
 
@@ -22,14 +22,14 @@ struct GRUQuantitativeParametersInCalibration {
 // 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale = 2^(-exp2_inv_xxx)
 // zp_xxx 表示量化零点（zero point），用于浮点数与整数的映射：量化值 q = round(x / scale + zp)，反量化 x = (q - zp) * scale
 struct GRUQuantitativeParameters {
-    int hidden_; // channel = hidden * 3
+    int hidden_;// channel = hidden * 3
     int32_t exp2_inv_x_;
     int32_t zp_x_;
     int32_t exp2_inv_h_;
     int32_t zp_h_;
 
-    std::vector<int32_t> exp2_inv_W_; // size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
-    std::vector<int32_t> exp2_inv_R_; // size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
+    std::vector<int32_t> exp2_inv_W_;// size = hidden * 3. per-channel (每个输出通道一个scale，即W的每一列一个scale)
+    std::vector<int32_t> exp2_inv_R_;// size = hidden * 3. per-channel (每个输出通道一个scale，即R的每一列一个scale)
 
     int32_t exp2_inv_Wx_;
     int32_t zp_Wx_;
@@ -70,10 +70,10 @@ struct QuantGRUReScale {
     int32_t zp_x_;
     int32_t zp_h_;
 
-    dev::vector<int32_t> n_W_mul_x_div_Wx_; // size = hidden * 3
+    dev::vector<int32_t> n_W_mul_x_div_Wx_;// size = hidden * 3
     dev::vector<float> scale_W_mul_x_div_Wx_;
     int32_t zp_Wx_;
-    dev::vector<int32_t> n_R_mul_h_div_Rh_; // size = hidden * 3
+    dev::vector<int32_t> n_R_mul_h_div_Rh_;// size = hidden * 3
     dev::vector<float> scale_R_mul_h_div_Rh_;
     int32_t zp_Rh_;
 
@@ -92,8 +92,8 @@ struct QuantGRUReScale {
     // r门
     int32_t zp_r_pre_;
     int32_t zp_r_out_;
-    int32_t exp2_inv_Wx_div_r_pre_; // n5
-    int32_t exp2_inv_Rh_div_r_pre_; // n6
+    int32_t exp2_inv_Wx_div_r_pre_;// n5
+    int32_t exp2_inv_Rh_div_r_pre_;// n6
     dev::vector<int32_t> n_bx_div_r_;
     dev::vector<float> scale_bx_div_r_;
     dev::vector<int32_t> n_br_div_r_;
@@ -104,35 +104,35 @@ struct QuantGRUReScale {
     int32_t zp_g_out_;
     int32_t n_Rh_div_Rh_add_br_;
     int32_t exp2_inv_Rh_div_Rh_add_br_;
-    dev::vector<int32_t> n_br_div_Rh_add_br_; // br 是 per-channel
+    dev::vector<int32_t> n_br_div_Rh_add_br_;// br 是 per-channel
     dev::vector<float> scale_br_div_Rh_add_br_;
     int32_t zp_Rh_add_br_;
-    int32_t n_r_mul_Rh_add_br_div_rRh_; // n9
-    int32_t exp2_inv_r_out_mul_h_div_rRh_; // S9
+    int32_t n_r_mul_Rh_add_br_div_rRh_;   // n9
+    int32_t exp2_inv_r_out_mul_h_div_rRh_;// S9
     int32_t zp_rRh_;
-    int32_t n_Wx_div_g_pre_; // n10
+    int32_t n_Wx_div_g_pre_;        // n10
     int32_t exp2_inv_Wx_div_g_pre_; // S10
-    int32_t n_rRh_div_g_pre_; // n11
-    int32_t exp2_inv_rRh_div_g_pre_; // S11
+    int32_t n_rRh_div_g_pre_;       // n11
+    int32_t exp2_inv_rRh_div_g_pre_;// S11
     dev::vector<int32_t> exp2_inv_bx_div_g_pre_;
     dev::vector<float> scale_bx_div_g_pre_;
 
     // h_new
     int32_t one_div_one_minus_update_;
-    int32_t n_z_out_div_one_minus_update_; // n12
-    int32_t exp2_inv_z_out_div_one_minus_update_; // S12
+    int32_t n_z_out_div_one_minus_update_;       // n12
+    int32_t exp2_inv_z_out_div_one_minus_update_;// S12
     int32_t zp_one_minus_update_;
 
     int32_t zp_new_contrib_;
-    int32_t n_one_minus_update_mul_g_div_new_contrib_; // n13
-    int32_t exp2_inv_one_minus_update_mul_g_div_new_contrib_; // S13
+    int32_t n_one_minus_update_mul_g_div_new_contrib_;       // n13
+    int32_t exp2_inv_one_minus_update_mul_g_div_new_contrib_;// S13
     int32_t zp_old_contrib_;
-    int32_t n_z_mul_h_div_old_contrib_; // n14
-    int32_t exp2_inv_z_mul_h_div_old_contrib_; // S14
-    int32_t n_new_contrib_div_h_; // n15
-    int32_t exp2_inv_new_contrib_div_h_; // S15
-    int32_t n_old_contrib_div_h_; // n16
-    int32_t exp2_inv_old_contrib_div_h_; // S16
+    int32_t n_z_mul_h_div_old_contrib_;       // n14
+    int32_t exp2_inv_z_mul_h_div_old_contrib_;// S14
+    int32_t n_new_contrib_div_h_;             // n15
+    int32_t exp2_inv_new_contrib_div_h_;      // S15
+    int32_t n_old_contrib_div_h_;             // n16
+    int32_t exp2_inv_old_contrib_div_h_;      // S16
 
 
     //test
@@ -145,20 +145,19 @@ void GruQuantInit(
     const int batch_size,
     const int input_size,
     const int hidden_size,
-    const float *W, // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R, // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx, // 输入偏置项（input bias），来自输入路径
-    const float *br, // 循环偏置项（recurrent bias），来自循环路径
-    const float *x, // 输入序列张量
-    const float *dh_new, // 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
+    const float *W,     // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    const float *R,     // 隐藏层到隐藏层的循环权重矩阵
+    const float *bx,    // 输入偏置项（input bias），来自输入路径
+    const float *br,    // 循环偏置项（recurrent bias），来自循环路径
+    const float *x,     // 输入序列张量
+    const float *dh_new,// 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
     QuantT *W_quant,
     QuantT *R_quant,
     int32_t *bx_quant,
     int32_t *br_quant,
     QuantT *x_quant,
     QuantT *dh_new_quant,
-    const GRUQuantitativeParameters &gruRescaleParams
-);
+    const GRUQuantitativeParameters &gruRescaleParams);
 
 inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
     int32_t v = q - zp;
@@ -171,7 +170,6 @@ inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int 
         return static_cast<float>(v) * static_cast<float>(1 << (-exp2_inv));
     }
 }
-
 
 
 template<typename T, typename QuantT>
@@ -258,12 +256,12 @@ void quantizeFloatToIntPerStep(const float *src_dev,
 
 template<typename T>
 void computeWeightSumMulzp(
-    const T *W_q,// [out_dim, in_dim] 权重量化矩阵
+    const T *W_q,       // [out_dim, in_dim] 权重量化矩阵
     int32_t *weight_sum,// [out_dim] 输出数组
     int zp,
-    const int32_t *__restrict__ n, // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,// 输出通道数 (M)
-    int in_dim,// 输入通道数 (K)
+    const int32_t *__restrict__ n,// n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
+    int out_dim,                  // 输出通道数 (M)
+    int in_dim,                   // 输入通道数 (K)
     cudaStream_t stream = 0);
 
 void applyZeroPointCompensation2D(
@@ -403,8 +401,8 @@ inline void dequantizeTensor(const QuantT *quant_data, float *dequant_data,
 
 // 定义常量
 constexpr int32_t Q15_ONE = 32768;
-constexpr int32_t ALPHA_Q15 = 29491; // 0.9 * 32768
-constexpr int32_t INV_QMAX = (1 << 15) / 127; // 257 in Q15
+constexpr int32_t ALPHA_Q15 = 29491;         // 0.9 * 32768
+constexpr int32_t INV_QMAX = (1 << 15) / 127;// 257 in Q15
 
 // 输入: 上一步scale参数 (M_prev, shift_prev)
 // 输入: 当前步隐藏态整数张量 h_t_int[]
@@ -417,12 +415,13 @@ inline void updateHScaleInt8(const int8_t *h_t, size_t size,
         max_abs = std::max(max_abs, abs((int) h_t[i]));
 
     // 2. ratio 定点化 (Q15)
-    int32_t ratio_q15 = (max_abs * INV_QMAX); // Q15 格式
+    int32_t ratio_q15 = (max_abs * INV_QMAX);// Q15 格式
 
     // 3. EMA 更新 (Q15)
-    static int32_t s_prev_q15 = Q15_ONE; // 初始scale比例=1.0
+    static int32_t s_prev_q15 = Q15_ONE;// 初始scale比例=1.0
     int32_t s_new_q15 = (ALPHA_Q15 * s_prev_q15 +
-                         (Q15_ONE - ALPHA_Q15) * ratio_q15 + (1 << 14)) >> 15;
+                         (Q15_ONE - ALPHA_Q15) * ratio_q15 + (1 << 14)) >>
+                        15;
     s_prev_q15 = s_new_q15;
 
     // 4. 更新 M (scale整数因子)
@@ -460,9 +459,9 @@ inline int32_t calculate_right_shift_bits(float S,
     // 步骤2：改进的四舍五入策略 - 考虑相对误差
     int32_t n_candidate;
     if (n_theory >= 0) {
-        n_candidate = static_cast<int32_t>(n_theory + 0.5f);  // 标准四舍五入
+        n_candidate = static_cast<int32_t>(n_theory + 0.5f);// 标准四舍五入
     } else {
-        n_candidate = static_cast<int32_t>(n_theory - 0.5f);  // 负数的四舍五入
+        n_candidate = static_cast<int32_t>(n_theory - 0.5f);// 负数的四舍五入
     }
 
 
@@ -500,36 +499,36 @@ inline void test_basic_cases() {
     std::cout << "\n=== 边界约束测试 ===" << std::endl;
 
     // 测试最小边界
-    assert(calculate_right_shift_bits(8.0f, "", 3, 10) == 3);  // 理论值-3，被裁剪到3
+    assert(calculate_right_shift_bits(8.0f, "", 3, 10) == 3);// 理论值-3，被裁剪到3
     std::cout << "min_n=3约束生效 ✓" << std::endl;
 
     // 测试最大边界
-    assert(calculate_right_shift_bits(0.0001f, "", 0, 10) == 10);  // 理论值~13，被裁剪到10
+    assert(calculate_right_shift_bits(0.0001f, "", 0, 10) == 10);// 理论值~13，被裁剪到10
     std::cout << "max_n=10约束生效 ✓" << std::endl;
 
     // 测试四舍五入
-    assert(calculate_right_shift_bits(0.375f) == 1);  // 理论值1.415 → 四舍五入到1
-    assert(calculate_right_shift_bits(0.625f) == 1);  // 理论值0.678 → 四舍五入到1
+    assert(calculate_right_shift_bits(0.375f) == 1);// 理论值1.415 → 四舍五入到1
+    assert(calculate_right_shift_bits(0.625f) == 1);// 理论值0.678 → 四舍五入到1
     std::cout << "四舍五入逻辑正确 ✓" << std::endl;
 
     std::cout << "\n=== 改进的精度验证测试 ===" << std::endl;
 
     struct TestCase {
         float S;
-        float max_acceptable_error;  // 可接受的最大相对误差百分比
+        float max_acceptable_error;// 可接受的最大相对误差百分比
     };
 
     std::vector<TestCase> test_cases = {
-        {1.0f, 1.0f},      // 精确匹配
-        {0.5f, 1.0f},      // 精确匹配
-        {0.25f, 1.0f},     // 精确匹配
-        {0.75f, 35.0f},    // 0.75 ≈ 2^0=1, 误差33% 在可接受范围
-        {0.375f, 35.0f},   // 0.375 ≈ 2^-1=0.5, 误差33% 在可接受范围
-        {0.625f, 25.0f},   // 0.625 ≈ 2^-1=0.5, 误差20% 在可接受范围
-        {0.999f, 1.0f},    // 非常接近1，应该误差很小
-        {1.001f, 1.0f},    // 非常接近1，应该误差很小
-        {0.1f, 50.0f},     // 0.1 ≈ 2^-3=0.125, 误差25% 或 2^-4=0.0625, 误差37.5%
-        {0.9f, 12.0f},     // 0.9 ≈ 2^0=1, 误差11%
+        {1.0f, 1.0f},   // 精确匹配
+        {0.5f, 1.0f},   // 精确匹配
+        {0.25f, 1.0f},  // 精确匹配
+        {0.75f, 35.0f}, // 0.75 ≈ 2^0=1, 误差33% 在可接受范围
+        {0.375f, 35.0f},// 0.375 ≈ 2^-1=0.5, 误差33% 在可接受范围
+        {0.625f, 25.0f},// 0.625 ≈ 2^-1=0.5, 误差20% 在可接受范围
+        {0.999f, 1.0f}, // 非常接近1，应该误差很小
+        {1.001f, 1.0f}, // 非常接近1，应该误差很小
+        {0.1f, 50.0f},  // 0.1 ≈ 2^-3=0.125, 误差25% 或 2^-4=0.0625, 误差37.5%
+        {0.9f, 12.0f},  // 0.9 ≈ 2^0=1, 误差11%
     };
 
     int passed = 0;
@@ -577,9 +576,9 @@ inline int32_t calculate_one_over_S(float S) {
     // n < 0 意味着 S > 1.0，此时 1/S < 1，不适合用右移位
     // n ≥ 32 会导致未定义行为（对于 32 位整数）
     if (n < 0) {
-        n = 0;  // 最小右移 0 位（即不移位）
+        n = 0;// 最小右移 0 位（即不移位）
     } else if (n > 30) {
-        n = 30; // 最大右移 30 位（避免溢出）
+        n = 30;// 最大右移 30 位（避免溢出）
     }
 
     // 计算 1/S ≈ 2^n
@@ -665,7 +664,6 @@ inline void calculateNewRangeForExp2(const T orig_min,
     // Calculate n = round(-log2(scale))
     T log2_scale = std::log2(scale);
     int32_t n = static_cast<int32_t>(std::ceil(-log2_scale));
-
 }
 
 inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
@@ -692,7 +690,8 @@ inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
         float deq_max = qmax * scale;
 
         float mse = ((deq_min - orig_min) * (deq_min - orig_min) +
-                     (deq_max - orig_max) * (deq_max - orig_max)) * 0.5f;
+                     (deq_max - orig_max) * (deq_max - orig_max)) *
+                    0.5f;
 
         if (mse < best_mse) {
             best_mse = mse;
@@ -767,7 +766,7 @@ inline void selectBestExp2InvAsym(
     if (n_raw < 0) n_raw = 0;
 
     // Step 2: cap n to avoid insane precision loss
-    constexpr int MAX_EXP2_INV = 8; // empirically best for GRU gates
+    constexpr int MAX_EXP2_INV = 8;// empirically best for GRU gates
     int n_candidates[3];
     n_candidates[0] = std::max(0, n_raw - 1);
     n_candidates[1] = std::max(0, n_raw);
@@ -811,7 +810,6 @@ inline void selectBestExp2InvAsym(
     }
     exp2_inv = best_n;
     zp = res_zp;
-
 }
 
 /**
@@ -973,8 +971,7 @@ inline void calibrateQuantParams(
     T &aligned_max,
     int32_t &exp2_inv,
     int32_t &zp,
-    const std::string &name = ""
-) {
+    const std::string &name = "") {
     static_assert(std::is_floating_point<T>::value, "T must be float or double");
     static_assert(std::is_signed<QuantT>::value, "QuantT must be a signed integer type");
 
@@ -989,12 +986,12 @@ inline void calibrateQuantParams(
 
         // 取绝对值范围，保证对称
         T abs_max = std::max(std::abs(orig_min), std::abs(orig_max));
-        abs_max = std::max(abs_max, static_cast<T>(1e-9)); // 避免除零
+        abs_max = std::max(abs_max, static_cast<T>(1e-9));// 避免除零
 
         // scale = abs_max / quant_max => 对齐到 2^-n
         T raw_scale = abs_max / quant_max;
         // scale >= raw_scale
-        exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale))); // floor instead of ceil
+        exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));// floor instead of ceil
         scale = std::pow(2.0, -exp2_inv);
         aligned_max = scale * quant_max;
         aligned_min = -aligned_max;
@@ -1007,7 +1004,7 @@ inline void calibrateQuantParams(
 
         // scale >= raw_scale 对齐到 2^-n
         exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));
-        scale = std::pow(2.0, -exp2_inv); // 取2的负exp2_inv次方
+        scale = std::pow(2.0, -exp2_inv);// 取2的负exp2_inv次方
 
         aligned_min = std::floor(orig_min / scale) * scale;
         aligned_max = std::ceil(orig_max / scale) * scale;
@@ -1097,6 +1094,14 @@ void dequantification(const QuantT *quant_data, T *data, size_t size,
                       int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
+void dequantificationV(const QuantT *quant_data, T *data,
+                       int time_steps, int batch_size, int hidden_size,
+                       int32_t exp2_inv_z, int32_t zp_z,
+                       int32_t exp2_inv_r, int32_t zp_r,
+                       int32_t exp2_inv_g, int32_t zp_g,
+                       int32_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
+
+template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src,
                               QuantT *quant_data,
                               size_t input_size,
@@ -1107,10 +1112,10 @@ template<typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data,
                                 size_t input_size, size_t channel_size,
                                 const dev::vector<int32_t> &exp2_invs);
-} // dev namespace
+}// namespace dev
 
-#include <random>
 #include <limits>
+#include <random>
 
 /**
  * @brief Fill a vector with random values from a normal distribution, and clamp to range.
@@ -1124,7 +1129,7 @@ inline void fillVectorWithNormalDistribution(
     float min_value,
     float max_value) {
     float mean = (min_value + max_value) / 2.0f;
-    float stddev = (max_value - min_value) / 6.0f;  // 3σ 刚好覆盖范围
+    float stddev = (max_value - min_value) / 6.0f;// 3σ 刚好覆盖范围
 
     static thread_local std::random_device rd;
     static thread_local std::mt19937 gen(rd());
@@ -1168,8 +1173,7 @@ void run_one_test(
 
     calibrateQuantParams<T, QuantT>(
         orig_min, orig_max, is_symmetric,
-        aligned_min, aligned_max, exp2_inv, zp
-    );
+        aligned_min, aligned_max, exp2_inv, zp);
 
     const int32_t quant_min = std::numeric_limits<QuantT>::min();
     const int32_t quant_max = std::numeric_limits<QuantT>::max();
@@ -1246,7 +1250,6 @@ inline void quantizationTest() {
     run_one_test<T, int16_t>("Asym-int16: general", -100.f, 30000.f, false);
 
     std::cout << "===== All tests passed! =====\n";
-
 }
 
 
@@ -1342,4 +1345,4 @@ inline void testCalibrateQuantParams() {
 
     std::cout << "All tests passed!\n";
 }
-}
+}// namespace unit_testing
