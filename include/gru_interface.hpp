@@ -44,6 +44,7 @@ template<typename QuantT>
 void quantGRUForward(const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
+                     const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
                      float *h// (time_steps) * batch_size * hidden_size
@@ -55,6 +56,7 @@ void hasteGRUForward(const int time_steps,
                      const int hidden_size,
                      const float *W, const float *R, const float *bx,
                      const float *br, const float *x,
+                     const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
                      float *h);
 

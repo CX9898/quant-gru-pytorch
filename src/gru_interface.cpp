@@ -99,6 +99,7 @@ void hasteGRUForward(const int time_steps,
                      const int hidden_size,
                      const float *W, const float *R, const float *bx,
                      const float *br, const float *x,
+                     const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
                      float *h) {
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
@@ -106,6 +107,16 @@ void hasteGRUForward(const int time_steps,
                                   3);// 用于存放W * x的中间结果
     dev::vector<float> tmp_Rh_dev(batch_size * hidden_size *
                                   3);// 用于存放R * h的中间结果
+
+    // 处理初始隐藏状态
+    const int NH = batch_size * hidden_size;
+    if (h0 != nullptr) {
+        // 如果提供了初始状态，复制到 h_dev[0]
+        d2d(h_dev.data(), h0, NH);
+    } else {
+        // 否则初始化为零
+        cudaMemset(h_dev.data(), 0, NH * sizeof(float));
+    }
 
     gru::ForwardPass<float> forward = gru::ForwardPass<float>(
         false,// training
@@ -144,6 +155,7 @@ template<typename QuantT>
 void quantGRUForward(const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
+                     const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
                      float *h// (time_steps) * batch_size * hidden_size
@@ -156,7 +168,17 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
                         quant_parms.zp_x_);
 
     dev::vector<QuantT> h_quant((time_steps + 1) * batch_size * hidden_size);
-    h_quant.zero();
+    
+    // 处理初始隐藏状态
+    const int NH = batch_size * hidden_size;
+    if (h0 != nullptr) {
+        // 如果提供了初始状态，直接量化到 h_quant[0]
+        dev::quantification(h0, h_quant.data(), NH,
+                           quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+    } else {
+        // 否则初始化为零
+        h_quant.zero();
+    }
 
     generate_int8_lut_from_exp2_inv(
         quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
@@ -211,7 +233,7 @@ void forwardInterface(bool is_quant,
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
             quantGRUForward(time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, quant_gru_scales, g_blas_handle, h);
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h);
         } else {
             dev::vector<int8_t> W_quant(hidden_size * 3 * input_size);
             dev::vector<int8_t> R_quant(hidden_size * 3 * hidden_size);
@@ -219,10 +241,10 @@ void forwardInterface(bool is_quant,
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
             quantGRUForward(time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, quant_gru_scales, g_blas_handle, h);
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h);
         }
     } else {
-        hasteGRUForward(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, g_blas_handle, h);
+        hasteGRUForward(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, nullptr, g_blas_handle, h);
     }
 }
 

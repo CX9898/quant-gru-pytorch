@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
@@ -729,8 +730,11 @@ void calculateScalePerSteps(const T *x_dev,
     T res_min = min[0];
     T res_max = max[0];
     for (int t = 1; t < steps; ++t) {
-        res_min = 0.9 * res_min + 0.1 * min[t];
-        res_max = 0.9 * res_max + 0.1 * max[t];
+        //        // TODO: 修改为原来的方法
+        //        res_min = 0.9 * res_min + 0.1 * min[t];
+        //        res_max = 0.9 * res_max + 0.1 * max[t];
+        res_min = std::min(res_min, min[t]);
+        res_max = std::max(res_max, max[t]);
     }
 
     calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp, name);
@@ -1000,10 +1004,9 @@ void calculateGRUQuantitativeParameters(const int steps,
                                       quant_parms_.zp_x_,
                                       "scale_x");
 
-
-    calculateScalePerSteps<T, QuantT>(h,
+    calculateScalePerSteps<T, QuantT>(h + NH,
                                       NH,
-                                      steps + 1,
+                                      steps,
                                       false,
                                       quant_parms_.exp2_inv_h_,
                                       quant_parms_.zp_h_,
