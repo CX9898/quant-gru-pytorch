@@ -524,6 +524,9 @@ int main() {
                       br_quant.data(), x.data(), quant_parms,
                       h_quant_inference.data());
 
+    printf("cudaError(GruInferenceQuant finish): %s\n",
+           cudaGetErrorString(cudaGetLastError()));
+
     // 运行浮点GRU得到结果1
     std::vector<float> h_inference(hidden_size * batch_size * (time_steps + 1));
     GruInference(time_steps,
@@ -540,21 +543,9 @@ int main() {
     printf("cudaError(GruInference finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
 
-    if (true) {
-        // Test
-        std::vector<float> h_inference_tmp(
-            h_inference.data(), h_inference.data() + h_inference.size());
-        std::vector<int8_t> h_quant_inference_tmp(
-            h_quant_inference.data(),
-            h_quant_inference.data() + h_quant_inference.size());
-
-        checkHQuantizationWithCosine<int8_t>(h_inference_tmp, h_quant_inference_tmp,
-                                             time_steps, batch_size, hidden_size,
-                                             quant_parms);
-    }
-
-    printf("cudaError(GruInferenceQuant finish): %s\n",
-           cudaGetErrorString(cudaGetLastError()));
+    checkHQuantizationWithCosine<int8_t>(h_inference, h_quant_inference,
+                                         time_steps, batch_size, hidden_size,
+                                         quant_parms);
 
     // 运行浮点训练
     printf("\n========== Running Float GRU Training ==========\n");

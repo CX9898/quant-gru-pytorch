@@ -665,9 +665,9 @@ inline void compareVIntermediateValues(
 }
 
 /**
- * @brief 比较浮点和量化版本的h隐藏状态
- * @param h_float 浮点版本的h隐藏状态
- * @param h_quant_dequant 量化后反量化的h隐藏状态
+ * @brief 比较浮点和量化版本的h隐藏状态（不包含初始状态）
+ * @param h_float 浮点版本的h隐藏状态，size = time_steps * batch_size * hidden_size（不包含初始状态t=0）
+ * @param h_quant_dequant 量化后反量化的h隐藏状态，size同上
  * @param time_steps 时间步数
  * @param batch_size 批次大小
  * @param hidden_size 隐藏层维度
@@ -705,7 +705,7 @@ inline void compareHValues(
 
     // 按时间步比较
     printf("\nPer time step comparison:\n");
-    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
+    for (int t = 0; t < time_steps; ++t) {
         const int t_offset = t * h_size_per_step;
         std::vector<float> h_float_step(h_size_per_step);
         std::vector<float> h_quant_step(h_size_per_step);
@@ -803,20 +803,22 @@ inline void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
 }
 
 /**
- * @brief 检查量化h值与浮点h值的余弦相似度
- * @param h_inference 浮点版本的h值，size = (time_steps+1) * batch_size * hidden_size
+ * @brief 检查量化h值与浮点h值的相似度（统一使用compareHValues的逻辑）
+ * @param h_inference 浮点版本的h值，size = (time_steps+1) * batch_size * hidden_size（包含初始状态）
  * @param h_quant_inference 量化版本的h值，size同上
  * @param time_steps 时间步数
  * @param batch_size 批次大小
  * @param hidden_size 隐藏层维度
  * @param scaleParam 量化参数
+ * @param prefix 输出前缀（可选）
  */
 template<typename QuantT>
 inline void checkHQuantizationWithCosine(
     const std::vector<float> &h_inference,// 浮点 h, size = (time_steps+1) * batch_size * hidden_size
     const std::vector<QuantT> &h_quant_inference,// 量化 h, size 同上
     int time_steps, int batch_size, int hidden_size,
-    const GRUQuantitativeParameters &scaleParam) {
+    const GRUQuantitativeParameters &scaleParam,
+    const std::string &prefix = "") {
     const int size_per_step = batch_size * hidden_size;
 
     // 验证输入数据大小
@@ -834,67 +836,35 @@ inline void checkHQuantizationWithCosine(
         return;
     }
 
-    printf(
-        "checkHQuantizationWithCosine: time_steps=%d, batch_size=%d, "
-        "hidden_size=%d\n",
-        time_steps, batch_size, hidden_size);
-    printf("  exp2_inv_h_=%d, zp_h_=%d\n", scaleParam.exp2_inv_h_,
-           scaleParam.zp_h_);
+    // 打印量化参数信息
+    printf("\n%s Quantization Parameters: exp2_inv_h_=%d, zp_h_=%d\n",
+           prefix.empty() ? "H" : prefix.c_str(),
+           scaleParam.exp2_inv_h_, scaleParam.zp_h_);
 
-    // 检查前几个数据点的值
-    printf("  Sample data check:\n");
-    printf("    h_inference size: %zu, expected: %d\n", h_inference.size(),
-           (time_steps + 1) * size_per_step);
-    printf("    h_quant_inference size: %zu, expected: %d\n",
-           h_quant_inference.size(), (time_steps + 1) * size_per_step);
-
-    // 检查初始状态（t=0）的数据
-    printf("    h_inference[t=0, first 5]: ");
-    for (int i = 0; i < 5 && i < size_per_step; ++i) {
-        printf("%f ", h_inference[i]);
-    }
-    printf("\n");
-    printf("    h_quant_inference[t=0, first 5]: ");
-    for (int i = 0; i < 5 && i < size_per_step; ++i) {
-        printf("%d ", static_cast<int>(h_quant_inference[i]));
-    }
-    printf("\n");
-
-    // 检查第一个时间步（t=1）的数据
-    const int t1_offset = size_per_step;
-    printf("    h_inference[t=1, first 5]: ");
-    for (int i = 0; i < 5 && i < size_per_step; ++i) {
-        printf("%f ", h_inference[t1_offset + i]);
-    }
-    printf("\n");
-    printf("    h_quant_inference[t=1, first 5]: ");
-    for (int i = 0; i < 5 && i < size_per_step; ++i) {
-        printf("%d ", static_cast<int>(h_quant_inference[t1_offset + i]));
-    }
-    printf("\n");
-
-    std::vector<float> h_float_step(size_per_step);
-    std::vector<float> h_quant_step(size_per_step);
-
+    // 反量化整个量化h值（跳过初始状态t=0，只处理t=1到t=time_steps）
+    std::vector<float> h_quant_dequant(time_steps * size_per_step);
     for (int t = 1; t <= time_steps; ++t) {
-        // ForwardPass 存储 h 的方式：h + t * (batch_size * hidden_size)
-        // 每个时间步内部：按 [batch0_h0, batch0_h1, ..., batch0_hH-1,
-        // batch1_h0, ..., batchN-1_hH-1] 顺序 即：t * (N*H) + n * H + h
-
         const size_t t_offset = static_cast<size_t>(t) * size_per_step;
-
-        // 直接拷贝和反量化
+        const size_t dst_offset = static_cast<size_t>(t - 1) * size_per_step;
+        
         for (int idx = 0; idx < size_per_step; ++idx) {
-            h_float_step[idx] = h_inference[t_offset + idx];
-
             const QuantT quant_val = h_quant_inference[t_offset + idx];
-            h_quant_step[idx] = dequantize<QuantT>(
+            h_quant_dequant[dst_offset + idx] = dequantize<QuantT>(
                 quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
         }
-        const float mse = computeMSE(h_float_step, h_quant_step);
-        const float cos_sim =
-            computeCosineSimilarity(h_float_step, h_quant_step);
-
-        printf("Time step %d: mse = %f, cosine_sim = %f\n", t, mse, cos_sim);
     }
+
+    // 提取浮点h值（跳过初始状态t=0，只处理t=1到t=time_steps）
+    std::vector<float> h_float(time_steps * size_per_step);
+    for (int t = 1; t <= time_steps; ++t) {
+        const size_t src_offset = static_cast<size_t>(t) * size_per_step;
+        const size_t dst_offset = static_cast<size_t>(t - 1) * size_per_step;
+        
+        for (int idx = 0; idx < size_per_step; ++idx) {
+            h_float[dst_offset + idx] = h_inference[src_offset + idx];
+        }
+    }
+
+    // 使用统一的compareHValues函数进行比较
+    compareHValues(h_float, h_quant_dequant, time_steps, batch_size, hidden_size, prefix);
 }
