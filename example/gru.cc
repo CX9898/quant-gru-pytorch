@@ -184,70 +184,44 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
                            g_blas_handle, quant_parms);
     }
 
+    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
+                                  // hidden_size * 3] 对应三个门
+    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
+    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
+    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
+    dev::vector<float> x_dev(x);
+
     // 步骤2: 将权重量化和x量化
     const int channel_size = hidden_size * 3;
-    std::vector<QuantT> W_quant(input_size * hidden_size * 3);
-    std::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
-    std::vector<int32_t> bx_quant(hidden_size * 3);
-    std::vector<int32_t> br_quant(hidden_size * 3);
+    dev::vector<QuantT> W_quant_dev(input_size * hidden_size * 3);
+    dev::vector<QuantT> R_quant_dev(hidden_size * hidden_size * 3);
+    dev::vector<int32_t> bx_quant_dev(hidden_size * 3);
+    dev::vector<int32_t> br_quant_dev(hidden_size * 3);
     const std::size_t x_size = time_steps * batch_size * input_size;
-    std::vector<QuantT> x_quant(x_size);
+    dev::vector<QuantT> x_quant_dev(x_size);
+
+    // 显式创建dev::vector以避免临时对象问题
+    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
 
     {
         ScopeTimer t("Quantize weights and x:");
         // 权重量化 (per-channel)
-        quantificationPerChannel(W.data(), W_quant.data(), input_size, channel_size,
-                                 quant_parms.exp2_inv_W_);
-        quantificationPerChannel(R.data(), R_quant.data(), hidden_size, channel_size,
-                                 quant_parms.exp2_inv_R_);
+        dev::quantificationPerChannel(W_dev.data(), W_quant_dev.data(), input_size, channel_size,
+                                      exp2_inv_W_dev);
+        dev::quantificationPerChannel(R_dev.data(), R_quant_dev.data(), hidden_size, channel_size,
+                                      exp2_inv_R_dev);
         // 偏置量化 (per-channel)
-        quantificationPerChannel(bx.data(), bx_quant.data(), 1, channel_size,
-                                 quant_parms.exp2_inv_bx_);
-        quantificationPerChannel(br.data(), br_quant.data(), 1, channel_size,
-                                 quant_parms.exp2_inv_br_);
+        dev::quantificationPerChannel(bx_dev.data(), bx_quant_dev.data(), 1, channel_size,
+                                      exp2_inv_bx_dev);
+        dev::quantificationPerChannel(br_dev.data(), br_quant_dev.data(), 1, channel_size,
+                                      exp2_inv_br_dev);
         // x量化 (全局)
-        quantification(x.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
-                       quant_parms.zp_x_);
+        dev::quantification(x_dev.data(), x_quant_dev.data(), x_size, quant_parms.exp2_inv_x_,
+                            quant_parms.zp_x_);
     }
-
-    //    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
-    //                                  // hidden_size * 3] 对应三个门
-    //    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
-    //    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
-    //    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
-    //    dev::vector<float> x_dev(x);
-    //
-    //    // 步骤2: 将权重量化和x量化
-    //    const int channel_size = hidden_size * 3;
-    //    dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
-    //    dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
-    //    dev::vector<int32_t> bx_quant(hidden_size * 3);
-    //    dev::vector<int32_t> br_quant(hidden_size * 3);
-    //    const std::size_t x_size = time_steps * batch_size * input_size;
-    //    dev::vector<QuantT> x_quant(x_size);
-    //
-    //    // 显式创建dev::vector以避免临时对象问题
-    //    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    //    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    //    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    //    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
-    //
-    //    {
-    //        ScopeTimer t("Quantize weights and x:");
-    //        // 权重量化 (per-channel)
-    //        dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
-    //                                      exp2_inv_W_dev);
-    //        dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
-    //                                      exp2_inv_R_dev);
-    //        // 偏置量化 (per-channel)
-    //        dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
-    //                                      exp2_inv_bx_dev);
-    //        dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
-    //                                      exp2_inv_br_dev);
-    //        // x量化 (全局)
-    //        dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
-    //                            quant_parms.zp_x_);
-    //    }
 
     // 生成LUT表
     generate_int8_lut_from_exp2_inv(
@@ -257,13 +231,6 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
         quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
         quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
         quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
-
-    // Copy量化后的数据到GPU
-    dev::vector<QuantT> W_quant_dev(W_quant);
-    dev::vector<QuantT> R_quant_dev(R_quant);
-    dev::vector<int32_t> bx_quant_dev(bx_quant);
-    dev::vector<int32_t> br_quant_dev(br_quant);
-    dev::vector<QuantT> x_quant_dev(x_quant);
 
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
     dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
