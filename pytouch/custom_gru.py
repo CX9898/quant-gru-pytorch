@@ -277,8 +277,8 @@ class CustomGRU(nn.GRU):
             bias_ih = self.bias_ih_l0  # [3*hidden]
             bias_hh = self.bias_hh_l0  # [3*hidden]
             # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
-            bx = self._reorder_weights_pytorch_to_haste(bias_ih)  # [3*hidden], 顺序 (z, r, n)
-            br = self._reorder_weights_pytorch_to_haste(bias_hh)  # [3*hidden], 顺序 (z, r, n)
+            bx = self._reorder_weights_pytorch_to_haste(bias_ih).contiguous()  # [3*hidden], 顺序 (z, r, n)
+            br = self._reorder_weights_pytorch_to_haste(bias_hh).contiguous()  # [3*hidden], 顺序 (z, r, n)
         else:
             # 如果没有偏置，创建零偏置
             target_device = device if device is not None else weight_ih.device
@@ -304,7 +304,7 @@ class CustomGRU(nn.GRU):
         # 处理 batch_first
         if self.batch_first:
             # [batch, seq_len, input_size] -> [seq_len, batch, input_size]
-            calibration_data = calibration_data.transpose(0, 1)
+            calibration_data = calibration_data.transpose(0, 1).contiguous()
 
         time_steps, batch_size, input_size = calibration_data.shape
         hidden_size = self.hidden_size
