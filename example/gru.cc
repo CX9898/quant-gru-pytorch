@@ -209,39 +209,45 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
         quantification(x.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
                        quant_parms.zp_x_);
     }
+
+    //        dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
+    //                                      // hidden_size * 3] 对应三个门
+    //        dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
+    //        dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
+    //        dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
+    //        dev::vector<float> x_dev(x);
     //
-    //    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
-    //                                  // hidden_size * 3] 对应三个门
-    //    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
-    //    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
-    //    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
-    //    dev::vector<float> x_dev(x);
+    //        // 步骤2: 将权重量化和x量化
+    //        const int channel_size = hidden_size * 3;
+    //        dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
+    //        dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
+    //        dev::vector<int32_t> bx_quant(hidden_size * 3);
+    //        dev::vector<int32_t> br_quant(hidden_size * 3);
+    //        const std::size_t x_size = time_steps * batch_size * input_size;
+    //        dev::vector<QuantT> x_quant(x_size);
     //
-    //    // 步骤2: 将权重量化和x量化
-    //    const int channel_size = hidden_size * 3;
-    //    dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
-    //    dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
-    //    dev::vector<int32_t> bx_quant(hidden_size * 3);
-    //    dev::vector<int32_t> br_quant(hidden_size * 3);
-    //    const std::size_t x_size = time_steps * batch_size * input_size;
-    //    dev::vector<QuantT> x_quant(x_size);
+    //        // 显式创建dev::vector以避免临时对象问题
+    //        dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    //        dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    //        dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    //        dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
     //
-    //    {
-    //        ScopeTimer t("Quantize weights and x:");
-    //        // 权重量化 (per-channel)
-    //        dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
-    //                                      quant_parms.exp2_inv_W_);
-    //        dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
-    //                                      quant_parms.exp2_inv_R_);
-    //        // 偏置量化 (per-channel)
-    //        dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
-    //                                      quant_parms.exp2_inv_bx_);
-    //        dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
-    //                                      quant_parms.exp2_inv_br_);
-    //        // x量化 (全局)
-    //        dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
-    //                            quant_parms.zp_x_);
-    //    }
+    //        {
+    //            ScopeTimer t("Quantize weights and x:");
+    //            // 权重量化 (per-channel)
+    //            dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
+    //                                          exp2_inv_W_dev);
+    //            dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
+    //                                          exp2_inv_R_dev);
+    //            // 偏置量化 (per-channel)
+    //            dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
+    //                                          exp2_inv_bx_dev);
+    //            dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
+    //                                          exp2_inv_br_dev);
+    //            // x量化 (全局)
+    //            dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
+    //                                quant_parms.zp_x_);
+    //        }
 
     // 生成LUT表
     generate_int8_lut_from_exp2_inv(
