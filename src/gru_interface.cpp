@@ -93,7 +93,8 @@ GRUQuantitativeParameters calibrateGruScales(
     return forward.getGRUQuantitativeParameters();
 }
 
-void hasteGRUForward(const int time_steps,
+void hasteGRUForward(bool is_training,// 是否开启训练模式，true为训练，false为推理
+                     const int time_steps,
                      const int batch_size,
                      const int input_size,
                      const int hidden_size,
@@ -101,8 +102,9 @@ void hasteGRUForward(const int time_steps,
                      const float *br, const float *x,
                      const float *h0,// 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
-                     float *h) {
-    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
+                     float *h,// (time_steps + 1) * batch_size * hidden_size
+                     float *v // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+) {
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                   3);// 用于存放W * x的中间结果
     dev::vector<float> tmp_Rh_dev(batch_size * hidden_size *
@@ -111,22 +113,20 @@ void hasteGRUForward(const int time_steps,
     // 处理初始隐藏状态
     const int NH = batch_size * hidden_size;
     if (h0 != nullptr) {
-        // 如果提供了初始状态，复制到 h_dev[0]
-        d2d(h_dev.data(), h0, NH);
+        // 如果提供了初始状态，复制到 h[0]
+        d2d(h, h0, NH);
     } else {
         // 否则初始化为零
-        cudaMemset(h_dev.data(), 0, NH * sizeof(float));
+        cudaMemset(h, 0, NH * sizeof(float));
     }
 
     gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-        false,// training
+        is_training,// training: true为训练，false为推理
         batch_size, input_size, hidden_size, g_blas_handle);
 
     forward.Run(time_steps, W, R, bx,
-                br, x, h_dev.data(), nullptr,
+                br, x, h, v,
                 tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
-
-    d2d(h, h_dev.data() + batch_size * hidden_size, time_steps * batch_size * hidden_size);
 }
 
 template<typename QuantT>
@@ -155,15 +155,16 @@ void quantitativeWeight(const int input_size, const int hidden_size,
 }
 
 template<typename QuantT>
-void quantGRUForward(const int time_steps, const int batch_size, const int input_size,
+void quantGRUForward(bool is_training,// 是否开启训练模式，true为训练，false为推理
+                     const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
                      const float *h0,// 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
-                     float *h// (time_steps) * batch_size * hidden_size
+                     float *h,// (time_steps + 1) * batch_size * hidden_size
+                     float *v // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
 ) {
-
     const std::size_t x_size = time_steps * batch_size * input_size;
 
     dev::vector<QuantT> x_quant(x_size);
@@ -179,8 +180,8 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
         dev::quantification(h0, h_quant.data(), NH,
                             quant_parms.exp2_inv_h_, quant_parms.zp_h_);
     } else {
-        // 否则初始化为零
-        h_quant.zero();
+        // 否则初始化为zp
+        h_quant.setVal(quant_parms.zp_h_);
     }
 
     generate_int8_lut_from_exp2_inv(
@@ -191,7 +192,7 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
         quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
         quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
 
-
+    dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                     3);// 用于存放W * x的中间结果
     dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size *
@@ -199,7 +200,7 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
 
     {
         gru::ForwardPassQuant<QuantT> forward = gru::ForwardPassQuant<QuantT>(
-            false,// training
+            is_training,// training: true为训练，false为推理
             batch_size, input_size, hidden_size, g_blas_handle);
 
         // 得到量化GRU中使用的rescale参数
@@ -207,14 +208,24 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
 
         forward.Run(time_steps, W, R, bx,
                     br, x_quant.data(), h_quant.data(),
-                    nullptr, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
+                    v_quant_dev.data(), tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
                     nullptr);
     }
 
-    dev::dequantification(h_quant.data() + batch_size * hidden_size,
+    dev::dequantification(h_quant.data(),
                           h,
-                          time_steps * batch_size * hidden_size,
+                          (time_steps + 1) * batch_size * hidden_size,
                           quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+
+    // 如果v不为nullptr，反量化v并输出
+    if (v != nullptr) {
+        dev::dequantificationV(v_quant_dev.data(), v,
+                               time_steps, batch_size, hidden_size,
+                               quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+                               quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
+                               quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
+                               quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+    }
 }
 
 void forwardInterface(bool is_quant,
@@ -235,19 +246,19 @@ void forwardInterface(bool is_quant,
             dev::vector<int32_t> bx_quant(hidden_size * 3);
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h);
+            quantGRUForward(false, time_steps, batch_size, input_size, hidden_size,
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, nullptr);
         } else {
             dev::vector<int8_t> W_quant(hidden_size * 3 * input_size);
             dev::vector<int8_t> R_quant(hidden_size * 3 * hidden_size);
             dev::vector<int32_t> bx_quant(hidden_size * 3);
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h);
+            quantGRUForward(false, time_steps, batch_size, input_size, hidden_size,
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, nullptr);
         }
     } else {
-        hasteGRUForward(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, nullptr, g_blas_handle, h);
+        hasteGRUForward(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, nullptr, g_blas_handle, h, nullptr);
     }
 }
 
@@ -344,19 +355,23 @@ template void quantitativeWeight<int16_t>(
     int16_t *W_quant, int16_t *R_quant, int32_t *bx_quant, int32_t *br_quant);
 
 template void quantGRUForward<int8_t>(
+    bool is_training,
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
     const float *h0,// 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
-    float *h);
+    float *h,
+    float *v);
 
 template void quantGRUForward<int16_t>(
+    bool is_training,
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
     const float *h0,// 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
-    float *h);
+    float *h,
+    float *v);
