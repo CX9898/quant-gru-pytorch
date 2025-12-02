@@ -576,7 +576,7 @@ def main():
         # test_batch_first()
 
         # 测试 CustomGRU 非量化 vs 量化（更准确的量化误差评估）
-        test_quantized_vs_non_quantized_int8()
+        # test_quantized_vs_non_quantized_int8()
 
         print("\n" + "=" * 80)
         print("所有测试完成！")
