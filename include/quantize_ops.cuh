@@ -32,40 +32,6 @@ __device__ __forceinline__ T round(float val) {
     return clamp<T>(static_cast<int>(roundf(val)));
 }
 
-/**
- * @brief 将 float 转 int8（GPU device 函数），支持 use_inv_scale 和对称量化
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- */
-template<bool use_inv_scale, bool symmetric>
-__device__ __forceinline__ int8_t quantize_float_to_int8(
-    const float value,
-    const float scale_param,
-    const int32_t zero_point
-) {
-    // 1. 编译期分支选择 scale 计算方式
-    const float scaled = [value, scale_param]() {
-      if constexpr (use_inv_scale) {
-          return value * scale_param;
-      } else {
-          return value / scale_param;
-      }
-    }();
-
-    // 2. 对称量化时 zero_point 固定为 0，非对称时使用传入 zero_point
-    const int32_t zp = symmetric ? 0 : zero_point;
-
-    // 3. 添加 zero_point
-    const float shifted = scaled + static_cast<float>(zp);
-
-    // 4. 四舍五入并截断到 int8 范围
-    const int32_t rounded = __float2int_rn(shifted);
-    const int32_t clamped = ::max(-128, ::min(127, rounded));
-
-    return static_cast<int8_t>(clamped);
-}
-
-
 template<typename T>
 struct QuantLimits;
 
@@ -142,47 +108,6 @@ __device__ __forceinline__ int8_t tanh_int16_lut(int16_t x) { // (TODO: 二项�
     tmp = (tmp * 255 + 65535 / 2) / 65535; // 缩放到 [0, 255]（四舍五入）
     int8_t idx = static_cast<int8_t>(tmp - 128); // → [-128, 127]
 //    return d_tanh_lut[static_cast<uint8_t>(idx)]; // 用索引访问 tanh LUT
-}
-
-/**
- * @brief 对单个 float 元素执行量化 (设备端函数)
- * @tparam QuantT       目标量化类型（int8_t 或 int16_t）
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- * @tparam clamp        是否使用饱和处理
- * @param x             输入值（float）
- * @param scale         当前 scale
- * @param zero_point    zero_point（仅非对称量化有效）
- * @return 量化后的整数值 (QuantT)
- */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp = true>
-__device__ __forceinline__ QuantT quantizeElement(
-    float x,
-    float scale,
-    int32_t zero_point) {
-
-    // 1. scale 运算
-    float scaled;
-    if constexpr (use_inv_scale)
-        scaled = x * scale;
-    else
-        scaled = x / scale;
-
-    // 2. zero_point (仅非对称)
-    if constexpr (!symmetric)
-        scaled += zero_point;
-
-    // 3. 四舍五入
-    int32_t rounded = __float2int_rn(scaled);
-
-    // 4. 饱和裁剪
-    if constexpr (clamp) {
-        constexpr int32_t qmin = QuantLimits<QuantT>::min();
-        constexpr int32_t qmax = QuantLimits<QuantT>::max();
-        rounded = min(max(rounded, qmin), qmax);
-    }
-
-    return static_cast<QuantT>(rounded);
 }
 
 } // dev namespace
