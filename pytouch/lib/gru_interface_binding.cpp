@@ -429,6 +429,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     const torch::Tensor &bx,
     const torch::Tensor &br,
     const torch::Tensor &x,
+    const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
     const GRUQuantitativeParametersPy &quant_params) {
 
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
@@ -436,6 +437,15 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // h0 可以为空张量（未提供初始状态）
+    const float *h0_ptr = nullptr;
+    if (h0.defined() && h0.numel() > 0) {
+        TORCH_CHECK(h0.is_cuda() && h0.dtype() == torch::kFloat32, "h0 must be CUDA float32 tensor");
+        TORCH_CHECK(h0.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
+                    "h0 must have shape [batch_size, hidden_size]");
+        h0_ptr = h0.data_ptr<float>();
+    }
 
     // 确保 cublas handle 已初始化
     if (g_blas_handle == nullptr) {
@@ -462,6 +472,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
         bx.data_ptr<float>(),
         br.data_ptr<float>(),
         x.data_ptr<float>(),
+        h0_ptr,  // 初始隐藏状态，可以为 nullptr
         cpp_params,
         g_blas_handle,
         h.data_ptr<float>(),
@@ -656,6 +667,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("is_quant"), py::arg("use_int16"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("h0") = torch::Tensor(),// 初始隐藏状态，可选
           py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为中间值
 
     // GRU 反向传播
