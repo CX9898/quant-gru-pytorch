@@ -210,44 +210,44 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
                        quant_parms.zp_x_);
     }
 
-    //        dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
-    //                                      // hidden_size * 3] 对应三个门
-    //        dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
-    //        dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
-    //        dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
-    //        dev::vector<float> x_dev(x);
+    //    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
+    //                                  // hidden_size * 3] 对应三个门
+    //    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
+    //    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
+    //    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
+    //    dev::vector<float> x_dev(x);
     //
-    //        // 步骤2: 将权重量化和x量化
-    //        const int channel_size = hidden_size * 3;
-    //        dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
-    //        dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
-    //        dev::vector<int32_t> bx_quant(hidden_size * 3);
-    //        dev::vector<int32_t> br_quant(hidden_size * 3);
-    //        const std::size_t x_size = time_steps * batch_size * input_size;
-    //        dev::vector<QuantT> x_quant(x_size);
+    //    // 步骤2: 将权重量化和x量化
+    //    const int channel_size = hidden_size * 3;
+    //    dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
+    //    dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
+    //    dev::vector<int32_t> bx_quant(hidden_size * 3);
+    //    dev::vector<int32_t> br_quant(hidden_size * 3);
+    //    const std::size_t x_size = time_steps * batch_size * input_size;
+    //    dev::vector<QuantT> x_quant(x_size);
     //
-    //        // 显式创建dev::vector以避免临时对象问题
-    //        dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    //        dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    //        dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    //        dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+    //    // 显式创建dev::vector以避免临时对象问题
+    //    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    //    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    //    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    //    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
     //
-    //        {
-    //            ScopeTimer t("Quantize weights and x:");
-    //            // 权重量化 (per-channel)
-    //            dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
-    //                                          exp2_inv_W_dev);
-    //            dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
-    //                                          exp2_inv_R_dev);
-    //            // 偏置量化 (per-channel)
-    //            dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
-    //                                          exp2_inv_bx_dev);
-    //            dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
-    //                                          exp2_inv_br_dev);
-    //            // x量化 (全局)
-    //            dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
-    //                                quant_parms.zp_x_);
-    //        }
+    //    {
+    //        ScopeTimer t("Quantize weights and x:");
+    //        // 权重量化 (per-channel)
+    //        dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
+    //                                      exp2_inv_W_dev);
+    //        dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
+    //                                      exp2_inv_R_dev);
+    //        // 偏置量化 (per-channel)
+    //        dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
+    //                                      exp2_inv_bx_dev);
+    //        dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
+    //                                      exp2_inv_br_dev);
+    //        // x量化 (全局)
+    //        dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
+    //                            quant_parms.zp_x_);
+    //    }
 
     // 生成LUT表
     generate_int8_lut_from_exp2_inv(
@@ -763,6 +763,182 @@ void checkHQuantizationWithCosine(
     }
 }
 
+void checkQuantize(
+    const std::vector<float> &W,
+    const std::vector<float> &R,
+    const std::vector<float> &bx,
+    const std::vector<float> &br,
+    const std::vector<float> &x,
+    const GRUQuantitativeParameters &quant_parms,
+    int time_steps,
+    int batch_size,
+    int input_size,
+    int hidden_size) {
+    // ========== 验证CPU和GPU量化结果一致性 ==========
+    printf("\n========== 验证CPU和GPU量化结果一致性 ==========\n");
+
+    const int channel_size = hidden_size * 3;
+    const std::size_t x_size = time_steps * batch_size * input_size;
+
+    // CPU版本量化结果
+    std::vector<int8_t> W_quant_cpu(input_size * hidden_size * 3);
+    std::vector<int8_t> R_quant_cpu(hidden_size * hidden_size * 3);
+    std::vector<int32_t> bx_quant_cpu(hidden_size * 3);
+    std::vector<int32_t> br_quant_cpu(hidden_size * 3);
+    std::vector<int8_t> x_quant_cpu(x_size);
+
+    {
+        ScopeTimer t("CPU量化:");
+        quantificationPerChannel(W.data(), W_quant_cpu.data(), input_size, channel_size,
+                                 quant_parms.exp2_inv_W_);
+        quantificationPerChannel(R.data(), R_quant_cpu.data(), hidden_size, channel_size,
+                                 quant_parms.exp2_inv_R_);
+        quantificationPerChannel(bx.data(), bx_quant_cpu.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_bx_);
+        quantificationPerChannel(br.data(), br_quant_cpu.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_br_);
+        quantification(x.data(), x_quant_cpu.data(), x_size, quant_parms.exp2_inv_x_,
+                       quant_parms.zp_x_);
+    }
+
+    // GPU版本量化结果
+    dev::vector<float> W_dev(W);
+    dev::vector<float> R_dev(R);
+    dev::vector<float> bx_dev(bx);
+    dev::vector<float> br_dev(br);
+    dev::vector<float> x_dev(x);
+
+    dev::vector<int8_t> W_quant_gpu(input_size * hidden_size * 3);
+    dev::vector<int8_t> R_quant_gpu(hidden_size * hidden_size * 3);
+    dev::vector<int32_t> bx_quant_gpu(hidden_size * 3);
+    dev::vector<int32_t> br_quant_gpu(hidden_size * 3);
+    dev::vector<int8_t> x_quant_gpu(x_size);
+
+    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+
+    {
+        ScopeTimer t("GPU量化:");
+        dev::quantificationPerChannel(W_dev.data(), W_quant_gpu.data(), input_size, channel_size,
+                                      exp2_inv_W_dev);
+        dev::quantificationPerChannel(R_dev.data(), R_quant_gpu.data(), hidden_size, channel_size,
+                                      exp2_inv_R_dev);
+        dev::quantificationPerChannel(bx_dev.data(), bx_quant_gpu.data(), 1, channel_size,
+                                      exp2_inv_bx_dev);
+        dev::quantificationPerChannel(br_dev.data(), br_quant_gpu.data(), 1, channel_size,
+                                      exp2_inv_br_dev);
+        dev::quantification(x_dev.data(), x_quant_gpu.data(), x_size, quant_parms.exp2_inv_x_,
+                            quant_parms.zp_x_);
+    }
+
+    // 将GPU结果复制到CPU进行比较
+    std::vector<int8_t> W_quant_gpu_host = d2h(W_quant_gpu);
+    std::vector<int8_t> R_quant_gpu_host = d2h(R_quant_gpu);
+    std::vector<int32_t> bx_quant_gpu_host = d2h(bx_quant_gpu);
+    std::vector<int32_t> br_quant_gpu_host = d2h(br_quant_gpu);
+    std::vector<int8_t> x_quant_gpu_host = d2h(x_quant_gpu);
+
+    // 比较结果
+    int mismatch_count = 0;
+    const int max_show_mismatches = 10;
+
+    // 比较W
+    printf("\n比较W量化结果 (大小: %zu):\n", W_quant_cpu.size());
+    for (size_t i = 0; i < W_quant_cpu.size(); ++i) {
+        if (W_quant_cpu[i] != W_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  W[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(W_quant_cpu[i]),
+                       static_cast<int>(W_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ W量化结果完全一致\n");
+    } else {
+        printf("  ✗ W量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较R
+    mismatch_count = 0;
+    printf("\n比较R量化结果 (大小: %zu):\n", R_quant_cpu.size());
+    for (size_t i = 0; i < R_quant_cpu.size(); ++i) {
+        if (R_quant_cpu[i] != R_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  R[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(R_quant_cpu[i]),
+                       static_cast<int>(R_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ R量化结果完全一致\n");
+    } else {
+        printf("  ✗ R量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较bx
+    mismatch_count = 0;
+    printf("\n比较bx量化结果 (大小: %zu):\n", bx_quant_cpu.size());
+    for (size_t i = 0; i < bx_quant_cpu.size(); ++i) {
+        if (bx_quant_cpu[i] != bx_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  bx[%zu]: CPU=%d, GPU=%d\n", i,
+                       bx_quant_cpu[i], bx_quant_gpu_host[i]);
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ bx量化结果完全一致\n");
+    } else {
+        printf("  ✗ bx量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较br
+    mismatch_count = 0;
+    printf("\n比较br量化结果 (大小: %zu):\n", br_quant_cpu.size());
+    for (size_t i = 0; i < br_quant_cpu.size(); ++i) {
+        if (br_quant_cpu[i] != br_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  br[%zu]: CPU=%d, GPU=%d\n", i,
+                       br_quant_cpu[i], br_quant_gpu_host[i]);
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ br量化结果完全一致\n");
+    } else {
+        printf("  ✗ br量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较x
+    mismatch_count = 0;
+    printf("\n比较x量化结果 (大小: %zu):\n", x_quant_cpu.size());
+    for (size_t i = 0; i < x_quant_cpu.size(); ++i) {
+        if (x_quant_cpu[i] != x_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  x[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(x_quant_cpu[i]),
+                       static_cast<int>(x_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ x量化结果完全一致\n");
+    } else {
+        printf("  ✗ x量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    printf("\n===========================================================\n\n");
+}
+
 int main() {
     srand(time(0));
 
@@ -918,6 +1094,9 @@ int main() {
 
     // 比较两个训练的输出
     compareGRUTrainGradients(gradients_float, gradients_quant, "Float vs Quantized");
+
+    // 验证CPU和GPU量化结果一致性
+    checkQuantize(W, R, bx, br, x, quant_parms, time_steps, batch_size, input_size, hidden_size);
 
     cublasDestroy(g_blas_handle);
 
