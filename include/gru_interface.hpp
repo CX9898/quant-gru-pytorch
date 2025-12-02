@@ -41,16 +41,19 @@ void quantitativeWeight(const int input_size, const int hidden_size,
                         QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant);
 
 template<typename QuantT>
-void quantGRUForward(const int time_steps, const int batch_size, const int input_size,
+void quantGRUForward(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+                     const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
                      const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
-                     float *h// (time_steps) * batch_size * hidden_size
+                     float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                     float *v   // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
 );
 
-void hasteGRUForward(const int time_steps,
+void hasteGRUForward(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+                     const int time_steps,
                      const int batch_size,
                      const int input_size,
                      const int hidden_size,
@@ -58,7 +61,9 @@ void hasteGRUForward(const int time_steps,
                      const float *br, const float *x,
                      const float *h0,  // 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
-                     float *h);
+                     float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                     float *v   // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+);
 
 void forwardInterface(bool is_quant,
                       bool use_int16,
@@ -70,4 +75,4 @@ void forwardInterface(bool is_quant,
                       const float *x,
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
-                      float *h);
+                      float *h);  // (time_steps + 1) * batch_size * hidden_size，包含初始状态

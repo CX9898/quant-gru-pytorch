@@ -93,22 +93,22 @@ class CustomGRU(nn.GRU):
     def _reorder_weights_pytorch_to_haste(self, w):
         """
         将 PyTorch GRU 权重格式 (r, z, n) 转换为 Haste GRU 权重格式 (z, r, n)
-        
+
         数学原理：
         - PyTorch GRU 使用门控顺序 (r, z, n)：reset gate, update gate, new gate
         - Haste GRU 使用门控顺序 (z, r, n)：update gate, reset gate, new gate
         - 转换方法：将第一维（3*hidden_size）分成三块，然后重新排列顺序
-        
+
         转换等价性说明：
         - 方法1（Haste）：先转置 [3*hidden, input] -> [input, 3*hidden]，再在最后一维重排序
         - 方法2（本实现）：先在第一维重排序，再转置 [3*hidden, input] -> [input, 3*hidden]
         - 两种方法数学上等价，因为转置和重排序是独立的操作
-        
+
         Args:
             w: 权重张量，第一维是 3*hidden_size，顺序为 r, z, n
                - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
                - 对于偏置向量：形状为 [3*hidden]
-            
+
         Returns:
             重排序后的权重张量，顺序为 z, r, n
                - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
@@ -123,22 +123,22 @@ class CustomGRU(nn.GRU):
     def _quantize_weights(self, W, R, bx, br, device):
         """
         实时量化权重和偏置
-        
+
         在每次前向传播时调用，将当前的浮点权重量化为整数权重。
         这样可以支持训练时权重的更新。
-        
+
         Args:
             W: 输入权重，形状 [input_size, 3*hidden_size]
             R: 循环权重，形状 [hidden_size, 3*hidden_size]
             bx: 输入偏置，形状 [3*hidden_size]
             br: 循环偏置，形状 [3*hidden_size]
             device: 设备
-            
+
         Returns:
             W_quant, R_quant, bx_quant, br_quant: 量化后的权重和偏置
         """
         input_size, hidden_size = W.shape[0], R.shape[0]
-        
+
         if self.quant_type == 'int8':
             # 创建量化权重张量
             W_quant = torch.empty(
@@ -211,13 +211,13 @@ class CustomGRU(nn.GRU):
                 bx_quant=bx_quant,
                 br_quant=br_quant
             )
-        
+
         return W_quant, R_quant, bx_quant, br_quant
 
     def _ensure_weights_on_cuda_float32(self):
         """
         确保所有权重和偏置在 CUDA 上且为 float32 类型
-        
+
         性能优化：在初始化时统一处理，避免在前向传播时重复检查和转换
         """
         # 确保权重在 CUDA 上且为 float32
@@ -225,19 +225,19 @@ class CustomGRU(nn.GRU):
             self.weight_ih_l0.data = self.weight_ih_l0.data.cuda()
         if self.weight_ih_l0.dtype != torch.float32:
             self.weight_ih_l0.data = self.weight_ih_l0.data.float()
-            
+
         if not self.weight_hh_l0.is_cuda:
             self.weight_hh_l0.data = self.weight_hh_l0.data.cuda()
         if self.weight_hh_l0.dtype != torch.float32:
             self.weight_hh_l0.data = self.weight_hh_l0.data.float()
-        
+
         # 确保偏置在 CUDA 上且为 float32（如果使用偏置）
         if self.bias:
             if not self.bias_ih_l0.is_cuda:
                 self.bias_ih_l0.data = self.bias_ih_l0.data.cuda()
             if self.bias_ih_l0.dtype != torch.float32:
                 self.bias_ih_l0.data = self.bias_ih_l0.data.float()
-                
+
             if not self.bias_hh_l0.is_cuda:
                 self.bias_hh_l0.data = self.bias_hh_l0.data.cuda()
             if self.bias_hh_l0.dtype != torch.float32:
@@ -246,16 +246,16 @@ class CustomGRU(nn.GRU):
     def _get_haste_weights(self, device: Optional[torch.device] = None):
         """
         获取 Haste 格式的权重和偏置
-        
+
         这个方法统一处理权重格式转换，避免在多个地方重复代码。
         转换过程：
         1. 获取 PyTorch 格式的权重和偏置
         2. 重排序：从 (r, z, n) 转为 (z, r, n)
         3. 转置权重矩阵：从 [3*hidden, input] 转为 [input, 3*hidden]
-        
+
         Args:
             device: 目标设备（可选），如果为 None，使用权重的当前设备
-            
+
         Returns:
             W: 输入权重，形状 [input_size, 3*hidden_size]，顺序 (z, r, n)
             R: 循环权重，形状 [hidden_size, 3*hidden_size]，顺序 (z, r, n)
@@ -265,13 +265,13 @@ class CustomGRU(nn.GRU):
         # 获取权重（已经在 CUDA 上且为 float32，由 _ensure_weights_on_cuda_float32 保证）
         weight_ih = self.weight_ih_l0  # [3*hidden, input]
         weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
-        
+
         # 将 PyTorch 格式转换为 Haste 格式：
         # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
         # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
         W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
         R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
-        
+
         # 处理偏置
         if self.bias:
             bias_ih = self.bias_ih_l0  # [3*hidden]
@@ -284,13 +284,13 @@ class CustomGRU(nn.GRU):
             target_device = device if device is not None else weight_ih.device
             bx = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
             br = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
-        
+
         return W, R, bx, br
 
     def _initialize_quantization(self, calibration_data: torch.Tensor):
         """
         初始化量化参数（不量化权重）
-        
+
         注意：只校准量化参数，不量化权重。权重将在每次前向传播时实时量化，
         这样可以支持训练时权重的更新。
 
@@ -393,7 +393,11 @@ class CustomGRU(nn.GRU):
             )
 
             if self.quant_type == 'int8':
-                output = gru_ops.quant_gru_forward_int8(
+                # 调用量化前向传播，返回 (h, v) 元组
+                # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
+                # v 为反量化后的中间值：[time_steps, batch_size, hidden_size * 4]
+                output_full, v = gru_ops.quant_gru_forward_int8(
+                    is_training=self.training,  # 根据模型是否处于训练模式设置
                     time_steps=seq_len,
                     batch_size=batch_size,
                     input_size=input_size,
@@ -407,7 +411,11 @@ class CustomGRU(nn.GRU):
                     quant_params=self.quant_params
                 )
             else:  # int16
-                output = gru_ops.quant_gru_forward_int16(
+                # 调用量化前向传播，返回 (h, v) 元组
+                # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
+                # v 为反量化后的中间值：[time_steps, batch_size, hidden_size * 4]
+                output_full, v = gru_ops.quant_gru_forward_int16(
+                    is_training=self.training,  # 根据模型是否处于训练模式设置
                     time_steps=seq_len,
                     batch_size=batch_size,
                     input_size=input_size,
@@ -420,9 +428,16 @@ class CustomGRU(nn.GRU):
                     h0=h0 if h0 is not None else torch.empty(0, device=input.device),  # 传递初始状态或空张量
                     quant_params=self.quant_params
                 )
+            # 提取时间步输出，去掉初始状态
+            # output_full 形状: [time_steps + 1, batch_size, hidden_size]
+            # output 形状: [time_steps, batch_size, hidden_size]
+            output = output_full[1:]  # 跳过初始状态 h[0]，只返回时间步输出
         else:
-
-            output = gru_ops.haste_gru_forward(
+            # 调用非量化前向传播，返回 (h, v) 元组
+            # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
+            # v 为中间值：[time_steps, batch_size, hidden_size * 4]
+            output_full, v = gru_ops.haste_gru_forward(
+                is_training=self.training,  # 根据模型是否处于训练模式设置
                 time_steps=seq_len,
                 batch_size=batch_size,
                 input_size=input_size,
@@ -434,6 +449,10 @@ class CustomGRU(nn.GRU):
                 x=input,
                 h0=h0 if h0 is not None else torch.empty(0, device=input.device)  # 传递初始状态或空张量
             )
+            # 提取时间步输出，去掉初始状态
+            # output_full 形状: [time_steps + 1, batch_size, hidden_size]
+            # output 形状: [time_steps, batch_size, hidden_size]
+            output = output_full[1:]  # 跳过初始状态 h[0]，只返回时间步输出
 
         # 处理 batch_first
         if self.batch_first:
@@ -450,5 +469,10 @@ class CustomGRU(nn.GRU):
         else:
             # output: [seq_len, batch, hidden_size]
             h_n = output[-1:, :, :]  # [1, batch, hidden_size]
+
+        # 确保 h_n 的形状为 [num_layers, batch, hidden_size]
+        # 由于我们只支持单层，所以 h_n 已经是 [1, batch, hidden_size]
+        # 但为了保持接口一致性，确保形状正确
+        assert h_n.shape[0] == 1, f"Expected h_n shape [1, batch, hidden_size], got {h_n.shape}"
 
         return output, h_n
