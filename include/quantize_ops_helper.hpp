@@ -698,6 +698,7 @@ inline void calibrateQuantParams(
 template<typename QuantT>
 inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
     // Host code: 与GPU版本保持一致，使用位运算
+    // 量化公式：q = round(src / scale + zp)
     float scale;
     if (exp2_inv >= 0) {
         // scale = 2^(-exp2) = 1 / (1 << exp2)
@@ -706,7 +707,9 @@ inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
         // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
         scale = static_cast<float>(1 << (-exp2_inv));
     }
-    int32_t q = static_cast<int32_t>(std::round(src / scale)) + zp;
+    // 正确的量化流程：先计算 src/scale + zp，然后四舍五入
+    float shifted = src / scale + static_cast<float>(zp);
+    int32_t q = static_cast<int32_t>(std::round(shifted));
 
     constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
     constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
