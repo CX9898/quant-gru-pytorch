@@ -99,10 +99,10 @@ bool checkMSE(const std::vector<T> &data1,
 ) {
     const float mse = computeMSE(data1, data2);
     if (mse > threshold) {
-        fprintf(stderr, "Warning! %s check mse failed: mse = %f, threshold = %f\n", name.c_str(), mse, threshold);
+        fprintf(stderr, "Warning! %s check mse failed: mse = %.10f, threshold = %f\n", name.c_str(), mse, threshold);
         return false;
     }
-    printf("\t%s: Check mes Pass! mes = %f, threshold = %f\n", name.c_str(), mse, threshold);
+    printf("\t%s: Check mes Pass! mes = %.10f, threshold = %f\n", name.c_str(), mse, threshold);
     return true;
 }
 
