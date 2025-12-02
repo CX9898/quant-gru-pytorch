@@ -78,3 +78,21 @@ void forwardInterface(bool is_training,  // 是否开启训练模式，true为�
                       const cublasHandle_t &g_blas_handle,
                       float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
                       float *v);  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+
+void hasteGRUBackward(const int time_steps,
+                      const int batch_size,
+                      const int input_size,
+                      const int hidden_size,
+                      const float *W, const float *R, const float *bx,
+                      const float *br, const float *x,
+                      const float *dh_new,
+                      const float *h,// (time_steps + 1) * batch_size * hidden_size
+                      const float *v,// (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+                      const cublasHandle_t &g_blas_handle,
+                      float *dx, // (time_steps *batch_size * input_size) 输入序列梯度
+                      float *dW, // (input_size * hidden_size * 3)// 对输入权重的梯度
+                      float *dR, // (hidden_size * hidden_size * 3) // 对循环权重的梯度
+                      float *dbx,// (hidden_size * 3)// 对输入偏置的梯度
+                      float *dbr,// (hidden_size * 3)// 对循环偏置的梯度
+                      float *dh  // (batch_size * hidden_size)// 对最后隐藏状态的梯度
+);

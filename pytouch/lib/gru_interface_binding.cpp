@@ -471,6 +471,90 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     return std::make_tuple(h, v);
 }
 
+// GRU 反向传播包装函数
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+haste_gru_backward_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W,
+    const torch::Tensor &R,
+    const torch::Tensor &bx,
+    const torch::Tensor &br,
+    const torch::Tensor &x,
+    const torch::Tensor &dh_new,  // 来自上层网络或损失函数的反向梯度
+    const torch::Tensor &h,        // 前向传播的隐藏状态
+    const torch::Tensor &v) {      // 前向传播的中间值，必需
+
+    // 检查输入张量的类型和设备
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+    TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32, "dh_new must be CUDA float32 tensor");
+    TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
+    TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
+
+    // 检查张量形状
+    TORCH_CHECK(W.sizes() == torch::IntArrayRef({input_size, hidden_size * 3}),
+                "W must have shape [input_size, hidden_size * 3]");
+    TORCH_CHECK(R.sizes() == torch::IntArrayRef({hidden_size, hidden_size * 3}),
+                "R must have shape [hidden_size, hidden_size * 3]");
+    TORCH_CHECK(bx.sizes() == torch::IntArrayRef({hidden_size * 3}),
+                "bx must have shape [hidden_size * 3]");
+    TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
+                "br must have shape [hidden_size * 3]");
+    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x must have shape [time_steps, batch_size, input_size]");
+    TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "h must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(v.sizes() == torch::IntArrayRef({time_steps, batch_size, hidden_size * 4}),
+                "v must have shape [time_steps, batch_size, hidden_size * 4]");
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 创建输出张量
+    auto dx = torch::empty({time_steps, batch_size, input_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dW = torch::zeros({input_size, hidden_size * 3},
+                         torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dR = torch::zeros({hidden_size, hidden_size * 3},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dbx = torch::zeros({hidden_size * 3},
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dbr = torch::zeros({hidden_size * 3},
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dh = torch::zeros({batch_size, hidden_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // 调用 C++ 函数
+    // 注意：需要将张量展平为连续内存布局
+    hasteGRUBackward(
+        time_steps, batch_size, input_size, hidden_size,
+        W.data_ptr<float>(),
+        R.data_ptr<float>(),
+        bx.data_ptr<float>(),
+        br.data_ptr<float>(),
+        x.data_ptr<float>(),
+        dh_new.data_ptr<float>(),
+        h.data_ptr<float>(),
+        v.data_ptr<float>(),
+        g_blas_handle,
+        dx.data_ptr<float>(),
+        dW.data_ptr<float>(),
+        dR.data_ptr<float>(),
+        dbx.data_ptr<float>(),
+        dbr.data_ptr<float>(),
+        dh.data_ptr<float>()
+    );
+
+    return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
 
@@ -573,4 +657,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
           py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为中间值
+
+    // GRU 反向传播
+    m.def("haste_gru_backward", &haste_gru_backward_wrapper,
+          "Non-quantized GRU backward pass",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
+          py::arg("x"), py::arg("dh_new"), py::arg("h"), py::arg("v"));// 中间值v，必需；返回 (dx, dW, dR, dbx, dbr, dh) 元组
 }

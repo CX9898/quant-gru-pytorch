@@ -129,6 +129,35 @@ void hasteGRUForward(bool is_training,// 是否开启训练模式，true为训�
                 tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
 }
 
+void hasteGRUBackward(const int time_steps,
+                      const int batch_size,
+                      const int input_size,
+                      const int hidden_size,
+                      const float *W, const float *R, const float *bx,
+                      const float *br, const float *x,
+                      const float *dh_new,
+                      const float *h,// (time_steps + 1) * batch_size * hidden_size
+                      const float *v,// (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+                      const cublasHandle_t &g_blas_handle,
+                      float *dx, // (time_steps *batch_size * input_size) 输入序列梯度
+                      float *dW, // (input_size * hidden_size * 3)// 对输入权重的梯度
+                      float *dR, // (hidden_size * hidden_size * 3) // 对循环权重的梯度
+                      float *dbx,// (hidden_size * 3)// 对输入偏置的梯度
+                      float *dbr,// (hidden_size * 3)// 对循环偏置的梯度
+                      float *dh  // (batch_size * hidden_size)// 对最后隐藏状态的梯度
+) {
+    dev::vector<float> dp_dev(time_steps * batch_size * hidden_size * 3);// 临时缓存梯度（内部结构用）
+    dev::vector<float> dq_dev(time_steps * batch_size * hidden_size * 3);// 临时缓存梯度（内部结构用）
+
+    gru::BackwardPass<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
+
+    backward.Run(time_steps, W, R, bx,
+                 br, x, h, v,
+                 dh_new, dx, dW, dR,
+                 dbx, dbr, dh, dp_dev.data(),
+                 dq_dev.data(), nullptr);
+}
+
 template<typename QuantT>
 void quantitativeWeight(const int input_size, const int hidden_size,
                         const float *W, const float *R, const float *bx, const float *br,
