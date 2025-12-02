@@ -1015,13 +1015,13 @@ void calculateGRUQuantitativeParameters(const int steps,
     quant_parms_.exp2_inv_W_ = calculateScalesPerChannels<T, QuantT>(W,
                                                                      hidden_size * 3,
                                                                      input_size,
-                                                                     "exp2_inv_W");
+                                                                     "scale_W");
 
 
     quant_parms_.exp2_inv_R_ = calculateScalesPerChannels<T, QuantT>(R,
                                                                      hidden_size * 3,
                                                                      hidden_size,
-                                                                     "exp2_inv_R");
+                                                                     "scale_R");
 
 
     calculateScale<T, QuantT>(tmp_Wx,
