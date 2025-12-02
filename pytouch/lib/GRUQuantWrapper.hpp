@@ -89,12 +89,29 @@ class GRUQuantWrapper {
 
         h_dev.zero();
 
-        // 关键问题：ForwardPass.Run期望W是[hidden*3, input] (列主序)
-        // 但PyTorch的weight_ih_l0是[3*hidden, input] (行主序)
-        // 由于CUBLAS使用列主序，行主序的[3*hidden, input]会被当作转置矩阵
-        // 所以需要转置：W.T = [input, 3*hidden]，这样在列主序中就是[3*hidden, input]
-        at::Tensor W_transposed = W.t().contiguous();  // [input, 3*hidden]
-        at::Tensor R_transposed = R.t().contiguous();  // [hidden, 3*hidden]
+        // 权重重排序：将 PyTorch GRU 权重格式 (r, z, n) 转换为 Haste GRU 权重格式 (z, r, n)
+        // PyTorch 的权重顺序是: r_gate (hidden个), z_gate (hidden个), n_gate (hidden个)
+        // Haste 期望的顺序是: z_gate (hidden个), r_gate (hidden个), n_gate (hidden个)
+        // 重排序在 3*hidden 维度上进行（对于权重矩阵，这是第一维）
+        auto reorder_weights_pytorch_to_haste = [](const at::Tensor &w) -> at::Tensor {
+            // w 的第一维是 3*hidden，需要按第一维分成3块
+            auto chunks = torch::chunk(w, 3, 0);  // 在第一维（3*hidden维度）上分成 r, z, n 三块
+            auto r = chunks[0];  // [hidden, ...]
+            auto z = chunks[1];  // [hidden, ...]
+            auto n = chunks[2];  // [hidden, ...]
+            // 重新拼接为 z, r, n
+            return torch::cat({z, r, n}, 0).contiguous();
+        };
+
+        // 将 PyTorch 格式转换为 Haste 格式：
+        // 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
+        // 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
+        at::Tensor W_reordered = reorder_weights_pytorch_to_haste(W).t().contiguous();  // [input, 3*hidden], 顺序 (z, r, n)
+        at::Tensor R_reordered = reorder_weights_pytorch_to_haste(R).t().contiguous();  // [hidden, 3*hidden], 顺序 (z, r, n)
+        
+        // 偏置是 1D 张量 [3*hidden]，直接在 3*hidden 维度（第一维）上重排序
+        at::Tensor bx_reordered = reorder_weights_pytorch_to_haste(bx);  // [3*hidden] -> (z, r, n)
+        at::Tensor br_reordered = reorder_weights_pytorch_to_haste(br);  // [3*hidden] -> (z, r, n)
 
         gru::ForwardPass<float> forward = gru::ForwardPass<float>(
             true,// training
@@ -107,10 +124,10 @@ class GRUQuantWrapper {
 
         forward.Run(
             time_steps_,
-            W_transposed.data_ptr<float>(),  // 使用转置后的W
-            R_transposed.data_ptr<float>(),   // 使用转置后的R
-            bx.data_ptr<float>(),
-            br.data_ptr<float>(),
+            W_reordered.data_ptr<float>(),  // 使用转置并重排序后的W [input, 3*hidden], (z, r, n)
+            R_reordered.data_ptr<float>(),   // 使用转置并重排序后的R [hidden, 3*hidden], (z, r, n)
+            bx_reordered.data_ptr<float>(),   // 使用重排序后的bx [3*hidden], (z, r, n)
+            br_reordered.data_ptr<float>(),   // 使用重排序后的br [3*hidden], (z, r, n)
             x_for_calib.data_ptr<float>(),
             h_dev.data(),
             v_dev.data(),
@@ -122,21 +139,21 @@ class GRUQuantWrapper {
         quant_parms_ = forward.getGRUQuantitativeParameters();
 
         // quantificationPerChannel期望的排布是[input_size, channel_size]
-        // W_transposed已经是[input, 3*hidden]，可以直接使用
+        // W_reordered已经是[input, 3*hidden]，可以直接使用
 
         dev::quantificationPerChannel(
-            W_transposed.data_ptr<float>(), W_quant_.data(), input_size_,
+            W_reordered.data_ptr<float>(), W_quant_.data(), input_size_,
             3 * hidden_size_, quant_parms_.exp2_inv_W_);
         dev::quantificationPerChannel(
-            R_transposed.data_ptr<float>(), R_quant_.data(), hidden_size_,
+            R_reordered.data_ptr<float>(), R_quant_.data(), hidden_size_,
             3 * hidden_size_, quant_parms_.exp2_inv_R_);
 
         dev::vector<int32_t> exp2_inv_bx(quant_parms_.exp2_inv_bx_);
-        dev::quantificationPerChannel(bx.data_ptr<float>(),
+        dev::quantificationPerChannel(bx_reordered.data_ptr<float>(),
                                       bx_quant_.data(), 1,
                                       3 * hidden_size_, exp2_inv_bx);
         dev::vector<int32_t> exp2_inv_br(quant_parms_.exp2_inv_br_);
-        dev::quantificationPerChannel(br.data_ptr<float>(),
+        dev::quantificationPerChannel(br_reordered.data_ptr<float>(),
                                       br_quant_.data(), 1,
                                       3 * hidden_size_, exp2_inv_br);
     }
