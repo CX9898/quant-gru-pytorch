@@ -11,7 +11,7 @@
 #include "gru.h"
 #include "inline_ops.h"
 #include "quantize_ops_helper.hpp"
-#include "quantized_unit_testing.h"
+#include "quantized_unit_testing.cuh"
 
 namespace {
 

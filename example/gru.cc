@@ -14,7 +14,7 @@
 #include "devVector.h"
 #include "gru_interface.hpp"
 #include "gru_quant.h"
-#include "quantized_unit_testing.h"
+#include "quantized_unit_testing.cuh"
 
 constexpr int BATCH_SIZE = 64;   // 批大小
 constexpr int SEQUENCE_LEN = 500;// 序列长度(T), 每个样本有T个时间步

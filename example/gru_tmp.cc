@@ -15,7 +15,7 @@
 #include "devVector.h"
 #include "device_ptr.h"
 #include "gru_quant.h"
-#include "quantized_unit_testing.h"
+#include "quantized_unit_testing.cuh"
 
 using Tensor1f = Eigen::Tensor<float, 1>;
 using Tensor2f = Eigen::Tensor<float, 2>;
