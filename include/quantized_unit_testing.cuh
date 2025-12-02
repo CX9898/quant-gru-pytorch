@@ -4,12 +4,25 @@
 #include <cstdint>
 #include <cstdio>
 #include <cublas_v2.h>
+#include <string>
 #include <vector>
 
 #include "blas.h"
 #include "checkData.hpp"
 #include "gru_quant.h"
 #include "quantize_ops_helper.hpp"
+
+// 梯度输出结构体
+struct GRUTrainGradients {
+    std::vector<float> dx; // 输入序列梯度 [time_steps * batch_size * input_size]
+    std::vector<float> dW; // 对输入权重的梯度 [input_size * hidden_size * 3]
+    std::vector<float> dR; // 对循环权重的梯度 [hidden_size * hidden_size * 3]
+    std::vector<float> dbx;// 对输入偏置的梯度 [hidden_size * 3]
+    std::vector<float> dbr;// 对循环偏置的梯度 [hidden_size * 3]
+    std::vector<float> dh; // 对最后隐藏状态的梯度 [batch_size * hidden_size]
+    std::vector<float> v;  // V中间值 [time_steps * batch_size * hidden_size * 4]
+    std::vector<float> h;  // 隐藏状态 [time_steps * batch_size * hidden_size] (不包含初始状态)
+};
 
 inline bool checkScale(const std::vector<float> &src,
                        const std::vector<int8_t> &quant,
@@ -385,4 +398,503 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
         printf("Error, checkQuantParameters failed\n");
     }
     return is_pass;
+}
+
+void checkQuantificationHostAndDevice(
+    const std::vector<float> &W,
+    const std::vector<float> &R,
+    const std::vector<float> &bx,
+    const std::vector<float> &br,
+    const std::vector<float> &x,
+    const GRUQuantitativeParameters &quant_parms,
+    int time_steps,
+    int batch_size,
+    int input_size,
+    int hidden_size) {
+    // ========== 验证CPU和GPU量化结果一致性 ==========
+    printf("\n========== 验证CPU和GPU量化结果一致性 ==========\n");
+
+    const int channel_size = hidden_size * 3;
+    const std::size_t x_size = time_steps * batch_size * input_size;
+
+    // CPU版本量化结果
+    std::vector<int8_t> W_quant_cpu(input_size * hidden_size * 3);
+    std::vector<int8_t> R_quant_cpu(hidden_size * hidden_size * 3);
+    std::vector<int32_t> bx_quant_cpu(hidden_size * 3);
+    std::vector<int32_t> br_quant_cpu(hidden_size * 3);
+    std::vector<int8_t> x_quant_cpu(x_size);
+
+    {
+        quantificationPerChannel(W.data(), W_quant_cpu.data(), input_size, channel_size,
+                                 quant_parms.exp2_inv_W_);
+        quantificationPerChannel(R.data(), R_quant_cpu.data(), hidden_size, channel_size,
+                                 quant_parms.exp2_inv_R_);
+        quantificationPerChannel(bx.data(), bx_quant_cpu.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_bx_);
+        quantificationPerChannel(br.data(), br_quant_cpu.data(), 1, channel_size,
+                                 quant_parms.exp2_inv_br_);
+        quantification(x.data(), x_quant_cpu.data(), x_size, quant_parms.exp2_inv_x_,
+                       quant_parms.zp_x_);
+    }
+
+    // GPU版本量化结果
+    dev::vector<float> W_dev(W);
+    dev::vector<float> R_dev(R);
+    dev::vector<float> bx_dev(bx);
+    dev::vector<float> br_dev(br);
+    dev::vector<float> x_dev(x);
+
+    dev::vector<int8_t> W_quant_gpu(input_size * hidden_size * 3);
+    dev::vector<int8_t> R_quant_gpu(hidden_size * hidden_size * 3);
+    dev::vector<int32_t> bx_quant_gpu(hidden_size * 3);
+    dev::vector<int32_t> br_quant_gpu(hidden_size * 3);
+    dev::vector<int8_t> x_quant_gpu(x_size);
+
+    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+
+    {
+        dev::quantificationPerChannel(W_dev.data(), W_quant_gpu.data(), input_size, channel_size,
+                                      exp2_inv_W_dev);
+        dev::quantificationPerChannel(R_dev.data(), R_quant_gpu.data(), hidden_size, channel_size,
+                                      exp2_inv_R_dev);
+        dev::quantificationPerChannel(bx_dev.data(), bx_quant_gpu.data(), 1, channel_size,
+                                      exp2_inv_bx_dev);
+        dev::quantificationPerChannel(br_dev.data(), br_quant_gpu.data(), 1, channel_size,
+                                      exp2_inv_br_dev);
+        dev::quantification(x_dev.data(), x_quant_gpu.data(), x_size, quant_parms.exp2_inv_x_,
+                            quant_parms.zp_x_);
+    }
+
+    // 将GPU结果复制到CPU进行比较
+    std::vector<int8_t> W_quant_gpu_host = d2h(W_quant_gpu);
+    std::vector<int8_t> R_quant_gpu_host = d2h(R_quant_gpu);
+    std::vector<int32_t> bx_quant_gpu_host = d2h(bx_quant_gpu);
+    std::vector<int32_t> br_quant_gpu_host = d2h(br_quant_gpu);
+    std::vector<int8_t> x_quant_gpu_host = d2h(x_quant_gpu);
+
+    // 比较结果
+    int mismatch_count = 0;
+    const int max_show_mismatches = 10;
+
+    // 比较W
+    printf("\n比较W量化结果 (大小: %zu):\n", W_quant_cpu.size());
+    for (size_t i = 0; i < W_quant_cpu.size(); ++i) {
+        if (W_quant_cpu[i] != W_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  W[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(W_quant_cpu[i]),
+                       static_cast<int>(W_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ W量化结果完全一致\n");
+    } else {
+        printf("  ✗ W量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较R
+    mismatch_count = 0;
+    printf("\n比较R量化结果 (大小: %zu):\n", R_quant_cpu.size());
+    for (size_t i = 0; i < R_quant_cpu.size(); ++i) {
+        if (R_quant_cpu[i] != R_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  R[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(R_quant_cpu[i]),
+                       static_cast<int>(R_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ R量化结果完全一致\n");
+    } else {
+        printf("  ✗ R量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较bx
+    mismatch_count = 0;
+    printf("\n比较bx量化结果 (大小: %zu):\n", bx_quant_cpu.size());
+    for (size_t i = 0; i < bx_quant_cpu.size(); ++i) {
+        if (bx_quant_cpu[i] != bx_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  bx[%zu]: CPU=%d, GPU=%d\n", i,
+                       bx_quant_cpu[i], bx_quant_gpu_host[i]);
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ bx量化结果完全一致\n");
+    } else {
+        printf("  ✗ bx量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较br
+    mismatch_count = 0;
+    printf("\n比较br量化结果 (大小: %zu):\n", br_quant_cpu.size());
+    for (size_t i = 0; i < br_quant_cpu.size(); ++i) {
+        if (br_quant_cpu[i] != br_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  br[%zu]: CPU=%d, GPU=%d\n", i,
+                       br_quant_cpu[i], br_quant_gpu_host[i]);
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ br量化结果完全一致\n");
+    } else {
+        printf("  ✗ br量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    // 比较x
+    mismatch_count = 0;
+    printf("\n比较x量化结果 (大小: %zu):\n", x_quant_cpu.size());
+    for (size_t i = 0; i < x_quant_cpu.size(); ++i) {
+        if (x_quant_cpu[i] != x_quant_gpu_host[i]) {
+            if (mismatch_count < max_show_mismatches) {
+                printf("  x[%zu]: CPU=%d, GPU=%d\n", i,
+                       static_cast<int>(x_quant_cpu[i]),
+                       static_cast<int>(x_quant_gpu_host[i]));
+            }
+            mismatch_count++;
+        }
+    }
+    if (mismatch_count == 0) {
+        printf("  ✓ x量化结果完全一致\n");
+    } else {
+        printf("  ✗ x量化结果有 %d 个不匹配\n", mismatch_count);
+    }
+
+    printf("\n===========================================================\n\n");
+}
+
+// ========== 统一的测试函数 ==========
+
+/**
+ * @brief 比较浮点和量化版本的V中间值
+ * @param v_float 浮点版本的V中间值
+ * @param v_quant_dequant 量化后反量化的V中间值
+ * @param time_steps 时间步数
+ * @param batch_size 批次大小
+ * @param hidden_size 隐藏层维度
+ * @param prefix 输出前缀（可选）
+ */
+inline void compareVIntermediateValues(
+    const std::vector<float> &v_float,
+    const std::vector<float> &v_quant_dequant,
+    int time_steps,
+    int batch_size,
+    int hidden_size,
+    const std::string &prefix = "") {
+    printf("\n========== %s V Intermediate Values Comparison ==========\n", prefix.c_str());
+
+    const int v_size_per_step = batch_size * hidden_size * 4;// 4个部分：z_out, r_out, g_out, Rh_add_br
+    const int v_size_per_part = batch_size * hidden_size;    // 每个部分的大小
+
+    // 验证大小
+    if (v_float.size() != static_cast<size_t>(time_steps * v_size_per_step)) {
+        printf("[Error] v_float size mismatch: expected %d, got %zu\n",
+               time_steps * v_size_per_step, v_float.size());
+        return;
+    }
+    if (v_quant_dequant.size() != static_cast<size_t>(time_steps * v_size_per_step)) {
+        printf("[Error] v_quant_dequant size mismatch: expected %d, got %zu\n",
+               time_steps * v_size_per_step, v_quant_dequant.size());
+        return;
+    }
+
+    // V的4个部分名称
+    const char *part_names[] = {"z_out", "r_out", "g_out", "Rh_add_br"};
+
+    // 整体比较
+    {
+        const float mse = computeMSE(v_float, v_quant_dequant);
+        const float cos_sim = computeCosineSimilarity(v_float, v_quant_dequant);
+        printf("Overall V: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 按部分比较（所有时间步）
+    for (int part = 0; part < 4; ++part) {
+        std::vector<float> v_float_part(time_steps * v_size_per_part);
+        std::vector<float> v_quant_part(time_steps * v_size_per_part);
+
+        for (int t = 0; t < time_steps; ++t) {
+            const int t_offset = t * v_size_per_step;
+            const int part_offset = part * hidden_size;
+
+            for (int b = 0; b < batch_size; ++b) {
+                const int b_offset = b * hidden_size;
+                for (int h = 0; h < hidden_size; ++h) {
+                    const int src_idx = t_offset + b_offset + part_offset + h;
+                    const int dst_idx = t * v_size_per_part + b_offset + h;
+                    v_float_part[dst_idx] = v_float[src_idx];
+                    v_quant_part[dst_idx] = v_quant_dequant[src_idx];
+                }
+            }
+        }
+
+        const float mse = computeMSE(v_float_part, v_quant_part);
+        const float cos_sim = computeCosineSimilarity(v_float_part, v_quant_part);
+        printf("%s: MSE = %e, Cosine Similarity = %f\n", part_names[part], mse, cos_sim);
+    }
+
+    // 按时间步比较（所有部分）
+    printf("\nPer time step comparison:\n");
+    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
+        const int t_offset = t * v_size_per_step;
+        std::vector<float> v_float_step(v_size_per_step);
+        std::vector<float> v_quant_step(v_size_per_step);
+
+        for (int i = 0; i < v_size_per_step; ++i) {
+            v_float_step[i] = v_float[t_offset + i];
+            v_quant_step[i] = v_quant_dequant[t_offset + i];
+        }
+
+        const float mse = computeMSE(v_float_step, v_quant_step);
+        const float cos_sim = computeCosineSimilarity(v_float_step, v_quant_step);
+        printf("  Time step %d: MSE = %e, Cosine Similarity = %f\n", t, mse, cos_sim);
+    }
+
+    printf("===========================================================\n\n");
+}
+
+/**
+ * @brief 比较浮点和量化版本的h隐藏状态
+ * @param h_float 浮点版本的h隐藏状态
+ * @param h_quant_dequant 量化后反量化的h隐藏状态
+ * @param time_steps 时间步数
+ * @param batch_size 批次大小
+ * @param hidden_size 隐藏层维度
+ * @param prefix 输出前缀（可选）
+ */
+inline void compareHValues(
+    const std::vector<float> &h_float,
+    const std::vector<float> &h_quant_dequant,
+    int time_steps,
+    int batch_size,
+    int hidden_size,
+    const std::string &prefix = "") {
+    printf("\n========== %s H Hidden States Comparison ==========\n", prefix.c_str());
+
+    const int h_size_per_step = batch_size * hidden_size;// 每个时间步的大小
+
+    // 验证大小
+    if (h_float.size() != static_cast<size_t>(time_steps * h_size_per_step)) {
+        printf("[Error] h_float size mismatch: expected %d, got %zu\n",
+               time_steps * h_size_per_step, h_float.size());
+        return;
+    }
+    if (h_quant_dequant.size() != static_cast<size_t>(time_steps * h_size_per_step)) {
+        printf("[Error] h_quant_dequant size mismatch: expected %d, got %zu\n",
+               time_steps * h_size_per_step, h_quant_dequant.size());
+        return;
+    }
+
+    // 整体比较
+    {
+        const float mse = computeMSE(h_float, h_quant_dequant);
+        const float cos_sim = computeCosineSimilarity(h_float, h_quant_dequant);
+        printf("Overall H: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 按时间步比较
+    printf("\nPer time step comparison:\n");
+    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
+        const int t_offset = t * h_size_per_step;
+        std::vector<float> h_float_step(h_size_per_step);
+        std::vector<float> h_quant_step(h_size_per_step);
+
+        for (int i = 0; i < h_size_per_step; ++i) {
+            h_float_step[i] = h_float[t_offset + i];
+            h_quant_step[i] = h_quant_dequant[t_offset + i];
+        }
+
+        const float mse = computeMSE(h_float_step, h_quant_step);
+        const float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
+        printf("  Time step %d: MSE = %e, Cosine Similarity = %f\n", t, mse, cos_sim);
+    }
+
+    // 按批次比较（所有时间步）
+    printf("\nPer batch comparison:\n");
+    for (int b = 0; b < batch_size && b < 5; ++b) {// 只显示前5个批次
+        std::vector<float> h_float_batch(time_steps * hidden_size);
+        std::vector<float> h_quant_batch(time_steps * hidden_size);
+
+        for (int t = 0; t < time_steps; ++t) {
+            const int t_offset = t * h_size_per_step;
+            const int b_offset = b * hidden_size;
+
+            for (int h = 0; h < hidden_size; ++h) {
+                const int src_idx = t_offset + b_offset + h;
+                const int dst_idx = t * hidden_size + h;
+                h_float_batch[dst_idx] = h_float[src_idx];
+                h_quant_batch[dst_idx] = h_quant_dequant[src_idx];
+            }
+        }
+
+        const float mse = computeMSE(h_float_batch, h_quant_batch);
+        const float cos_sim = computeCosineSimilarity(h_float_batch, h_quant_batch);
+        printf("  Batch %d: MSE = %e, Cosine Similarity = %f\n", b, mse, cos_sim);
+    }
+
+    printf("===========================================================\n\n");
+}
+
+/**
+ * @brief 比较两个GRU训练梯度的差异
+ * @param gradients_float 浮点版本的梯度
+ * @param gradients_quant 量化版本的梯度
+ * @param prefix 输出前缀（可选）
+ */
+inline void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
+                                     const GRUTrainGradients &gradients_quant,
+                                     const std::string &prefix = "") {
+    printf("\n========== %s GRU Train Gradients Comparison ==========\n", prefix.c_str());
+
+    // 比较 dx
+    {
+        const float mse = computeMSE(gradients_float.dx, gradients_quant.dx);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dx, gradients_quant.dx);
+        printf("dx: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dW
+    {
+        const float mse = computeMSE(gradients_float.dW, gradients_quant.dW);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dW, gradients_quant.dW);
+        printf("dW: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dR
+    {
+        const float mse = computeMSE(gradients_float.dR, gradients_quant.dR);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dR, gradients_quant.dR);
+        printf("dR: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dbx
+    {
+        const float mse = computeMSE(gradients_float.dbx, gradients_quant.dbx);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dbx, gradients_quant.dbx);
+        printf("dbx: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dbr
+    {
+        const float mse = computeMSE(gradients_float.dbr, gradients_quant.dbr);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dbr, gradients_quant.dbr);
+        printf("dbr: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dh
+    {
+        const float mse = computeMSE(gradients_float.dh, gradients_quant.dh);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dh, gradients_quant.dh);
+        printf("dh: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    printf("===========================================================\n\n");
+}
+
+/**
+ * @brief 检查量化h值与浮点h值的余弦相似度
+ * @param h_inference 浮点版本的h值，size = (time_steps+1) * batch_size * hidden_size
+ * @param h_quant_inference 量化版本的h值，size同上
+ * @param time_steps 时间步数
+ * @param batch_size 批次大小
+ * @param hidden_size 隐藏层维度
+ * @param scaleParam 量化参数
+ */
+template<typename QuantT>
+inline void checkHQuantizationWithCosine(
+    const std::vector<float> &h_inference,// 浮点 h, size = (time_steps+1) * batch_size * hidden_size
+    const std::vector<QuantT> &h_quant_inference,// 量化 h, size 同上
+    int time_steps, int batch_size, int hidden_size,
+    const GRUQuantitativeParameters &scaleParam) {
+    const int size_per_step = batch_size * hidden_size;
+
+    // 验证输入数据大小
+    if (h_inference.size() !=
+        static_cast<size_t>((time_steps + 1) * size_per_step)) {
+        printf("[Error] h_inference size mismatch: expected %d, got %zu\n",
+               (time_steps + 1) * size_per_step, h_inference.size());
+        return;
+    }
+    if (h_quant_inference.size() !=
+        static_cast<size_t>((time_steps + 1) * size_per_step)) {
+        printf(
+            "[Error] h_quant_inference size mismatch: expected %d, got %zu\n",
+            (time_steps + 1) * size_per_step, h_quant_inference.size());
+        return;
+    }
+
+    printf(
+        "checkHQuantizationWithCosine: time_steps=%d, batch_size=%d, "
+        "hidden_size=%d\n",
+        time_steps, batch_size, hidden_size);
+    printf("  exp2_inv_h_=%d, zp_h_=%d\n", scaleParam.exp2_inv_h_,
+           scaleParam.zp_h_);
+
+    // 检查前几个数据点的值
+    printf("  Sample data check:\n");
+    printf("    h_inference size: %zu, expected: %d\n", h_inference.size(),
+           (time_steps + 1) * size_per_step);
+    printf("    h_quant_inference size: %zu, expected: %d\n",
+           h_quant_inference.size(), (time_steps + 1) * size_per_step);
+
+    // 检查初始状态（t=0）的数据
+    printf("    h_inference[t=0, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%f ", h_inference[i]);
+    }
+    printf("\n");
+    printf("    h_quant_inference[t=0, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%d ", static_cast<int>(h_quant_inference[i]));
+    }
+    printf("\n");
+
+    // 检查第一个时间步（t=1）的数据
+    const int t1_offset = size_per_step;
+    printf("    h_inference[t=1, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%f ", h_inference[t1_offset + i]);
+    }
+    printf("\n");
+    printf("    h_quant_inference[t=1, first 5]: ");
+    for (int i = 0; i < 5 && i < size_per_step; ++i) {
+        printf("%d ", static_cast<int>(h_quant_inference[t1_offset + i]));
+    }
+    printf("\n");
+
+    std::vector<float> h_float_step(size_per_step);
+    std::vector<float> h_quant_step(size_per_step);
+
+    for (int t = 1; t <= time_steps; ++t) {
+        // ForwardPass 存储 h 的方式：h + t * (batch_size * hidden_size)
+        // 每个时间步内部：按 [batch0_h0, batch0_h1, ..., batch0_hH-1,
+        // batch1_h0, ..., batchN-1_hH-1] 顺序 即：t * (N*H) + n * H + h
+
+        const size_t t_offset = static_cast<size_t>(t) * size_per_step;
+
+        // 直接拷贝和反量化
+        for (int idx = 0; idx < size_per_step; ++idx) {
+            h_float_step[idx] = h_inference[t_offset + idx];
+
+            const QuantT quant_val = h_quant_inference[t_offset + idx];
+            h_quant_step[idx] = dequantize<QuantT>(
+                quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
+        }
+        const float mse = computeMSE(h_float_step, h_quant_step);
+        const float cos_sim =
+            computeCosineSimilarity(h_float_step, h_quant_step);
+
+        printf("Time step %d: mse = %f, cosine_sim = %f\n", t, mse, cos_sim);
+    }
 }
