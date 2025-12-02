@@ -209,6 +209,39 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
         quantification(x.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
                        quant_parms.zp_x_);
     }
+    //
+    //    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
+    //                                  // hidden_size * 3] 对应三个门
+    //    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
+    //    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
+    //    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
+    //    dev::vector<float> x_dev(x);
+    //
+    //    // 步骤2: 将权重量化和x量化
+    //    const int channel_size = hidden_size * 3;
+    //    dev::vector<QuantT> W_quant(input_size * hidden_size * 3);
+    //    dev::vector<QuantT> R_quant(hidden_size * hidden_size * 3);
+    //    dev::vector<int32_t> bx_quant(hidden_size * 3);
+    //    dev::vector<int32_t> br_quant(hidden_size * 3);
+    //    const std::size_t x_size = time_steps * batch_size * input_size;
+    //    dev::vector<QuantT> x_quant(x_size);
+    //
+    //    {
+    //        ScopeTimer t("Quantize weights and x:");
+    //        // 权重量化 (per-channel)
+    //        dev::quantificationPerChannel(W_dev.data(), W_quant.data(), input_size, channel_size,
+    //                                      quant_parms.exp2_inv_W_);
+    //        dev::quantificationPerChannel(R_dev.data(), R_quant.data(), hidden_size, channel_size,
+    //                                      quant_parms.exp2_inv_R_);
+    //        // 偏置量化 (per-channel)
+    //        dev::quantificationPerChannel(bx_dev.data(), bx_quant.data(), 1, channel_size,
+    //                                      quant_parms.exp2_inv_bx_);
+    //        dev::quantificationPerChannel(br_dev.data(), br_quant.data(), 1, channel_size,
+    //                                      quant_parms.exp2_inv_br_);
+    //        // x量化 (全局)
+    //        dev::quantification(x_dev.data(), x_quant.data(), x_size, quant_parms.exp2_inv_x_,
+    //                            quant_parms.zp_x_);
+    //    }
 
     // 生成LUT表
     generate_int8_lut_from_exp2_inv(
@@ -323,10 +356,10 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     d2h(gradients.dbx, dbx_dev);
     d2h(gradients.dbr, dbr_dev);
     d2h(gradients.dh, dh_dev);
-    
+
     // 将反量化后的V复制到CPU
     d2h(gradients.v, v_dequant_dev);
-    
+
     // 将反量化后的h复制到CPU（跳过初始状态，只复制time_steps个时间步）
     const int h_output_size = time_steps * batch_size * hidden_size;
     gradients.h.resize(h_output_size);
@@ -419,10 +452,10 @@ GRUTrainGradients GruTrain(const int time_steps,
     d2h(gradients.dbx.data(), dbx_dev.data(), dbx_dev.size());
     d2h(gradients.dbr.data(), dbr_dev.data(), dbr_dev.size());
     d2h(gradients.dh.data(), dh_dev.data(), dh_dev.size());
-    
+
     // 将V从GPU复制到CPU
     d2h(gradients.v, v_dev);
-    
+
     // 将h从GPU复制到CPU（跳过初始状态，只复制time_steps个时间步）
     const int h_output_size = time_steps * batch_size * hidden_size;
     gradients.h.resize(h_output_size);
@@ -440,10 +473,10 @@ void compareVIntermediateValues(
     int hidden_size,
     const std::string &prefix = "") {
     printf("\n========== %s V Intermediate Values Comparison ==========\n", prefix.c_str());
-    
-    const int v_size_per_step = batch_size * hidden_size * 4; // 4个部分：z_out, r_out, g_out, Rh_add_br
-    const int v_size_per_part = batch_size * hidden_size; // 每个部分的大小
-    
+
+    const int v_size_per_step = batch_size * hidden_size * 4;// 4个部分：z_out, r_out, g_out, Rh_add_br
+    const int v_size_per_part = batch_size * hidden_size;    // 每个部分的大小
+
     // 验证大小
     if (v_float.size() != static_cast<size_t>(time_steps * v_size_per_step)) {
         printf("[Error] v_float size mismatch: expected %d, got %zu\n",
@@ -455,26 +488,26 @@ void compareVIntermediateValues(
                time_steps * v_size_per_step, v_quant_dequant.size());
         return;
     }
-    
+
     // V的4个部分名称
-    const char* part_names[] = {"z_out", "r_out", "g_out", "Rh_add_br"};
-    
+    const char *part_names[] = {"z_out", "r_out", "g_out", "Rh_add_br"};
+
     // 整体比较
     {
         const float mse = computeMSE(v_float, v_quant_dequant);
         const float cos_sim = computeCosineSimilarity(v_float, v_quant_dequant);
         printf("Overall V: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
     }
-    
+
     // 按部分比较（所有时间步）
     for (int part = 0; part < 4; ++part) {
         std::vector<float> v_float_part(time_steps * v_size_per_part);
         std::vector<float> v_quant_part(time_steps * v_size_per_part);
-        
+
         for (int t = 0; t < time_steps; ++t) {
             const int t_offset = t * v_size_per_step;
             const int part_offset = part * hidden_size;
-            
+
             for (int b = 0; b < batch_size; ++b) {
                 const int b_offset = b * hidden_size;
                 for (int h = 0; h < hidden_size; ++h) {
@@ -485,29 +518,29 @@ void compareVIntermediateValues(
                 }
             }
         }
-        
+
         const float mse = computeMSE(v_float_part, v_quant_part);
         const float cos_sim = computeCosineSimilarity(v_float_part, v_quant_part);
         printf("%s: MSE = %e, Cosine Similarity = %f\n", part_names[part], mse, cos_sim);
     }
-    
+
     // 按时间步比较（所有部分）
     printf("\nPer time step comparison:\n");
-    for (int t = 0; t < time_steps && t < 10; ++t) { // 只显示前10个时间步
+    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
         const int t_offset = t * v_size_per_step;
         std::vector<float> v_float_step(v_size_per_step);
         std::vector<float> v_quant_step(v_size_per_step);
-        
+
         for (int i = 0; i < v_size_per_step; ++i) {
             v_float_step[i] = v_float[t_offset + i];
             v_quant_step[i] = v_quant_dequant[t_offset + i];
         }
-        
+
         const float mse = computeMSE(v_float_step, v_quant_step);
         const float cos_sim = computeCosineSimilarity(v_float_step, v_quant_step);
         printf("  Time step %d: MSE = %e, Cosine Similarity = %f\n", t, mse, cos_sim);
     }
-    
+
     printf("===========================================================\n\n");
 }
 
@@ -520,9 +553,9 @@ void compareHValues(
     int hidden_size,
     const std::string &prefix = "") {
     printf("\n========== %s H Hidden States Comparison ==========\n", prefix.c_str());
-    
-    const int h_size_per_step = batch_size * hidden_size; // 每个时间步的大小
-    
+
+    const int h_size_per_step = batch_size * hidden_size;// 每个时间步的大小
+
     // 验证大小
     if (h_float.size() != static_cast<size_t>(time_steps * h_size_per_step)) {
         printf("[Error] h_float size mismatch: expected %d, got %zu\n",
@@ -534,41 +567,41 @@ void compareHValues(
                time_steps * h_size_per_step, h_quant_dequant.size());
         return;
     }
-    
+
     // 整体比较
     {
         const float mse = computeMSE(h_float, h_quant_dequant);
         const float cos_sim = computeCosineSimilarity(h_float, h_quant_dequant);
         printf("Overall H: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
     }
-    
+
     // 按时间步比较
     printf("\nPer time step comparison:\n");
-    for (int t = 0; t < time_steps && t < 10; ++t) { // 只显示前10个时间步
+    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
         const int t_offset = t * h_size_per_step;
         std::vector<float> h_float_step(h_size_per_step);
         std::vector<float> h_quant_step(h_size_per_step);
-        
+
         for (int i = 0; i < h_size_per_step; ++i) {
             h_float_step[i] = h_float[t_offset + i];
             h_quant_step[i] = h_quant_dequant[t_offset + i];
         }
-        
+
         const float mse = computeMSE(h_float_step, h_quant_step);
         const float cos_sim = computeCosineSimilarity(h_float_step, h_quant_step);
         printf("  Time step %d: MSE = %e, Cosine Similarity = %f\n", t, mse, cos_sim);
     }
-    
+
     // 按批次比较（所有时间步）
     printf("\nPer batch comparison:\n");
-    for (int b = 0; b < batch_size && b < 5; ++b) { // 只显示前5个批次
+    for (int b = 0; b < batch_size && b < 5; ++b) {// 只显示前5个批次
         std::vector<float> h_float_batch(time_steps * hidden_size);
         std::vector<float> h_quant_batch(time_steps * hidden_size);
-        
+
         for (int t = 0; t < time_steps; ++t) {
             const int t_offset = t * h_size_per_step;
             const int b_offset = b * hidden_size;
-            
+
             for (int h = 0; h < hidden_size; ++h) {
                 const int src_idx = t_offset + b_offset + h;
                 const int dst_idx = t * hidden_size + h;
@@ -576,12 +609,12 @@ void compareHValues(
                 h_quant_batch[dst_idx] = h_quant_dequant[src_idx];
             }
         }
-        
+
         const float mse = computeMSE(h_float_batch, h_quant_batch);
         const float cos_sim = computeCosineSimilarity(h_float_batch, h_quant_batch);
         printf("  Batch %d: MSE = %e, Cosine Similarity = %f\n", b, mse, cos_sim);
     }
-    
+
     printf("===========================================================\n\n");
 }
 
