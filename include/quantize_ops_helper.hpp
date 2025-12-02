@@ -159,35 +159,6 @@ void GruQuantInit(
     QuantT *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams);
 
-inline __host__ __device__ float dequant_from_exp2(int q, int32_t exp2_inv, int zp) {
-    int32_t v = q - zp;
-
-    if (exp2_inv >= 0) {
-        // scale = 2^(-exp2) = 1 / (1 << exp2)
-        return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);
-    } else {
-        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
-        return static_cast<float>(v) * static_cast<float>(1 << (-exp2_inv));
-    }
-}
-
-
-template<typename T, typename QuantT>
-inline QuantT quant_from_exp2(T src, int32_t exp2_inv, int zp) {
-    float scaled;
-    if (exp2_inv >= 0) {
-        scaled = src * static_cast<float>(1 << exp2_inv);
-    } else {
-        scaled = src / static_cast<float>(1 << (-exp2_inv));
-    }
-
-    int32_t q = static_cast<int32_t>(std::round(scaled)) + zp;
-    constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-    constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = std::clamp(q, qmin, qmax);
-    return static_cast<QuantT>(q);
-}
-
 void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
                                      int32_t zp_z_pre,
                                      int32_t exp2_inv_z_out,
@@ -214,46 +185,6 @@ __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int n) {
     }
 }
 
-/**
- * @brief 在 GPU 上将 float 数据量化为 int8
- * @tparam QuantT       目标量化类型（int8_t 或 int16_t）
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- * @tparam clamp    是否使用饱和处理 (对bias不处理)
- * @param src_dev    输入 float 指针（GPU 内存）
- * @param dst_dev    输出 int8 指针（GPU 内存）
- * @param size       元素数量
- * @param scale      量化 scale
- * @param zero_point 量化 zero_point（非对称量化有效）
- */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp = true>
-void quantizeFloatToInt(const float *src_dev,
-                        QuantT *dst_dev,
-                        uint32_t size,
-                        float scale,
-                        int32_t zero_point = 0);
-
-/**
- * @brief 在 GPU 上将 float 数据量化为 int8/int16（支持每个时间步独立 scale）
- * @tparam QuantT       目标量化类型（int8_t 或 int16_t）
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- * @tparam clamp        是否使用饱和处理
- * @param src_dev       输入 float 指针（GPU 内存）
- * @param dst_dev       输出 int8/int16 指针（GPU 内存）
- * @param size          总元素数量
- * @param scale_per_t   每个时间步的量化 scale 数组（GPU 内存，长度为 time_steps）
- * @param zero_point    每个时间步的量化 zero_point（非对称量化有效）
- * @param time_step_size 每个时间步的元素数（例如 batch_size * input_dim）
- */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp = true>
-void quantizeFloatToIntPerStep(const float *src_dev,
-                               QuantT *dst_dev,
-                               size_t size,
-                               const float *scale_per_t,
-                               const int32_t *zero_point_per_t,
-                               int time_step_size);
-
 template<typename T>
 void computeWeightSumMulzp(
     const T *W_q,       // [out_dim, in_dim] 权重量化矩阵
@@ -270,26 +201,6 @@ void applyZeroPointCompensation2D(
     const int32_t *x_zp,
     int out_dim,
     int batch_size,
-    cudaStream_t stream = 0);
-
-/**
- * @brief 从 GPU 上的量化数据计算 scale（使用最大最小值）
- *
- * @tparam QuantT         量化类型（int8_t 或 int16_t）
- * @param h_dev           [in] GPU 上的量化数据指针
- * @param size            [in] 数据元素数量
- * @param scale           [out] 输出的 scale
- * @param zero_point      [out] 输出的 zero_point
- * @param symmetric       [in] 是否使用对称量化
- * @param stream          [in] CUDA stream
- */
-template<typename QuantT>
-void calculateScaleZeroPointFromDevice(
-    const QuantT *h_dev,
-    size_t size,
-    float &scale,
-    int32_t &zero_point,
-    bool symmetric = true,
     cudaStream_t stream = 0);
 
 /**
@@ -358,77 +269,6 @@ void calculateScaleZeroPointFromFloatDevice(
 //
 //template<typename T>
 //T findMinValueFromDev(const T *dev_data, size_t size);
-
-/**
- * @brief 使用 (M, shift) 参数将量化值反量化为浮点数
- * @tparam QuantT      量化类型（int8_t / int16_t / int32_t）
- * @param quant_data   输入量化数据指针
- * @param size         数据元素数量
- * @param M            定点缩放系数（整数）
- * @param shift        缩放右移位数
- * @param dequant_data 输出反量化后的 float 数组
- */
-template<typename QuantT>
-void dequantizeTensorFixedPoint(const QuantT *quant_data,
-                                size_t size,
-                                int32_t M,
-                                int shift,
-                                float *dequant_data) {
-    // 计算等效的scale（float），只在CPU上调试时使用
-    const float scale = static_cast<float>(M) / static_cast<float>(1 << shift);
-
-    for (size_t i = 0; i < size; ++i) {
-        const int32_t q = static_cast<int32_t>(quant_data[i]);
-        dequant_data[i] = q * scale;
-    }
-}
-
-/**
- * @brief 完整的反量化函数（支持对称和非对称量化）
- * @param quant_data 量化后的int8数据
- * @param dequant_data 反量化后的float数据输出
- * @param size 数据数量
- * @param scale 缩放因子
- * @param zero_point 零点（对称量化为0，非对称量化通常不为0）
- */
-template<typename QuantT>
-inline void dequantizeTensor(const QuantT *quant_data, float *dequant_data,
-                             int size, float scale, int32_t zero_point) {
-    for (int i = 0; i < size; ++i) {
-        dequant_data[i] = static_cast<float>(quant_data[i] - zero_point) * scale;
-    }
-}
-
-// 定义常量
-constexpr int32_t Q15_ONE = 32768;
-constexpr int32_t ALPHA_Q15 = 29491;         // 0.9 * 32768
-constexpr int32_t INV_QMAX = (1 << 15) / 127;// 257 in Q15
-
-// 输入: 上一步scale参数 (M_prev, shift_prev)
-// 输入: 当前步隐藏态整数张量 h_t_int[]
-// 输出: 更新后的scale参数 (M_new, shift_new)
-inline void updateHScaleInt8(const int8_t *h_t, size_t size,
-                             int32_t &M_prev, int &shift_prev) {
-    // 1. 求当前步最大值
-    int max_abs = 0;
-    for (size_t i = 0; i < size; ++i)
-        max_abs = std::max(max_abs, abs((int) h_t[i]));
-
-    // 2. ratio 定点化 (Q15)
-    int32_t ratio_q15 = (max_abs * INV_QMAX);// Q15 格式
-
-    // 3. EMA 更新 (Q15)
-    static int32_t s_prev_q15 = Q15_ONE;// 初始scale比例=1.0
-    int32_t s_new_q15 = (ALPHA_Q15 * s_prev_q15 +
-                         (Q15_ONE - ALPHA_Q15) * ratio_q15 + (1 << 14)) >>
-                        15;
-    s_prev_q15 = s_new_q15;
-
-    // 4. 更新 M (scale整数因子)
-    M_prev = (M_prev * s_new_q15 + (1 << 14)) >> 15;
-
-    // shift_prev 可视范围动态调整（或保持不变）
-}
 
 /**
  * @brief 计算缩放因子 S 对应的右移位数 n（使 S ≈ 2^(-n)）
@@ -702,47 +542,6 @@ inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
     return best_exp2;
 }
 
-//inline int32_t selectBestExp2InvAsym(const float orig_min,
-//                                     const float orig_max,
-//                                     int32_t quant_min,
-//                                     int32_t quant_max) {
-//    const float EPS = 1e-12f;
-//    const float orig_range = std::max(orig_max - orig_min, EPS);
-//    const int32_t quant_range = quant_max - quant_min;
-//
-//    // 初始候选
-//    int32_t exp2_inv0 = static_cast<int32_t>(std::ceil(std::log2(orig_range / quant_range)));
-//    exp2_inv0 = std::max(exp2_inv0, 0);
-//
-//    float best_mse = std::numeric_limits<float>::max();
-//    int32_t best_exp2 = exp2_inv0;
-//
-//    for (int32_t candidate = exp2_inv0 - 1; candidate <= exp2_inv0 + 1; ++candidate) {
-//        if (candidate < 0) continue;
-//
-//        const float scale = std::pow(2.f, -static_cast<float>(candidate));
-//        float aligned_min = std::floor(orig_min / scale) * scale;
-//        float aligned_max = aligned_min + scale * quant_range;
-//
-//        // 估算零点
-//        float zp_float = (-aligned_min) / scale + quant_min;
-//        int32_t zp = static_cast<int32_t>(std::llround(zp_float));
-//        zp = std::clamp(zp, quant_min, quant_max);
-//
-//        // 简单估算 MSE: 取 min/max 两点
-//        float deq_min = (quant_min - zp) * scale + aligned_min;
-//        float deq_max = (quant_max - zp) * scale + aligned_min;
-//        float mse = ((deq_min - orig_min) * (deq_min - orig_min) +
-//                     (deq_max - orig_max) * (deq_max - orig_max)) * 0.5f;
-//
-//        if (mse < best_mse) {
-//            best_mse = mse;
-//            best_exp2 = candidate;
-//        }
-//    }
-//    return best_exp2;
-//}
-
 #define DEBUG true
 
 inline void selectBestExp2InvAsym(
@@ -830,138 +629,6 @@ inline void selectBestExp2InvAsym(
  *       5. 自动适配量化范围：通过std::numeric_limits<QuantT>获取quant_min/quant_max，无需手动配置；
  *       6. 异常处理：原始min ≥ orig_max、QuantT非有符号整数、T非浮点类型时抛出异常。
  */
-//template<typename T, typename QuantT>
-//inline void calibrateQuantParams(
-//    const T orig_min,
-//    const T orig_max,
-//    const bool is_symmetric,
-//    T &aligned_min,
-//    T &aligned_max,
-//    int32_t &exp2_inv,
-//    int32_t &zp,
-//    const std::string &name = "") {
-//
-//    static_assert(std::is_floating_point_v<T>, "T must be floating point");
-//    static_assert(std::is_signed_v<QuantT> && std::is_integral_v<QuantT>, "QuantT must be signed integer");
-//
-//    constexpr int32_t quant_min = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-//    constexpr int32_t quant_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-//    // difference (quant_max - quant_min)
-//    constexpr int32_t quant_range = quant_max - quant_min;
-//
-//    if (name == "scale_x") {
-//        printf("!!!\n");
-//    }
-//
-//    if (orig_min >= orig_max - static_cast<T>(1e-12)) {
-////        throw std::invalid_argument(
-////            name +
-////            "Invalid original range: orig_min (" + std::to_string(orig_min) +
-////            ") must be less than orig_max (" + std::to_string(orig_max) + ")");
-//        return;
-//    }
-//
-//    // small epsilon for zero-checks
-//    const T EPS = static_cast<T>(1e-12);
-//    T aligned_scale = static_cast<T>(1.0);
-//
-//    if (is_symmetric) {
-//        // symmetric quantization: zp == 0
-//        zp = static_cast<QuantT>(0);
-//
-//        // half_range = max(|min|, |max|)
-//        const T half_range = std::max(std::abs(orig_min), std::abs(orig_max));
-//        const T safe_half_range = (half_range <= EPS) ? static_cast<T>(1.0) : half_range;
-//
-////        // Want scale = 2^-n such that scale * quant_max >= half_range
-////        // => 2^-n >= half_range / quant_max  => n <= log2(quant_max / half_range)
-////        // choose largest scale (smallest n) satisfying => n = floor(log2(quant_max / half_range))
-//        {
-//            const T ratio = static_cast<T>(quant_max) / safe_half_range;
-//            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30))); // guard
-//            int32_t n = static_cast<int32_t>(std::floor(log2_val));
-//            n = std::max(n, static_cast<int32_t>(0));
-//            exp2_inv = n;
-//        }
-//
-//        exp2_inv = selectBestExp2InvSym(orig_min, orig_max, quant_max);
-//
-//        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-//        // preserve symmetry: aligned_max >= half_range, aligned_min = -aligned_max
-//        aligned_max = aligned_scale * static_cast<T>(quant_max);
-//        if (aligned_max < safe_half_range) {
-//            // should not happen because of floor logic, but guard anyway by reducing exp2_inv
-//            // if happens, decrease exp2_inv until coverage satisfied (rare)
-//            while (exp2_inv > 0 && (aligned_scale * static_cast<T>(quant_max) < safe_half_range)) {
-//                --exp2_inv;
-//                aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-//                aligned_max = aligned_scale * static_cast<T>(quant_max);
-//            }
-//        }
-//        // final symmetric aligned range
-//        aligned_max = std::max(aligned_max, safe_half_range);
-//        aligned_min = -aligned_max;
-//
-//        // Finally ensure we cover original min/max (preserve symmetry)
-//        if (aligned_min > orig_min) aligned_min = -aligned_max; // keep symmetric
-//        if (aligned_max < orig_max) aligned_max = aligned_max; // already symmetric
-//    } else {
-//        // asymmetric quantization
-//        T orig_range = orig_max - orig_min;
-//        orig_range = (orig_range <= EPS) ? static_cast<T>(1.0) : orig_range;
-//
-//        // Want scale = 2^-n such that scale * quant_range >= orig_range
-//        // => 2^-n >= orig_range / quant_range => n <= log2(quant_range / orig_range)
-//        // choose largest scale satisfying => n = floor(log2(quant_range / orig_range))
-////        {
-////            const T ratio = static_cast<T>(quant_range) / orig_range;
-////            const T log2_val = std::log2(std::max(ratio, static_cast<T>(1e-30)));
-////            int32_t n = static_cast<int32_t>(std::floor(log2_val));
-////            n = std::max(n, static_cast<int32_t>(0));
-////            exp2_inv = n;
-////        }
-//        selectBestExp2InvAsym(orig_min, orig_max, quant_min, quant_max, exp2_inv, zp);
-//
-////        aligned_scale = std::pow(static_cast<T>(2.0), -static_cast<T>(exp2_inv));
-////        // align min down to multiple of scale
-////        aligned_min = std::floor(orig_min / aligned_scale) * aligned_scale;
-////        aligned_max = aligned_min + aligned_scale * static_cast<T>(quant_range);
-//
-//        aligned_min = aligned_scale * (quant_min - zp);
-//        aligned_max = aligned_scale * (quant_max - zp);
-//
-//        // if due to numerical error we still don't cover orig_max, expand by one step
-//        if (aligned_max < orig_max - EPS) {
-//            aligned_min -= aligned_scale;
-//            aligned_max += aligned_scale;
-//        }
-//
-//        // zero point: quant_min + round( (-aligned_min) / scale )
-////        const T zp_float = (-aligned_min) / aligned_scale;
-////        int32_t zp_int = static_cast<int32_t>(std::llround(zp_float)); // round to nearest
-////        // convert to quant space by offsetting quant_min
-////        zp_int = quant_min + zp_int;
-////        // clamp
-////        zp_int = std::clamp(zp_int, quant_min, quant_max);
-////        zp = static_cast<QuantT>(zp_int);
-//
-//        // small numerical cleanup
-//        aligned_min = std::round(aligned_min * static_cast<T>(1e9)) / static_cast<T>(1e9);
-//        aligned_max = std::round(aligned_max * static_cast<T>(1e9)) / static_cast<T>(1e9);
-//    }
-//
-//    if (DEBUG && name != "exp2_inv_W" && name != "exp2_inv_R" && name != "scale_bx" && name != "scale_br") {
-//        printf("%s : min_val = %.15f, max_val = %.15f, min_new = %.15f, max_new = %.15f, exp2_inv = %d, zp = %d\n",
-//               name.c_str(),
-//               orig_min,
-//               orig_max,
-//               aligned_min,
-//               aligned_max,
-//               exp2_inv,
-//               zp);
-//    }
-//}
-
 template<typename T, typename QuantT>
 inline void calibrateQuantParams(
     const T orig_min,
@@ -1049,10 +716,10 @@ inline QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
 }
 
 template<typename QuantT>
-inline float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
+inline __host__ __device__ float dequantize(QuantT q, int32_t exp2_inv, int32_t zp) {
     // Host code: 与GPU版本保持一致
     int32_t v = static_cast<int32_t>(q) - zp;
-    
+
     if (exp2_inv >= 0) {
         // scale = 2^(-exp2) = 1 / (1 << exp2)
         return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);

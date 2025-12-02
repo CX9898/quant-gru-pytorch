@@ -15,83 +15,6 @@ __constant__ int8_t d_sigmoid_int8_z_lut[256];
 __constant__ int8_t d_sigmoid_int8_r_lut[256];
 __constant__ int8_t d_tanh_int8_g_lut[256];
 
-/**
- * @brief 在 GPU 上将 float 数据量化为 int8
- * @tparam QuantT       目标量化类型（int8_t 或 int16_t）
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- * @tparam clamp    是否使用饱和处理 (对bias不处理)
- * @param src_dev    输入 float 指针（GPU 内存）
- * @param dst_dev    输出 int8 指针（GPU 内存）
- * @param size       元素数量
- * @param scale      量化 scale
- * @param zero_point 量化 zero_point（非对称量化有效）
- */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
-void quantizeFloatToInt(const float *src_dev, QuantT *dst_dev, uint32_t size,
-                        float scale, int32_t zero_point) {
-    uint32_t block = 512;
-    uint32_t grid = (size + block - 1) / block;
-
-    dev::quantizeFloatToInt<QuantT, use_inv_scale, symmetric, clamp>
-        <<<grid, block>>>(src_dev, dst_dev, size, scale, zero_point);
-}
-
-template void quantizeFloatToInt<int8_t, true, true, true>(const float *src_dev,
-                                                           int8_t *dst_dev,
-                                                           uint32_t size,
-                                                           float scale,
-                                                           int32_t zero_point);
-
-template void quantizeFloatToInt<int8_t, true, true, false>(
-    const float *src_dev, int8_t *dst_dev, uint32_t size, float scale,
-    int32_t zero_point);
-
-template void quantizeFloatToInt<int32_t, true, true, false>(
-    const float *src_dev, int32_t *dst_dev, uint32_t size, float scale,
-    int32_t zero_point);
-
-template void quantizeFloatToInt<int32_t, false, false, true>(
-    const float *src_dev, int32_t *dst_dev, uint32_t size, float scale,
-    int32_t zero_point);
-
-/**
- * @brief 在 GPU 上将 float 数据量化为 int8/int16（支持每个时间步独立 scale）
- * @tparam QuantT       目标量化类型（int8_t 或 int16_t）
- * @tparam use_inv_scale 是否使用 inv_scale（乘法而非除法）
- * @tparam symmetric    是否使用对称量化（zero_point=0）
- * @tparam clamp        是否使用饱和处理
- * @param src_dev       输入 float 指针（GPU 内存）
- * @param dst_dev       输出 int8/int16 指针（GPU 内存）
- * @param size          总元素数量
- * @param scale_per_t   每个时间步的量化 scale 数组（GPU 内存，长度为
- * time_steps）
- * @param zero_point_per_t    每个时间步的量化 zero_point（非对称量化有效）
- * @param time_step_size 每个时间步的元素数（例如 batch_size * input_dim）
- */
-template<typename QuantT, bool use_inv_scale, bool symmetric, bool clamp>
-void quantizeFloatToIntPerStep(const float *src_dev, QuantT *dst_dev,
-                               size_t size, const float *scale_per_t,
-                               const int32_t *zero_point_per_t,
-                               int time_step_size) {
-    uint32_t block = 512;
-    uint32_t grid = (size + block - 1) / block;
-
-    dev::quantizeFloatToIntPerStep<QuantT, use_inv_scale, symmetric, clamp>
-        <<<grid, block>>>(src_dev, dst_dev, size, scale_per_t, zero_point_per_t,
-                          time_step_size);
-}
-
-template void quantizeFloatToIntPerStep<int8_t, false, false, true>(
-    const float *src_dev, int8_t *dst_dev, size_t size,
-    const float *scale_per_t, const int32_t *zero_point_per_t,
-    int time_step_size);
-
-template void quantizeFloatToIntPerStep<int16_t, false, false, true>(
-    const float *src_dev, int16_t *dst_dev, size_t size,
-    const float *scale_per_t, const int32_t *zero_point_per_t,
-    int time_step_size);
-
 std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int zp_z_pre,
                                               float scale_z, int zp_z) {
     std::vector<int8_t> lut(256);
@@ -180,13 +103,13 @@ std::vector<int8_t> generate_sigmoid_int8_lut_exp2(int32_t exp2_inv_z_pre,
         int x_i8 = i - 128;
 
         // （1）反量化 x
-        float x_fp = dequant_from_exp2(x_i8, exp2_inv_z_pre, zp_z_pre);
+        float x_fp = dequantize(x_i8, exp2_inv_z_pre, zp_z_pre);
 
         // （2）计算 sigmoid
         float y_fp = 1.f / (1.f + std::exp(-x_fp));
 
         // （3）量化 y
-        int y_i8 = quant_from_exp2<float, int8_t>(y_fp, exp2_inv_z, zp_z);
+        int y_i8 = quantize<int8_t>(y_fp, exp2_inv_z, zp_z);
 
         lut[i] = static_cast<int8_t>(y_i8);
     }
@@ -204,13 +127,13 @@ std::vector<int8_t> generate_tanh_int8_lut_exp2(int32_t exp2_inv_pre,
         int x_i8 = i - 128;
 
         // （1）反量化 x
-        float x_fp = dequant_from_exp2(x_i8, exp2_inv_pre, zp_pre);
+        float x_fp = dequantize(x_i8, exp2_inv_pre, zp_pre);
 
         // （2）tanh
         float y_fp = std::tanh(x_fp);
 
         // （3）量化 y
-        int y_i8 = quant_from_exp2<float, int8_t>(y_fp, exp2_inv_out, zp_out);
+        int y_i8 = quantize<int8_t>(y_fp, exp2_inv_out, zp_out);
 
         lut[i] = static_cast<int8_t>(y_i8);
     }
@@ -239,73 +162,7 @@ void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,
                        sizeof(int8_t) * 256);
 }
 
-// template<typename T>
-// void calculateScaleZeroPoint(const T *host_data, size_t size, float &scale, T
-// &zero_point) {
-//     const auto max_it = thrust::max_element(thrust::host, host_data,
-//     host_data + size); const auto min_it = thrust::min_element(thrust::host,
-//     host_data, host_data + size);
-//
-//     T max_val, min_val;
-//     thrust::copy(max_it, max_it + 1, &max_val);
-//     thrust::copy(min_it, min_it + 1, &min_val);
-//
-//     constexpr int int_min = std::numeric_limits<T>::min();
-//     constexpr int int_max = std::numeric_limits<T>::max();
-//
-//     scale = static_cast<float>(max_val - min_val) /
-//     static_cast<float>(int_max - int_min);
-//
-//     // 安全计算zero point
-//     int zp_temp = static_cast<int>(std::round(-static_cast<float>(min_val) /
-//     scale)) + int_min; zero_point = static_cast<T>(std::clamp(zp_temp,
-//     static_cast<int>(int_min), static_cast<int>(int_max)));
-// }
-//
-// template void calculateScaleZeroPoint<int8_t>(const int8_t *dev_data, size_t
-// size, float &scale, int8_t &zero_point);
-//
-// template void calculateScaleZeroPoint<int16_t>(const int16_t *dev_data,
-// size_t size, float &scale, int16_t &zero_point);
-
 namespace kernel {
-
-template<typename T>
-__global__ void computeWeightSumTiled(
-    const T *__restrict__ W_q,       // [out_dim, in_dim] 权重量化矩阵
-    int32_t *__restrict__ weight_sum,// [out_dim] 输出数组
-    int out_dim,                     // 输出通道数 (M)
-    int in_dim                       // 输入通道数 (K)
-) {
-    const int row = blockIdx.x;
-    if (row >= out_dim) {
-        return;
-    }
-    const int tid = threadIdx.x;
-
-    extern __shared__ int32_t sdata[];
-    int32_t local_sum = 0;
-
-    // 每个线程处理部分列
-    for (int j = tid; j < in_dim; j += blockDim.x) {
-        local_sum += static_cast<int32_t>(W_q[row * in_dim + j]);
-    }
-
-    sdata[tid] = local_sum;
-    __syncthreads();
-
-    // 归约
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            sdata[tid] += sdata[tid + s];
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        weight_sum[row] = sdata[0];
-    }
-}
 
 template<typename T>
 __global__ void computeWeightSumMulZP(
@@ -332,18 +189,6 @@ __global__ void computeWeightSumMulZP(
     weight_sum[row] = sum;
 }
 
-__global__ void applyZeroPointCompensation2D(
-    int32_t *__restrict__ Y_int32, const int32_t *__restrict__ weight_sum,
-    const int32_t *__restrict__ x_zp, int out_dim, int batch_size) {
-    int m = blockIdx.y * blockDim.y + threadIdx.y;// 输出维度方向
-    int b = blockIdx.x * blockDim.x + threadIdx.x;// batch方向
-
-    if (m >= out_dim || b >= batch_size) return;
-
-    int idx = m * batch_size + b;
-    Y_int32[idx] -= x_zp[b] * weight_sum[m];
-}
-
 template<typename T, typename QuantT>
 __global__ void quantification(const T *data, QuantT *quant_data, size_t size,
                                int32_t exp2_inv, int32_t zp) {
@@ -363,10 +208,10 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
         return;
     }
 
-    data[idx] = dev::dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
+    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
 }
 
-} // namespace kernel
+}// namespace kernel
 
 namespace kernel {
 
@@ -384,33 +229,33 @@ __global__ void dequantificationV(const QuantT *quant_data, T *data,
     const int t = blockIdx.x;
     const int b = blockIdx.y;
     const int h = threadIdx.x;
-    
+
     if (t >= time_steps || b >= batch_size || h >= hidden_size) {
         return;
     }
-    
+
     // v的布局: [time_steps, batch_size, hidden_size * 4]
     // 每个时间步内: [batch_size, hidden_size * 4]
     // 每个batch内: [hidden_size * 4]
     // 4个部分: [z_out, r_out, g_out, Rh_add_br_g]，每个部分大小为 hidden_size
-    
+
     const int base_idx = t * (batch_size * hidden_size * 4) + b * (hidden_size * 4);
-    
+
     // 反量化 z_out (第0部分)
     const int z_idx = base_idx + 0 * hidden_size + h;
-    data[z_idx] = dev::dequantize<QuantT>(quant_data[z_idx], exp2_inv_z, zp_z);
-    
+    data[z_idx] = dequantize<QuantT>(quant_data[z_idx], exp2_inv_z, zp_z);
+
     // 反量化 r_out (第1部分)
     const int r_idx = base_idx + 1 * hidden_size + h;
-    data[r_idx] = dev::dequantize<QuantT>(quant_data[r_idx], exp2_inv_r, zp_r);
-    
+    data[r_idx] = dequantize<QuantT>(quant_data[r_idx], exp2_inv_r, zp_r);
+
     // 反量化 g_out (第2部分，对称量化，zp=0)
     const int g_idx = base_idx + 2 * hidden_size + h;
-    data[g_idx] = dev::dequantize<QuantT>(quant_data[g_idx], exp2_inv_g, zp_g);
-    
+    data[g_idx] = dequantize<QuantT>(quant_data[g_idx], exp2_inv_g, zp_g);
+
     // 反量化 Rh_add_br_g (第3部分)
     const int rh_idx = base_idx + 3 * hidden_size + h;
-    data[rh_idx] = dev::dequantize<QuantT>(quant_data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
+    data[rh_idx] = dequantize<QuantT>(quant_data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
 }
 
 template<typename T, typename QuantT>
@@ -442,7 +287,7 @@ __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data,
     const int32_t exp2_inv = exp2_invs[channel_idx];
 
     const size_t idx = input_idx * channel_size + channel_idx;
-    data[idx] = dev::dequantize<QuantT>(quant_data[idx], exp2_inv, 0);
+    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, 0);
 }
 
 }// namespace kernel
@@ -457,19 +302,11 @@ void computeWeightSumMulzp(
     int out_dim,// 输出通道数 (M)
     int in_dim, // 输入通道数 (K)
     cudaStream_t stream) {
-    //    if (in_dim < 4096) {
-    //        int threads = 256;
-    //        int shared_mem = threads * sizeof(int32_t);
-    //        kernel::computeWeightSumTiled<<<out_dim, threads, shared_mem,
-    //        stream>>>(
-    //            W_q, weight_sum, out_dim, in_dim
-    //        );
-    //    } else {
+
     int threads = 256;
     int blocks = (out_dim + threads - 1) / threads;
     kernel::computeWeightSumMulZP<<<blocks, threads, 0, stream>>>(
         W_q, weight_sum, x_zp, n, out_dim, in_dim);
-    //    }
 }
 
 template void computeWeightSumMulzp<int8_t>(
@@ -492,72 +329,6 @@ template void computeWeightSumMulzp<int16_t>(
     int in_dim, // 输入通道数 (K)
     cudaStream_t stream);
 
-void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum,
-                                  const int32_t *x_zp, int out_dim,
-                                  int batch_size, cudaStream_t stream) {
-    dim3 threads(16, 16);
-    dim3 blocks((batch_size + 15) / 16, (out_dim + 15) / 16);
-    kernel::applyZeroPointCompensation2D<<<blocks, threads, 0, stream>>>(
-        Y_int32, weight_sum, x_zp, out_dim, batch_size);
-}
-
-/**
- * @brief 从 GPU 上的量化数据计算 scale（使用最大最小值）
- */
-template<typename QuantT>
-void calculateScaleZeroPointFromDevice(const QuantT *h_dev, size_t size,
-                                       float &scale, int32_t &zero_point,
-                                       bool symmetric, cudaStream_t stream) {
-    if (h_dev == nullptr || size == 0) {
-        scale = 1.0f;
-        zero_point = 0;
-        return;
-    }
-
-    // 使用 thrust 或自定义 kernel 计算最大最小值
-    // 这里使用简单的 CPU 方法（需要将数据拷贝到 host）
-    std::vector<QuantT> h_host(size);
-    cudaMemcpyAsync(h_host.data(), h_dev, size * sizeof(QuantT),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-
-    // 计算最大最小值
-    QuantT max_val = h_host[0];
-    QuantT min_val = h_host[0];
-    for (size_t i = 1; i < size; ++i) {
-        if (h_host[i] > max_val) max_val = h_host[i];
-        if (h_host[i] < min_val) min_val = h_host[i];
-    }
-
-    // 计算 scale 和 zero_point
-    const int32_t int_min =
-        static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-    const int32_t int_max =
-        static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-
-    if (symmetric) {
-        float abs_max = std::max(std::abs(static_cast<float>(max_val)),
-                                 std::abs(static_cast<float>(min_val)));
-        scale = abs_max / static_cast<float>(int_max);
-        zero_point = 0;
-    } else {
-        scale = static_cast<float>(max_val - min_val) /
-                static_cast<float>(int_max - int_min);
-        if (scale < 1e-12f) scale = 1e-12f;
-        zero_point = static_cast<int32_t>(
-            std::round(int_min - static_cast<float>(min_val) / scale));
-        zero_point = std::clamp(zero_point, int_min, int_max);
-    }
-}
-
-template void calculateScaleZeroPointFromDevice<int8_t>(
-    const int8_t *h_dev, size_t size, float &scale, int32_t &zero_point,
-    bool symmetric, cudaStream_t stream);
-
-template void calculateScaleZeroPointFromDevice<int16_t>(
-    const int16_t *h_dev, size_t size, float &scale, int32_t &zero_point,
-    bool symmetric, cudaStream_t stream);
-
 namespace dev {
 
 template<typename T, typename QuantT>
@@ -578,8 +349,8 @@ template void quantification<float, int8_t>(const float *data, int8_t *quant_dat
                                             int32_t exp2_inv, int32_t zp);
 template void quantification<float, int16_t>(const float *data, int16_t *quant_data, size_t size,
                                              int32_t exp2_inv, int32_t zp);
-template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
-                                               int32_t exp2_inv, int32_t zp);
+template void quantification<float, int32_t>(const float *data, int32_t *quant_data, size_t size,
+                                             int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size,
@@ -590,25 +361,32 @@ void dequantification(const QuantT *quant_data, T *data, size_t size,
     cudaDeviceSynchronize();
 }
 
+template void dequantification<float, int8_t>(const int8_t *quant_data, float *data, size_t size,
+                                              int32_t exp2_inv, int32_t zp);
+template void dequantification<float, int16_t>(const int16_t *quant_data, float *data, size_t size,
+                                               int32_t exp2_inv, int32_t zp);
+template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
+                                               int32_t exp2_inv, int32_t zp);
+
 template<typename T, typename QuantT>
 void dequantificationV(const QuantT *quant_data, T *data,
-                      int time_steps, int batch_size, int hidden_size,
-                      int32_t exp2_inv_z, int32_t zp_z,
-                      int32_t exp2_inv_r, int32_t zp_r,
-                      int32_t exp2_inv_g, int32_t zp_g,
-                      int32_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br) {
+                       int time_steps, int batch_size, int hidden_size,
+                       int32_t exp2_inv_z, int32_t zp_z,
+                       int32_t exp2_inv_r, int32_t zp_r,
+                       int32_t exp2_inv_g, int32_t zp_g,
+                       int32_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br) {
     // Launch configuration: 每个block处理一个时间步和一个batch的所有hidden单元
     // blockDim.x = hidden_size (每个线程处理一个hidden单元)
     // gridDim.x = time_steps
     // gridDim.y = batch_size
     const dim3 blockDim(hidden_size);
     const dim3 gridDim(time_steps, batch_size);
-    
+
     kernel::dequantificationV<<<gridDim, blockDim>>>(
         quant_data, data, time_steps, batch_size, hidden_size,
         exp2_inv_z, zp_z, exp2_inv_r, zp_r, exp2_inv_g, zp_g,
         exp2_inv_Rh_add_br, zp_Rh_add_br);
-    
+
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("dequantificationV kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -629,12 +407,6 @@ template void dequantificationV<float, int16_t>(const int16_t *quant_data, float
                                                 int32_t exp2_inv_g, int32_t zp_g,
                                                 int32_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
 
-template void dequantification<float, int8_t>(const int8_t *quant_data, float *data, size_t size,
-                                              int32_t exp2_inv, int32_t zp);
-template void dequantification<float, int16_t>(const int16_t *quant_data, float *data, size_t size,
-                                               int32_t exp2_inv, int32_t zp);
-//template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
-//                                               int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data,
@@ -683,66 +455,3 @@ template void dequantificationPerChannel<float, int32_t>(const int32_t *quant_da
                                                          size_t input_size, size_t channel_size,
                                                          const dev::vector<int32_t> &exp2_invs);
 }// namespace dev
-
-//
-// template<typename T>
-// T findMaxValueFromDev(const T *dev_data, size_t size) {
-//    if (size == 0) {
-//        // 边界处理：空数据返回最小值（避免访问非法内存）
-//        return std::numeric_limits<T>::lowest();
-//    }
-//
-//    // 直接用 thrust::max_element 找设备端最大值的迭代器
-//    const T *max_it = thrust::max_element(thrust::device, dev_data, dev_data +
-//    size);
-//
-//    T max_val;
-//    // 把设备端的最大值拷贝到主机端
-//    thrust::copy(thrust::device, max_it, max_it + 1, &max_val);
-//
-//    return max_val;
-//
-////    return thrust::reduce(thrust::device, dev_data, dev_data + size,
-////                          std::numeric_limits<T>::lowest(),
-////                          thrust::maximum<T>());
-//}
-//
-// template int8_t findMaxValueFromDev<int8_t>(const int8_t *dev_data, size_t
-// size);
-//
-// template int16_t findMaxValueFromDev<int16_t>(const int16_t *dev_data, size_t
-// size);
-//
-// template float findMaxValueFromDev<float>(const float *dev_data, size_t
-// size);
-//
-// template<typename T>
-// T findMinValueFromDev(const T *dev_data, size_t size) {
-//    if (size == 0) {
-//        // 边界处理：空数据返回最大值（避免访问非法内存）
-//        return std::numeric_limits<T>::max();
-//    }
-//
-//    // 直接用 thrust::max_element 找设备端最大值的迭代器
-//    const T *min_it = thrust::min_element(thrust::device, dev_data, dev_data +
-//    size);
-//
-//    T min_val;
-//    // 把设备端的最大值拷贝到主机端
-//    thrust::copy(thrust::device, min_it, min_it + 1, &min_val);
-//
-//    return min_val;
-//
-////    return thrust::reduce(thrust::device, dev_data, dev_data + size,
-////                          std::numeric_limits<T>::lowest(),
-////                          thrust::maximum<T>());
-//}
-//
-// template int8_t findMinValueFromDev<int8_t>(const int8_t *dev_data, size_t
-// size);
-//
-// template int16_t findMinValueFromDev<int16_t>(const int16_t *dev_data, size_t
-// size);
-//
-// template float findMinValueFromDev<float>(const float *dev_data, size_t
-// size);

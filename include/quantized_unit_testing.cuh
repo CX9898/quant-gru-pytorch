@@ -6,9 +6,9 @@
 #include <cublas_v2.h>
 #include <vector>
 
-#include "gru_quant.h"
 #include "blas.h"
 #include "checkData.hpp"
+#include "gru_quant.h"
 #include "quantize_ops_helper.hpp"
 
 inline bool checkScale(const std::vector<float> &src,
@@ -46,7 +46,7 @@ inline bool checkScale(const std::vector<T> &src,
     std::vector<T> requant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < src.size(); ++i) {
-        const float req_val = dequant_from_exp2(quant[i], exp2_inv, zero_point);
+        const float req_val = dequantize(quant[i], exp2_inv, zero_point);
         requant[i] = req_val;
     }
     is_pass &= checkCosineSimilarity(src, requant, name);
@@ -63,7 +63,7 @@ inline bool checkScale(const std::vector<T> &src,
     std::vector<QuantT> quant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < src.size(); ++i) {
-        const QuantT req_val = quant_from_exp2<T, QuantT>(src[i], exp2_inv, zero_point);
+        const QuantT req_val = quantize<QuantT>(src[i], exp2_inv, zero_point);
         quant[i] = req_val;
     }
     return checkScale<T, QuantT>(src, quant, exp2_inv, zero_point, name);
@@ -116,7 +116,7 @@ inline bool checkScalePerChannel(const std::vector<T> &src,
             const int idx = i * channel_size + j;
             const int exp2_inv_val = exp2_inv[j];
             const int zp_val = 0;
-            const T req_val = dequant_from_exp2(quant[idx], exp2_inv_val, zp_val);
+            const T req_val = dequantize(quant[idx], exp2_inv_val, zp_val);
             requant[idx] = req_val;
         }
     }
@@ -139,7 +139,7 @@ inline bool checkScalePerChannel(const std::vector<T> &src,
             const int idx = i * channel_size + j;
             const int exp2_inv_val = exp2_inv[j];
             const int zp_val = 0;
-            const QuantT quant_val = quant_from_exp2<T, QuantT>(src[idx], exp2_inv_val, zp_val);
+            const QuantT quant_val = quantize<QuantT>(src[idx], exp2_inv_val, zp_val);
             quant[idx] = quant_val;
         }
     }
@@ -150,71 +150,71 @@ inline bool checkScalePerChannel(const std::vector<T> &src,
 template<typename QuantT>
 struct Quantized_unit_testing {
 
-  std::vector<float> W_;
-  std::vector<float> R_;
-  std::vector<float> bx_;
-  std::vector<float> br_;
-  std::vector<float> x_;
-  std::vector<float> dh_;
-  std::vector<QuantT> W_quant_;
-  std::vector<QuantT> R_quant_;
-  std::vector<int32_t> bx_quant_;
-  std::vector<int32_t> br_quant_;
-  std::vector<QuantT> x_quant_;
-  std::vector<QuantT> dh_new_quant_;
-  size_t hidden_size_;
-  size_t input_size_;
-  size_t batch_size_;
-  size_t time_steps_;
-  cublasHandle_t handle_;
-  size_t channels_;
-  GRUQuantitativeParameters quant_parms_;
+    std::vector<float> W_;
+    std::vector<float> R_;
+    std::vector<float> bx_;
+    std::vector<float> br_;
+    std::vector<float> x_;
+    std::vector<float> dh_;
+    std::vector<QuantT> W_quant_;
+    std::vector<QuantT> R_quant_;
+    std::vector<int32_t> bx_quant_;
+    std::vector<int32_t> br_quant_;
+    std::vector<QuantT> x_quant_;
+    std::vector<QuantT> dh_new_quant_;
+    size_t hidden_size_;
+    size_t input_size_;
+    size_t batch_size_;
+    size_t time_steps_;
+    cublasHandle_t handle_;
+    size_t channels_;
+    GRUQuantitativeParameters quant_parms_;
 
-  Quantized_unit_testing(float *W,
-                         float *R,
-                         float *bx,
-                         float *br,
-                         float *x,
-                         float *dh,
-                         QuantT *W_quant,
-                         QuantT *R_quant,
-                         int32_t *bx_quant,
-                         int32_t *br_quant,
-                         QuantT *x_quant,
-                         QuantT *dh_new_quant,
-                         size_t hidden_size,
-                         size_t input_size,
-                         size_t batch_size,
-                         size_t time_steps,
-                         cublasHandle_t handle,
-                         const GRUQuantitativeParameters &quant_parms) {
-      hidden_size_ = hidden_size;
-      input_size_ = input_size;
-      batch_size_ = batch_size;
-      time_steps_ = time_steps;
-      handle_ = handle;
-      quant_parms_ = quant_parms;
-      W_ = std::vector<float>(W, W + hidden_size * 3 * input_size);
-      R_ = std::vector<float>(R, R + hidden_size * 3 * hidden_size);
-      bx_ = std::vector<float>(bx, bx + hidden_size * 3);
-      br_ = std::vector<float>(br, br + hidden_size * 3);
-      x_ = std::vector<float>(x, x + input_size * batch_size * time_steps);
-      dh_ = std::vector<float>(dh, dh + hidden_size * batch_size * time_steps);
-      W_quant_ = std::vector<QuantT>(W_quant, W_quant + hidden_size * 3 * input_size);
-      R_quant_ = std::vector<QuantT>(R_quant, R_quant + hidden_size * 3 * hidden_size);
-      bx_quant_ = std::vector<int32_t>(bx_quant, bx_quant + hidden_size * 3);
-      br_quant_ = std::vector<int32_t>(br_quant, br_quant + hidden_size * 3);
-      x_quant_ = std::vector<QuantT>(x_quant, x_quant + input_size * batch_size * time_steps);
-      dh_new_quant_ = std::vector<QuantT>(dh_new_quant, dh_new_quant + hidden_size * batch_size * time_steps);
+    Quantized_unit_testing(float *W,
+                           float *R,
+                           float *bx,
+                           float *br,
+                           float *x,
+                           float *dh,
+                           QuantT *W_quant,
+                           QuantT *R_quant,
+                           int32_t *bx_quant,
+                           int32_t *br_quant,
+                           QuantT *x_quant,
+                           QuantT *dh_new_quant,
+                           size_t hidden_size,
+                           size_t input_size,
+                           size_t batch_size,
+                           size_t time_steps,
+                           cublasHandle_t handle,
+                           const GRUQuantitativeParameters &quant_parms) {
+        hidden_size_ = hidden_size;
+        input_size_ = input_size;
+        batch_size_ = batch_size;
+        time_steps_ = time_steps;
+        handle_ = handle;
+        quant_parms_ = quant_parms;
+        W_ = std::vector<float>(W, W + hidden_size * 3 * input_size);
+        R_ = std::vector<float>(R, R + hidden_size * 3 * hidden_size);
+        bx_ = std::vector<float>(bx, bx + hidden_size * 3);
+        br_ = std::vector<float>(br, br + hidden_size * 3);
+        x_ = std::vector<float>(x, x + input_size * batch_size * time_steps);
+        dh_ = std::vector<float>(dh, dh + hidden_size * batch_size * time_steps);
+        W_quant_ = std::vector<QuantT>(W_quant, W_quant + hidden_size * 3 * input_size);
+        R_quant_ = std::vector<QuantT>(R_quant, R_quant + hidden_size * 3 * hidden_size);
+        bx_quant_ = std::vector<int32_t>(bx_quant, bx_quant + hidden_size * 3);
+        br_quant_ = std::vector<int32_t>(br_quant, br_quant + hidden_size * 3);
+        x_quant_ = std::vector<QuantT>(x_quant, x_quant + input_size * batch_size * time_steps);
+        dh_new_quant_ = std::vector<QuantT>(dh_new_quant, dh_new_quant + hidden_size * batch_size * time_steps);
 
-      channels_ = hidden_size_ * 3;
-  }
+        channels_ = hidden_size_ * 3;
+    }
 
-  bool checkWxGemm();
+    bool checkWxGemm();
 
-  bool checkQuantParameters();
+    bool checkQuantParameters();
 
-  void printGRUQuantitativeParameters();
+    void printGRUQuantitativeParameters();
 };
 
 template<typename QuantT>
@@ -283,7 +283,6 @@ inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
            quant_parms_.exp2_inv_old_contrib_,
            quant_parms_.zp_old_contrib_);
-
 }
 
 template<typename QuantT>
@@ -321,8 +320,8 @@ inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
             for (int k = 0; k < K; ++k) {
                 const int8_t W_quant_val = W_quant_[lda * k + m];
                 const int8_t x_quant_val = x_quant_[n * ldb + k];
-                const float W_quant_val_float = dequant_from_exp2(W_quant_val, exp2_inv_W_val, 0);
-                const float x_quant_val_float = dequant_from_exp2(x_quant_val, exp2_inv_x_val, zp_x_val);
+                const float W_quant_val_float = dequantize(W_quant_val, exp2_inv_W_val, 0);
+                const float x_quant_val_float = dequantize(x_quant_val, exp2_inv_x_val, zp_x_val);
                 sum += W_quant_val_float * x_quant_val_float;
             }
             const int Wx_idx = n * ldc + m;
