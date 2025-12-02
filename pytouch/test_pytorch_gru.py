@@ -106,13 +106,15 @@ print(f"  输入 x转置: {x_t.shape} = [input, batch]")
 print(f"  权重 W: [768, 256] (列主序)")
 print(f"  计算: W @ x = [768, 256] @ [256, 64] = [768, 64]")
 
-# 正确的CUDA计算
-result_cuda = torch.matmul(x_single, w_ih.T)
-result_cuda_t = result_cuda.T  # [64, 768] - 转置结果
+# 正确的CUDA计算（模拟CUDA的列主序计算）
+# CUDA: W @ x_t，其中 W是[768, 256]，x_t是[256, 64]
+result_cuda_sim = torch.matmul(w_ih, x_t)  # [768, 256] @ [256, 64] = [768, 64]
+result_cuda_final = result_cuda_sim.T  # [64, 768] - 转置回PyTorch格式
 
-print(f"  结果转置: [64, 768]")
+print(f"  CUDA模拟结果: {result_cuda_sim.shape} = [hidden*3, batch]")
+print(f"  转置后: {result_cuda_final.shape} = [batch, hidden*3]")
 print(f"  与PyTorch结果比较:")
-mse_check = torch.mean((result_cuda_t - result_pt) ** 2).item()
+mse_check = torch.mean((result_cuda_final - result_pt) ** 2).item()
 print(f"    MSE: {mse_check:.10f}")
 if mse_check < 1e-6:
     print("    ✓ 结果一致！权重可以直接使用（行主序weight_ih在CUDA列主序中就是正确的）")
