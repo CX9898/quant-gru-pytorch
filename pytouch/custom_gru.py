@@ -16,6 +16,152 @@ except ImportError:
     )
 
 
+class GRUFunction(torch.autograd.Function):
+    """
+    GRU 的自定义 autograd Function，支持反向传播
+
+    支持量化和非量化两种模式，反向传播统一使用 float32 权重调用 haste_gru_backward
+    """
+
+    @staticmethod
+    def forward(ctx, input, W, R, bx, br, h0, is_training,
+                use_quantization=False, quant_type='int8', quant_params=None):
+        """
+        前向传播
+
+        Args:
+            ctx: 上下文对象，用于保存中间结果
+            input: 输入序列 [time_steps, batch_size, input_size]
+            W: 输入权重 [input_size, hidden_size * 3] (float32，用于反向传播)
+            R: 循环权重 [hidden_size, hidden_size * 3] (float32，用于反向传播)
+            bx: 输入偏置 [hidden_size * 3] (float32，用于反向传播)
+            br: 循环偏置 [hidden_size * 3] (float32，用于反向传播)
+            h0: 初始隐藏状态 [batch_size, hidden_size] 或 None
+            is_training: 是否处于训练模式
+            use_quantization: 是否使用量化
+            quant_type: 量化类型，'int8' 或 'int16'
+            quant_params: 量化参数
+
+        Returns:
+            output: 输出序列 [time_steps, batch_size, hidden_size]
+            h_n: 最终隐藏状态 [1, batch_size, hidden_size]
+        """
+        time_steps, batch_size, input_size = input.shape
+        hidden_size = R.shape[0]
+
+        # 保存上下文信息
+        ctx.time_steps = time_steps
+        ctx.batch_size = batch_size
+        ctx.input_size = input_size
+        ctx.hidden_size = hidden_size
+
+        # 准备量化参数（如果使用量化）
+        if use_quantization:
+            if quant_params is None:
+                raise RuntimeError("quant_params is required when use_quantization=True")
+            use_int16 = (quant_type == 'int16')
+        else:
+            # 非量化模式也需要 quant_params，创建一个空的
+            use_int16 = False
+            quant_params = gru_ops.GRUQuantitativeParameters()
+
+        # 准备 h0 参数（转换为正确的格式或空张量）
+        h0_tensor = h0 if h0 is not None else torch.empty(0, device=input.device)
+
+        # 调用 forward_interface 统一接口
+        output_full, v = gru_ops.forward_interface(
+            is_training=is_training,
+            is_quant=use_quantization,
+            use_int16=use_int16,
+            time_steps=time_steps,
+            batch_size=batch_size,
+            input_size=input_size,
+            hidden_size=hidden_size,
+            W=W,
+            R=R,
+            bx=bx,
+            br=br,
+            x=input,
+            h0=h0_tensor,
+            quant_params=quant_params
+        )
+
+        # 提取时间步输出（去掉初始状态）
+        output = output_full[1:]  # [time_steps, batch_size, hidden_size]
+
+        # 获取最终隐藏状态
+        h_n = output_full[-1:]  # [1, batch_size, hidden_size]
+
+        # 保存中间结果用于反向传播
+        # 保存 float32 权重（无论是否量化，反向传播都使用 float32 权重）
+        # 保存 output_full 和 v（量化和非量化都返回反量化后的 float32 值）
+        ctx.save_for_backward(W, R, bx, br, input, output_full, v)
+
+        return output, h_n
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_h_n):
+        """
+        反向传播
+
+        Args:
+            ctx: 上下文对象，包含前向传播保存的中间结果
+            grad_output: 输出序列的梯度 [time_steps, batch_size, hidden_size]
+            grad_h_n: 最终隐藏状态的梯度 [1, batch_size, hidden_size]
+
+        Returns:
+            grad_input: 输入序列的梯度
+            grad_W: 输入权重的梯度
+            grad_R: 循环权重的梯度
+            grad_bx: 输入偏置的梯度
+            grad_br: 循环偏置的梯度
+            grad_h0: 初始隐藏状态的梯度（None）
+            None: is_training 的梯度（None）
+        """
+        # 恢复保存的中间结果
+        W, R, bx, br, input, h, v = ctx.saved_tensors
+        time_steps = ctx.time_steps
+        batch_size = ctx.batch_size
+        input_size = ctx.input_size
+        hidden_size = ctx.hidden_size
+
+        # 构建 dh_new: [time_steps + 1, batch_size, hidden_size]
+        # dh_new[0] = grad_h_n (初始状态的梯度)
+        # dh_new[1:] = grad_output (时间步输出的梯度)
+        dh_new = torch.zeros(
+            (time_steps + 1, batch_size, hidden_size),
+            device=grad_output.device,
+            dtype=grad_output.dtype
+        )
+
+        # 设置时间步输出的梯度
+        dh_new[1:] = grad_output
+
+        # 设置最终隐藏状态的梯度（如果有）
+        if grad_h_n is not None and grad_h_n.numel() > 0:
+            dh_new[-1] = dh_new[-1] + grad_h_n[0]
+
+        # 调用 C++ 反向传播
+        dx, dW, dR, dbx, dbr, dh = gru_ops.haste_gru_backward(
+            time_steps=time_steps,
+            batch_size=batch_size,
+            input_size=input_size,
+            hidden_size=hidden_size,
+            W=W,
+            R=R,
+            bx=bx,
+            br=br,
+            x=input,
+            dh_new=dh_new,
+            h=h,
+            v=v
+        )
+
+        # 返回梯度
+        # 注意：h0 和 is_training 不需要梯度
+        return dx, dW, dR, dbx, dbr, None, None
+
+
 class CustomGRU(nn.GRU):
     """
     继承自 PyTorch nn.GRU 的自定义类，支持量化前向传播
@@ -375,100 +521,36 @@ class CustomGRU(nn.GRU):
         if not input.is_cuda:
             input = input.cuda()
 
-        # 使用非量化前向传播
         # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
         W, R, bx, br = self._get_haste_weights(device=input.device)
 
-        if self.use_quantization:
-            # 使用量化前向传播
-            if self.quant_params is None:
-                raise RuntimeError(
-                    "Quantization parameters not initialized. "
-                    "Please call _initialize_quantization() first or provide calibration_data in __init__."
-                )
-
-            # 实时量化权重（每次前向传播时量化，支持训练时权重更新）
-            W_quant, R_quant, bx_quant, br_quant = self._quantize_weights(
-                W, R, bx, br, input.device
-            )
-
-            if self.quant_type == 'int8':
-                # 调用量化前向传播，返回 (h, v) 元组
-                # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
-                # v 为反量化后的中间值：[time_steps, batch_size, hidden_size * 4]
-                output_full, v = gru_ops.quant_gru_forward_int8(
-                    is_training=self.training,  # 根据模型是否处于训练模式设置
-                    time_steps=seq_len,
-                    batch_size=batch_size,
-                    input_size=input_size,
-                    hidden_size=hidden_size,
-                    W_quant=W_quant,
-                    R_quant=R_quant,
-                    bx_quant=bx_quant,
-                    br_quant=br_quant,
-                    x=input,
-                    h0=h0 if h0 is not None else torch.empty(0, device=input.device),  # 传递初始状态或空张量
-                    quant_params=self.quant_params
-                )
-            else:  # int16
-                # 调用量化前向传播，返回 (h, v) 元组
-                # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
-                # v 为反量化后的中间值：[time_steps, batch_size, hidden_size * 4]
-                output_full, v = gru_ops.quant_gru_forward_int16(
-                    is_training=self.training,  # 根据模型是否处于训练模式设置
-                    time_steps=seq_len,
-                    batch_size=batch_size,
-                    input_size=input_size,
-                    hidden_size=hidden_size,
-                    W_quant=W_quant,
-                    R_quant=R_quant,
-                    bx_quant=bx_quant,
-                    br_quant=br_quant,
-                    x=input,
-                    h0=h0 if h0 is not None else torch.empty(0, device=input.device),  # 传递初始状态或空张量
-                    quant_params=self.quant_params
-                )
-            # 提取时间步输出，去掉初始状态
-            # output_full 形状: [time_steps + 1, batch_size, hidden_size]
-            # output 形状: [time_steps, batch_size, hidden_size]
-            output = output_full[1:]  # 跳过初始状态 h[0]，只返回时间步输出
-        else:
-            # 调用非量化前向传播，返回 (h, v) 元组
-            # h 包含初始状态：[time_steps + 1, batch_size, hidden_size]
-            # v 为中间值：[time_steps, batch_size, hidden_size * 4]
-            output_full, v = gru_ops.haste_gru_forward(
-                is_training=self.training,  # 根据模型是否处于训练模式设置
-                time_steps=seq_len,
-                batch_size=batch_size,
-                input_size=input_size,
-                hidden_size=hidden_size,
-                W=W,
-                R=R,
-                bx=bx,
-                br=br,
-                x=input,
-                h0=h0 if h0 is not None else torch.empty(0, device=input.device)  # 传递初始状态或空张量
-            )
-            # 提取时间步输出，去掉初始状态
-            # output_full 形状: [time_steps + 1, batch_size, hidden_size]
-            # output 形状: [time_steps, batch_size, hidden_size]
-            output = output_full[1:]  # 跳过初始状态 h[0]，只返回时间步输出
+        # 统一使用 GRUFunction 进行前向传播（支持量化和非量化模式的反向传播）
+        # 注意：GRUFunction 需要输入为 [time_steps, batch_size, input_size]
+        # 而 input 已经是这个格式了（之前已经处理了 batch_first）
+        output, h_n_from_func = GRUFunction.apply(
+            input,              # [time_steps, batch_size, input_size]
+            W,                  # [input_size, hidden_size * 3] (float32)
+            R,                  # [hidden_size, hidden_size * 3] (float32)
+            bx,                 # [hidden_size * 3] (float32)
+            br,                 # [hidden_size * 3] (float32)
+            h0,                 # [batch_size, hidden_size] 或 None
+            self.training,      # 是否处于训练模式
+            self.use_quantization,  # 是否使用量化
+            self.quant_type,    # 量化类型
+            self.quant_params   # 量化参数
+        )
+        # output 形状: [time_steps, batch_size, hidden_size]
+        # h_n_from_func 形状: [1, batch_size, hidden_size]
 
         # 处理 batch_first
         if self.batch_first:
             # [seq_len, batch, hidden_size] -> [batch, seq_len, hidden_size]
             output = output.transpose(0, 1)
 
-        # 获取最终隐藏状态（总是从计算结果中获取最后一个时间步）
-        # 注意：即使提供了 hx，最终状态也应该从计算结果中获取，而不是直接返回 hx
-        # output 形状: [seq_len, batch, hidden_size] 或 [batch, seq_len, hidden_size]
-        if self.batch_first:
-            # output: [batch, seq_len, hidden_size]
-            h_n = output[:, -1:, :]  # [batch, 1, hidden_size]
-            h_n = h_n.transpose(0, 1)  # [1, batch, hidden_size]
-        else:
-            # output: [seq_len, batch, hidden_size]
-            h_n = output[-1:, :, :]  # [1, batch, hidden_size]
+        # 获取最终隐藏状态
+        # GRUFunction 统一返回最终隐藏状态
+        # h_n_from_func 形状: [1, batch_size, hidden_size]
+        h_n = h_n_from_func
 
         # 确保 h_n 的形状为 [num_layers, batch, hidden_size]
         # 由于我们只支持单层，所以 h_n 已经是 [1, batch, hidden_size]

@@ -41,31 +41,31 @@ void quantitativeWeight(const int input_size, const int hidden_size,
                         QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant);
 
 template<typename QuantT>
-void quantGRUForward(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+void quantGRUForward(bool is_training,// 是否开启训练模式，true为训练，false为推理
                      const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
-                     const float *h0,  // 初始隐藏状态，可以为 nullptr
+                     const float *h0,// 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
-                     float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
-                     float *v   // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
+                     float *h,// (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                     float *v // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
 );
 
-void hasteGRUForward(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+void hasteGRUForward(bool is_training,// 是否开启训练模式，true为训练，false为推理
                      const int time_steps,
                      const int batch_size,
                      const int input_size,
                      const int hidden_size,
                      const float *W, const float *R, const float *bx,
                      const float *br, const float *x,
-                     const float *h0,  // 初始隐藏状态，可以为 nullptr
+                     const float *h0,// 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
-                     float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
-                     float *v   // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+                     float *h,// (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                     float *v // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
 );
 
-void forwardInterface(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+void forwardInterface(bool is_training,// 是否开启训练模式，true为训练，false为推理
                       bool is_quant,
                       bool use_int16,
                       int time_steps, int batch_size, int input_size, int hidden_size,
@@ -74,10 +74,11 @@ void forwardInterface(bool is_training,  // 是否开启训练模式，true为�
                       const float *bx,
                       const float *br,
                       const float *x,
+                      const float *h0,// 初始隐藏状态，可以为 nullptr
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
-                      float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
-                      float *v);  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+                      float *h, // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                      float *v);// (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
 
 void hasteGRUBackward(const int time_steps,
                       const int batch_size,
