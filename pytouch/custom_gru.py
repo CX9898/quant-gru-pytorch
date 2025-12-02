@@ -77,6 +77,10 @@ class CustomGRU(nn.GRU):
         # 注意：不再存储固定的量化权重，而是在每次前向传播时实时量化
         # 这样可以支持训练时权重的更新
 
+        # 性能优化：确保权重在 CUDA 上且为 float32
+        # 这样可以减少前向传播时的设备检查和类型转换
+        self._ensure_weights_on_cuda_float32()
+
         # 如果使用量化，需要校准量化参数（不量化权重）
         if self.use_quantization:
             if calibration_data is None:
@@ -90,14 +94,30 @@ class CustomGRU(nn.GRU):
         """
         将 PyTorch GRU 权重格式 (r, z, n) 转换为 Haste GRU 权重格式 (z, r, n)
         
+        数学原理：
+        - PyTorch GRU 使用门控顺序 (r, z, n)：reset gate, update gate, new gate
+        - Haste GRU 使用门控顺序 (z, r, n)：update gate, reset gate, new gate
+        - 转换方法：将第一维（3*hidden_size）分成三块，然后重新排列顺序
+        
+        转换等价性说明：
+        - 方法1（Haste）：先转置 [3*hidden, input] -> [input, 3*hidden]，再在最后一维重排序
+        - 方法2（本实现）：先在第一维重排序，再转置 [3*hidden, input] -> [input, 3*hidden]
+        - 两种方法数学上等价，因为转置和重排序是独立的操作
+        
         Args:
             w: 权重张量，第一维是 3*hidden_size，顺序为 r, z, n
+               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状为 [3*hidden]
             
         Returns:
             重排序后的权重张量，顺序为 z, r, n
+               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状保持不变 [3*hidden]
         """
         # 重排序在 3*hidden 维度上进行（第一维）
+        # chunk 将第一维分成三块：r, z, n（每块大小为 hidden_size）
         r, z, n = torch.chunk(w, 3, dim=0)
+        # 重新组合为 z, r, n 的顺序
         return torch.cat([z, r, n], dim=0)
 
     def _quantize_weights(self, W, R, bx, br, device):
@@ -194,6 +214,79 @@ class CustomGRU(nn.GRU):
         
         return W_quant, R_quant, bx_quant, br_quant
 
+    def _ensure_weights_on_cuda_float32(self):
+        """
+        确保所有权重和偏置在 CUDA 上且为 float32 类型
+        
+        性能优化：在初始化时统一处理，避免在前向传播时重复检查和转换
+        """
+        # 确保权重在 CUDA 上且为 float32
+        if not self.weight_ih_l0.is_cuda:
+            self.weight_ih_l0.data = self.weight_ih_l0.data.cuda()
+        if self.weight_ih_l0.dtype != torch.float32:
+            self.weight_ih_l0.data = self.weight_ih_l0.data.float()
+            
+        if not self.weight_hh_l0.is_cuda:
+            self.weight_hh_l0.data = self.weight_hh_l0.data.cuda()
+        if self.weight_hh_l0.dtype != torch.float32:
+            self.weight_hh_l0.data = self.weight_hh_l0.data.float()
+        
+        # 确保偏置在 CUDA 上且为 float32（如果使用偏置）
+        if self.bias:
+            if not self.bias_ih_l0.is_cuda:
+                self.bias_ih_l0.data = self.bias_ih_l0.data.cuda()
+            if self.bias_ih_l0.dtype != torch.float32:
+                self.bias_ih_l0.data = self.bias_ih_l0.data.float()
+                
+            if not self.bias_hh_l0.is_cuda:
+                self.bias_hh_l0.data = self.bias_hh_l0.data.cuda()
+            if self.bias_hh_l0.dtype != torch.float32:
+                self.bias_hh_l0.data = self.bias_hh_l0.data.float()
+
+    def _get_haste_weights(self, device: Optional[torch.device] = None):
+        """
+        获取 Haste 格式的权重和偏置
+        
+        这个方法统一处理权重格式转换，避免在多个地方重复代码。
+        转换过程：
+        1. 获取 PyTorch 格式的权重和偏置
+        2. 重排序：从 (r, z, n) 转为 (z, r, n)
+        3. 转置权重矩阵：从 [3*hidden, input] 转为 [input, 3*hidden]
+        
+        Args:
+            device: 目标设备（可选），如果为 None，使用权重的当前设备
+            
+        Returns:
+            W: 输入权重，形状 [input_size, 3*hidden_size]，顺序 (z, r, n)
+            R: 循环权重，形状 [hidden_size, 3*hidden_size]，顺序 (z, r, n)
+            bx: 输入偏置，形状 [3*hidden_size]，顺序 (z, r, n)
+            br: 循环偏置，形状 [3*hidden_size]，顺序 (z, r, n)
+        """
+        # 获取权重（已经在 CUDA 上且为 float32，由 _ensure_weights_on_cuda_float32 保证）
+        weight_ih = self.weight_ih_l0  # [3*hidden, input]
+        weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
+        
+        # 将 PyTorch 格式转换为 Haste 格式：
+        # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
+        # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
+        W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
+        R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
+        
+        # 处理偏置
+        if self.bias:
+            bias_ih = self.bias_ih_l0  # [3*hidden]
+            bias_hh = self.bias_hh_l0  # [3*hidden]
+            # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
+            bx = self._reorder_weights_pytorch_to_haste(bias_ih)  # [3*hidden], 顺序 (z, r, n)
+            br = self._reorder_weights_pytorch_to_haste(bias_hh)  # [3*hidden], 顺序 (z, r, n)
+        else:
+            # 如果没有偏置，创建零偏置
+            target_device = device if device is not None else weight_ih.device
+            bx = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
+            br = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
+        
+        return W, R, bx, br
+
     def _initialize_quantization(self, calibration_data: torch.Tensor):
         """
         初始化量化参数（不量化权重）
@@ -216,50 +309,8 @@ class CustomGRU(nn.GRU):
         time_steps, batch_size, input_size = calibration_data.shape
         hidden_size = self.hidden_size
 
-        # 获取权重和偏置
-        # PyTorch GRU 的权重格式：
-        # weight_ih_l0: [3*hidden, input] (行主序)
-        # weight_hh_l0: [3*hidden, hidden] (行主序)
-        # bias_ih_l0: [3*hidden]
-        # bias_hh_l0: [3*hidden]
-        weight_ih = self.weight_ih_l0  # [3*hidden, input]
-        weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
-
-        # 确保权重在 CUDA 上且为 float32
-        if not weight_ih.is_cuda:
-            weight_ih = weight_ih.cuda()
-        if not weight_hh.is_cuda:
-            weight_hh = weight_hh.cuda()
-        if weight_ih.dtype != torch.float32:
-            weight_ih = weight_ih.float()
-        if weight_hh.dtype != torch.float32:
-            weight_hh = weight_hh.float()
-
-        if self.bias:
-            bias_ih = self.bias_ih_l0  # [3*hidden]
-            bias_hh = self.bias_hh_l0  # [3*hidden]
-            # 确保偏置在 CUDA 上且为 float32
-            if not bias_ih.is_cuda:
-                bias_ih = bias_ih.cuda()
-            if not bias_hh.is_cuda:
-                bias_hh = bias_hh.cuda()
-            if bias_ih.dtype != torch.float32:
-                bias_ih = bias_ih.float()
-            if bias_hh.dtype != torch.float32:
-                bias_hh = bias_hh.float()
-            # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
-            bx = self._reorder_weights_pytorch_to_haste(bias_ih)
-            br = self._reorder_weights_pytorch_to_haste(bias_hh)
-        else:
-            # 如果没有偏置，创建零偏置
-            bx = torch.zeros(3 * hidden_size, device=calibration_data.device, dtype=torch.float32)
-            br = torch.zeros(3 * hidden_size, device=calibration_data.device, dtype=torch.float32)
-
-        # 将 PyTorch 格式转换为 Haste 格式：
-        # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
-        # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
-        W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
-        R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
+        # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
+        W, R, bx, br = self._get_haste_weights(device=calibration_data.device)
 
         # 只校准量化参数，不量化权重
         # 权重将在每次前向传播时实时量化，以支持训练时权重的更新
@@ -324,6 +375,10 @@ class CustomGRU(nn.GRU):
         if not input.is_cuda:
             input = input.cuda()
 
+        # 使用非量化前向传播
+        # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
+        W, R, bx, br = self._get_haste_weights(device=input.device)
+
         if self.use_quantization:
             # 使用量化前向传播
             if self.quant_params is None:
@@ -331,45 +386,6 @@ class CustomGRU(nn.GRU):
                     "Quantization parameters not initialized. "
                     "Please call _initialize_quantization() first or provide calibration_data in __init__."
                 )
-
-            # 获取当前权重和偏置（支持训练时权重更新）
-            weight_ih = self.weight_ih_l0  # [3*hidden, input]
-            weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
-
-            # 确保权重在 CUDA 上且为 float32
-            if not weight_ih.is_cuda:
-                weight_ih = weight_ih.cuda()
-            if not weight_hh.is_cuda:
-                weight_hh = weight_hh.cuda()
-            if weight_ih.dtype != torch.float32:
-                weight_ih = weight_ih.float()
-            if weight_hh.dtype != torch.float32:
-                weight_hh = weight_hh.float()
-
-            if self.bias:
-                bias_ih = self.bias_ih_l0
-                bias_hh = self.bias_hh_l0
-                # 确保偏置在 CUDA 上且为 float32
-                if not bias_ih.is_cuda:
-                    bias_ih = bias_ih.cuda()
-                if not bias_hh.is_cuda:
-                    bias_hh = bias_hh.cuda()
-                if bias_ih.dtype != torch.float32:
-                    bias_ih = bias_ih.float()
-                if bias_hh.dtype != torch.float32:
-                    bias_hh = bias_hh.float()
-                # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
-                bx = self._reorder_weights_pytorch_to_haste(bias_ih)
-                br = self._reorder_weights_pytorch_to_haste(bias_hh)
-            else:
-                bx = torch.zeros(3 * hidden_size, device=input.device, dtype=torch.float32)
-                br = torch.zeros(3 * hidden_size, device=input.device, dtype=torch.float32)
-
-            # 将 PyTorch 格式转换为 Haste 格式：
-            # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
-            # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
-            W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
-            R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
 
             # 实时量化权重（每次前向传播时量化，支持训练时权重更新）
             W_quant, R_quant, bx_quant, br_quant = self._quantize_weights(
@@ -405,45 +421,6 @@ class CustomGRU(nn.GRU):
                     quant_params=self.quant_params
                 )
         else:
-            # 使用非量化前向传播
-            # 获取权重和偏置
-            weight_ih = self.weight_ih_l0  # [3*hidden, input]
-            weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
-
-            # 确保权重在 CUDA 上且为 float32
-            if not weight_ih.is_cuda:
-                weight_ih = weight_ih.cuda()
-            if not weight_hh.is_cuda:
-                weight_hh = weight_hh.cuda()
-            if weight_ih.dtype != torch.float32:
-                weight_ih = weight_ih.float()
-            if weight_hh.dtype != torch.float32:
-                weight_hh = weight_hh.float()
-
-            if self.bias:
-                bias_ih = self.bias_ih_l0
-                bias_hh = self.bias_hh_l0
-                # 确保偏置在 CUDA 上且为 float32
-                if not bias_ih.is_cuda:
-                    bias_ih = bias_ih.cuda()
-                if not bias_hh.is_cuda:
-                    bias_hh = bias_hh.cuda()
-                if bias_ih.dtype != torch.float32:
-                    bias_ih = bias_ih.float()
-                if bias_hh.dtype != torch.float32:
-                    bias_hh = bias_hh.float()
-                # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
-                bx = self._reorder_weights_pytorch_to_haste(bias_ih)
-                br = self._reorder_weights_pytorch_to_haste(bias_hh)
-            else:
-                bx = torch.zeros(3 * hidden_size, device=input.device, dtype=torch.float32)
-                br = torch.zeros(3 * hidden_size, device=input.device, dtype=torch.float32)
-
-            # 将 PyTorch 格式转换为 Haste 格式：
-            # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
-            # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
-            W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
-            R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
 
             output = gru_ops.haste_gru_forward(
                 time_steps=seq_len,
