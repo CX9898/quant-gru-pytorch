@@ -99,7 +99,7 @@ void hasteGRUForward(const int time_steps,
                      const int hidden_size,
                      const float *W, const float *R, const float *bx,
                      const float *br, const float *x,
-                     const float *h0,  // 初始隐藏状态，可以为 nullptr
+                     const float *h0,// 初始隐藏状态，可以为 nullptr
                      const cublasHandle_t &g_blas_handle,
                      float *h) {
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
@@ -134,28 +134,31 @@ void quantitativeWeight(const int input_size, const int hidden_size,
                         const float *W, const float *R, const float *bx, const float *br,
                         const GRUQuantitativeParameters &quant_parms,
                         QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant) {
+    // 显式创建dev::vector以避免临时对象问题
+    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+
     dev::quantificationPerChannel(
         W, W_quant, input_size,
-        3 * hidden_size, quant_parms.exp2_inv_W_);
+        3 * hidden_size, exp2_inv_W_dev);
     dev::quantificationPerChannel(
         R, R_quant, hidden_size,
-        3 * hidden_size, quant_parms.exp2_inv_R_);
-
-    dev::vector<int32_t> exp2_inv_bx(quant_parms.exp2_inv_bx_);
+        3 * hidden_size, exp2_inv_R_dev);
     dev::quantificationPerChannel(bx,
                                   bx_quant, 1,
-                                  3 * hidden_size, exp2_inv_bx);
-    dev::vector<int32_t> exp2_inv_br(quant_parms.exp2_inv_br_);
+                                  3 * hidden_size, exp2_inv_bx_dev);
     dev::quantificationPerChannel(br,
                                   br_quant, 1,
-                                  3 * hidden_size, exp2_inv_br);
+                                  3 * hidden_size, exp2_inv_br_dev);
 }
 
 template<typename QuantT>
 void quantGRUForward(const int time_steps, const int batch_size, const int input_size,
                      const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
                      const int32_t *br, const float *x,
-                     const float *h0,  // 初始隐藏状态，可以为 nullptr
+                     const float *h0,// 初始隐藏状态，可以为 nullptr
                      const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle,
                      float *h// (time_steps) * batch_size * hidden_size
@@ -168,13 +171,13 @@ void quantGRUForward(const int time_steps, const int batch_size, const int input
                         quant_parms.zp_x_);
 
     dev::vector<QuantT> h_quant((time_steps + 1) * batch_size * hidden_size);
-    
+
     // 处理初始隐藏状态
     const int NH = batch_size * hidden_size;
     if (h0 != nullptr) {
         // 如果提供了初始状态，直接量化到 h_quant[0]
         dev::quantification(h0, h_quant.data(), NH,
-                           quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+                            quant_parms.exp2_inv_h_, quant_parms.zp_h_);
     } else {
         // 否则初始化为零
         h_quant.zero();
@@ -344,7 +347,7 @@ template void quantGRUForward<int8_t>(
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
+    const float *h0,// 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
     float *h);
@@ -353,7 +356,7 @@ template void quantGRUForward<int16_t>(
     const int time_steps, const int batch_size, const int input_size,
     const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx,
     const int32_t *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
+    const float *h0,// 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_parms,
     const cublasHandle_t &g_blas_handle,
     float *h);
