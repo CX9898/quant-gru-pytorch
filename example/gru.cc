@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "checkData.hpp"
 #include "devVector.h"
 #include "gru_interface.hpp"
 #include "gru_quant.h"
@@ -147,19 +148,29 @@ void GruInference(const int time_steps,
     d2h(h, h_dev.data(), h_dev.size());
 }
 
+// 梯度输出结构体
+struct GRUTrainGradients {
+    std::vector<float> dx; // 输入序列梯度 [time_steps * batch_size * input_size]
+    std::vector<float> dW; // 对输入权重的梯度 [input_size * hidden_size * 3]
+    std::vector<float> dR; // 对循环权重的梯度 [hidden_size * hidden_size * 3]
+    std::vector<float> dbx;// 对输入偏置的梯度 [hidden_size * 3]
+    std::vector<float> dbr;// 对循环偏置的梯度 [hidden_size * 3]
+    std::vector<float> dh; // 对最后隐藏状态的梯度 [batch_size * hidden_size]
+};
+
 template<typename QuantT>
-void GruTrainQuant(const int time_steps,
-                   const int batch_size,
-                   const int input_size,
-                   const int hidden_size,
-                   const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
-                                                   // hidden_size * 3] 对应三个门
-                   const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
-                   const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
-                   const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
-                   const std::vector<float> &x,    // 输入序列张量
-                   const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
-                                                   // [hidden_size, batch_size, time_steps]
+GRUTrainGradients GruTrainQuant(const int time_steps,
+                                const int batch_size,
+                                const int input_size,
+                                const int hidden_size,
+                                const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
+                                                                // hidden_size * 3] 对应三个门
+                                const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
+                                const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
+                                const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
+                                const std::vector<float> &x,    // 输入序列张量
+                                const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
+                                                                // [hidden_size, batch_size, time_steps]
 
 ) {
     // 步骤1: 先校验出量化参数
@@ -300,20 +311,32 @@ void GruTrainQuant(const int time_steps,
                      dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
                      dq_dev.data(), nullptr);
     }
+
+    // 将梯度从GPU复制到CPU
+    GRUTrainGradients gradients;
+
+    d2h(gradients.dx, dx_dev);
+    d2h(gradients.dW, dW_dev);
+    d2h(gradients.dR, dR_dev);
+    d2h(gradients.dbx, dbx_dev);
+    d2h(gradients.dbr, dbr_dev);
+    d2h(gradients.dh, dh_dev);
+
+    return gradients;
 }
 
-void GruTrain(const int time_steps,
-              const int batch_size,
-              const int input_size,
-              const int hidden_size,
-              const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
-                                              // hidden_size * 3] 对应三个门
-              const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
-              const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
-              const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
-              const std::vector<float> &x,    // 输入序列张量
-              const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
-                                              // [hidden_size, batch_size, time_steps]
+GRUTrainGradients GruTrain(const int time_steps,
+                           const int batch_size,
+                           const int input_size,
+                           const int hidden_size,
+                           const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
+                                                           // hidden_size * 3] 对应三个门
+                           const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
+                           const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
+                           const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
+                           const std::vector<float> &x,    // 输入序列张量
+                           const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
+                                                           // [hidden_size, batch_size, time_steps]
 
 ) {
 
@@ -370,6 +393,75 @@ void GruTrain(const int time_steps,
                      dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
                      dq_dev.data(), nullptr);
     }
+
+    // 将梯度从GPU复制到CPU
+    GRUTrainGradients gradients;
+    gradients.dx.resize(time_steps * batch_size * input_size);
+    gradients.dW.resize(input_size * hidden_size * 3);
+    gradients.dR.resize(hidden_size * hidden_size * 3);
+    gradients.dbx.resize(hidden_size * 3);
+    gradients.dbr.resize(hidden_size * 3);
+    gradients.dh.resize(batch_size * hidden_size);
+
+    d2h(gradients.dx.data(), dx_dev.data(), dx_dev.size());
+    d2h(gradients.dW.data(), dW_dev.data(), dW_dev.size());
+    d2h(gradients.dR.data(), dR_dev.data(), dR_dev.size());
+    d2h(gradients.dbx.data(), dbx_dev.data(), dbx_dev.size());
+    d2h(gradients.dbr.data(), dbr_dev.data(), dbr_dev.size());
+    d2h(gradients.dh.data(), dh_dev.data(), dh_dev.size());
+
+    return gradients;
+}
+
+// 比较两个GRU训练梯度的差异
+void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
+                              const GRUTrainGradients &gradients_quant,
+                              const std::string &prefix = "") {
+    printf("\n========== %s GRU Train Gradients Comparison ==========\n", prefix.c_str());
+
+    // 比较 dx
+    {
+        const float mse = computeMSE(gradients_float.dx, gradients_quant.dx);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dx, gradients_quant.dx);
+        printf("dx: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dW
+    {
+        const float mse = computeMSE(gradients_float.dW, gradients_quant.dW);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dW, gradients_quant.dW);
+        printf("dW: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dR
+    {
+        const float mse = computeMSE(gradients_float.dR, gradients_quant.dR);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dR, gradients_quant.dR);
+        printf("dR: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dbx
+    {
+        const float mse = computeMSE(gradients_float.dbx, gradients_quant.dbx);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dbx, gradients_quant.dbx);
+        printf("dbx: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dbr
+    {
+        const float mse = computeMSE(gradients_float.dbr, gradients_quant.dbr);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dbr, gradients_quant.dbr);
+        printf("dbr: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    // 比较 dh
+    {
+        const float mse = computeMSE(gradients_float.dh, gradients_quant.dh);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dh, gradients_quant.dh);
+        printf("dh: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+    }
+
+    printf("===========================================================\n\n");
 }
 
 void checkHQuantizationWithCosine(
@@ -589,11 +681,24 @@ int main() {
     printf("cudaError(GruInferenceQuant finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
 
-    GruTrain(time_steps, batch_size, input_size, hidden_size,
-             W, R, bx, br, x, dh);
+    // 运行浮点训练
+    printf("\n========== Running Float GRU Training ==========\n");
+    GRUTrainGradients gradients_float = GruTrain(time_steps, batch_size, input_size, hidden_size,
+                                                 W, R, bx, br, x, dh);
 
     printf("cudaError(GruTrain finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
+
+    // 运行量化训练
+    printf("\n========== Running Quantized GRU Training ==========\n");
+    GRUTrainGradients gradients_quant = GruTrainQuant<int8_t>(time_steps, batch_size, input_size, hidden_size,
+                                                              W, R, bx, br, x, dh);
+
+    printf("cudaError(GruTrainQuant finish): %s\n",
+           cudaGetErrorString(cudaGetLastError()));
+
+    // 比较两个训练的输出
+    compareGRUTrainGradients(gradients_float, gradients_quant, "Float vs Quantized");
 
     cublasDestroy(g_blas_handle);
 
