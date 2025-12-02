@@ -777,6 +777,14 @@ void dequantification(const QuantT *quant_data, T *data, size_t size,
                       int32_t exp2_inv, int32_t zp);
 
 template<typename T, typename QuantT>
+void quantificationV(const T *data, QuantT *quant_data,
+                     int time_steps, int batch_size, int hidden_size,
+                     int32_t exp2_inv_z, int32_t zp_z,
+                     int32_t exp2_inv_r, int32_t zp_r,
+                     int32_t exp2_inv_g, int32_t zp_g,
+                     int32_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
+
+template<typename T, typename QuantT>
 void dequantificationV(const QuantT *quant_data, T *data,
                        int time_steps, int batch_size, int hidden_size,
                        int32_t exp2_inv_z, int32_t zp_z,
