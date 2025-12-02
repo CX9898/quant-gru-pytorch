@@ -65,7 +65,8 @@ void hasteGRUForward(bool is_training,  // 是否开启训练模式，true为训
                      float *v   // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
 );
 
-void forwardInterface(bool is_quant,
+void forwardInterface(bool is_training,  // 是否开启训练模式，true为训练，false为推理
+                      bool is_quant,
                       bool use_int16,
                       int time_steps, int batch_size, int input_size, int hidden_size,
                       const float *W,
@@ -75,4 +76,5 @@ void forwardInterface(bool is_quant,
                       const float *x,
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
-                      float *h);  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                      float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                      float *v);  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
