@@ -228,7 +228,8 @@ void quantGRUForward(bool is_training,// 是否开启训练模式，true为训�
     }
 }
 
-void forwardInterface(bool is_quant,
+void forwardInterface(bool is_training,// 是否开启训练模式，true为训练，false为推理
+                      bool is_quant,
                       bool use_int16,
                       int time_steps, int batch_size, int input_size, int hidden_size,
                       const float *W,
@@ -238,7 +239,8 @@ void forwardInterface(bool is_quant,
                       const float *x,
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
-                      float *h) {
+                      float *h,  // (time_steps + 1) * batch_size * hidden_size，包含初始状态
+                      float *v) {// (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
     if (is_quant) {
         if (use_int16) {
             dev::vector<int16_t> W_quant(hidden_size * 3 * input_size);
@@ -246,19 +248,19 @@ void forwardInterface(bool is_quant,
             dev::vector<int32_t> bx_quant(hidden_size * 3);
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(false, time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, nullptr);
+            quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, v);
         } else {
             dev::vector<int8_t> W_quant(hidden_size * 3 * input_size);
             dev::vector<int8_t> R_quant(hidden_size * 3 * hidden_size);
             dev::vector<int32_t> bx_quant(hidden_size * 3);
             dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(false, time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, nullptr);
+            quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
+                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, nullptr, quant_gru_scales, g_blas_handle, h, v);
         }
     } else {
-        hasteGRUForward(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, nullptr, g_blas_handle, h, nullptr);
+        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, nullptr, g_blas_handle, h, v);
     }
 }
 

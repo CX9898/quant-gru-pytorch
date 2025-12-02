@@ -418,6 +418,59 @@ std::tuple<torch::Tensor, torch::Tensor> haste_gru_forward_wrapper(
     return std::make_tuple(h, v);
 }
 
+// forwardInterface 的包装函数
+std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
+    bool is_training,  // 是否开启训练模式，true为训练，false为推理
+    bool is_quant,
+    bool use_int16,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W,
+    const torch::Tensor &R,
+    const torch::Tensor &bx,
+    const torch::Tensor &br,
+    const torch::Tensor &x,
+    const GRUQuantitativeParametersPy &quant_params) {
+
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 创建输出张量，包含初始状态，大小为 (time_steps + 1) * batch_size * hidden_size
+    auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // 创建v输出张量，大小为 time_steps * batch_size * hidden_size * 4
+    auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
+
+    forwardInterface(
+        is_training,
+        is_quant,
+        use_int16,
+        time_steps, batch_size, input_size, hidden_size,
+        W.data_ptr<float>(),
+        R.data_ptr<float>(),
+        bx.data_ptr<float>(),
+        br.data_ptr<float>(),
+        x.data_ptr<float>(),
+        cpp_params,
+        g_blas_handle,
+        h.data_ptr<float>(),
+        v.data_ptr<float>()  // 传递v参数
+    );
+
+    return std::make_tuple(h, v);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
 
@@ -511,4 +564,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor());// 初始隐藏状态，可选；返回 (h, v) 元组，h包含初始状态，v为中间值
+
+    // forwardInterface 统一接口
+    m.def("forward_interface", &forward_interface_wrapper,
+          "Unified GRU forward interface supporting both quantized and non-quantized modes",
+          py::arg("is_training"),// 是否开启训练模式，true为训练，false为推理
+          py::arg("is_quant"), py::arg("use_int16"),
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为中间值
 }
