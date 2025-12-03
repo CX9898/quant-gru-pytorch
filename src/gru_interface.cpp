@@ -1,4 +1,5 @@
 #include "gru_interface.hpp"
+#include "quantize_ops_helper.hpp"
 
 
 void calibrateGruScales(
@@ -91,6 +92,30 @@ GRUQuantitativeParameters calibrateGruScales(
         nullptr);
 
     return forward.getGRUQuantitativeParameters();
+}
+
+// 校准量化参数并初始化 LUT 表（组合函数，方便使用）
+// 内部会根据 use_int16 参数自动选择相应的 LUT 初始化方法
+GRUQuantitativeParameters calibrateGruScalesAndInitLut(
+    bool use_int16,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W,
+    const float *R,
+    const float *bx,
+    const float *br,
+    const float *x,
+    const cublasHandle_t &g_blas_handle) {
+    // 先校准量化参数
+    GRUQuantitativeParameters quant_params = calibrateGruScales(
+        use_int16,
+        time_steps, batch_size, input_size, hidden_size,
+        W, R, bx, br, x,
+        g_blas_handle);
+
+    // 初始化 LUT 表（内部会根据 use_int16 自动选择方法）
+    initialize_quantization_lut(quant_params, use_int16);
+
+    return quant_params;
 }
 
 void hasteGRUForward(bool is_training,// 是否开启训练模式，true为训练，false为推理
@@ -213,13 +238,18 @@ void quantGRUForward(bool is_training,// 是否开启训练模式，true为训�
         h_quant.setVal(quant_parms.zp_h_);
     }
 
-    generate_int8_lut_from_exp2_inv(
-        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
-        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
-        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
-        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+    // 注意：generate_int8_lut_from_exp2_inv 已从 quantGRUForward 中移除
+    // 该函数应该在初始化时调用一次，而不是每次前向传播都调用
+    // 这样可以避免重复生成 LUT 表，提高性能
+
+//    // 使用分段线性量化表替代传统的LUT表
+//    generate_piecewise_linear_lut_from_exp2_inv<QuantT>(
+//        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
+//        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+//        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
+//        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
+//        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
+//        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
 
     dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
@@ -407,3 +437,29 @@ template void quantGRUForward<int16_t>(
     const cublasHandle_t &g_blas_handle,
     float *h,
     float *v);
+
+// 初始化量化 LUT 表（仅在初始化时调用一次）
+// 接收量化参数对象和量化类型，内部根据类型自动选择相应的 LUT 初始化方法
+// 支持 int8 和 int16，未来可扩展支持其他类型
+// 解耦实现细节，上层无需关注具体参数和初始化方法
+void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params, bool use_int16) {
+    if (use_int16) {
+        // int16 使用分段线性量化表
+        generate_piecewise_linear_lut_from_exp2_inv<int16_t>(
+            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
+            quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
+            quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
+            quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
+            quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+    } else {
+        // int8 使用传统的 LUT 表
+        generate_int8_lut_from_exp2_inv(
+            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
+            quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
+            quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
+            quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
+            quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+    }
+}

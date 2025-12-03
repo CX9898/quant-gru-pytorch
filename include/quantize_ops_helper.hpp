@@ -172,6 +172,23 @@ void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
                                      int32_t exp2_inv_g_out,
                                      int32_t zp_g_out);
 
+// 生成分段线性量化表（基于exp2_inv参数，支持模板类型）
+template<typename QuantT>
+void generate_piecewise_linear_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
+                                                  int32_t zp_z_pre,
+                                                  int32_t exp2_inv_z_out,
+                                                  int32_t zp_z_out,
+                                                  int32_t exp2_inv_r_pre,
+                                                  int32_t zp_r_pre,
+                                                  int32_t exp2_inv_r_out,
+                                                  int32_t zp_r_out,
+                                                  int32_t exp2_inv_g_pre,
+                                                  int32_t zp_g_pre,
+                                                  int32_t exp2_inv_g_out,
+                                                  int32_t zp_g_out,
+                                                  float x_min = -6.0f,
+                                                  float x_max = 6.0f);
+
 
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int n) {
     if (n <= 0) return x << (-n);

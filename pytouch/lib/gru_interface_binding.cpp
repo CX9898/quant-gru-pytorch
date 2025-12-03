@@ -168,6 +168,43 @@ GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
     return py_params;
 }
 
+// 校准 GRU 量化参数并初始化 LUT 表的包装函数（组合函数）
+GRUQuantitativeParametersPy calibrate_gru_scales_and_init_lut_wrapper(
+    bool use_int16,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W,
+    const torch::Tensor &R,
+    const torch::Tensor &bx,
+    const torch::Tensor &br,
+    const torch::Tensor &x) {
+
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 调用组合函数（内部会处理 LUT 初始化）
+    GRUQuantitativeParameters quant_params = calibrateGruScalesAndInitLut(
+        use_int16,
+        time_steps, batch_size, input_size, hidden_size,
+        W.data_ptr<float>(),
+        R.data_ptr<float>(),
+        bx.data_ptr<float>(),
+        br.data_ptr<float>(),
+        x.data_ptr<float>(),
+        g_blas_handle);
+
+    GRUQuantitativeParametersPy py_params;
+    py_params.from_cpp(quant_params);
+    return py_params;
+}
+
 // 量化权重的包装函数（int8）
 void quantitative_weight_int8_wrapper(
     int input_size, int hidden_size,
@@ -566,6 +603,16 @@ haste_gru_backward_wrapper(
     return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
 }
 
+// 初始化量化 LUT 表的包装函数
+// 将 Python 绑定层的参数转换为 C++ 接口层的参数
+void initialize_quantization_lut_wrapper(
+    const GRUQuantitativeParametersPy &quant_params,
+    bool use_int16) {
+    // 转换为 C++ 结构体并调用 gru_interface 中的函数
+    GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
+    initialize_quantization_lut(cpp_params, use_int16);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
 
@@ -614,6 +661,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // 校准量化参数
     m.def("calibrate_gru_scales", &calibrate_gru_scales_wrapper,
           "Calibrate GRU quantization scales",
+          py::arg("use_int16"), py::arg("time_steps"), py::arg("batch_size"),
+          py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"));
+
+    // 校准量化参数并初始化 LUT 表（组合函数，方便使用）
+    m.def("calibrate_gru_scales_and_init_lut", &calibrate_gru_scales_and_init_lut_wrapper,
+          "Calibrate GRU quantization scales and initialize LUT tables (convenience function)",
           py::arg("use_int16"), py::arg("time_steps"), py::arg("batch_size"),
           py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"));
@@ -676,4 +730,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
           py::arg("x"), py::arg("dh_new"), py::arg("h"), py::arg("v"));// 中间值v，必需；返回 (dx, dW, dR, dbx, dbr, dh) 元组
+
+    // 初始化量化 LUT 表（仅在初始化时调用一次）
+    // 接收量化参数对象和量化类型，内部根据类型自动选择相应的 LUT 初始化方法
+    // 支持 int8 和 int16，未来可扩展支持其他类型
+    m.def("initialize_quantization_lut", &initialize_quantization_lut_wrapper,
+          "Initialize quantization LUT tables from quantization parameters (should be called only once during initialization)",
+          py::arg("quant_params"), py::arg("use_int16"));
 }

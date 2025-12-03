@@ -577,6 +577,12 @@ class CustomGRU(nn.GRU):
             x=calibration_data
         )
 
+        # 初始化时生成量化 LUT 表（仅调用一次）
+        # 传入量化参数对象和量化类型，内部根据类型自动选择相应的 LUT 初始化方法
+        # 支持 int8 和 int16，未来可扩展支持其他类型
+        use_int16 = (self.quant_type == 'int16')
+        gru_ops.initialize_quantization_lut(quant_params=self.quant_params, use_int16=use_int16)
+
     def forward(
         self,
         input: torch.Tensor,

@@ -48,11 +48,11 @@ __device__ __forceinline__ QuantT computeZ( // 更新门z
         rshift_round(br_val, rescale_params.n_br_div_z_[channel_idx]); // n为: scale_br / scale_z_pre ≈ 2^-n; br为R的偏置
 
     const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
-    const QuantT z_pre_i8 = dev::clamp<QuantT>(z_pre_i32);// clamp: 截断到int8的范围
 
+    const QuantT z_pre_i8 = dev::clamp<QuantT>(z_pre_i32);// clamp: 截断到int8的范围
     const QuantT z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut); // TODO: 支持int16量化
 
-    // TODO: 分段线性量化
+//    // TODO: 分段线性量化
 //    QuantT z;
 //    if constexpr (std::is_same_v<QuantT, int16_t>) {
 //        // INT16 版本：使用分段线性拟合（z 门）
@@ -132,10 +132,11 @@ __device__ __forceinline__ QuantT computeR( // 重置门r
 
     // scale_z_pre是通过效验阶段得到的; 通过sigmoid函数入口前的各项相加:Wx_val+Rh_val+bx_val+br_val的结果的的最大最小值计算得到
     const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
+
     const QuantT r_pre_i8 = dev::clamp<QuantT>(r_pre_i32); // clamp: 截断到int8的范围
     const QuantT r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut); // TODO: 支持int16量化
 
-    // TODO: 分段线性量化
+//    // TODO: 分段线性量化
 //    QuantT r;
 //    if constexpr (std::is_same_v<QuantT, int16_t>) {
 //        // INT16 版本：使用分段线性拟合（r 门）
@@ -235,11 +236,11 @@ __device__ __forceinline__ QuantT computeG( // New Gate
 
     // 累加求和
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
-    const QuantT g_pre_i8 = dev::clamp<QuantT>(g_pre_i32); // 截断到int8
 
+    const QuantT g_pre_i8 = dev::clamp<QuantT>(g_pre_i32); // 截断到int8
     const QuantT g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut); // TODO: 支持int16量化
 
-    // TODO: 分段线性量化
+//    // TODO: 分段线性量化
 //    QuantT g;
 //    if constexpr (std::is_same_v<QuantT, int16_t>) {
 //        // INT16 版本：使用分段线性拟合
