@@ -219,8 +219,22 @@ class GRUFunction(torch.autograd.Function):
 
         # 构建 dh_new: [time_steps + 1, batch_size, hidden_size]
         # dh_new 包含所有时间步隐藏状态的梯度，用于 C++ 反向传播接口
-        # - dh_new[0]: 初始状态的梯度（通常为 0，除非有来自外部的梯度）
-        # - dh_new[1:time_steps+1]: 时间步 1 到 time_steps 的隐藏状态梯度
+        #
+        # 注意：C++ 代码从后往前遍历时间步（i = time_steps-1 到 0），
+        # 对于每个时间步 i，使用指针偏移 dh_new + (i + 1) * NH（NH = batch_size * hidden_size）
+        #
+        # 指针偏移说明（NH 是一个时间步的大小，以元素为单位）：
+        # - dh_new + 0 * NH = dh_new + 0：指向 dh_new[0]（时间步 0，初始状态）
+        # - dh_new + 1 * NH = dh_new + NH：指向 dh_new[NH]（时间步 1）
+        # - dh_new + 2 * NH = dh_new + 2*NH：指向 dh_new[2*NH]（时间步 2）
+        #
+        # 在循环中：
+        # - 当 i = time_steps-1 时，使用 dh_new + (time_steps-1+1) * NH = dh_new + time_steps * NH（最后一个时间步）
+        # - 当 i = 0 时，使用 dh_new + (0+1) * NH = dh_new + 1 * NH = dh_new + NH（时间步 1）
+        # - dh_new[0]（时间步 0）：从未被访问，保持为 0（正确）
+        #
+        # 初始状态 h0 的梯度通过 C++ 返回的 dh 计算（在最后一次迭代 i=0 后），
+        # 而不是通过 dh_new[0]。dh 包含了从时间步 1 传播回来的梯度。
         dh_new = torch.zeros(
             (time_steps + 1, batch_size, hidden_size),
             device=grad_output.device,
@@ -233,10 +247,28 @@ class GRUFunction(torch.autograd.Function):
         dh_new[1:] = grad_output
 
         # 处理最终隐藏状态的梯度
-        # 注意：h_n = output_full[-1:]，即 output_full[time_steps]
-        # 而 output = output_full[1:]，所以 output[-1] = output_full[time_steps] = h_n[0]
-        # 因此 grad_output[-1] 和 grad_h_n[0] 都对应最后一个时间步的梯度
-        # 需要将它们相加：dh_new[-1] = grad_output[-1] + grad_h_n[0]
+        #
+        # 核心问题：同一个隐藏状态被返回了两次
+        # - output[-1] = output_full[time_steps]（最后一个时间步的隐藏状态）
+        # - h_n[0] = output_full[time_steps]（同一个隐藏状态）
+        #
+        # 在 PyTorch 的 autograd 机制中，如果一个值被多个地方使用，
+        # 反向传播时梯度会从多个路径传回，需要将这些梯度相加。
+        #
+        # 梯度来源：
+        # - grad_output[-1]: 损失函数对 output[-1] 的梯度
+        # - grad_h_n[0]: 损失函数对 h_n[0] 的梯度
+        # 两者都对应 output_full[time_steps]，需要相加得到总梯度
+        #
+        # 执行过程：
+        # 1. dh_new[1:] = grad_output 后，dh_new[-1] = grad_output[time_steps-1] = grad_output[-1]
+        # 2. dh_new[-1] = dh_new[-1] + grad_h_n[0] 将两个来源的梯度相加
+        #
+        # 尺寸验证：
+        # - dh_new[-1] 的形状是 [batch_size, hidden_size]（对应 dh_new[time_steps]）
+        # - grad_h_n[0] 的形状是 [batch_size, hidden_size]
+        # - 尺寸匹配，可以相加
+        # - 相加后，dh_new 的形状仍然是 [time_steps + 1, batch_size, hidden_size]，没有改变
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
