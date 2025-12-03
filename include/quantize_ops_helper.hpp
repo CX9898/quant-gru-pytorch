@@ -769,3 +769,110 @@ inline void fillVectorWithNormalDistribution(
         value = sample;
     }
 }
+
+
+// 辅助函数：量化浮点数为 INT16（对称量化）
+inline int16_t quantize_coefficient_int16(float val_fp, int8_t shift_bits) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
+    q = std::max(-32768, std::min(32767, q));
+    return static_cast<int16_t>(q);
+}
+
+// 辅助函数：量化输入为 UINT16（非对称量化）
+inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int16_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    q = std::max(0, std::min(65535, q));
+    return static_cast<uint16_t>(q);
+}
+
+// 辅助函数：确定 shift_bits（根据最大值）
+inline int8_t determine_shift_bits_int16(float max_val) {
+    const float max_q = 32767.0f;
+    if (max_val < 1e-9f) return 0;
+    float scale = max_val / max_q;
+    int8_t shift_bits = static_cast<int8_t>(std::ceil(-std::log2(scale)));
+    return std::max(static_cast<int8_t>(0), shift_bits);
+}
+
+// 辅助函数：量化浮点数为 INT8（对称量化）
+inline int8_t quantize_coefficient_int8(float val_fp, int8_t shift_bits) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
+    q = std::max(-128, std::min(127, q));
+    return static_cast<int8_t>(q);
+}
+
+// 辅助函数：量化输入为 UINT8（非对称量化）
+inline uint8_t quantize_input_uint8(float val_fp, int8_t shift_bits, int8_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    q = std::max(0, std::min(255, q));
+    return static_cast<uint8_t>(q);
+}
+
+// 辅助函数：确定 shift_bits（根据最大值，INT8 版本）
+inline int8_t determine_shift_bits_int8(float max_val) {
+    const float max_q = 127.0f;
+    if (max_val < 1e-9f) return 0;
+    float scale = max_val / max_q;
+    int8_t shift_bits = static_cast<int8_t>(std::ceil(-std::log2(scale)));
+    return std::max(static_cast<int8_t>(0), shift_bits);
+}
+
+void init_sigmoid_z_lut_int8(
+    int8_t shift_bits_x,
+    int8_t zp_x,
+    int8_t shift_bits_y,
+    int8_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);
+
+void init_sigmoid_r_lut_int8(
+    int8_t shift_bits_x,
+    int8_t zp_x,
+    int8_t shift_bits_y,
+    int8_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);
+
+void init_tanh_lut_int8(
+    int8_t shift_bits_x,
+    int8_t zp_x,
+    int8_t shift_bits_y,
+    int8_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);
+
+void init_tanh_lut_int16(
+    int8_t shift_bits_x,
+    int16_t zp_x,
+    int8_t shift_bits_y,
+    int16_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);
+
+// 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - r 门）
+void init_sigmoid_r_lut_int16(
+    int8_t shift_bits_x,
+    int16_t zp_x,
+    int8_t shift_bits_y,
+    int16_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);
+
+// 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - z 门）
+void init_sigmoid_z_lut_int16(
+    int8_t shift_bits_x,
+    int16_t zp_x,
+    int8_t shift_bits_y,
+    int16_t zp_y,
+    float x_min = -6.0f,
+    float x_max = 6.0f
+);

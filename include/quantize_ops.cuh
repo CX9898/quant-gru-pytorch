@@ -7,6 +7,51 @@ extern __constant__ int8_t d_sigmoid_int8_z_lut[256];
 extern __constant__ int8_t d_sigmoid_int8_r_lut[256];
 extern __constant__ int8_t d_tanh_int8_g_lut[256];
 
+// ==================== 分段线性量化数据结构 ====================
+#define NUM_SEGMENTS 16
+
+// INT16 版本的段参数结构
+struct SegmentParams_INT16 {
+    int16_t q_b;                    // 量化后的系数 b (INT16)
+    int8_t n_BX_total;              // 融合后的移位位数 (INT8，可能为负)
+    int32_t term_c_precomputed;     // 预计算的 term_c (INT32)
+    uint16_t threshold;             // 段阈值 (UINT16，量化后的输入值)
+};
+
+// Sigmoid/Tanh 查找表结构（INT16）
+struct SigmoidLUT_INT16 {
+    SegmentParams_INT16 segments[NUM_SEGMENTS];
+    int16_t zp_x;                   // 输入 zero-point (INT16)
+    int8_t shift_bits_x;             // 输入 shift_bits (INT8)
+    int8_t shift_bits_y;             // 输出 shift_bits (INT8)
+    int16_t zp_y;                   // 输出 zero-point (INT16)
+};
+
+// INT8 版本的段参数结构
+struct SegmentParams_INT8 {
+    int8_t q_b;                    // 量化后的系数 b (INT8)
+    int8_t n_BX_total;              // 融合后的移位位数 (INT8，可能为负)
+    int16_t term_c_precomputed;     // 预计算的 term_c (INT16)
+    uint8_t threshold;             // 段阈值 (UINT8，量化后的输入值)
+};
+
+// Sigmoid/Tanh 查找表结构（INT8）
+struct SigmoidLUT_INT8 {
+    SegmentParams_INT8 segments[NUM_SEGMENTS];
+    int8_t zp_x;                   // 输入 zero-point (INT8)
+    int8_t shift_bits_x;             // 输入 shift_bits (INT8)
+    int8_t shift_bits_y;             // 输出 shift_bits (INT8)
+    int8_t zp_y;                   // 输出 zero-point (INT8)
+};
+
+// 常量内存声明（CUDA设备端）
+extern __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;  // z 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT_INT16 d_sigmoid_r_lut_int16;  // r 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT_INT16 d_tanh_lut_int16;
+extern __constant__ SigmoidLUT_INT8 d_sigmoid_z_lut_int8;  // z 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT_INT8 d_sigmoid_r_lut_int8;  // r 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT_INT8 d_tanh_lut_int8;
+
 namespace dev {
 
 template<typename T>
@@ -118,6 +163,173 @@ __device__ __forceinline__ int8_t tanh_int16_lut(int16_t x) {// (TODO: 二项式
     tmp = (tmp * 255 + 65535 / 2) / 65535;        // 缩放到 [0, 255]（四舍五入）
     int8_t idx = static_cast<int8_t>(tmp - 128);  // → [-128, 127]
     //    return d_tanh_lut[static_cast<uint8_t>(idx)]; // 用索引访问 tanh LUT
+}
+
+// ==================== 分段线性量化设备端函数 ====================
+
+// 带符号右移（四舍五入）
+__device__ __forceinline__ int32_t rshift_round(int32_t val, int8_t shift) {
+    if (shift <= 0) return val;
+    if (shift >= 32) return (val >= 0) ? 0 : -1;
+
+    // 四舍五入：加上 1 << (shift - 1)
+    int32_t round_val = (val >= 0) ?
+        (val + (1 << (shift - 1))) >> shift :
+        (val - (1 << (shift - 1))) >> shift;
+    return round_val;
+}
+
+// 段查找函数（线性查找，32段足够快）
+__device__ __forceinline__ int find_segment_int16(
+    uint16_t q_x,
+    const SegmentParams_INT16* segments
+) {
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        if (q_x < segments[i].threshold) {
+            return i;
+        }
+    }
+    return NUM_SEGMENTS - 1;  // 返回最后一个段
+}
+
+// INT8 版本的段查找函数
+__device__ __forceinline__ int find_segment_int8(
+    uint8_t q_x,
+    const SegmentParams_INT8* segments
+) {
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        if (q_x < segments[i].threshold) {
+            return i;
+        }
+    }
+    return NUM_SEGMENTS - 1;  // 返回最后一个段
+}
+
+// Sigmoid 分段线性计算（核心函数，接受 LUT 参数）
+__device__ __forceinline__ uint16_t sigmoid_piecewise_linear_int16(
+    uint16_t q_x,
+    const SigmoidLUT_INT16& lut
+) {
+
+    // [1] 段查找
+    int seg_id = find_segment_int16(q_x, lut.segments);
+    const SegmentParams_INT16& seg = lut.segments[seg_id];
+
+    // [2] 去零点
+    int16_t x_offset = static_cast<int16_t>(q_x) - lut.zp_x;
+
+    // [3] 乘法 + 移位融合
+    // 公式: term_bx = (q_b * x_offset) >> n_BX_total
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+
+    int32_t term_bx;
+    if (seg.n_BX_total >= 0) {
+        // 右移
+        term_bx = rshift_round(bx_32, seg.n_BX_total);
+    } else {
+        // 左移（n_BX_total < 0）
+        term_bx = bx_32 << (-seg.n_BX_total);
+    }
+
+    // [4] 相加（term_c 已预计算）
+    int32_t y_32 = term_bx + seg.term_c_precomputed;
+
+    // [5] 饱和到 UINT16 范围 [0, 65535]
+    int32_t q_y = max(0, min(65535, y_32));
+
+    return static_cast<uint16_t>(q_y);
+}
+
+// Tanh 分段线性计算（类似实现，接受 LUT 参数）
+__device__ __forceinline__ uint16_t tanh_piecewise_linear_int16(
+    uint16_t q_x,
+    const SigmoidLUT_INT16& lut
+) {
+
+    // 与 sigmoid 相同的计算流程
+    int seg_id = find_segment_int16(q_x, lut.segments);
+    const SegmentParams_INT16& seg = lut.segments[seg_id];
+
+    int16_t x_offset = static_cast<int16_t>(q_x) - lut.zp_x;
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+
+    int32_t term_bx;
+    if (seg.n_BX_total >= 0) {
+        term_bx = rshift_round(bx_32, seg.n_BX_total);
+    } else {
+        term_bx = bx_32 << (-seg.n_BX_total);
+    }
+
+    int32_t y_32 = term_bx + seg.term_c_precomputed;
+    int32_t q_y = max(0, min(65535, y_32));
+
+    return static_cast<uint16_t>(q_y);
+}
+
+// Sigmoid 分段线性计算（INT8 版本，接受 LUT 参数）
+__device__ __forceinline__ int8_t sigmoid_piecewise_linear_int8(
+    int8_t q_x,
+    const SigmoidLUT_INT8& lut
+) {
+
+    // [1] 将 int8_t [-128, 127] 转换为 uint8_t [0, 255] 用于段查找
+    uint8_t q_x_uint8 = static_cast<uint8_t>(static_cast<int16_t>(q_x) + 128);
+
+    // [2] 段查找
+    int seg_id = find_segment_int8(q_x_uint8, lut.segments);
+    const SegmentParams_INT8& seg = lut.segments[seg_id];
+
+    // [3] 去零点
+    int16_t x_offset = static_cast<int16_t>(q_x) - static_cast<int16_t>(lut.zp_x);
+
+    // [4] 乘法 + 移位融合
+    // 公式: term_bx = (q_b * x_offset) >> n_BX_total
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+
+    int32_t term_bx;
+    if (seg.n_BX_total >= 0) {
+        // 右移
+        term_bx = rshift_round(bx_32, seg.n_BX_total);
+    } else {
+        // 左移（n_BX_total < 0）
+        term_bx = bx_32 << (-seg.n_BX_total);
+    }
+
+    // [5] 相加（term_c 已预计算）
+    int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);
+
+    // [6] 饱和到 INT8 范围 [-128, 127]
+    int32_t q_y = max(-128, min(127, y_32));
+
+    return static_cast<int8_t>(q_y);
+}
+
+// Tanh 分段线性计算（INT8 版本，接受 LUT 参数）
+__device__ __forceinline__ int8_t tanh_piecewise_linear_int8(
+    int8_t q_x,
+    const SigmoidLUT_INT8& lut
+) {
+
+    // 与 sigmoid 相同的计算流程
+    uint8_t q_x_uint8 = static_cast<uint8_t>(static_cast<int16_t>(q_x) + 128);
+
+    int seg_id = find_segment_int8(q_x_uint8, lut.segments);
+    const SegmentParams_INT8& seg = lut.segments[seg_id];
+
+    int16_t x_offset = static_cast<int16_t>(q_x) - static_cast<int16_t>(lut.zp_x);
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+
+    int32_t term_bx;
+    if (seg.n_BX_total >= 0) {
+        term_bx = rshift_round(bx_32, seg.n_BX_total);
+    } else {
+        term_bx = bx_32 << (-seg.n_BX_total);
+    }
+
+    int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);
+    int32_t q_y = max(-128, min(127, y_32));
+
+    return static_cast<int8_t>(q_y);
 }
 
 }// namespace dev
