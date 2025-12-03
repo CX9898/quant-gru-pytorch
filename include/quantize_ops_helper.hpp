@@ -542,7 +542,7 @@ inline int32_t selectBestExp2InvSym(const float orig_min, const float orig_max,
     return best_exp2;
 }
 
-#define DEBUG true
+//#define DEBUG true
 
 inline void selectBestExp2InvAsym(
     const float orig_min,
