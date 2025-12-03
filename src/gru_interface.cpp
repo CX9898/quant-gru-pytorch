@@ -238,19 +238,6 @@ void quantGRUForward(bool is_training,// 是否开启训练模式，true为训�
         h_quant.setVal(quant_parms.zp_h_);
     }
 
-    // 注意：generate_int8_lut_from_exp2_inv 已从 quantGRUForward 中移除
-    // 该函数应该在初始化时调用一次，而不是每次前向传播都调用
-    // 这样可以避免重复生成 LUT 表，提高性能
-
-//    // 使用分段线性量化表替代传统的LUT表
-//    generate_piecewise_linear_lut_from_exp2_inv<QuantT>(
-//        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
-//        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-//        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
-//        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-//        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
-//        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
-
     dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                     3);// 用于存放W * x的中间结果
@@ -445,6 +432,9 @@ template void quantGRUForward<int16_t>(
 void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params, bool use_int16) {
     if (use_int16) {
         // int16 使用分段线性量化表
+        // x_min 和 x_max 定义了 LUT 表的输入范围：
+        // 注意：虽然三个门使用相同的范围，但函数支持为每个门单独设置范围以提供灵活性
+        // 注意：模板参数使用 int16_t（表示16位量化），函数内部会自动处理无符号量化范围
         generate_piecewise_linear_lut_from_exp2_inv<int16_t>(
             quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
             quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
