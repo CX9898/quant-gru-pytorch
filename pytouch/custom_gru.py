@@ -16,39 +16,55 @@ except ImportError:
     )
 
 
-def _reorder_weights_haste_to_pytorch(w):
-    """
-    将 Haste GRU 权重格式 (z, r, n) 转换回 PyTorch GRU 权重格式 (r, z, n)
-
-    这是 _reorder_weights_pytorch_to_haste 的反向操作，用于将梯度从 Haste 格式
-    转换回 PyTorch 格式，以便正确传播到 nn.Parameter。
-
-    Args:
-        w: 权重张量，第一维是 3*hidden_size，顺序为 z, r, n
-           - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
-           - 对于偏置向量：形状为 [3*hidden]
-
-    Returns:
-        重排序后的权重张量，顺序为 r, z, n
-           - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
-           - 对于偏置向量：形状保持不变 [3*hidden]
-    """
-    # 重排序在 3*hidden 维度上进行（第一维）
-    # chunk 将第一维分成三块：z, r, n（每块大小为 hidden_size）
-    z, r, n = torch.chunk(w, 3, dim=0)
-    # 重新组合为 r, z, n 的顺序（PyTorch 格式）
-    return torch.cat([r, z, n], dim=0)
-
-
 class GRUFunction(torch.autograd.Function):
     """
     GRU 的自定义 autograd Function，支持反向传播
 
     支持量化和非量化两种模式，反向传播统一使用 float32 权重调用 haste_gru_backward
+    
+    所有格式转换操作统一在此类中处理：
+    - forward: 接收 PyTorch 格式权重，转换为 Haste 格式后调用 C++ 接口
+    - backward: 接收 Haste 格式梯度，转换为 PyTorch 格式后返回
     """
 
     @staticmethod
-    def forward(ctx, input, W, R, bx, br, h0, is_training,
+    def _reorder_weights_pytorch_to_haste(w):
+        """
+        将 PyTorch GRU 权重格式 (r, z, n) 转换为 Haste GRU 权重格式 (z, r, n)
+
+        Args:
+            w: 权重张量，第一维是 3*hidden_size，顺序为 r, z, n
+               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状为 [3*hidden]
+
+        Returns:
+            重排序后的权重张量，顺序为 z, r, n
+               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状保持不变 [3*hidden]
+        """
+        r, z, n = torch.chunk(w, 3, dim=0)
+        return torch.cat([z, r, n], dim=0)
+
+    @staticmethod
+    def _reorder_weights_haste_to_pytorch(w):
+        """
+        将 Haste GRU 权重格式 (z, r, n) 转换回 PyTorch GRU 权重格式 (r, z, n)
+
+        Args:
+            w: 权重张量，第一维是 3*hidden_size，顺序为 z, r, n
+               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状为 [3*hidden]
+
+        Returns:
+            重排序后的权重张量，顺序为 r, z, n
+               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状保持不变 [3*hidden]
+        """
+        z, r, n = torch.chunk(w, 3, dim=0)
+        return torch.cat([r, z, n], dim=0)
+
+    @staticmethod
+    def forward(ctx, input, weight_ih, weight_hh, bias_ih, bias_hh, h0, is_training,
                 use_quantization=False, quant_type='int8', quant_params=None):
         """
         前向传播
@@ -56,10 +72,10 @@ class GRUFunction(torch.autograd.Function):
         Args:
             ctx: 上下文对象，用于保存中间结果
             input: 输入序列 [time_steps, batch_size, input_size]
-            W: 输入权重 [input_size, hidden_size * 3] (float32，用于反向传播)
-            R: 循环权重 [hidden_size, hidden_size * 3] (float32，用于反向传播)
-            bx: 输入偏置 [hidden_size * 3] (float32，用于反向传播)
-            br: 循环偏置 [hidden_size * 3] (float32，用于反向传播)
+            weight_ih: 输入权重 [3*hidden_size, input_size] (PyTorch 格式: r, z, n)
+            weight_hh: 循环权重 [3*hidden_size, hidden_size] (PyTorch 格式: r, z, n)
+            bias_ih: 输入偏置 [3*hidden_size] (PyTorch 格式: r, z, n) 或 None
+            bias_hh: 循环偏置 [3*hidden_size] (PyTorch 格式: r, z, n) 或 None
             h0: 初始隐藏状态 [batch_size, hidden_size] 或 None
             is_training: 是否处于训练模式
             use_quantization: 是否使用量化
@@ -71,13 +87,28 @@ class GRUFunction(torch.autograd.Function):
             h_n: 最终隐藏状态 [1, batch_size, hidden_size]
         """
         time_steps, batch_size, input_size = input.shape
-        hidden_size = R.shape[0]
+        hidden_size = weight_hh.shape[1]
 
         # 保存上下文信息
         ctx.time_steps = time_steps
         ctx.batch_size = batch_size
         ctx.input_size = input_size
         ctx.hidden_size = hidden_size
+
+        # 格式转换：从 PyTorch 格式转换为 Haste 格式
+        # PyTorch: [3*hidden, input] (r, z, n) -> Haste: [input, 3*hidden] (z, r, n)
+        W = GRUFunction._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
+        R = GRUFunction._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
+
+        # 处理偏置
+        if bias_ih is not None and bias_hh is not None:
+            bx = GRUFunction._reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+            br = GRUFunction._reorder_weights_pytorch_to_haste(bias_hh).contiguous()
+        else:
+            # 如果没有偏置，创建零偏置
+            device = input.device
+            bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+            br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
 
         # 准备量化参数（如果使用量化）
         if use_quantization:
@@ -101,6 +132,7 @@ class GRUFunction(torch.autograd.Function):
             h0_tensor = torch.empty(0, device=input.device, dtype=torch.float32)
 
         # 调用 forward_interface 统一接口
+        # 注意：此时 W, R, bx, br 已经是 Haste 格式 (z, r, n)
         output_full, v = gru_ops.forward_interface(
             is_training=is_training,
             is_quant=use_quantization,
@@ -125,9 +157,10 @@ class GRUFunction(torch.autograd.Function):
         h_n = output_full[-1:]  # [1, batch_size, hidden_size]
 
         # 保存中间结果用于反向传播
-        # 保存 float32 权重（无论是否量化，反向传播都使用 float32 权重）
+        # 保存 PyTorch 格式的权重（用于 backward 中的格式转换）
+        # 保存 Haste 格式的权重（用于调用 C++ 接口）
         # 保存 output_full 和 v（量化和非量化都返回反量化后的 float32 值）
-        ctx.save_for_backward(W, R, bx, br, input, output_full, v)
+        ctx.save_for_backward(weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, output_full, v)
 
         return output, h_n
 
@@ -154,7 +187,8 @@ class GRUFunction(torch.autograd.Function):
             None: quant_params 的梯度（None）
         """
         # 恢复保存的中间结果
-        W, R, bx, br, input, h, v = ctx.saved_tensors
+        # saved_tensors = [weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, output_full, v]
+        weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, h, v = ctx.saved_tensors
         time_steps = ctx.time_steps
         batch_size = ctx.batch_size
         input_size = ctx.input_size
@@ -176,7 +210,8 @@ class GRUFunction(torch.autograd.Function):
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
-        # 调用 C++ 反向传播
+        # 调用 C++ 反向传播（使用 Haste 格式的权重）
+        # 注意：W, R, bx, br 已经是 Haste 格式 (z, r, n)
         dx, dW, dR, dbx, dbr, dh = gru_ops.haste_gru_backward(
             time_steps=time_steps,
             batch_size=batch_size,
@@ -192,21 +227,27 @@ class GRUFunction(torch.autograd.Function):
             v=v
         )
 
-        # 将梯度从 Haste 格式转换回 PyTorch 格式
-        # dW 和 dR 的形状是 [input, 3*hidden] 和 [hidden, 3*hidden]，顺序 (z, r, n)
-        # 需要转换为 [3*hidden, input] 和 [3*hidden, hidden]，顺序 (r, z, n)
+        # 格式转换：将梯度从 Haste 格式转换为 PyTorch 格式
+        # dW 和 dR 的形状是 [input_size, 3*hidden_size] 和 [hidden_size, 3*hidden_size]，顺序 (z, r, n)
+        # 需要转换为 [3*hidden_size, input_size] 和 [3*hidden_size, hidden_size]，顺序 (r, z, n)
         # 步骤：1) 先转置 2) 再重排序
-        dW_pytorch = _reorder_weights_haste_to_pytorch(dW.t()).contiguous()  # [3*hidden, input], 顺序 (r, z, n)
-        dR_pytorch = _reorder_weights_haste_to_pytorch(dR.t()).contiguous()  # [3*hidden, hidden], 顺序 (r, z, n)
+        dW_pytorch = GRUFunction._reorder_weights_haste_to_pytorch(dW.t()).contiguous()
+        dR_pytorch = GRUFunction._reorder_weights_haste_to_pytorch(dR.t()).contiguous()
 
-        # dbx 和 dbr 的形状是 [3*hidden]，顺序 (z, r, n)
-        # 需要转换为 [3*hidden]，顺序 (r, z, n)
-        dbx_pytorch = _reorder_weights_haste_to_pytorch(dbx).contiguous()  # [3*hidden], 顺序 (r, z, n)
-        dbr_pytorch = _reorder_weights_haste_to_pytorch(dbr).contiguous()  # [3*hidden], 顺序 (r, z, n)
+        # dbx 和 dbr 的形状是 [3*hidden_size]，顺序 (z, r, n)
+        # 需要转换为 [3*hidden_size]，顺序 (r, z, n)
+        dbx_pytorch = GRUFunction._reorder_weights_haste_to_pytorch(dbx).contiguous()
+        dbr_pytorch = GRUFunction._reorder_weights_haste_to_pytorch(dbr).contiguous()
+
+        # 处理偏置梯度：如果原始没有偏置，梯度应该为 None
+        if bias_ih is None:
+            dbx_pytorch = None
+        if bias_hh is None:
+            dbr_pytorch = None
 
         # 返回梯度（已转换为 PyTorch 格式）
         # 注意：backward 必须返回与 forward 输入参数数量相同的梯度值
-        # forward 有 10 个参数：input, W, R, bx, br, h0, is_training, use_quantization, quant_type, quant_params
+        # forward 有 10 个参数：input, weight_ih, weight_hh, bias_ih, bias_hh, h0, is_training, use_quantization, quant_type, quant_params
         # h0 的梯度：C++ 返回的 dh 形状为 [batch_size, hidden_size]
         # 如果 forward 时 h0 是 None，则 backward 也应该返回 None
         if ctx.h0_is_none:
@@ -293,58 +334,6 @@ class CustomGRU(nn.GRU):
                 )
             self._initialize_quantization(calibration_data)
 
-    def _reorder_weights_pytorch_to_haste(self, w):
-        """
-        将 PyTorch GRU 权重格式 (r, z, n) 转换为 Haste GRU 权重格式 (z, r, n)
-
-        数学原理：
-        - PyTorch GRU 使用门控顺序 (r, z, n)：reset gate, update gate, new gate
-        - Haste GRU 使用门控顺序 (z, r, n)：update gate, reset gate, new gate
-        - 转换方法：将第一维（3*hidden_size）分成三块，然后重新排列顺序
-
-        转换等价性说明：
-        - 方法1（Haste）：先转置 [3*hidden, input] -> [input, 3*hidden]，再在最后一维重排序
-        - 方法2（本实现）：先在第一维重排序，再转置 [3*hidden, input] -> [input, 3*hidden]
-        - 两种方法数学上等价，因为转置和重排序是独立的操作
-
-        Args:
-            w: 权重张量，第一维是 3*hidden_size，顺序为 r, z, n
-               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
-               - 对于偏置向量：形状为 [3*hidden]
-
-        Returns:
-            重排序后的权重张量，顺序为 z, r, n
-               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
-               - 对于偏置向量：形状保持不变 [3*hidden]
-        """
-        # 重排序在 3*hidden 维度上进行（第一维）
-        # chunk 将第一维分成三块：r, z, n（每块大小为 hidden_size）
-        r, z, n = torch.chunk(w, 3, dim=0)
-        # 重新组合为 z, r, n 的顺序
-        return torch.cat([z, r, n], dim=0)
-
-    def _reorder_weights_haste_to_pytorch(self, w):
-        """
-        将 Haste GRU 权重格式 (z, r, n) 转换回 PyTorch GRU 权重格式 (r, z, n)
-
-        这是 _reorder_weights_pytorch_to_haste 的反向操作，用于将梯度从 Haste 格式
-        转换回 PyTorch 格式，以便正确传播到 nn.Parameter。
-
-        Args:
-            w: 权重张量，第一维是 3*hidden_size，顺序为 z, r, n
-               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
-               - 对于偏置向量：形状为 [3*hidden]
-
-        Returns:
-            重排序后的权重张量，顺序为 r, z, n
-               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
-               - 对于偏置向量：形状保持不变 [3*hidden]
-        """
-        # 重排序在 3*hidden 维度上进行（第一维）
-        # chunk 将第一维分成三块：z, r, n（每块大小为 hidden_size）
-        z, r, n = torch.chunk(w, 3, dim=0)
-        # 重新组合为 r, z, n 的顺序（PyTorch 格式）
-        return torch.cat([r, z, n], dim=0)
 
     def _quantize_weights(self, W, R, bx, br, device):
         """
@@ -469,49 +458,6 @@ class CustomGRU(nn.GRU):
             if self.bias_hh_l0.dtype != torch.float32:
                 self.bias_hh_l0.data = self.bias_hh_l0.data.float()
 
-    def _get_haste_weights(self, device: Optional[torch.device] = None):
-        """
-        获取 Haste 格式的权重和偏置
-
-        这个方法统一处理权重格式转换，避免在多个地方重复代码。
-        转换过程：
-        1. 获取 PyTorch 格式的权重和偏置
-        2. 重排序：从 (r, z, n) 转为 (z, r, n)
-        3. 转置权重矩阵：从 [3*hidden, input] 转为 [input, 3*hidden]
-
-        Args:
-            device: 目标设备（可选），如果为 None，使用权重的当前设备
-
-        Returns:
-            W: 输入权重，形状 [input_size, 3*hidden_size]，顺序 (z, r, n)
-            R: 循环权重，形状 [hidden_size, 3*hidden_size]，顺序 (z, r, n)
-            bx: 输入偏置，形状 [3*hidden_size]，顺序 (z, r, n)
-            br: 循环偏置，形状 [3*hidden_size]，顺序 (z, r, n)
-        """
-        # 获取权重（已经在 CUDA 上且为 float32，由 _ensure_weights_on_cuda_float32 保证）
-        weight_ih = self.weight_ih_l0  # [3*hidden, input]
-        weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
-
-        # 将 PyTorch 格式转换为 Haste 格式：
-        # 1. 重排序：在 3*hidden 维度上从 (r, z, n) 转为 (z, r, n)
-        # 2. 转置权重：从 [3*hidden, input] 转为 [input, 3*hidden]
-        W = self._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()  # [input, 3*hidden], 顺序 (z, r, n)
-        R = self._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()  # [hidden, 3*hidden], 顺序 (z, r, n)
-
-        # 处理偏置
-        if self.bias:
-            bias_ih = self.bias_ih_l0  # [3*hidden]
-            bias_hh = self.bias_hh_l0  # [3*hidden]
-            # 将 PyTorch 格式 (r, z, n) 转换为 Haste 格式 (z, r, n)
-            bx = self._reorder_weights_pytorch_to_haste(bias_ih).contiguous()  # [3*hidden], 顺序 (z, r, n)
-            br = self._reorder_weights_pytorch_to_haste(bias_hh).contiguous()  # [3*hidden], 顺序 (z, r, n)
-        else:
-            # 如果没有偏置，创建零偏置
-            target_device = device if device is not None else weight_ih.device
-            bx = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
-            br = torch.zeros(3 * self.hidden_size, device=target_device, dtype=torch.float32)
-
-        return W, R, bx, br
 
     def _initialize_quantization(self, calibration_data: torch.Tensor):
         """
@@ -535,8 +481,22 @@ class CustomGRU(nn.GRU):
         time_steps, batch_size, input_size = calibration_data.shape
         hidden_size = self.hidden_size
 
-        # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
-        W, R, bx, br = self._get_haste_weights(device=calibration_data.device)
+        # 格式转换：从 PyTorch 格式转换为 Haste 格式（用于校准）
+        # 使用 GRUFunction 的静态方法进行转换
+        weight_ih = self.weight_ih_l0  # [3*hidden, input]
+        weight_hh = self.weight_hh_l0  # [3*hidden, hidden]
+        W = GRUFunction._reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
+        R = GRUFunction._reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
+
+        if self.bias:
+            bias_ih = self.bias_ih_l0
+            bias_hh = self.bias_hh_l0
+            bx = GRUFunction._reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+            br = GRUFunction._reorder_weights_pytorch_to_haste(bias_hh).contiguous()
+        else:
+            device = calibration_data.device
+            bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+            br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
 
         # 只校准量化参数，不量化权重
         # 权重将在每次前向传播时实时量化，以支持训练时权重的更新
@@ -603,18 +563,22 @@ class CustomGRU(nn.GRU):
         if input.dtype != torch.float32:
             input = input.float()
 
-        # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
-        W, R, bx, br = self._get_haste_weights(device=input.device)
+        # 获取权重和偏置（已经在 CUDA 上且为 float32，由 _ensure_weights_on_cuda_float32 保证）
+        weight_ih = self.weight_ih_l0  # [3*hidden, input] (PyTorch 格式: r, z, n)
+        weight_hh = self.weight_hh_l0  # [3*hidden, hidden] (PyTorch 格式: r, z, n)
+        bias_ih = self.bias_ih_l0 if self.bias else None  # [3*hidden] (PyTorch 格式: r, z, n) 或 None
+        bias_hh = self.bias_hh_l0 if self.bias else None  # [3*hidden] (PyTorch 格式: r, z, n) 或 None
 
         # 统一使用 GRUFunction 进行前向传播（支持量化和非量化模式的反向传播）
+        # GRUFunction 内部会处理格式转换：PyTorch 格式 -> Haste 格式
         # 注意：GRUFunction 需要输入为 [time_steps, batch_size, input_size]
         # 而 input 已经是这个格式了（之前已经处理了 batch_first）
         output, h_n_from_func = GRUFunction.apply(
             input,              # [time_steps, batch_size, input_size]
-            W,                  # [input_size, hidden_size * 3] (float32)
-            R,                  # [hidden_size, hidden_size * 3] (float32)
-            bx,                 # [hidden_size * 3] (float32)
-            br,                 # [hidden_size * 3] (float32)
+            weight_ih,          # [3*hidden_size, input_size] (PyTorch 格式: r, z, n)
+            weight_hh,          # [3*hidden_size, hidden_size] (PyTorch 格式: r, z, n)
+            bias_ih,            # [3*hidden_size] (PyTorch 格式: r, z, n) 或 None
+            bias_hh,            # [3*hidden_size] (PyTorch 格式: r, z, n) 或 None
             h0,                 # [batch_size, hidden_size] 或 None
             self.training,      # 是否处于训练模式
             self.use_quantization,  # 是否使用量化
