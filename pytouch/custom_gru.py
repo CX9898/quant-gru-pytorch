@@ -21,7 +21,7 @@ class GRUFunction(torch.autograd.Function):
     GRU 的自定义 autograd Function，支持反向传播
 
     支持量化和非量化两种模式，反向传播统一使用 float32 权重调用 haste_gru_backward
-    
+
     所有格式转换操作统一在此类中处理：
     - forward: 接收 PyTorch 格式权重，转换为 Haste 格式后调用 C++ 接口
     - backward: 接收 Haste 格式梯度，转换为 PyTorch 格式后返回
@@ -120,6 +120,10 @@ class GRUFunction(torch.autograd.Function):
             use_int16 = False
             quant_params = gru_ops.GRUQuantitativeParameters()
 
+        # 保存偏置是否为 None 的信息（用于 backward 中判断是否需要返回梯度）
+        ctx.bias_ih_is_none = (bias_ih is None)
+        ctx.bias_hh_is_none = (bias_hh is None)
+
         # 准备 h0 参数（转换为正确的格式或空张量）
         # C++ 接口期望 h0 的形状是 [batch_size, hidden_size] 或空张量
         # 当 h0 为 None 时，创建空张量，形状为 [0] 以匹配接口期望
@@ -150,17 +154,31 @@ class GRUFunction(torch.autograd.Function):
             quant_params=quant_params
         )
 
-        # 提取时间步输出（去掉初始状态）
-        output = output_full[1:]  # [time_steps, batch_size, hidden_size]
-
-        # 获取最终隐藏状态
-        h_n = output_full[-1:]  # [1, batch_size, hidden_size]
+        # 将 output_full 分成两个返回值，符合 PyTorch 标准 GRU 接口
+        #
+        # 原因：
+        # 1. PyTorch nn.GRU 标准接口返回 (output, h_n) 两个值
+        # 2. 语义不同：
+        #    - output: 时间步输出序列，不包含初始状态（初始状态是输入，不是输出）
+        #    - h_n: 最终隐藏状态，单独返回方便后续使用（多层网络、序列拼接等）
+        # 3. C++ 接口返回完整序列 [time_steps + 1, ...]（包含初始状态），
+        #    但 PyTorch 接口期望 output 不包含初始状态 [time_steps, ...]
+        #
+        # output_full 结构：
+        # - output_full[0]: 初始隐藏状态 h0（不是输入序列产生的输出）
+        # - output_full[1:time_steps+1]: 时间步 1 到 time_steps 的隐藏状态（输入序列产生的输出）
+        output = output_full[1:]  # [time_steps, batch_size, hidden_size] - 时间步输出序列
+        h_n = output_full[-1:]   # [1, batch_size, hidden_size] - 最终隐藏状态
 
         # 保存中间结果用于反向传播
-        # 保存 PyTorch 格式的权重（用于 backward 中的格式转换）
-        # 保存 Haste 格式的权重（用于调用 C++ 接口）
-        # 保存 output_full 和 v（量化和非量化都返回反量化后的 float32 值）
-        ctx.save_for_backward(weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, output_full, v)
+        # 只保存 backward 中实际需要的张量：
+        # - W, R, bx, br: Haste 格式的权重和偏置（用于调用 C++ 反向传播接口）
+        # - input: 输入序列（用于反向传播计算）
+        # - output_full: 完整输出序列（包含初始状态，用于反向传播计算）
+        # - v: 中间激活值（用于反向传播计算）
+        # 注意：不保存 PyTorch 格式的权重，因为 backward 中不需要它们
+        # 注意：不保存 bias_ih/bias_hh 张量，只保存布尔标志（ctx.bias_ih_is_none/bias_hh_is_none）
+        ctx.save_for_backward(W, R, bx, br, input, output_full, v)
 
         return output, h_n
 
@@ -172,7 +190,12 @@ class GRUFunction(torch.autograd.Function):
         Args:
             ctx: 上下文对象，包含前向传播保存的中间结果
             grad_output: 输出序列的梯度 [time_steps, batch_size, hidden_size]
+                        对应 forward 返回的 output = output_full[1:] 的梯度
+                        即时间步 1 到 time_steps 的隐藏状态梯度
             grad_h_n: 最终隐藏状态的梯度 [1, batch_size, hidden_size]
+                      对应 forward 返回的 h_n = output_full[-1:] 的梯度
+                      注意：h_n[0] 和 output[-1] 指向同一个隐藏状态（output_full[time_steps]）
+                      因此 grad_output[-1] 和 grad_h_n[0] 需要相加
 
         Returns:
             grad_input: 输入序列的梯度
@@ -187,16 +210,17 @@ class GRUFunction(torch.autograd.Function):
             None: quant_params 的梯度（None）
         """
         # 恢复保存的中间结果
-        # saved_tensors = [weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, output_full, v]
-        weight_ih, weight_hh, bias_ih, bias_hh, W, R, bx, br, input, h, v = ctx.saved_tensors
+        # saved_tensors = [W, R, bx, br, input, output_full, v]
+        W, R, bx, br, input, h, v = ctx.saved_tensors
         time_steps = ctx.time_steps
         batch_size = ctx.batch_size
         input_size = ctx.input_size
         hidden_size = ctx.hidden_size
 
         # 构建 dh_new: [time_steps + 1, batch_size, hidden_size]
-        # dh_new[0] = grad_h_n (初始状态的梯度)
-        # dh_new[1:] = grad_output (时间步输出的梯度)
+        # dh_new 包含所有时间步隐藏状态的梯度，用于 C++ 反向传播接口
+        # - dh_new[0]: 初始状态的梯度（通常为 0，除非有来自外部的梯度）
+        # - dh_new[1:time_steps+1]: 时间步 1 到 time_steps 的隐藏状态梯度
         dh_new = torch.zeros(
             (time_steps + 1, batch_size, hidden_size),
             device=grad_output.device,
@@ -204,9 +228,15 @@ class GRUFunction(torch.autograd.Function):
         )
 
         # 设置时间步输出的梯度
+        # grad_output 对应 output = output_full[1:] 的梯度
+        # 即时间步 1 到 time_steps 的隐藏状态梯度
         dh_new[1:] = grad_output
 
-        # 设置最终隐藏状态的梯度（如果有）
+        # 处理最终隐藏状态的梯度
+        # 注意：h_n = output_full[-1:]，即 output_full[time_steps]
+        # 而 output = output_full[1:]，所以 output[-1] = output_full[time_steps] = h_n[0]
+        # 因此 grad_output[-1] 和 grad_h_n[0] 都对应最后一个时间步的梯度
+        # 需要将它们相加：dh_new[-1] = grad_output[-1] + grad_h_n[0]
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
@@ -240,9 +270,10 @@ class GRUFunction(torch.autograd.Function):
         dbr_pytorch = GRUFunction._reorder_weights_haste_to_pytorch(dbr).contiguous()
 
         # 处理偏置梯度：如果原始没有偏置，梯度应该为 None
-        if bias_ih is None:
+        # 使用保存的布尔标志判断，而不是保存整个张量
+        if ctx.bias_ih_is_none:
             dbx_pytorch = None
-        if bias_hh is None:
+        if ctx.bias_hh_is_none:
             dbr_pytorch = None
 
         # 返回梯度（已转换为 PyTorch 格式）
