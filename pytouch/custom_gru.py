@@ -90,7 +90,15 @@ class GRUFunction(torch.autograd.Function):
             quant_params = gru_ops.GRUQuantitativeParameters()
 
         # 准备 h0 参数（转换为正确的格式或空张量）
-        h0_tensor = h0 if h0 is not None else torch.empty(0, device=input.device)
+        # C++ 接口期望 h0 的形状是 [batch_size, hidden_size] 或空张量
+        # 当 h0 为 None 时，创建空张量，形状为 [0] 以匹配接口期望
+        # 保存 h0 是否为 None 的信息，以便在 backward 中正确处理梯度
+        ctx.h0_is_none = (h0 is None)
+        if h0 is not None:
+            h0_tensor = h0
+        else:
+            # 创建空张量，C++ 接口会检查 h0.numel() > 0 来判断是否为空
+            h0_tensor = torch.empty(0, device=input.device, dtype=torch.float32)
 
         # 调用 forward_interface 统一接口
         output_full, v = gru_ops.forward_interface(
@@ -139,8 +147,11 @@ class GRUFunction(torch.autograd.Function):
             grad_R: 循环权重的梯度
             grad_bx: 输入偏置的梯度
             grad_br: 循环偏置的梯度
-            grad_h0: 初始隐藏状态的梯度（None）
+            grad_h0: 初始隐藏状态的梯度 [batch_size, hidden_size] 或 None
             None: is_training 的梯度（None）
+            None: use_quantization 的梯度（None）
+            None: quant_type 的梯度（None）
+            None: quant_params 的梯度（None）
         """
         # 恢复保存的中间结果
         W, R, bx, br, input, h, v = ctx.saved_tensors
@@ -194,8 +205,18 @@ class GRUFunction(torch.autograd.Function):
         dbr_pytorch = _reorder_weights_haste_to_pytorch(dbr).contiguous()  # [3*hidden], 顺序 (r, z, n)
 
         # 返回梯度（已转换为 PyTorch 格式）
-        # 注意：h0 和 is_training 不需要梯度
-        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, None, None
+        # 注意：backward 必须返回与 forward 输入参数数量相同的梯度值
+        # forward 有 10 个参数：input, W, R, bx, br, h0, is_training, use_quantization, quant_type, quant_params
+        # h0 的梯度：C++ 返回的 dh 形状为 [batch_size, hidden_size]
+        # 如果 forward 时 h0 是 None，则 backward 也应该返回 None
+        if ctx.h0_is_none:
+            grad_h0 = None
+        else:
+            # dh 形状为 [batch_size, hidden_size]，已经是正确格式
+            grad_h0 = dh
+
+        # 返回所有梯度（对应 forward 的 10 个参数）
+        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None, None
 
 
 class CustomGRU(nn.GRU):
@@ -576,9 +597,11 @@ class CustomGRU(nn.GRU):
             # hx 形状: [num_layers, batch, hidden_size] -> h0: [batch, hidden_size]
             h0 = hx[0]  # [batch, hidden_size]
 
-        # 确保输入在 CUDA 上
+        # 确保输入在 CUDA 上且为 float32
         if not input.is_cuda:
             input = input.cuda()
+        if input.dtype != torch.float32:
+            input = input.float()
 
         # 使用统一的权重转换方法（权重已经在 CUDA 上且为 float32）
         W, R, bx, br = self._get_haste_weights(device=input.device)
