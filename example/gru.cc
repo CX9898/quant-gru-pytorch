@@ -81,6 +81,10 @@ void GruInferenceQuant(
                                    W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data());
     }
     {
+        bool is_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
+        initialize_quantization_lut(quant_parms, is_int16);
+    }
+    {
         ScopeTimer t("GruInferenceQuant:");
         quantGRUForward<QuantT>(false, time_steps, batch_size, input_size, hidden_size,
                                 W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data(),
@@ -191,13 +195,10 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     }
 
     // 生成LUT表
-    generate_int8_lut_from_exp2_inv(
-        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
-        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
-        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
-        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+    {
+        bool is_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
+        initialize_quantization_lut(quant_parms, is_int16);
+    }
 
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
     dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
