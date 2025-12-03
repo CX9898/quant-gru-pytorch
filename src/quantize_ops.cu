@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <type_traits>
 
 #include "devVector.h"
 #include "quantize_ops.cuh"
@@ -172,6 +173,79 @@ void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,
                        sizeof(int8_t) * 256);
     cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(),
                        sizeof(int8_t) * 256);
+}
+
+// 生成分段线性量化表（基于exp2_inv参数，支持模板类型）
+// exp2_inv 就是 shift_bits（因为 scale = 2^(-exp2_inv) = 2^(-shift_bits)）
+template<typename QuantT>
+void generate_piecewise_linear_lut_from_exp2_inv(int32_t exp2_inv_z_pre,
+                                                  int32_t zp_z_pre,
+                                                  int32_t exp2_inv_z_out,
+                                                  int32_t zp_z_out,
+                                                  int32_t exp2_inv_r_pre,
+                                                  int32_t zp_r_pre,
+                                                  int32_t exp2_inv_r_out,
+                                                  int32_t zp_r_out,
+                                                  int32_t exp2_inv_g_pre,
+                                                  int32_t zp_g_pre,
+                                                  int32_t exp2_inv_g_out,
+                                                  int32_t zp_g_out,
+                                                  float x_min,
+                                                  float x_max) {
+    // 将 exp2_inv 转换为 shift_bits（它们实际上是相同的）
+    // shift_bits 始终是 int8_t 类型
+    int8_t shift_bits_z_pre = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_z_pre))));
+    int8_t shift_bits_z_out = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_z_out))));
+    int8_t shift_bits_r_pre = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_r_pre))));
+    int8_t shift_bits_r_out = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_r_out))));
+    int8_t shift_bits_g_pre = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_g_pre))));
+    int8_t shift_bits_g_out = static_cast<int8_t>(std::max(0, std::min(127, static_cast<int>(exp2_inv_g_out))));
+
+    // 根据 QuantT 类型选择相应的 zp 类型和初始化函数
+    if constexpr (std::is_same_v<QuantT, int8_t>) {
+        // INT8 版本
+        int8_t zp_z_pre_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_z_pre))));
+        int8_t zp_z_out_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_z_out))));
+        int8_t zp_r_pre_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_r_pre))));
+        int8_t zp_r_out_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_r_out))));
+        int8_t zp_g_pre_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_g_pre))));
+        int8_t zp_g_out_quant = static_cast<int8_t>(std::max(-128, std::min(127, static_cast<int>(zp_g_out))));
+
+        init_sigmoid_z_lut_int8(shift_bits_z_pre, zp_z_pre_quant,
+                                shift_bits_z_out, zp_z_out_quant,
+                                x_min, x_max);
+
+        init_sigmoid_r_lut_int8(shift_bits_r_pre, zp_r_pre_quant,
+                                shift_bits_r_out, zp_r_out_quant,
+                                x_min, x_max);
+
+        init_tanh_lut_int8(shift_bits_g_pre, zp_g_pre_quant,
+                           shift_bits_g_out, zp_g_out_quant,
+                           x_min, x_max);
+    } else if constexpr (std::is_same_v<QuantT, int16_t>) {
+        // INT16 版本
+        int16_t zp_z_pre_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_z_pre))));
+        int16_t zp_z_out_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_z_out))));
+        int16_t zp_r_pre_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_r_pre))));
+        int16_t zp_r_out_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_r_out))));
+        int16_t zp_g_pre_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_g_pre))));
+        int16_t zp_g_out_quant = static_cast<int16_t>(std::max(-32768, std::min(32767, static_cast<int>(zp_g_out))));
+
+        init_sigmoid_z_lut_int16(shift_bits_z_pre, zp_z_pre_quant,
+                                 shift_bits_z_out, zp_z_out_quant,
+                                 x_min, x_max);
+
+        init_sigmoid_r_lut_int16(shift_bits_r_pre, zp_r_pre_quant,
+                                 shift_bits_r_out, zp_r_out_quant,
+                                 x_min, x_max);
+
+        init_tanh_lut_int16(shift_bits_g_pre, zp_g_pre_quant,
+                            shift_bits_g_out, zp_g_out_quant,
+                            x_min, x_max);
+    } else {
+        static_assert(std::is_same_v<QuantT, int8_t> || std::is_same_v<QuantT, int16_t>,
+                      "QuantT must be int8_t or int16_t");
+    }
 }
 
 namespace kernel {
@@ -1123,3 +1197,22 @@ void init_tanh_lut_int8(
                cudaGetErrorString(err));
     }
 }
+
+// 显式实例化 generate_piecewise_linear_lut_from_exp2_inv 模板函数
+template void generate_piecewise_linear_lut_from_exp2_inv<int8_t>(
+    int32_t exp2_inv_z_pre, int32_t zp_z_pre,
+    int32_t exp2_inv_z_out, int32_t zp_z_out,
+    int32_t exp2_inv_r_pre, int32_t zp_r_pre,
+    int32_t exp2_inv_r_out, int32_t zp_r_out,
+    int32_t exp2_inv_g_pre, int32_t zp_g_pre,
+    int32_t exp2_inv_g_out, int32_t zp_g_out,
+    float x_min, float x_max);
+
+template void generate_piecewise_linear_lut_from_exp2_inv<int16_t>(
+    int32_t exp2_inv_z_pre, int32_t zp_z_pre,
+    int32_t exp2_inv_z_out, int32_t zp_z_out,
+    int32_t exp2_inv_r_pre, int32_t zp_r_pre,
+    int32_t exp2_inv_r_out, int32_t zp_r_out,
+    int32_t exp2_inv_g_pre, int32_t zp_g_pre,
+    int32_t exp2_inv_g_out, int32_t zp_g_out,
+    float x_min, float x_max);
