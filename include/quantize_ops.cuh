@@ -216,7 +216,8 @@ __device__ __forceinline__ uint16_t sigmoid_piecewise_linear_int16(
     const SegmentParams_INT16& seg = lut.segments[seg_id];
 
     // [2] 去零点
-    int16_t x_offset = static_cast<int16_t>(q_x) - lut.zp_x;
+    // 🔥 修正：使用 int32_t 避免溢出（q_x 是 uint16_t [0, 65535]，zp_x 可能是正数如 24576）
+    int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
 
     // [3] 乘法 + 移位融合
     // 公式: term_bx = (q_b * x_offset) >> n_BX_total
@@ -250,8 +251,9 @@ __device__ __forceinline__ uint16_t tanh_piecewise_linear_int16(
     int seg_id = find_segment_int16(q_x, lut.segments);
     const SegmentParams_INT16& seg = lut.segments[seg_id];
 
-    int16_t x_offset = static_cast<int16_t>(q_x) - lut.zp_x;
-    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+    // 🔥 修正：使用 int32_t 避免溢出（q_x 是 uint16_t [0, 65535]，zp_x 可能是正数如 24576）
+    int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
 
     int32_t term_bx;
     if (seg.n_BX_total >= 0) {
@@ -266,25 +268,23 @@ __device__ __forceinline__ uint16_t tanh_piecewise_linear_int16(
     return static_cast<uint16_t>(q_y);
 }
 
-// Sigmoid 分段线性计算（INT8 版本，接受 LUT 参数）
-__device__ __forceinline__ int8_t sigmoid_piecewise_linear_int8(
-    int8_t q_x,
+// Sigmoid 分段线性计算（UINT8 版本，接受 LUT 参数）
+__device__ __forceinline__ uint8_t sigmoid_piecewise_linear_int8(
+    uint8_t q_x,
     const SigmoidLUT_INT8& lut
 ) {
 
-    // [1] 将 int8_t [-128, 127] 转换为 uint8_t [0, 255] 用于段查找
-    uint8_t q_x_uint8 = static_cast<uint8_t>(static_cast<int16_t>(q_x) + 128);
-
-    // [2] 段查找
-    int seg_id = find_segment_int8(q_x_uint8, lut.segments);
+    // [1] 段查找（输入已经是 uint8_t [0, 255]）
+    int seg_id = find_segment_int8(q_x, lut.segments);
     const SegmentParams_INT8& seg = lut.segments[seg_id];
 
-    // [3] 去零点
-    int16_t x_offset = static_cast<int16_t>(q_x) - static_cast<int16_t>(lut.zp_x);
+    // [2] 去零点
+    // 🔥 修正：使用 int32_t 避免溢出（q_x 是 uint8_t [0, 255]，zp_x 可能是正数）
+    int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
 
-    // [4] 乘法 + 移位融合
+    // [3] 乘法 + 移位融合
     // 公式: term_bx = (q_b * x_offset) >> n_BX_total
-    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
 
     int32_t term_bx;
     if (seg.n_BX_total >= 0) {
@@ -295,29 +295,33 @@ __device__ __forceinline__ int8_t sigmoid_piecewise_linear_int8(
         term_bx = bx_32 << (-seg.n_BX_total);
     }
 
-    // [5] 相加（term_c 已预计算）
+    // [4] 相加（term_c 已预计算）
     int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);
 
-    // [6] 饱和到 INT8 范围 [-128, 127]
-    int32_t q_y = max(-128, min(127, y_32));
+    // [5] 饱和到 UINT8 范围 [0, 255]（根据 Python 参考，非对称量化使用无符号整数）
+    int32_t q_y = max(0, min(255, y_32));
 
-    return static_cast<int8_t>(q_y);
+    return static_cast<uint8_t>(q_y);
 }
 
-// Tanh 分段线性计算（INT8 版本，接受 LUT 参数）
-__device__ __forceinline__ int8_t tanh_piecewise_linear_int8(
-    int8_t q_x,
+// Tanh 分段线性计算（UINT8 版本，接受 LUT 参数）
+__device__ __forceinline__ uint8_t tanh_piecewise_linear_int8(
+    uint8_t q_x,
     const SigmoidLUT_INT8& lut
 ) {
 
     // 与 sigmoid 相同的计算流程
-    uint8_t q_x_uint8 = static_cast<uint8_t>(static_cast<int16_t>(q_x) + 128);
-
-    int seg_id = find_segment_int8(q_x_uint8, lut.segments);
+    // [1] 段查找（输入已经是 uint8_t [0, 255]）
+    int seg_id = find_segment_int8(q_x, lut.segments);
     const SegmentParams_INT8& seg = lut.segments[seg_id];
 
-    int16_t x_offset = static_cast<int16_t>(q_x) - static_cast<int16_t>(lut.zp_x);
-    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * static_cast<int32_t>(x_offset);
+    // [2] 去零点
+    // 🔥 修正：使用 int32_t 避免溢出（q_x 是 uint8_t [0, 255]，zp_x 可能是正数）
+    int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
+
+    // [3] 乘法 + 移位融合
+    // 公式: term_bx = (q_b * x_offset) >> n_BX_total
+    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
 
     int32_t term_bx;
     if (seg.n_BX_total >= 0) {
@@ -326,10 +330,13 @@ __device__ __forceinline__ int8_t tanh_piecewise_linear_int8(
         term_bx = bx_32 << (-seg.n_BX_total);
     }
 
+    // [4] 相加（term_c 已预计算）
     int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);
-    int32_t q_y = max(-128, min(127, y_32));
 
-    return static_cast<int8_t>(q_y);
+    // [5] 饱和到 UINT8 范围 [0, 255]（根据 Python 参考，非对称量化使用无符号整数）
+    int32_t q_y = max(0, min(255, y_32));
+
+    return static_cast<uint8_t>(q_y);
 }
 
 }// namespace dev
