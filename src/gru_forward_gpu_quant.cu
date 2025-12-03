@@ -52,6 +52,21 @@ __device__ __forceinline__ QuantT computeZ( // 更新门z
 
     const QuantT z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut); // TODO: 支持int16量化
 
+    // TODO: 分段线性量化
+//    QuantT z;
+//    if constexpr (std::is_same_v<QuantT, int16_t>) {
+//        // INT16 版本：使用分段线性拟合（z 门）
+//        // z_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
+//        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, z_pre_i32)));
+//        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
+//        // 将结果转换回 INT16（注意：分段线性函数返回的是 UINT16，需要根据输出量化参数转换）
+//        z = static_cast<QuantT>(q_y);
+//    } else {
+//        // INT8 版本：使用分段线性拟合（z 门）
+//        const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);// clamp: 截断到int8的范围
+//        z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
+//    }
+
     // const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
     // const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
     // const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh] 的展开索引
@@ -119,6 +134,21 @@ __device__ __forceinline__ QuantT computeR( // 重置门r
     const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
     const QuantT r_pre_i8 = dev::clamp<QuantT>(r_pre_i32); // clamp: 截断到int8的范围
     const QuantT r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut); // TODO: 支持int16量化
+
+    // TODO: 分段线性量化
+//    QuantT r;
+//    if constexpr (std::is_same_v<QuantT, int16_t>) {
+//        // INT16 版本：使用分段线性拟合（r 门）
+//        // r_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
+//        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, r_pre_i32)));
+//        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
+//        // 将结果转换回 INT16
+//        r = static_cast<QuantT>(q_y);
+//    } else {
+//        // INT8 版本：使用分段线性拟合（r 门）
+//        const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32); // clamp: 截断到int8的范围
+//        r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
+//    }
 
 //    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
 //    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
@@ -208,6 +238,21 @@ __device__ __forceinline__ QuantT computeG( // New Gate
     const QuantT g_pre_i8 = dev::clamp<QuantT>(g_pre_i32); // 截断到int8
 
     const QuantT g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut); // TODO: 支持int16量化
+
+    // TODO: 分段线性量化
+//    QuantT g;
+//    if constexpr (std::is_same_v<QuantT, int16_t>) {
+//        // INT16 版本：使用分段线性拟合
+//        // g_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
+//        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, g_pre_i32)));
+//        uint16_t q_y = dev::tanh_piecewise_linear_int16(q_x, d_tanh_lut_int16);
+//        // 将结果转换回 INT16
+//        g = static_cast<QuantT>(q_y);
+//    } else {
+//        // INT8 版本：使用分段线性拟合
+//        const int8_t g_pre_i8 = dev::clamp<int8_t>(g_pre_i32); // 截断到int8
+//        g = dev::tanh_piecewise_linear_int8(g_pre_i8, d_tanh_lut_int8);
+//    }
 
 //    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
 //    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
