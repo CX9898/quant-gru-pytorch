@@ -16,6 +16,30 @@ except ImportError:
     )
 
 
+def _reorder_weights_haste_to_pytorch(w):
+    """
+    将 Haste GRU 权重格式 (z, r, n) 转换回 PyTorch GRU 权重格式 (r, z, n)
+
+    这是 _reorder_weights_pytorch_to_haste 的反向操作，用于将梯度从 Haste 格式
+    转换回 PyTorch 格式，以便正确传播到 nn.Parameter。
+
+    Args:
+        w: 权重张量，第一维是 3*hidden_size，顺序为 z, r, n
+           - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
+           - 对于偏置向量：形状为 [3*hidden]
+
+    Returns:
+        重排序后的权重张量，顺序为 r, z, n
+           - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
+           - 对于偏置向量：形状保持不变 [3*hidden]
+    """
+    # 重排序在 3*hidden 维度上进行（第一维）
+    # chunk 将第一维分成三块：z, r, n（每块大小为 hidden_size）
+    z, r, n = torch.chunk(w, 3, dim=0)
+    # 重新组合为 r, z, n 的顺序（PyTorch 格式）
+    return torch.cat([r, z, n], dim=0)
+
+
 class GRUFunction(torch.autograd.Function):
     """
     GRU 的自定义 autograd Function，支持反向传播
@@ -157,9 +181,21 @@ class GRUFunction(torch.autograd.Function):
             v=v
         )
 
-        # 返回梯度
+        # 将梯度从 Haste 格式转换回 PyTorch 格式
+        # dW 和 dR 的形状是 [input, 3*hidden] 和 [hidden, 3*hidden]，顺序 (z, r, n)
+        # 需要转换为 [3*hidden, input] 和 [3*hidden, hidden]，顺序 (r, z, n)
+        # 步骤：1) 先转置 2) 再重排序
+        dW_pytorch = _reorder_weights_haste_to_pytorch(dW.t()).contiguous()  # [3*hidden, input], 顺序 (r, z, n)
+        dR_pytorch = _reorder_weights_haste_to_pytorch(dR.t()).contiguous()  # [3*hidden, hidden], 顺序 (r, z, n)
+
+        # dbx 和 dbr 的形状是 [3*hidden]，顺序 (z, r, n)
+        # 需要转换为 [3*hidden]，顺序 (r, z, n)
+        dbx_pytorch = _reorder_weights_haste_to_pytorch(dbx).contiguous()  # [3*hidden], 顺序 (r, z, n)
+        dbr_pytorch = _reorder_weights_haste_to_pytorch(dbr).contiguous()  # [3*hidden], 顺序 (r, z, n)
+
+        # 返回梯度（已转换为 PyTorch 格式）
         # 注意：h0 和 is_training 不需要梯度
-        return dx, dW, dR, dbx, dbr, None, None
+        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, None, None
 
 
 class CustomGRU(nn.GRU):
@@ -265,6 +301,29 @@ class CustomGRU(nn.GRU):
         r, z, n = torch.chunk(w, 3, dim=0)
         # 重新组合为 z, r, n 的顺序
         return torch.cat([z, r, n], dim=0)
+
+    def _reorder_weights_haste_to_pytorch(self, w):
+        """
+        将 Haste GRU 权重格式 (z, r, n) 转换回 PyTorch GRU 权重格式 (r, z, n)
+
+        这是 _reorder_weights_pytorch_to_haste 的反向操作，用于将梯度从 Haste 格式
+        转换回 PyTorch 格式，以便正确传播到 nn.Parameter。
+
+        Args:
+            w: 权重张量，第一维是 3*hidden_size，顺序为 z, r, n
+               - 对于权重矩阵：形状为 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状为 [3*hidden]
+
+        Returns:
+            重排序后的权重张量，顺序为 r, z, n
+               - 对于权重矩阵：形状保持不变 [3*hidden, input] 或 [3*hidden, hidden]
+               - 对于偏置向量：形状保持不变 [3*hidden]
+        """
+        # 重排序在 3*hidden 维度上进行（第一维）
+        # chunk 将第一维分成三块：z, r, n（每块大小为 hidden_size）
+        z, r, n = torch.chunk(w, 3, dim=0)
+        # 重新组合为 r, z, n 的顺序（PyTorch 格式）
+        return torch.cat([r, z, n], dim=0)
 
     def _quantize_weights(self, W, R, bx, br, device):
         """
