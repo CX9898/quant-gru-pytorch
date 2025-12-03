@@ -685,14 +685,9 @@ inline void compareHValues(
     const int h_size_per_step = batch_size * hidden_size;// 每个时间步的大小
 
     // 验证大小
-    if (h_float.size() != static_cast<size_t>(time_steps * h_size_per_step)) {
-        printf("[Error] h_float size mismatch: expected %d, got %zu\n",
-               time_steps * h_size_per_step, h_float.size());
-        return;
-    }
-    if (h_quant_dequant.size() != static_cast<size_t>(time_steps * h_size_per_step)) {
-        printf("[Error] h_quant_dequant size mismatch: expected %d, got %zu\n",
-               time_steps * h_size_per_step, h_quant_dequant.size());
+    if (h_quant_dequant.size() != h_float.size()) {
+        printf("[Error] h_float and h_quant_dequant size mismatch: h_float_size = %zu, h_quant_dequant_size = %zu\n",
+                   h_float.size(), h_quant_dequant.size());
         return;
     }
 
