@@ -18,3 +18,8 @@
 /tools/
 
 /.cache/
+
+*.log
+*.so
+*.a
+*.o
