@@ -320,71 +320,81 @@ GRUTrainGradients GruTrain(const int time_steps,
                            const std::vector<float> &x,    // 输入序列张量
                            const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
                                                            // [hidden_size, batch_size, time_steps]
-
 ) {
-
-    // Copy weights over to GPU.
+    // 1. 使用dev::vector拷贝数据到GPU
     dev::vector<float> W_dev(W);
     dev::vector<float> R_dev(R);
     dev::vector<float> bx_dev(bx);
     dev::vector<float> br_dev(br);
     dev::vector<float> x_dev(x);
-
     dev::vector<float> dh_new_dev(dh_new);
 
+    // 2. 创建必要的dev::vector缓存
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> tmp_Rh_dev(batch_size * hidden_size * 3);
     dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
 
-    h_dev.zero();
-
+    // 3. 前向传播: 调用hasteGRUForward
     {
-        ScopeTimer t("Train forward:");
-        gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-            true,// training
-            batch_size, input_size, hidden_size, g_blas_handle);
-
-        forward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
-                    br_dev.data(), x_dev.data(), h_dev.data(), v_dev.data(),
-                    tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
+        ScopeTimer t("hasteGRUForward (train):");
+        hasteGRUForward(
+            true,// training模式
+            time_steps,
+            batch_size,
+            input_size,
+            hidden_size,
+            W_dev.data(),
+            R_dev.data(),
+            bx_dev.data(),
+            br_dev.data(),
+            x_dev.data(),
+            nullptr,// h0
+            g_blas_handle,
+            h_dev.data(),
+            v_dev.data()// reserve
+        );
     }
 
-    dev::vector<float> dx_dev(time_steps * batch_size *
-                              input_size);// 输入序列梯度
-    dev::vector<float> dW_dev(input_size * hidden_size *
-                              3);// 对输入权重的梯度
-    dev::vector<float> dR_dev(hidden_size * hidden_size *
-                              3);               // 对循环权重的梯度
-    dev::vector<float> dbx_dev(hidden_size * 3);// 对输入偏置的梯度
-    dev::vector<float> dbr_dev(hidden_size * 3);// 对循环偏置的梯度
-    dev::vector<float> dh_dev(batch_size *
-                              hidden_size);// 对最后隐藏状态的梯度
-    dev::vector<float> dp_dev(time_steps * batch_size * hidden_size *
-                              3);// 临时缓存梯度（内部结构用）
-    dev::vector<float> dq_dev(time_steps * batch_size * hidden_size *
-                              3);// 临时缓存梯度（内部结构用）
+    // 4. 创建梯度参数, 用dev::vector分配空间
+    dev::vector<float> dx_dev(time_steps * batch_size * input_size);
+    dev::vector<float> dW_dev(input_size * hidden_size * 3);
+    dev::vector<float> dR_dev(hidden_size * hidden_size * 3);
+    dev::vector<float> dbx_dev(hidden_size * 3);
+    dev::vector<float> dbr_dev(hidden_size * 3);
+    dev::vector<float> dh_dev(batch_size * hidden_size);
 
+    // 5. 反向传播: 调用hasteGRUbackward
     {
-        ScopeTimer t("Train backward:");
-        gru::BackwardPass<float> backward(batch_size, input_size, hidden_size,
-                                          g_blas_handle);
-
-        backward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
-                     br_dev.data(), x_dev.data(), h_dev.data(), v_dev.data(),
-                     dh_new_dev.data(), dx_dev.data(), dW_dev.data(), dR_dev.data(),
-                     dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
-                     dq_dev.data(), nullptr);
+        ScopeTimer t("hasteGRUbackward:");
+        hasteGRUBackward(
+            time_steps,
+            batch_size,
+            input_size,
+            hidden_size,
+            W_dev.data(),
+            R_dev.data(),
+            bx_dev.data(),
+            br_dev.data(),
+            x_dev.data(),
+            dh_new_dev.data(),
+            h_dev.data(),
+            v_dev.data(),
+            g_blas_handle,
+            dx_dev.data(),
+            dW_dev.data(),
+            dR_dev.data(),
+            dbx_dev.data(),
+            dbr_dev.data(),
+            dh_dev.data());
     }
 
-    // 将梯度从GPU复制到CPU
+    // 6. 拷贝结果回CPU
     GRUTrainGradients gradients;
-    gradients.dx.resize(time_steps * batch_size * input_size);
-    gradients.dW.resize(input_size * hidden_size * 3);
-    gradients.dR.resize(hidden_size * hidden_size * 3);
-    gradients.dbx.resize(hidden_size * 3);
-    gradients.dbr.resize(hidden_size * 3);
-    gradients.dh.resize(batch_size * hidden_size);
+    gradients.dx.resize(dx_dev.size());
+    gradients.dW.resize(dW_dev.size());
+    gradients.dR.resize(dR_dev.size());
+    gradients.dbx.resize(dbx_dev.size());
+    gradients.dbr.resize(dbr_dev.size());
+    gradients.dh.resize(dh_dev.size());
 
     d2h(gradients.dx.data(), dx_dev.data(), dx_dev.size());
     d2h(gradients.dW.data(), dW_dev.data(), dW_dev.size());
@@ -393,10 +403,7 @@ GRUTrainGradients GruTrain(const int time_steps,
     d2h(gradients.dbr.data(), dbr_dev.data(), dbr_dev.size());
     d2h(gradients.dh.data(), dh_dev.data(), dh_dev.size());
 
-    // 将V从GPU复制到CPU
-    d2h(gradients.v, v_dev);
-
-    // 将h从GPU复制到CPU（跳过初始状态，只复制time_steps个时间步）
+    // h需要跳过初始状态h0，只返回time_steps个h
     const int h_output_size = time_steps * batch_size * hidden_size;
     gradients.h.resize(h_output_size);
     d2h(gradients.h.data(), h_dev.data() + batch_size * hidden_size, h_output_size);
