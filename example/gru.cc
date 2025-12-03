@@ -16,10 +16,10 @@
 #include "gru_quant.h"
 #include "quantized_unit_testing.cuh"
 
-constexpr int BATCH_SIZE = 64;   // 批大小
-constexpr int SEQUENCE_LEN = 500;// 序列长度(T), 每个样本有T个时间步
-constexpr int HIDDEN_DIMS = 256; // 隐藏层维度(H), h_t的维度
-constexpr int INPUT_DIMS = 256;  // 输入维度(I), x_t的维度
+constexpr int BATCH_SIZE = 64;  // 批大小
+constexpr int SEQUENCE_LEN = 50;// 序列长度(T), 每个样本有T个时间步
+constexpr int HIDDEN_DIMS = 256;// 隐藏层维度(H), h_t的维度
+constexpr int INPUT_DIMS = 256; // 输入维度(I), x_t的维度
 
 cublasHandle_t g_blas_handle;// 改为非static以便在wrapper中访问
 
@@ -58,94 +58,72 @@ class ScopeTimer {
 template<typename QuantT>
 void GruInferenceQuant(
     const int time_steps, const int batch_size, const int input_size,
-    const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx,
-    const int32_t *br, const float *x,
+    const int hidden_size, const std::vector<float> &W, const std::vector<float> &R, const std::vector<float> &bx,
+    const std::vector<float> &br, const std::vector<float> &x,
     const GRUQuantitativeParameters &quant_parms,
-    int8_t *h_quant_out// (time_steps + 1) * batch_size * hidden_size
+    std::vector<float> &h_out// (time_steps + 1) * batch_size * hidden_size
 ) {
-    generate_int8_lut_from_exp2_inv(
-        quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_,
-        quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-        quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_,
-        quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-        quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_,
-        quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+    dev::vector<float> x_dev(x);
 
-    // Copy weights over to GPU.
-    dev::vector<QuantT> W_dev(W, input_size * hidden_size * 3);
-    dev::vector<QuantT> R_dev(R, hidden_size * hidden_size * 3);
-    dev::vector<int32_t> bx_dev(bx, hidden_size * 3);
-    dev::vector<int32_t> br_dev(br, hidden_size * 3);
+    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
 
-    const std::size_t x_size = time_steps * batch_size * input_size;
-
-    std::vector<QuantT> x_quant(x_size);
-    quantification(x, x_quant.data(), x_size, quant_parms.exp2_inv_x_,
-                   quant_parms.zp_x_);
-
-    dev::vector<QuantT> x_quant_dev(x_quant);
-
-    const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
-    dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
-
-    dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-                                    3);// 用于存放W * x的中间结果
-    dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size *
-                                    3);// 用于存放R * h的中间结果
-
+    dev::vector<QuantT> W_quant_dev(W.size());
+    dev::vector<QuantT> R_quant_dev(R.size());
+    dev::vector<int32_t> bx_quant_dev(bx.size());
+    dev::vector<int32_t> br_quant_dev(br.size());
     {
-        gru::ForwardPassQuant<int8_t> forward = gru::ForwardPassQuant<int8_t>(
-            false,// training
-            batch_size, input_size, hidden_size, g_blas_handle);
-
-        // 得到量化GRU中使用的rescale参数
-        forward.setRescaleParam(quant_parms);
-
-        ScopeTimer t("Inference Quant:");
-        forward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
-                    br_dev.data(), x_quant_dev.data(), h_quant_dev.data(),
-                    nullptr, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
-                    nullptr);
+        dev::vector<float> W_dev(W);
+        dev::vector<float> R_dev(R);
+        dev::vector<float> bx_dev(bx);
+        dev::vector<float> br_dev(br);
+        quantitativeWeight<QuantT>(input_size, hidden_size,
+                                   W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(), quant_parms,
+                                   W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data());
     }
-
-    d2h(h_quant_out, h_quant_dev.data(), h_quant_dev.size());
+    {
+        ScopeTimer t("GruInferenceQuant:");
+        quantGRUForward<QuantT>(false, time_steps, batch_size, input_size, hidden_size,
+                                W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data(),
+                                x_dev.data(), nullptr, quant_parms, g_blas_handle, h_dev.data(), nullptr);
+    }
+    d2h(h_out, h_dev);
 }
 
 void GruInference(const int time_steps,
                   const int batch_size,
                   const int input_size,
                   const int hidden_size,
-                  const float *W, const float *R, const float *bx,
-                  const float *br, const float *x, float *h) {
+                  const std::vector<float> &W,
+                  const std::vector<float> &R,
+                  const std::vector<float> &bx,
+                  const std::vector<float> &br,
+                  const std::vector<float> &x,
+                  std::vector<float> &h) {
+    dev::vector<float> W_dev(W);
+    dev::vector<float> R_dev(R);
+    dev::vector<float> bx_dev(bx);
+    dev::vector<float> br_dev(br);
+    dev::vector<float> x_dev(x);
+    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
 
-    // Copy weights over to GPU.
-    dev::vector<float> W_dev(W, hidden_size * 3 * input_size);
-    dev::vector<float> R_dev(R, hidden_size * 3 * hidden_size);
-    dev::vector<float> bx_dev(bx, hidden_size * 3);
-    dev::vector<float> br_dev(br, hidden_size * 3);
-    dev::vector<float> x_dev(x, time_steps * input_size * batch_size);
-
-    dev::vector<float> h_dev(hidden_size * batch_size * (time_steps + 1));
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-                                  3);// 用于存放W * x的中间结果
-    dev::vector<float> tmp_Rh_dev(batch_size * hidden_size *
-                                  3);// 用于存放R * h的中间结果
-
-    h_dev.zero();// h初始化为0
-
-    {
-        ScopeTimer t("Inference:");
-
-        gru::ForwardPass<float> forward = gru::ForwardPass<float>(
-            false,// training
-            batch_size, input_size, hidden_size, g_blas_handle);
-
-        forward.Run(time_steps, W_dev.data(), R_dev.data(), bx_dev.data(),
-                    br_dev.data(), x_dev.data(), h_dev.data(), nullptr,
-                    tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
-    }
-
-    d2h(h, h_dev.data(), h_dev.size());
+    // 调用hasteGRUForward进行推理
+    ScopeTimer t("GruInference (float):");
+    hasteGRUForward(false,
+                    time_steps,
+                    batch_size,
+                    input_size,
+                    hidden_size,
+                    W_dev.data(),
+                    R_dev.data(),
+                    bx_dev.data(),
+                    br_dev.data(),
+                    x_dev.data(),
+                    nullptr,// h0设为nullptr
+                    g_blas_handle,
+                    h_dev.data(),
+                    nullptr// reserve设为nullptr
+    );
+    d2h(h, h_dev);
 }
 
 
@@ -517,12 +495,11 @@ int main() {
     quantized_unit_testing.printGRUQuantitativeParameters();
     //    quantized_unit_testing.checkQuantParameters();
 
-    std::vector<int8_t> h_quant_inference(hidden_size * batch_size * (time_steps + 1));
+    std::vector<float> h_dequant_int8_inference(hidden_size * batch_size * (time_steps + 1));
     // 运行量化GRU得到量化结果2
-    GruInferenceQuant(time_steps, batch_size, input_size, hidden_size,
-                      W_quant.data(), R_quant.data(), bx_quant.data(),
-                      br_quant.data(), x.data(), quant_parms,
-                      h_quant_inference.data());
+    GruInferenceQuant<int8_t>(time_steps, batch_size, input_size, hidden_size,
+                              W, R, bx, br, x, quant_parms,
+                              h_dequant_int8_inference);
 
     printf("cudaError(GruInferenceQuant finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
@@ -533,19 +510,18 @@ int main() {
                  batch_size,
                  input_size,
                  hidden_size,
-                 W.data(),
-                 R.data(),
-                 bx.data(),
-                 br.data(),
-                 x.data(),
-                 h_inference.data());
+                 W,
+                 R,
+                 bx,
+                 br,
+                 x,
+                 h_inference);
 
     printf("cudaError(GruInference finish): %s\n",
            cudaGetErrorString(cudaGetLastError()));
 
-    checkHQuantizationWithCosine<int8_t>(h_inference, h_quant_inference,
-                                         time_steps, batch_size, hidden_size,
-                                         quant_parms);
+    compareHValues(h_inference, h_dequant_int8_inference, time_steps, batch_size, hidden_size,
+                   "Inference: Float vs Quantized");
 
     // 运行浮点训练
     printf("\n========== Running Float GRU Training ==========\n");
