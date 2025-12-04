@@ -997,7 +997,7 @@ void calculateGRUQuantitativeParameters(const int steps,
     const int NH = batch_size * hidden_size;
 
     calculateScalePerSteps<T, QuantT>(x,
-                                      NH,
+                                      batch_size * input_size,
                                       steps,
                                       false,
                                       quant_parms_.exp2_inv_x_,
