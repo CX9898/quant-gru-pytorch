@@ -542,7 +542,7 @@ class CustomGRU(nn.GRU):
 
         # 处理 batch_first
         if self.batch_first:
-            input = input.transpose(0, 1)
+            input = input.transpose(0, 1).contiguous()  # [B, T, I] -> [T, B, I]，确保连续内存布局
 
         seq_len, batch_size, input_size = input.shape
         hidden_size = self.hidden_size
@@ -585,7 +585,7 @@ class CustomGRU(nn.GRU):
 
         # 处理 batch_first
         if self.batch_first:
-            output = output.transpose(0, 1)
+            output = output.transpose(0, 1).contiguous()  # [T, B, H] -> [B, T, H]，确保连续内存布局
 
         # 确保 h_n 形状正确
         assert h_n_from_func.shape[0] == 1, f"Expected h_n shape [1, batch, hidden_size], got {h_n_from_func.shape}"
