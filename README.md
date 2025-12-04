@@ -100,13 +100,13 @@ cmake ..
 # 编译
 make -j$(nproc)
 
-# 库文件将输出到 pytouch/lib/ 目录
+# 库文件将输出到 pytorch/lib/ 目录
 ```
 
 #### 2. 编译Python扩展
 
 ```bash
-cd pytouch
+cd pytorch
 
 # 编译Python扩展（开发模式）
 python setup.py build_ext --inplace
