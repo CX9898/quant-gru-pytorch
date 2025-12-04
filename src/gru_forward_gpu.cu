@@ -898,7 +898,7 @@ void calculateScaleFromV(const std::vector<T> &h_host,
     std::vector<T> new_contrib(output_size);
     std::vector<T> old_contrib(output_size);
 
-    //#pragma omp parallel for
+#pragma omp parallel for
     for (int t = 0; t < steps; ++t) {
         const size_t offset_v_per_step = t * batch_size * hidden_size * 4;
         for (int b = 0; b < batch_size; ++b) {
@@ -1214,6 +1214,7 @@ void ForwardPass<T>::Run(
 
     if (calibration_mode_) {
         // 同步所有 GPU 操作，确保数据计算完成
+        cudaDeviceSynchronize();
         quant_parms_.hidden_ = data_->hidden_size;
         if (!use_int16_quant_) {
             calculateGRUQuantitativeParameters<T, int8_t>(steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh, z_pres_, r_pres_, g_pres_, quant_parms_);

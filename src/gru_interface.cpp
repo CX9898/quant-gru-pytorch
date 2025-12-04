@@ -1,5 +1,7 @@
 #include "gru_interface.hpp"
 #include "quantize_ops_helper.hpp"
+#include <cuda_runtime.h>
+#include <cstdio>
 
 
 void calibrateGruScales(
@@ -90,6 +92,24 @@ GRUQuantitativeParameters calibrateGruScales(
         tmp_Rh_dev.data(),
         0.0f,
         nullptr);
+
+    // 同步所有 CUDA 操作，确保校准完成
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA error in calibrateGruScales: %s\n", cudaGetErrorString(err));
+        // 不抛出异常，让调用者处理
+    }
+
+    // 确保 cublas stream 已恢复（forward.Run() 内部会恢复，但这里再次确认）
+    cudaStream_t current_stream;
+    cublasGetStream(g_blas_handle, &current_stream);
+    // 如果 stream 不是默认的，同步它
+    if (current_stream != nullptr) {
+        cudaStreamSynchronize(current_stream);
+    }
 
     return forward.getGRUQuantitativeParameters();
 }
