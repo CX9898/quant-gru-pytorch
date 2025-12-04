@@ -41,10 +41,10 @@ add_library(gru_quant_shared SHARED ${SRC_FILES})
 
 # 输出目录
 set_target_properties(gru_quant_static PROPERTIES
-        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytouch/lib
+        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
 )
 set_target_properties(gru_quant_shared PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytouch/lib
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
         CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
 )
