@@ -1,3 +1,18 @@
+// Copyright 2020 LMNT, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+// ==============================================================================
+
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 
@@ -6,25 +21,20 @@
 #include "gru.h"
 #include "inline_ops.h"
 
-namespace op {
+namespace kernel {
 
-template<typename T, bool ApplyZoneout, bool Calibration = false>
-__device__
-void PointwiseOperations(const int batch_dim,
-                         const int hidden_dim,
-                         const T *h,
-                         const T *v,
-                         const T *dh_new,
-                         T *dbx_out,
-                         T *dbr_out,
-                         T *dh_inout, // 未初始化
-                         T *dp_out,
-                         T *dq_out,
-                         const T *zoneout_mask,  // Zoneout mask (only used if ApplyZoneout==true)
-                         T *dh_totals,
-                         T *dgs,
-                         T *dzs
-) {
+template<typename T, bool ApplyZoneout>
+__global__ void PointwiseOperations(const int batch_dim,
+                                    const int hidden_dim,
+                                    const T *h,
+                                    const T *v,
+                                    const T *dh_new,
+                                    T *dbx_out,
+                                    T *dbr_out,
+                                    T *dh_inout,
+                                    T *dp_out,
+                                    T *dq_out,
+                                    const T *zoneout_mask) {// Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
     const int col = blockDim.y * blockIdx.y + threadIdx.y;
 
@@ -33,8 +43,7 @@ void PointwiseOperations(const int batch_dim,
 
     const int base_idx = col * hidden_dim + row;
 
-    T dh_total = dh_new[base_idx] + dh_inout[base_idx]; // dh_inout 未初始化
-    dh_totals[base_idx] = dh_total;
+    T dh_total = dh_new[base_idx] + dh_inout[base_idx];
 
     const int stride4_base_idx = col * (hidden_dim * 4) + row;
     const int z_idx = stride4_base_idx + 0 * hidden_dim;
@@ -57,9 +66,7 @@ void PointwiseOperations(const int batch_dim,
     }
 
     const T dg = (static_cast<T>(1.0) - z) * dh_total;
-    dgs[base_idx] = dg;
     const T dz = (h[base_idx] - g) * dh_total;
-    dzs[base_idx] = dz;
     const T dp_g = d_tanh(g) * dg;
     const T dq_g = dp_g * r;
     const T dr = dp_g * q_g;
@@ -88,65 +95,35 @@ void PointwiseOperations(const int batch_dim,
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
-
 template<typename T, bool ApplyZoneout>
-__global__
-void PointwiseOperations(const int batch_dim,
-                         const int hidden_dim,
-                         const half *h,
-                         const half *v,
-                         const half *dh_new,
-                         half *dbx_out,
-                         half *dbr_out,
-                         half *dh_inout,
-                         half *dp_out,
-                         half *dq_out,
-                         const half *zoneout_mask) {
+__global__ void PointwiseOperations(const int batch_dim,
+                                    const int hidden_dim,
+                                    const half *h,
+                                    const half *v,
+                                    const half *dh_new,
+                                    half *dbx_out,
+                                    half *dbr_out,
+                                    half *dh_inout,
+                                    half *dp_out,
+                                    half *dq_out,
+                                    const half *zoneout_mask) {
     device_assert_fail("FP16 is not supported on compute capability < 7.0.");
 }
-
 #endif
 
-}  // op namespace
-
-template<typename T, bool ApplyZoneout, bool Calibration = false>
-__global__
-void PointwiseOperations(const int batch_dim,
-                         const int hidden_dim,
-                         const T *h,
-                         const T *v,
-                         const T *dh_new,
-                         T *dbx_out,
-                         T *dbr_out,
-                         T *dh_inout,
-                         T *dp_out,
-                         T *dq_out,
-                         const T *zoneout_mask) {
-    op::PointwiseOperations<T, ApplyZoneout, Calibration>(batch_dim,
-                                                          hidden_dim,
-                                                          h,
-                                                          v,
-                                                          dh_new,
-                                                          dbx_out,
-                                                          dbr_out,
-                                                          dh_inout,
-                                                          dp_out,
-                                                          dq_out,
-                                                          zoneout_mask, nullptr,
-                                                          nullptr, nullptr);
-}
+}// namespace kernel
 
 namespace gru {
 
 template<typename T>
 struct BackwardPass<T>::private_data {
-  int batch_size;
-  int input_size;
-  int hidden_size;
-  cublasHandle_t blas_handle;
-  cudaStream_t stream[2];
-  cudaEvent_t event;
-  cudaStream_t sync_stream;
+    int batch_size;
+    int input_size;
+    int hidden_size;
+    cublasHandle_t blas_handle;
+    cudaStream_t stream[2];
+    cudaEvent_t event;
+    cudaStream_t sync_stream;
 };
 
 template<typename T>
@@ -185,23 +162,23 @@ BackwardPass<T>::~BackwardPass() {
 
 template<typename T>
 void BackwardPass<T>::Iterate(
-    const T *W_t,     // [H*3,C]
-    const T *R_t,     // [H*3,H]
-    const T *bx,      // [H*3]
-    const T *br,      // [H*3]
-    const T *x_t,     // [C,N]
-    const T *h,       // [N,H]
-    const T *v,       // [N,H*4]
-    const T *dh_new,  // [N,H]
-    T *dx,            // [N,C]
-    T *dW,            // [C,H*3]
-    T *dR,            // [H,H*3]
-    T *dbx,           // [H*3]
-    T *dbr,           // [H*3]
-    T *dh,            // [N,H]
-    T *dp,            // [N,H*3]
-    T *dq,            // [N,H*3]
-    const T *zoneout_mask) {  // [N,H]
+    const T *W_t,           // [H*3,C]
+    const T *R_t,           // [H*3,H]
+    const T *bx,            // [H*3]
+    const T *br,            // [H*3]
+    const T *x_t,           // [C,N]
+    const T *h,             // [N,H]
+    const T *v,             // [N,H*4]
+    const T *dh_new,        // [N,H]
+    T *dx,                  // [N,C]
+    T *dW,                  // [C,H*3]
+    T *dR,                  // [H,H*3]
+    T *dbx,                 // [H*3]
+    T *dbr,                 // [H*3]
+    T *dh,                  // [N,H]
+    T *dp,                  // [N,H*3]
+    T *dq,                  // [N,H*3]
+    const T *zoneout_mask) {// [N,H]
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const T alpha = static_cast<T>(1.0);
@@ -270,16 +247,16 @@ void BackwardPass<T>::Iterate(
 
 template<typename T>
 void BackwardPass<T>::IterateInternal(
-    const T *R_t,     // [H*3,H]
-    const T *h,       // [N,H]
-    const T *v,       // [N,H*4]
-    const T *dh_new,  // [N,H]
-    T *dbx,           // [H*3]
-    T *dbr,           // [H*3]
-    T *dh,            // [N,H], 未初始化
-    T *dp,            // [N,H*3]
-    T *dq,            // [N,H*3]
-    const T *zoneout_mask) {  // [N,H]
+    const T *R_t,           // [H*3,H]
+    const T *h,             // [N,H]
+    const T *v,             // [N,H*4]
+    const T *dh_new,        // [N,H]
+    T *dbx,                 // [H*3]
+    T *dbr,                 // [H*3]
+    T *dh,                  // [N,H]
+    T *dp,                  // [N,H*3]
+    T *dq,                  // [N,H*3]
+    const T *zoneout_mask) {// [N,H]
     const T alpha = static_cast<T>(1.0);
     const T beta_sum = static_cast<T>(1.0);
 
@@ -296,7 +273,7 @@ void BackwardPass<T>::IterateInternal(
         (batch_size + blockDim.y - 1) / blockDim.y);
 
     if (zoneout_mask) {
-        PointwiseOperations<T, true><<<gridDim, blockDim, 0, stream1>>>(
+        kernel::PointwiseOperations<T, true><<<gridDim, blockDim, 0, stream1>>>(
             batch_size,
             hidden_size,
             h,
@@ -307,10 +284,9 @@ void BackwardPass<T>::IterateInternal(
             dh,
             dp,
             dq,
-            zoneout_mask
-        );
+            zoneout_mask);
     } else {
-        PointwiseOperations<T, false><<<gridDim, blockDim, 0, stream1>>>(
+        kernel::PointwiseOperations<T, false><<<gridDim, blockDim, 0, stream1>>>(
             batch_size,
             hidden_size,
             h,
@@ -321,8 +297,7 @@ void BackwardPass<T>::IterateInternal(
             dh,
             dp,
             dq,
-            nullptr
-        );
+            nullptr);
     }
     cudaEventRecord(event, stream1);
 
@@ -353,7 +328,7 @@ void BackwardPass<T>::Run(
     T *dR,
     T *dbx,
     T *dbr,
-    T *dh, // 未初始化
+    T *dh,
     T *dp,
     T *dq,
     const T *zoneout_mask) {
@@ -428,9 +403,7 @@ void BackwardPass<T>::Run(
 }
 
 //template struct BackwardPass<half>;
-template
-struct BackwardPass<float>;
-template
-struct BackwardPass<double>;
+template struct BackwardPass<float>;
+template struct BackwardPass<double>;
 
-}  // namespace gru
+}// namespace gru
