@@ -23,3 +23,9 @@
 *.so
 *.a
 *.o
+
+*/speech_commands/
+*.whl
+*.egg-info
+*/*build*/
+*/tmp/
