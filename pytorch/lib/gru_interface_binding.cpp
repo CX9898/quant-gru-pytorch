@@ -408,7 +408,7 @@ std::tuple<torch::Tensor, torch::Tensor> haste_gru_forward_wrapper(
     const torch::Tensor &bx,
     const torch::Tensor &br,
     const torch::Tensor &x,
-    const torch::Tensor &h0) { // 初始隐藏状态，可以为空张量
+    const torch::Tensor &h0) {// 初始隐藏状态，可以为空张量
 
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
@@ -457,7 +457,7 @@ std::tuple<torch::Tensor, torch::Tensor> haste_gru_forward_wrapper(
 
 // forwardInterface 的包装函数
 std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
+    bool is_training,// 是否开启训练模式，true为训练，false为推理
     bool is_quant,
     bool use_int16,
     int time_steps, int batch_size, int input_size, int hidden_size,
@@ -466,7 +466,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     const torch::Tensor &bx,
     const torch::Tensor &br,
     const torch::Tensor &x,
-    const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
+    const torch::Tensor &h0,// 初始隐藏状态，可以为空张量
     const GRUQuantitativeParametersPy &quant_params) {
 
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
@@ -509,11 +509,11 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
         bx.data_ptr<float>(),
         br.data_ptr<float>(),
         x.data_ptr<float>(),
-        h0_ptr,  // 初始隐藏状态，可以为 nullptr
+        h0_ptr,// 初始隐藏状态，可以为 nullptr
         cpp_params,
         g_blas_handle,
         h.data_ptr<float>(),
-        v.data_ptr<float>()  // 传递v参数
+        v.data_ptr<float>()// 传递v参数
     );
 
     return std::make_tuple(h, v);
@@ -528,9 +528,9 @@ haste_gru_backward_wrapper(
     const torch::Tensor &bx,
     const torch::Tensor &br,
     const torch::Tensor &x,
-    const torch::Tensor &dh_new,  // 来自上层网络或损失函数的反向梯度
-    const torch::Tensor &h,        // 前向传播的隐藏状态
-    const torch::Tensor &v) {      // 前向传播的中间值，必需
+    const torch::Tensor &dh_new,// 来自上层网络或损失函数的反向梯度
+    const torch::Tensor &h,     // 前向传播的隐藏状态
+    const torch::Tensor &v) {   // 前向传播的中间值，必需
 
     // 检查输入张量的类型和设备
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
@@ -543,16 +543,30 @@ haste_gru_backward_wrapper(
     TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
 
     // 检查张量形状
+    // 根据 haste 的实现，gru_backward 期望转置后的格式：
+    // x_t: [input_size, time_steps, batch_size] (转置后的 x)
+    // kernel_t: [hidden_size * 3, input_size] (转置后的 kernel)
+    // recurrent_kernel_t: [hidden_size * 3, hidden_size] (转置后的 recurrent_kernel)
+
+    // 检查 x 的形状，需要转置为 [input_size, time_steps, batch_size]
+    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x must have shape [time_steps, batch_size, input_size]");
+    torch::Tensor x_t = x.permute({2, 0, 1}).contiguous();// [T,B,I] -> [I,T,B]
+
+    // 检查 W 的形状，需要转置为 [hidden_size * 3, input_size]
     TORCH_CHECK(W.sizes() == torch::IntArrayRef({input_size, hidden_size * 3}),
                 "W must have shape [input_size, hidden_size * 3]");
+    torch::Tensor W_t = W.t().contiguous();// [C, H*3] -> [H*3, C]
+
+    // 检查 R 的形状，需要转置为 [hidden_size * 3, hidden_size]
     TORCH_CHECK(R.sizes() == torch::IntArrayRef({hidden_size, hidden_size * 3}),
                 "R must have shape [hidden_size, hidden_size * 3]");
+    torch::Tensor R_t = R.t().contiguous();// [H, H*3] -> [H*3, H]
+
     TORCH_CHECK(bx.sizes() == torch::IntArrayRef({hidden_size * 3}),
                 "bx must have shape [hidden_size * 3]");
     TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
                 "br must have shape [hidden_size * 3]");
-    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
-                "x must have shape [time_steps, batch_size, input_size]");
     TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
                 "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
     TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
@@ -567,27 +581,29 @@ haste_gru_backward_wrapper(
 
     // 创建输出张量
     auto dx = torch::empty({time_steps, batch_size, input_size},
-                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dW = torch::zeros({input_size, hidden_size * 3},
-                         torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dR = torch::zeros({hidden_size, hidden_size * 3},
-                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dbx = torch::zeros({hidden_size * 3},
-                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                            torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dbr = torch::zeros({hidden_size * 3},
-                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                            torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dh = torch::zeros({batch_size, hidden_size},
-                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
     // 调用 C++ 函数
     // 注意：需要将张量展平为连续内存布局
+    // C++ BackwardPass 期望转置后的格式（与 haste 一致）：
+    // W_t: [H*3, C], R_t: [H*3, H], x_t: [I, T, B]
     hasteGRUBackward(
         time_steps, batch_size, input_size, hidden_size,
-        W.data_ptr<float>(),
-        R.data_ptr<float>(),
+        W_t.data_ptr<float>(),// [H*3, C] - 转置后的 W
+        R_t.data_ptr<float>(),// [H*3, H] - 转置后的 R
         bx.data_ptr<float>(),
         br.data_ptr<float>(),
-        x.data_ptr<float>(),
+        x_t.data_ptr<float>(),// [I, T, B] - 转置后的 x
         dh_new.data_ptr<float>(),
         h.data_ptr<float>(),
         v.data_ptr<float>(),
@@ -597,8 +613,7 @@ haste_gru_backward_wrapper(
         dR.data_ptr<float>(),
         dbx.data_ptr<float>(),
         dbr.data_ptr<float>(),
-        dh.data_ptr<float>()
-    );
+        dh.data_ptr<float>());
 
     return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
 }
@@ -695,7 +710,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W_quant"), py::arg("R_quant"), py::arg("bx_quant"), py::arg("br_quant"),
           py::arg("x"), py::arg("h0") = torch::Tensor(),// 初始隐藏状态，可选
-          py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为反量化后的中间值
+          py::arg("quant_params"));                     // 返回 (h, v) 元组，h包含初始状态，v为反量化后的中间值
 
     // 量化 GRU 前向传播（int16）
     m.def("quant_gru_forward_int16", &quant_gru_forward_int16_wrapper,
@@ -704,7 +719,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W_quant"), py::arg("R_quant"), py::arg("bx_quant"), py::arg("br_quant"),
           py::arg("x"), py::arg("h0") = torch::Tensor(),// 初始隐藏状态，可选
-          py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为反量化后的中间值
+          py::arg("quant_params"));                     // 返回 (h, v) 元组，h包含初始状态，v为反量化后的中间值
 
     // 非量化 GRU 前向传播
     m.def("haste_gru_forward", &haste_gru_forward_wrapper,
@@ -722,7 +737,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),// 初始隐藏状态，可选
-          py::arg("quant_params"));// 返回 (h, v) 元组，h包含初始状态，v为中间值
+          py::arg("quant_params"));       // 返回 (h, v) 元组，h包含初始状态，v为中间值
 
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper,

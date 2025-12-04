@@ -251,16 +251,20 @@ class GRUFunction(torch.autograd.Function):
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
         # 调用 C++ 反向传播接口
+        # Python 绑定层会内部处理转置，使其与 haste 的实现一致：
+        # - x: [T,B,I] -> x_t: [I,T,B]
+        # - W: [C,H*3] -> W_t: [H*3,C]
+        # - R: [H,H*3] -> R_t: [H*3,H]
         dx, dW, dR, dbx, dbr, dh = gru_ops.haste_gru_backward(
             time_steps=time_steps,
             batch_size=batch_size,
             input_size=input_size,
             hidden_size=hidden_size,
-            W=W,
-            R=R,
+            W=W,  # [C, H*3] - Python 绑定层会转置为 [H*3, C]
+            R=R,  # [H, H*3] - Python 绑定层会转置为 [H*3, H]
             bx=bx,
             br=br,
-            x=input,
+            x=input,  # [T, B, I] - Python 绑定层会转置为 [I, T, B]
             dh_new=dh_new,
             h=h,
             v=v
