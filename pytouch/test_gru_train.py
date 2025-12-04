@@ -126,13 +126,14 @@ if CUSTOM_GRU_AVAILABLE:
     optimizers['custom_gru_no_quant'] = optim.Adam(models['custom_gru_no_quant'].parameters(), lr=1e-3)
 
     # 3. CustomGRU int8 量化版本
+    # 使用延迟校准：先创建模型（不校准），同步权重后再校准
     custom_gru_int8 = CustomGRU(
         input_size=n_mels,
         hidden_size=128,
         batch_first=True,
         use_quantization=True,
         quant_type='int8',
-        calibration_data=calibration_data
+        calibration_data=None  # 延迟校准，稍后调用 calibrate()
     ).to(device)
     models['custom_gru_int8'] = GRUNet(gru_layer=custom_gru_int8).to(device)
     optimizers['custom_gru_int8'] = optim.Adam(models['custom_gru_int8'].parameters(), lr=1e-3)
@@ -154,14 +155,31 @@ if CUSTOM_GRU_AVAILABLE:
     nn_gru = models['nn_gru'].gru
     for name, model in models.items():
         if name != 'nn_gru' and hasattr(model.gru, 'weight_ih_l0'):
-            model.gru.weight_ih_l0.data.copy_(nn_gru.weight_ih_l0.data)
-            model.gru.weight_hh_l0.data.copy_(nn_gru.weight_hh_l0.data)
+            # 确保源权重是连续的
+            torch.cuda.synchronize()
+            # 复制权重并同步
+            model.gru.weight_ih_l0.data.copy_(nn_gru.weight_ih_l0.data.contiguous())
+            torch.cuda.synchronize()
+            model.gru.weight_hh_l0.data.copy_(nn_gru.weight_hh_l0.data.contiguous())
+            torch.cuda.synchronize()
             if nn_gru.bias:
-                model.gru.bias_ih_l0.data.copy_(nn_gru.bias_ih_l0.data)
-                model.gru.bias_hh_l0.data.copy_(nn_gru.bias_hh_l0.data)
+                model.gru.bias_ih_l0.data.copy_(nn_gru.bias_ih_l0.data.contiguous())
+                torch.cuda.synchronize()
+                model.gru.bias_hh_l0.data.copy_(nn_gru.bias_hh_l0.data.contiguous())
+                torch.cuda.synchronize()
             # 同步全连接层权重
-            model.fc.weight.data.copy_(models['nn_gru'].fc.weight.data)
-            model.fc.bias.data.copy_(models['nn_gru'].fc.bias.data)
+            model.fc.weight.data.copy_(models['nn_gru'].fc.weight.data.contiguous())
+            torch.cuda.synchronize()
+            model.fc.bias.data.copy_(models['nn_gru'].fc.bias.data.contiguous())
+            torch.cuda.synchronize()
+
+    # 在权重同步后，对量化版本进行校准（使用正确的权重）
+    print("校准量化参数...")
+    for name, model in models.items():
+        if name != 'nn_gru' and hasattr(model.gru, 'calibrate'):
+            if model.gru.use_quantization and not model.gru.is_calibrated():
+                model.gru.calibrate(calibration_data)
+                torch.cuda.synchronize()
 
     print(f"已创建 {len(models)} 个模型版本进行对比:")
     for name in models.keys():
