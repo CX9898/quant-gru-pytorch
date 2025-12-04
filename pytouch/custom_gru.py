@@ -484,10 +484,16 @@ class CustomGRU(nn.GRU):
         """
         重写 _apply 方法，在量化初始化后正确处理设备迁移
 
-        避免量化初始化改变 CUDA 状态后，flatten_parameters() 失败的问题
+        主要用于向后兼容立即校准方式（方式1）：
+        - 如果使用延迟校准（方式2，推荐），此方法不会被触发
+        - 如果使用立即校准（方式1），在量化初始化后调用 .to(device) 时会触发此方法
+        - 手动应用函数，避免触发 flatten_parameters()，防止 CUDA 状态冲突
+
+        注意：延迟校准方式不需要此方法，因为 .to(device) 在量化初始化之前调用
         """
         if hasattr(self, '_quantization_initialized') and self._quantization_initialized:
             # 量化已初始化：手动应用函数，避免触发 flatten_parameters()
+            # 这主要用于向后兼容立即校准方式
             if hasattr(self, '_flat_weights'):
                 self._flat_weights = None
             for param in self.parameters():
@@ -500,7 +506,7 @@ class CustomGRU(nn.GRU):
                     buffer.data = fn(buffer.data)
             return self
         else:
-            # 量化未初始化：使用父类的默认行为
+            # 量化未初始化：使用父类的默认行为（正常触发 flatten_parameters()）
             return super(CustomGRU, self)._apply(fn)
 
     def forward(
