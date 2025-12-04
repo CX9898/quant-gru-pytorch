@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 
-project(gru LANGUAGES CXX CUDA)
+project(quant-gru LANGUAGES CXX CUDA)
 
 # ------------------------------
 # C++ / CUDA 标准
