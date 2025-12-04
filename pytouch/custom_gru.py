@@ -292,6 +292,10 @@ class CustomGRU(nn.GRU):
     """
     继承自 PyTorch nn.GRU 的自定义类，支持量化前向传播
 
+    支持两种校准方式：
+    1. 立即校准：在构造函数中提供 calibration_data，立即进行校准（向后兼容）
+    2. 延迟校准：构造函数中 calibration_data=None，后续调用 calibrate() 方法（推荐）
+
     Args:
         input_size: 输入特征维度
         hidden_size: 隐藏状态维度
@@ -302,7 +306,18 @@ class CustomGRU(nn.GRU):
         bidirectional: 是否双向（目前不支持）
         use_quantization: 是否使用量化
         quant_type: 量化类型，'int8' 或 'int16'
-        calibration_data: 用于校准量化参数的输入数据
+        calibration_data: 用于校准量化参数的输入数据（可选）
+            - 如果提供：立即进行校准（向后兼容）
+            - 如果为 None：延迟校准，需要后续调用 calibrate() 方法
+
+    Examples:
+        # 方式1：立即校准（向后兼容）
+        gru = CustomGRU(..., use_quantization=True, calibration_data=data)
+
+        # 方式2：延迟校准（推荐，可以在设置权重后校准）
+        gru = CustomGRU(..., use_quantization=True, calibration_data=None)
+        # ... 设置权重 ...
+        gru.calibrate(calibration_data)
     """
 
     def __init__(
@@ -347,13 +362,12 @@ class CustomGRU(nn.GRU):
 
         # 量化参数初始化
         if self.use_quantization:
-            if calibration_data is None:
-                raise ValueError(
-                    "calibration_data is required when use_quantization=True. "
-                    "Please provide sample input data for calibration."
-                )
-            # 直接初始化量化参数
-            self._initialize_quantization(calibration_data)
+            if calibration_data is not None:
+                # 立即校准（向后兼容）
+                self._initialize_quantization(calibration_data)
+            else:
+                # 延迟校准
+                self.quant_params = None
         else:
             self.quant_params = None
 
@@ -381,19 +395,46 @@ class CustomGRU(nn.GRU):
 
         return W, R, bx, br
 
+    def is_calibrated(self) -> bool:
+        """检查量化参数是否已校准"""
+        return self.quant_params is not None
+
+    def calibrate(self, calibration_data: torch.Tensor):
+        """
+        显式校准量化参数（公共方法）
+
+        权重将在每次前向传播时实时量化，以支持训练时权重的更新。
+
+        Args:
+            calibration_data: 用于校准的输入数据，形状为 [seq_len, batch, input_size] 或 [batch, seq_len, input_size]
+
+        Raises:
+            RuntimeError: 如果未启用量化
+        """
+        if not self.use_quantization:
+            raise RuntimeError("Cannot calibrate: quantization is not enabled. Set use_quantization=True first.")
+        self._initialize_quantization(calibration_data)
+
     def _initialize_quantization(self, calibration_data: torch.Tensor):
         """
-        初始化量化参数（不量化权重）
+        初始化量化参数（内部方法）
 
         权重将在每次前向传播时实时量化，以支持训练时权重的更新。
 
         Args:
             calibration_data: 用于校准的输入数据，形状为 [seq_len, batch, input_size] 或 [batch, seq_len, input_size]
         """
-        # 确保数据在 CUDA 上
+        # 确保校准数据在 CUDA 上
         device = calibration_data.device if calibration_data.is_cuda else torch.device('cuda')
         if not calibration_data.is_cuda:
             calibration_data = calibration_data.to(device)
+
+        # 确保模型参数在 GPU 上（手动移动，避免触发 flatten_parameters）
+        if not next(self.parameters()).is_cuda:
+            for param in self.parameters():
+                param.data = param.data.to(device)
+            for buffer in self.buffers():
+                buffer.data = buffer.data.to(device)
 
         # 处理 batch_first
         if self.batch_first:
@@ -425,12 +466,42 @@ class CustomGRU(nn.GRU):
         gru_ops.initialize_quantization_lut(quant_params=self.quant_params, use_int16=use_int16)
         torch.cuda.synchronize()
 
-        # 确保权重连续性（避免量化初始化改变 CUDA 状态后的问题）
+        # 确保权重连续性并重置 flatten_parameters 状态
         self.weight_ih_l0.data = self.weight_ih_l0.data.contiguous()
         self.weight_hh_l0.data = self.weight_hh_l0.data.contiguous()
         if self.bias:
             self.bias_ih_l0.data = self.bias_ih_l0.data.contiguous()
             self.bias_hh_l0.data = self.bias_hh_l0.data.contiguous()
+
+        # 重置 flatten_parameters 的内部状态，避免后续 .to(device) 时出现问题
+        if hasattr(self, '_flat_weights'):
+            self._flat_weights = None
+
+        # 标记量化已初始化，用于后续的 _apply 方法
+        self._quantization_initialized = True
+
+    def _apply(self, fn):
+        """
+        重写 _apply 方法，在量化初始化后正确处理设备迁移
+
+        避免量化初始化改变 CUDA 状态后，flatten_parameters() 失败的问题
+        """
+        if hasattr(self, '_quantization_initialized') and self._quantization_initialized:
+            # 量化已初始化：手动应用函数，避免触发 flatten_parameters()
+            if hasattr(self, '_flat_weights'):
+                self._flat_weights = None
+            for param in self.parameters():
+                if param is not None:
+                    param.data = fn(param.data)
+                    if param._grad is not None:
+                        param._grad.data = fn(param._grad.data)
+            for buffer in self.buffers():
+                if buffer is not None:
+                    buffer.data = fn(buffer.data)
+            return self
+        else:
+            # 量化未初始化：使用父类的默认行为
+            return super(CustomGRU, self)._apply(fn)
 
     def forward(
         self,
@@ -447,7 +518,18 @@ class CustomGRU(nn.GRU):
         Returns:
             output: 输出张量，形状与 input 相同但最后一维为 hidden_size
             h_n: 最终隐藏状态，形状为 [num_layers, batch, hidden_size]
+
+        Raises:
+            RuntimeError: 如果启用了量化但未校准
         """
+        # 检查量化是否已校准
+        if self.use_quantization and not self.is_calibrated():
+            raise RuntimeError(
+                "Quantization is enabled but not calibrated. "
+                "Please call calibrate(calibration_data) before forward pass, "
+                "or provide calibration_data in __init__."
+            )
+
         # 处理 batch_first
         if self.batch_first:
             input = input.transpose(0, 1)
