@@ -335,7 +335,7 @@ def test_quantized_int8():
 
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
-    results2 = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
+    # results2 = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
 
     # 量化版本会有误差，但应该在合理范围内
     print(f"✅ int8 量化测试完成！MSE: {results['mse_output']:.6f}, "
