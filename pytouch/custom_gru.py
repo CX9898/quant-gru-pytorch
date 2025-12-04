@@ -345,15 +345,17 @@ class CustomGRU(nn.GRU):
         # 初始化 cublas handle
         gru_ops.init_gru_cublas()
 
-        # 量化参数（延迟初始化）
-        self.quant_params = None
+        # 量化参数初始化
         if self.use_quantization:
             if calibration_data is None:
                 raise ValueError(
                     "calibration_data is required when use_quantization=True. "
                     "Please provide sample input data for calibration."
                 )
-            self._pending_calibration_data = calibration_data
+            # 直接初始化量化参数
+            self._initialize_quantization(calibration_data)
+        else:
+            self.quant_params = None
 
     def _convert_weights_to_haste_format(self, device: torch.device):
         """
@@ -468,21 +470,6 @@ class CustomGRU(nn.GRU):
         # 确保输入在 CUDA 上且为 float32
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
-
-        # 延迟初始化量化参数（在第一次前向传播时）
-        if self.use_quantization and self.quant_params is None:
-            if hasattr(self, '_pending_calibration_data') and self._pending_calibration_data is not None:
-                calibration_data = self._pending_calibration_data
-                device = next(self.parameters()).device if len(list(self.parameters())) > 0 else torch.device('cuda')
-                if not calibration_data.is_cuda:
-                    calibration_data = calibration_data.to(device)
-                self._initialize_quantization(calibration_data)
-                self._pending_calibration_data = None
-            else:
-                raise RuntimeError(
-                    "量化参数未初始化，且没有提供校准数据。"
-                    "请在创建 CustomGRU 时提供 calibration_data 参数。"
-                )
 
         # 获取权重和偏置
         weight_ih = self.weight_ih_l0
