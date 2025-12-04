@@ -150,13 +150,11 @@ void GruQuantInit(
     const float *bx,    // 输入偏置项（input bias），来自输入路径
     const float *br,    // 循环偏置项（recurrent bias），来自循环路径
     const float *x,     // 输入序列张量
-    const float *dh_new,// 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
     QuantT *W_quant,
     QuantT *R_quant,
     int32_t *bx_quant,
     int32_t *br_quant,
     QuantT *x_quant,
-    QuantT *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams);
 
 void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre,

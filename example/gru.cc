@@ -419,18 +419,18 @@ int main() {
     init_gru_cublas();// 使用初始化函数
 
     // Weights.
-    std::vector<float> W(HIDDEN_DIMS * 3 * INPUT_DIMS); // 对应W_z/W_r/W_h的合并
-    std::vector<float> R(HIDDEN_DIMS * 3 * HIDDEN_DIMS);// 对应R_z/R_r/R_h的合并
+    std::vector<float> W(INPUT_DIMS * HIDDEN_DIMS * 3); // 对应W_z/W_r/W_h的合并
+    std::vector<float> R(HIDDEN_DIMS * HIDDEN_DIMS * 3);// 对应R_z/R_r/R_h的合并
     std::vector<float> bx(HIDDEN_DIMS * 3);             // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t
     // 到门控的线性变换" 加偏置
     std::vector<float> br(HIDDEN_DIMS * 3);// br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态
     // h_{t-1} 到门控的线性变换" 加偏置
 
     // Input.
-    std::vector<float> x(INPUT_DIMS * BATCH_SIZE * SEQUENCE_LEN);
+    std::vector<float> x(SEQUENCE_LEN * BATCH_SIZE * INPUT_DIMS);
 
     // Gradients from upstream layers.
-    std::vector<float> dh(HIDDEN_DIMS * BATCH_SIZE * (SEQUENCE_LEN + 1));
+    std::vector<float> dh((SEQUENCE_LEN + 1) * BATCH_SIZE * HIDDEN_DIMS);
 
     // W: 输入权重矩阵，使用 Xavier/Glorot 均匀初始化
     // 范围: U(-k, k)，其中 k = sqrt(6 / (input_size + hidden_size * 3))
@@ -479,31 +479,30 @@ int main() {
                        g_blas_handle, quant_parms);
 
     // Quant
-    std::vector<int8_t> W_quant(HIDDEN_DIMS * 3 * INPUT_DIMS); // 对应W_z/W_r/W_h的合并
-    std::vector<int8_t> R_quant(HIDDEN_DIMS * 3 * HIDDEN_DIMS);// 对应R_z/R_r/R_h的合并
-    std::vector<int32_t> bx_quant(HIDDEN_DIMS * 3);            // 对应b_z/b_r/b_h的合并. bx 负责给
+    std::vector<int8_t> W_quant(W.size());   // 对应W_z/W_r/W_h的合并
+    std::vector<int8_t> R_quant(R.size());   // 对应R_z/R_r/R_h的合并
+    std::vector<int32_t> bx_quant(bx.size());// 对应b_z/b_r/b_h的合并. bx 负责给
     // “输入 x_t 到门控的线性变换” 加偏置
-    std::vector<int32_t> br_quant(HIDDEN_DIMS * 3);// br: 3H(部分实现中偏置分输出\隐藏层. br
+    std::vector<int32_t> br_quant(br.size());// br: 3H(部分实现中偏置分输出\隐藏层. br
     // 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
-    std::vector<int8_t> x_quant(INPUT_DIMS * BATCH_SIZE * SEQUENCE_LEN);
-    std::vector<int8_t> dh_new_quant(HIDDEN_DIMS * BATCH_SIZE * (SEQUENCE_LEN + 1));
+    std::vector<int8_t> x_quant(x.size());
 
     // 使用固定量化参数将输入量化
     GruQuantInit(time_steps, batch_size, input_size, hidden_size, W.data(),
-                 R.data(), bx.data(), br.data(), x.data(), dh.data(),
+                 R.data(), bx.data(), br.data(), x.data(),
                  W_quant.data(), R_quant.data(), bx_quant.data(),
-                 br_quant.data(), x_quant.data(), dh_new_quant.data(),
+                 br_quant.data(), x_quant.data(),
                  quant_parms);
 
     Quantized_unit_testing<int8_t> quantized_unit_testing(
         W.data(), R.data(), bx.data(), br.data(), x.data(), dh.data(),
         W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(),
-        x_quant.data(), dh_new_quant.data(), hidden_size, input_size,
+        x_quant.data(), hidden_size, input_size,
         batch_size, time_steps, g_blas_handle, quant_parms);
     quantized_unit_testing.printGRUQuantitativeParameters();
     //    quantized_unit_testing.checkQuantParameters();
 
-    std::vector<float> h_dequant_int8_inference(hidden_size * batch_size * (time_steps + 1));
+    std::vector<float> h_dequant_int8_inference((time_steps + 1) * batch_size * hidden_size);
     // 运行量化GRU得到量化结果2
     GruInferenceQuant<int8_t>(time_steps, batch_size, input_size, hidden_size,
                               W, R, bx, br, x, quant_parms,
@@ -513,7 +512,7 @@ int main() {
            cudaGetErrorString(cudaGetLastError()));
 
     // 运行浮点GRU得到结果1
-    std::vector<float> h_inference(hidden_size * batch_size * (time_steps + 1));
+    std::vector<float> h_inference((time_steps + 1) * batch_size * hidden_size);
     GruInference(time_steps,
                  batch_size,
                  input_size,

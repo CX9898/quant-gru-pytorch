@@ -2,6 +2,7 @@
 #include "quantize_ops_helper.hpp"
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <stdexcept>
 
 
 void calibrateGruScales(
@@ -99,8 +100,10 @@ GRUQuantitativeParameters calibrateGruScales(
     // 检查 CUDA 错误
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "CUDA error in calibrateGruScales: %s\n", cudaGetErrorString(err));
-        // 不抛出异常，让调用者处理
+        const char* err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in calibrateGruScales: %s\n", err_str);
+        // 抛出异常，让调用者知道校准失败
+        throw std::runtime_error(std::string("CUDA error in calibrateGruScales: ") + err_str);
     }
 
     // 确保 cublas stream 已恢复（forward.Run() 内部会恢复，但这里再次确认）
@@ -342,13 +345,11 @@ void GruQuantInit(
     const float *bx,    // 输入偏置项（input bias），来自输入路径
     const float *br,    // 循环偏置项（recurrent bias），来自循环路径
     const float *x,     // 输入序列张量
-    const float *dh_new,// 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
     QuantT *W_quant,
     QuantT *R_quant,
     int32_t *bx_quant,
     int32_t *br_quant,
     QuantT *x_quant,
-    QuantT *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams) {
     const int channel_size = hidden_size * 3;
     // N : batch_size
@@ -382,13 +383,11 @@ template void GruQuantInit<int8_t>(
     const float *bx,    // 输入偏置项（input bias），来自输入路径
     const float *br,    // 循环偏置项（recurrent bias），来自循环路径
     const float *x,     // 输入序列张量
-    const float *dh_new,// 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
     int8_t *W_quant,
     int8_t *R_quant,
     int32_t *bx_quant,
     int32_t *br_quant,
     int8_t *x_quant,
-    int8_t *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams);
 
 template void GruQuantInit<int16_t>(
@@ -401,13 +400,11 @@ template void GruQuantInit<int16_t>(
     const float *bx,    // 输入偏置项（input bias），来自输入路径
     const float *br,    // 循环偏置项（recurrent bias），来自循环路径
     const float *x,     // 输入序列张量
-    const float *dh_new,// 来自上层网络或损失函数的反向梯度. [hidden_size, batch_size, time_steps]
     int16_t *W_quant,
     int16_t *R_quant,
     int32_t *bx_quant,
     int32_t *br_quant,
     int16_t *x_quant,
-    int16_t *dh_new_quant,
     const GRUQuantitativeParameters &gruRescaleParams);
 
 // 显式实例化 quantitativeWeight 和 quantGRUForward 模板函数，供 Python 绑定使用

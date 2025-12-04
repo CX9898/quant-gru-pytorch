@@ -174,7 +174,6 @@ struct Quantized_unit_testing {
     std::vector<int32_t> bx_quant_;
     std::vector<int32_t> br_quant_;
     std::vector<QuantT> x_quant_;
-    std::vector<QuantT> dh_new_quant_;
     size_t hidden_size_;
     size_t input_size_;
     size_t batch_size_;
@@ -194,7 +193,6 @@ struct Quantized_unit_testing {
                            int32_t *bx_quant,
                            int32_t *br_quant,
                            QuantT *x_quant,
-                           QuantT *dh_new_quant,
                            size_t hidden_size,
                            size_t input_size,
                            size_t batch_size,
@@ -218,7 +216,6 @@ struct Quantized_unit_testing {
         bx_quant_ = std::vector<int32_t>(bx_quant, bx_quant + hidden_size * 3);
         br_quant_ = std::vector<int32_t>(br_quant, br_quant + hidden_size * 3);
         x_quant_ = std::vector<QuantT>(x_quant, x_quant + input_size * batch_size * time_steps);
-        dh_new_quant_ = std::vector<QuantT>(dh_new_quant, dh_new_quant + hidden_size * batch_size * time_steps);
 
         channels_ = hidden_size_ * 3;
     }

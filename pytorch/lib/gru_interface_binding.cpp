@@ -147,6 +147,13 @@ GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
 
+    // 检查 x 的形状，期望 [time_steps, batch_size, input_size]
+    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x must have shape [time_steps, batch_size, input_size]");
+
+    // 确保 x 是连续的（Haste GRU 期望 [T, N, C] 格式，但需要连续内存布局）
+    torch::Tensor x_contiguous = x.contiguous();
+
     // 确保 cublas handle 已初始化
     if (g_blas_handle == nullptr) {
         init_gru_cublas(g_blas_handle);
@@ -160,7 +167,7 @@ GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
         R.data_ptr<float>(),
         bx.data_ptr<float>(),
         br.data_ptr<float>(),
-        x.data_ptr<float>(),
+        x_contiguous.data_ptr<float>(),
         g_blas_handle);
 
     GRUQuantitativeParametersPy py_params;
