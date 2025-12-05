@@ -111,9 +111,18 @@ optimizers['nn_gru'] = optim.Adam(models['nn_gru'].parameters(), lr=1e-3)
 # 2-4. CustomGRU 版本（如果可用）
 if CUSTOM_GRU_AVAILABLE:
     # 准备校准数据（用于量化版本的初始化）
+    # 使用固定长度的校准数据，避免 padding 问题
+    # 从 DataLoader 获取一个批次，然后使用固定长度（取平均序列长度或固定值）
     print("准备校准数据...")
     calibration_specs, _ = next(iter(train_loader))
-    calibration_data = calibration_specs.to(device)
+    # 使用固定长度：取批次中的平均序列长度，或使用固定值（如 50）
+    # 这里使用固定值 50，确保没有 padding
+    fixed_seq_len = 50
+    batch_size = calibration_specs.size(0)
+    # 如果实际序列长度小于固定长度，则截断；如果大于，则使用实际长度
+    actual_seq_len = min(calibration_specs.size(1), fixed_seq_len)
+    calibration_data = calibration_specs[:, :actual_seq_len, :].to(device)  # [B, T, F]
+    print(f"校准数据形状: {calibration_data.shape} (batch_first=True)")
 
     # 2. CustomGRU 非量化版本
     custom_gru_no_quant = CustomGRU(
@@ -155,35 +164,94 @@ if CUSTOM_GRU_AVAILABLE:
     nn_gru = models['nn_gru'].gru
     for name, model in models.items():
         if name != 'nn_gru' and hasattr(model.gru, 'weight_ih_l0'):
+            # 确保 CustomGRU 的权重没有被展平（处理 flatten_parameters 的情况）
+            # 注意：不要重置基准模型 nn.GRU 的 _flat_weights，否则会导致后续调用失败
+            if hasattr(model.gru, '_flat_weights') and model.gru._flat_weights is not None:
+                model.gru._flat_weights = None
+
             # 确保源权重是连续的
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
             # 复制权重并同步
             model.gru.weight_ih_l0.data.copy_(nn_gru.weight_ih_l0.data.contiguous())
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
             model.gru.weight_hh_l0.data.copy_(nn_gru.weight_hh_l0.data.contiguous())
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
             if nn_gru.bias:
                 model.gru.bias_ih_l0.data.copy_(nn_gru.bias_ih_l0.data.contiguous())
-                torch.cuda.synchronize()
+                if device.type == 'cuda':
+                    torch.cuda.synchronize()
+
                 model.gru.bias_hh_l0.data.copy_(nn_gru.bias_hh_l0.data.contiguous())
-                torch.cuda.synchronize()
+                if device.type == 'cuda':
+                    torch.cuda.synchronize()
+
             # 同步全连接层权重
             model.fc.weight.data.copy_(models['nn_gru'].fc.weight.data.contiguous())
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
             model.fc.bias.data.copy_(models['nn_gru'].fc.bias.data.contiguous())
-            torch.cuda.synchronize()
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
+
+            # 验证权重是否同步成功
+            weight_ih_diff = (model.gru.weight_ih_l0.data - nn_gru.weight_ih_l0.data).abs().max().item()
+            weight_hh_diff = (model.gru.weight_hh_l0.data - nn_gru.weight_hh_l0.data).abs().max().item()
+            fc_weight_diff = (model.fc.weight.data - models['nn_gru'].fc.weight.data).abs().max().item()
+            fc_bias_diff = (model.fc.bias.data - models['nn_gru'].fc.bias.data).abs().max().item()
+
+            max_diff = max(weight_ih_diff, weight_hh_diff, fc_weight_diff, fc_bias_diff)
+            if max_diff > 1e-6:
+                print(f"警告: {name} 的权重同步可能失败，最大差异: {max_diff:.2e}")
+                print(f"  - weight_ih_l0: {weight_ih_diff:.2e}")
+                print(f"  - weight_hh_l0: {weight_hh_diff:.2e}")
+                print(f"  - fc.weight: {fc_weight_diff:.2e}")
+                print(f"  - fc.bias: {fc_bias_diff:.2e}")
+            else:
+                print(f"✓ {name} 权重同步成功 (最大差异: {max_diff:.2e})")
 
     # 在权重同步后，对量化版本进行校准（使用正确的权重）
     print("校准量化参数...")
     for name, model in models.items():
         if name != 'nn_gru' and hasattr(model.gru, 'calibrate'):
             if model.gru.use_quantization and not model.gru.is_calibrated():
-                model.gru.calibrate(calibration_data)
-                torch.cuda.synchronize()
+                try:
+                    model.gru.calibrate(calibration_data)
+                    if device.type == 'cuda':
+                        torch.cuda.synchronize()
+                    print(f"✓ {name} 量化参数校准成功")
+                except Exception as e:
+                    print(f"✗ {name} 量化参数校准失败: {e}")
+                    raise
 
-    print(f"已创建 {len(models)} 个模型版本进行对比:")
+    print(f"\n已创建 {len(models)} 个模型版本进行对比:")
     for name in models.keys():
         print(f"  - {name}")
+
+    # 验证所有模型的初始状态是否一致
+    print("\n验证初始状态一致性...")
+    test_specs, _ = next(iter(test_loader))
+    test_specs = test_specs.to(device)
+
+    with torch.no_grad():
+        baseline_output = models['nn_gru'](test_specs)
+        for name, model in models.items():
+            if name != 'nn_gru':
+                model.eval()
+                output = model(test_specs)
+                diff = (output - baseline_output).abs().max().item()
+                mean_diff = (output - baseline_output).abs().mean().item()
+                print(f"  {name:25s} | 最大差异: {diff:.6f} | 平均差异: {mean_diff:.6f}")
+                if diff > 1e-3:
+                    print(f"    警告: {name} 的初始输出与基准模型差异较大 (>1e-3)")
+                elif diff > 1e-6:
+                    print(f"    注意: {name} 的初始输出与基准模型有轻微差异 (可能由于数值精度)")
 else:
     print("只测试 nn.GRU（CustomGRU 不可用）")
 
@@ -261,22 +329,26 @@ for epoch in range(1, num_epochs + 1):
         train_time = time.time() - train_start
         avg_loss = running_loss / len(train_loader)
 
-        # 评估
-        eval_results = eval_all_models(test_loader, {name: model})
-        test_acc = eval_results[name]['accuracy']
-        eval_time = eval_results[name]['time']
-
         epoch_results[name] = {
             'loss': avg_loss,
-            'test_acc': test_acc,
-            'train_time': train_time,
-            'eval_time': eval_time
+            'train_time': train_time
         }
 
         history[name].append(epoch_results[name])
 
-        print(f"{name:25s} | Loss: {avg_loss:.4f} | Test Acc: {test_acc:.2f}% | "
-              f"Train: {train_time:.2f}s | Eval: {eval_time:.2f}s")
+        print(f"{name:25s} | Loss: {avg_loss:.4f} | Train: {train_time:.2f}s")
+
+    # 在每个 epoch 结束后，评估所有模型（便于对比）
+    print("\n评估所有模型...")
+    eval_results = eval_all_models(test_loader, models)
+    for name in training_order:
+        test_acc = eval_results[name]['accuracy']
+        eval_time = eval_results[name]['time']
+        epoch_results[name]['test_acc'] = test_acc
+        epoch_results[name]['eval_time'] = eval_time
+        history[name][-1] = epoch_results[name]  # 更新最新记录
+
+        print(f"{name:25s} | Test Acc: {test_acc:.2f}% | Eval: {eval_time:.2f}s")
 
 # ===================== 7. 最终对比总结 =====================
 print("\n" + "="*80)
