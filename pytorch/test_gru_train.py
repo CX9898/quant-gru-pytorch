@@ -6,6 +6,7 @@ from torchaudio.datasets import SPEECHCOMMANDS
 from torch.utils.data import DataLoader, random_split
 import os
 import time
+import random
 from collections import defaultdict
 
 # 导入 CustomGRU
@@ -111,18 +112,315 @@ optimizers['nn_gru'] = optim.Adam(models['nn_gru'].parameters(), lr=1e-3)
 # 2-4. CustomGRU 版本（如果可用）
 if CUSTOM_GRU_AVAILABLE:
     # 准备校准数据（用于量化版本的初始化）
-    # 使用固定长度的校准数据，避免 padding 问题
-    # 从 DataLoader 获取一个批次，然后使用固定长度（取平均序列长度或固定值）
-    print("准备校准数据...")
-    calibration_specs, _ = next(iter(train_loader))
-    # 使用固定长度：取批次中的平均序列长度，或使用固定值（如 50）
-    # 这里使用固定值 50，确保没有 padding
-    fixed_seq_len = 50
-    batch_size = calibration_specs.size(0)
-    # 如果实际序列长度小于固定长度，则截断；如果大于，则使用实际长度
-    actual_seq_len = min(calibration_specs.size(1), fixed_seq_len)
-    calibration_data = calibration_specs[:, :actual_seq_len, :].to(device)  # [B, T, F]
-    print(f"校准数据形状: {calibration_data.shape} (batch_first=True)")
+    # 校准数据源配置
+    USE_TEST_LOADER_FOR_CALIBRATION = True  # True: 使用 test_loader, False: 使用随机采样的训练数据
+
+    if USE_TEST_LOADER_FOR_CALIBRATION:
+        # 使用测试集作为校准数据
+        print("准备校准数据（使用测试集）...")
+        print("  从 test_loader 收集校准数据...")
+
+        all_test_specs = []
+        for batch_idx, (specs, targets) in enumerate(test_loader):
+            all_test_specs.append(specs)
+            if (batch_idx + 1) % 10 == 0:
+                print(f"    已收集 {batch_idx + 1}/{len(test_loader)} 个批次")
+
+        # 找到最大序列长度
+        max_seq_len = max(specs.size(1) for specs in all_test_specs)
+        print(f"  最大序列长度: {max_seq_len}")
+
+        # 统一序列长度
+        unified_specs = []
+        for specs in all_test_specs:
+            current_seq_len = specs.size(1)
+            if current_seq_len < max_seq_len:
+                pad_len = max_seq_len - current_seq_len
+                padded_specs = nn.functional.pad(specs, (0, 0, 0, pad_len), mode='constant', value=0.0)
+                unified_specs.append(padded_specs)
+            elif current_seq_len > max_seq_len:
+                unified_specs.append(specs[:, :max_seq_len, :])
+            else:
+                unified_specs.append(specs)
+
+        # 拼接所有批次
+        print("  正在拼接所有批次...")
+        calibration_data = torch.cat(unified_specs, dim=0).to(device)  # [B_total, T, F]
+        total_samples = calibration_data.size(0)
+        seq_len = calibration_data.size(1)
+        feature_dim = calibration_data.size(2)
+        print(f"  校准数据形状: {calibration_data.shape} (batch_first=True)")
+        print(f"  总样本数: {total_samples}, 序列长度: {seq_len}, 特征维度: {feature_dim}")
+
+        # 计算内存使用量
+        memory_mb = (total_samples * seq_len * feature_dim * 4) / (1024 * 1024)
+        print(f"  估计内存使用: {memory_mb:.2f} MB")
+
+    else:
+        # 使用随机采样的训练数据
+        print("准备校准数据（随机采样代表性样本）...")
+
+        # 校准数据配置（优化版）
+        CALIBRATION_SAMPLE_RATIO = 0.3  # 使用 30% 的训练数据作为校准数据（提高比例）
+        MIN_CALIBRATION_SAMPLES = 1000   # 最少样本数（提高最小值）
+        MAX_CALIBRATION_SAMPLES = 10000  # 最多样本数（提高上限，使用更多样本）
+        USE_STRATIFIED_SAMPLING = True   # 使用分层采样，确保每个类别都有代表性
+
+        # 计算需要采样的样本数
+        total_train_samples = len(train_dataset)
+        target_samples = int(total_train_samples * CALIBRATION_SAMPLE_RATIO)
+        target_samples = max(MIN_CALIBRATION_SAMPLES, min(target_samples, MAX_CALIBRATION_SAMPLES))
+        print(f"  训练集总样本数: {total_train_samples}")
+        print(f"  目标采样数: {target_samples} (约 {100.0 * target_samples / total_train_samples:.1f}%)")
+        print(f"  使用分层采样: {USE_STRATIFIED_SAMPLING}")
+
+        # 收集所有样本的标签信息（用于分层采样）
+        print("  正在分析数据集类别分布...")
+        temp_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+        label_indices = defaultdict(list)  # {label_index: [sample_indices]}
+        idx_to_label = {}  # {sample_index: label_index} 用于快速查找
+
+        for idx, (specs, targets) in enumerate(temp_loader):
+            label_idx = targets.item()
+            label_indices[label_idx].append(idx)
+            idx_to_label[idx] = label_idx
+
+        print(f"  类别数量: {len(label_indices)}")
+        for label_idx, indices in sorted(label_indices.items()):
+            label_name = labels[label_idx] if label_idx < len(labels) else f"class_{label_idx}"
+            print(f"    {label_name}: {len(indices)} 个样本")
+
+        # 采样策略：分层采样或随机采样
+        if USE_STRATIFIED_SAMPLING:
+            print("  使用分层采样策略...")
+            # 分层采样：确保每个类别都有代表性样本
+            samples_per_class = max(1, target_samples // len(label_indices))
+            sample_indices = []
+
+            for label_idx, indices in label_indices.items():
+                # 每个类别采样 samples_per_class 个样本
+                class_samples = min(samples_per_class, len(indices))
+                random.seed(42 + label_idx)  # 每个类别使用不同的种子，但可复现
+                sampled = random.sample(indices, class_samples)
+                sample_indices.extend(sampled)
+
+            # 如果还没达到目标数量，随机补充
+            if len(sample_indices) < target_samples:
+                remaining = target_samples - len(sample_indices)
+                all_indices = [idx for indices in label_indices.values() for idx in indices]
+                available = [idx for idx in all_indices if idx not in sample_indices]
+                if available:
+                    random.seed(42)
+                    additional = random.sample(available, min(remaining, len(available)))
+                    sample_indices.extend(additional)
+
+            # 如果超过目标数量，随机减少
+            if len(sample_indices) > target_samples:
+                random.seed(42)
+                sample_indices = random.sample(sample_indices, target_samples)
+
+            print(f"  分层采样结果: {len(sample_indices)} 个样本")
+            # 验证每个类别的采样数量
+            sampled_labels = defaultdict(int)
+            for idx in sample_indices:
+                if idx in idx_to_label:
+                    label_idx = idx_to_label[idx]
+                    sampled_labels[label_idx] += 1
+            print(f"  各类别采样数量:")
+            for label_idx, count in sorted(sampled_labels.items()):
+                label_name = labels[label_idx] if label_idx < len(labels) else f"class_{label_idx}"
+                print(f"    {label_name}: {count} 个样本")
+        else:
+            # 随机采样
+            print("  使用随机采样策略...")
+            random.seed(42)
+            sample_indices = random.sample(range(total_train_samples), target_samples)
+
+        sample_indices_set = set(sample_indices)
+
+        # 收集采样数据
+        print("  正在收集采样数据...")
+        sampled_specs = []
+
+        # 重新创建临时 loader（因为之前已经遍历过了）
+        temp_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
+        collected_samples = 0
+        for idx, (specs, targets) in enumerate(temp_loader):
+            if idx in sample_indices_set:
+                sampled_specs.append(specs)
+                collected_samples += 1
+                if collected_samples % 500 == 0:
+                    print(f"    已收集 {collected_samples}/{len(sample_indices)} 个样本")
+
+            # 如果已经收集足够的样本，可以提前停止
+            if collected_samples >= len(sample_indices):
+                break
+
+        print(f"  实际收集样本数: {collected_samples}")
+
+        # 拼接所有采样数据
+        print("  正在拼接采样数据...")
+        # 找到所有批次中的最大序列长度
+        if sampled_specs:
+            max_seq_len = max(specs.size(1) for specs in sampled_specs)
+            print(f"  最大序列长度: {max_seq_len}")
+
+            # 统一序列长度：将所有批次填充或截断到最大长度
+            unified_specs = []
+            for specs in sampled_specs:
+                current_seq_len = specs.size(1)
+                if current_seq_len < max_seq_len:
+                    # 需要填充到最大长度
+                    pad_len = max_seq_len - current_seq_len
+                    # 在序列维度（dim=1）的末尾填充
+                    padded_specs = nn.functional.pad(specs, (0, 0, 0, pad_len), mode='constant', value=0.0)
+                    unified_specs.append(padded_specs)
+                elif current_seq_len > max_seq_len:
+                    # 截断到最大长度（理论上不应该发生）
+                    unified_specs.append(specs[:, :max_seq_len, :])
+                else:
+                    # 长度正好，直接使用
+                    unified_specs.append(specs)
+
+            # 拼接所有批次：[B1, T, F] + [B2, T, F] + ... -> [B_total, T, F]
+            print("  正在拼接所有批次...")
+            calibration_data = torch.cat(unified_specs, dim=0).to(device)  # [B_total, T, F]
+            total_samples = calibration_data.size(0)
+            seq_len = calibration_data.size(1)
+            feature_dim = calibration_data.size(2)
+            print(f"  校准数据形状: {calibration_data.shape} (batch_first=True)")
+            print(f"  总样本数: {total_samples}, 序列长度: {seq_len}, 特征维度: {feature_dim}")
+
+            # 计算内存使用量（粗略估计）
+            memory_mb = (total_samples * seq_len * feature_dim * 4) / (1024 * 1024)  # float32 = 4 bytes
+            print(f"  估计内存使用: {memory_mb:.2f} MB")
+        else:
+            # 如果没有采样到数据，使用第一个批次作为后备
+            print("  警告: 未采样到数据，使用第一个批次作为校准数据")
+            calibration_specs, _ = next(iter(train_loader))
+            fixed_seq_len = min(calibration_specs.size(1), 50)
+            calibration_data = calibration_specs[:, :fixed_seq_len, :].to(device)
+            print(f"  校准数据形状: {calibration_data.shape} (batch_first=True)")
+
+    # ========== 验证校准数据质量（对所有数据源都进行验证）==========
+    if 'calibration_data' in locals():
+        print("\n  正在验证校准数据质量...")
+        has_invalid = False
+
+        # 1. 检查 NaN 值
+        nan_count = torch.isnan(calibration_data).sum().item()
+        if nan_count > 0:
+            print(f"  ✗ 警告: 发现 {nan_count} 个 NaN 值")
+            has_invalid = True
+        else:
+            print(f"  ✓ NaN 检查通过: 无 NaN 值")
+
+        # 2. 检查 Inf 值
+        inf_count = torch.isinf(calibration_data).sum().item()
+        if inf_count > 0:
+            print(f"  ✗ 警告: 发现 {inf_count} 个 Inf 值")
+            has_invalid = True
+        else:
+            print(f"  ✓ Inf 检查通过: 无 Inf 值")
+
+        # 3. 检查全零样本（可能表示无效数据）
+        # 检查每个样本是否全为零
+        sample_norms = calibration_data.norm(dim=(1, 2))  # [B] 每个样本的L2范数
+        zero_samples = (sample_norms < 1e-8).sum().item()
+        if zero_samples > 0:
+            print(f"  ✗ 警告: 发现 {zero_samples} 个全零样本（可能无效）")
+            has_invalid = True
+        else:
+            print(f"  ✓ 全零样本检查通过: 无全零样本")
+
+        # 4. 检查数据范围（统计信息）
+        data_min = calibration_data.min().item()
+        data_max = calibration_data.max().item()
+        data_mean = calibration_data.mean().item()
+        data_std = calibration_data.std().item()
+        print(f"  数据统计信息:")
+        print(f"    最小值: {data_min:.6f}")
+        print(f"    最大值: {data_max:.6f}")
+        print(f"    平均值: {data_mean:.6f}")
+        print(f"    标准差: {data_std:.6f}")
+
+        # 检查数据范围是否合理（Mel频谱通常是负数，因为使用了AmplitudeToDB）
+        if data_max > 100 or data_min < -200:
+            print(f"  ⚠ 注意: 数据范围异常，可能存在问题")
+            print(f"    预期范围: 通常在 [-100, 50] 之间（AmplitudeToDB后的Mel频谱）")
+
+        # 5. 检查每个时间步是否有无效数据
+        # 检查每个时间步的统计信息
+        time_step_means = calibration_data.mean(dim=(0, 2))  # [T] 每个时间步的平均值
+        time_step_stds = calibration_data.std(dim=(0, 2))   # [T] 每个时间步的标准差
+
+        # 检查是否有时间步全为零或方差为0（可能表示padding）
+        zero_time_steps = (time_step_means.abs() < 1e-8).sum().item()
+        constant_time_steps = (time_step_stds < 1e-8).sum().item()
+
+        if zero_time_steps > 0:
+            print(f"  ⚠ 注意: 发现 {zero_time_steps} 个时间步的平均值接近零（可能是padding）")
+        if constant_time_steps > 0:
+            print(f"  ⚠ 注意: 发现 {constant_time_steps} 个时间步的方差接近零（可能是padding或常数）")
+
+        # 6. 检查每个特征维度是否有无效数据
+        feature_means = calibration_data.mean(dim=(0, 1))  # [F] 每个特征维度的平均值
+        feature_stds = calibration_data.std(dim=(0, 1))    # [F] 每个特征维度的标准差
+
+        zero_features = (feature_means.abs() < 1e-8).sum().item()
+        constant_features = (feature_stds < 1e-8).sum().item()
+
+        if zero_features > 0:
+            print(f"  ⚠ 注意: 发现 {zero_features} 个特征维度的平均值接近零")
+        if constant_features > 0:
+            print(f"  ⚠ 注意: 发现 {constant_features} 个特征维度的方差接近零（可能是无效特征）")
+
+        # 7. 检查是否有异常大的值（可能是异常值）
+        abs_data = calibration_data.abs()
+        large_value_threshold = 100  # 根据AmplitudeToDB的特性，合理值通常在[-100, 50]之间
+        large_value_count = (abs_data > large_value_threshold).sum().item()
+        if large_value_count > 0:
+            large_value_ratio = 100.0 * large_value_count / calibration_data.numel()
+            print(f"  ⚠ 注意: 发现 {large_value_count} 个绝对值 > {large_value_threshold} 的值 ({large_value_ratio:.2f}%)")
+
+        # 8. 最终验证结果
+        if has_invalid:
+            print(f"\n  ✗ 校准数据验证失败: 发现无效数据，建议检查数据预处理流程")
+            print(f"  建议:")
+            print(f"    1. 检查数据预处理是否有问题")
+            print(f"    2. 检查是否有数据损坏")
+            print(f"    3. 考虑过滤掉无效样本")
+        else:
+            print(f"\n  ✓ 校准数据验证通过: 未发现明显的无效数据")
+
+        # 9. 可选：过滤无效样本（如果发现）
+        if has_invalid and (nan_count > 0 or inf_count > 0):
+            print(f"\n  正在过滤无效样本...")
+            # 找出有效样本的索引（没有NaN和Inf）
+            valid_mask = ~(torch.isnan(calibration_data).any(dim=(1, 2)) |
+                          torch.isinf(calibration_data).any(dim=(1, 2)))
+            valid_indices = torch.where(valid_mask)[0]
+
+            if len(valid_indices) < total_samples:
+                original_samples = total_samples
+                calibration_data = calibration_data[valid_indices]
+                total_samples = calibration_data.size(0)
+                print(f"  已过滤 {original_samples - total_samples} 个无效样本")
+                print(f"  剩余有效样本: {total_samples}")
+
+                # 检查最小样本数（如果定义了）
+                min_samples = MIN_CALIBRATION_SAMPLES if not USE_TEST_LOADER_FOR_CALIBRATION else 100
+                if total_samples < min_samples:
+                    print(f"  ✗ 错误: 过滤后样本数 ({total_samples}) 少于最小要求 ({min_samples})")
+                    raise ValueError(f"校准数据中无效样本过多，无法继续")
+    else:
+        # 如果没有采样到数据，使用第一个批次作为后备
+        print("  警告: 未采样到数据，使用第一个批次作为校准数据")
+        calibration_specs, _ = next(iter(train_loader))
+        fixed_seq_len = min(calibration_specs.size(1), 50)
+        calibration_data = calibration_specs[:, :fixed_seq_len, :].to(device)
+        print(f"  校准数据形状: {calibration_data.shape} (batch_first=True)")
 
     # 2. CustomGRU 非量化版本
     custom_gru_no_quant = CustomGRU(
