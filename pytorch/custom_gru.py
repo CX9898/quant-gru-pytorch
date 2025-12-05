@@ -186,28 +186,28 @@ class GRUFunction(torch.autograd.Function):
             h0=h0_tensor,
             quant_params=quant_params
         )
-        #
-        #         # 调用 C++ 接口
-        # output_full_no_quant, v_no_quant = gru_ops.haste_gru_forward(
-        #     is_training=is_training,
-        #     time_steps=time_steps,
-        #     batch_size=batch_size,
-        #     input_size=input_size,
-        #     hidden_size=hidden_size,
-        #     W=W,
-        #     R=R,
-        #     bx=bx,
-        #     br=br,
-        #     x=input,
-        #     h0=h0_tensor,
-        # )
+
+        # 浮点前向
+        output_full_no_quant, v_no_quant = gru_ops.haste_gru_forward(
+            is_training=is_training,
+            time_steps=time_steps,
+            batch_size=batch_size,
+            input_size=input_size,
+            hidden_size=hidden_size,
+            W=W,
+            R=R,
+            bx=bx,
+            br=br,
+            x=input,
+            h0=h0_tensor,
+        )
 
         # 分离输出：output_full[0] 是初始状态，output_full[1:] 是时间步输出
         output = output_full[1:]  # [time_steps, batch_size, hidden_size]
         h_n = output_full[-1:]    # [1, batch_size, hidden_size]
 
         # 保存中间结果用于反向传播
-        ctx.save_for_backward(W, R, bx, br, input, output_full, v)
+        ctx.save_for_backward(W, R, bx, br, input, output_full_no_quant, v_no_quant)
 
         return output, h_n
 
