@@ -195,8 +195,9 @@ __device__ __forceinline__ QuantT computeR(// 重置门r
     return r;
 }
 
-template<typename QuantT>
-__device__ __forceinline__ QuantT computeG(// New Gate
+template<typename GT,    // 候选状态 g 输出的类型
+         typename RT>    // 重置门 r 的类型
+__device__ __forceinline__ GT computeG(// New Gate
     const int channel_idx,
     const int32_t Wx_val,// Wx 对应门的值
     const int32_t Rh_val,// Rh 对应门的值
@@ -204,7 +205,7 @@ __device__ __forceinline__ QuantT computeG(// New Gate
     const int32_t R_sum_mul_h_zp,
     const int32_t bx_val,// bx 对应门的bias
     const int32_t br_val,// br 对应门的bias
-    const QuantT r,
+    const RT r,
     const QuantGRUReScale &rescale_params) {
     //  g = tanh (Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx]);
 
@@ -228,18 +229,18 @@ __device__ __forceinline__ QuantT computeG(// New Gate
     // 累加求和
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
 
-    const QuantT g_pre_i8 = dev::clamp<QuantT>(g_pre_i32);     // 截断到int8
-    QuantT g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut);// TODO: 支持int16量化
+    const GT g_pre_i8 = dev::clamp<GT>(g_pre_i32);         // 截断到int8
+    GT g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut);// TODO: 支持int16量化
 
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
-    if constexpr (std::is_same_v<QuantT, int16_t>) {
+    if constexpr (std::is_same_v<GT, int16_t>) {
         // INT16 版本：使用分段线性拟合
         // g_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
         uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, g_pre_i32)));
         uint16_t q_y = dev::tanh_piecewise_linear_int16(q_x, d_tanh_lut_int16);
         // 输出 q_y 已经是 uint16_t，直接转换
-        g = static_cast<QuantT>(q_y);
+        g = static_cast<GT>(q_y);
     } else {
         // INT8 版本：使用分段线性拟合
         // g_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
@@ -247,7 +248,7 @@ __device__ __forceinline__ QuantT computeG(// New Gate
         uint8_t q_x = static_cast<uint8_t>(max(0, min(255, g_pre_i32)));
         uint8_t q_y = dev::tanh_piecewise_linear_int8(q_x, d_tanh_lut_int8);
         // 输出 q_y 已经是 uint8_t，直接转换
-        g = static_cast<QuantT>(q_y);
+        g = static_cast<GT>(q_y);
     }
 #endif
 
@@ -291,11 +292,14 @@ __device__ __forceinline__ QuantT computeG(// New Gate
     return g;
 }
 
-template<typename QuantT>
-__device__ __forceinline__ QuantT computeH(// 最终h
-    const QuantT z,
-    const QuantT g,
-    const QuantT h_old,
+template<typename ZT,      // 更新门 z 的类型
+         typename GT,      // 候选状态 g 的类型
+         typename HInT,    // 输入隐藏状态的类型
+         typename HOutT>   // 输出隐藏状态的类型
+__device__ __forceinline__ HOutT computeH(// 最终h
+    const ZT z,
+    const GT g,
+    const HInT h_old,
     const QuantGRUReScale &rescale_params) {
     // cur_h_value = z * h[output_idx] + (1.0 - z) * g;
 
@@ -316,7 +320,7 @@ __device__ __forceinline__ QuantT computeH(// 最终h
         rshift_round(new_contrib - rescale_params.zp_new_contrib_, rescale_params.n_new_contrib_div_h_) +
         rescale_params.zp_h_;
 
-    const QuantT h = dev::clamp<QuantT>(h_i32);
+    const HOutT h = dev::clamp<HOutT>(h_i32);
 
     // const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
     // const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
@@ -365,7 +369,14 @@ __device__ __forceinline__ QuantT computeH(// 最终h
 //
 // C = input_size(输入维度), H = hidden_size(隐藏层维度),
 // T = time_steps(时间步), N = batch_size(批量大小)
-template<typename QuantT, bool Training, bool ApplyZoneout>
+template<typename ZT,           // 更新门 z 的类型
+         typename RT,           // 重置门 r 的类型
+         typename GT,           // 候选状态 g 的类型
+         typename HInT,         // 输入隐藏状态 h 的类型
+         typename HOutT,        // 输出隐藏状态 h_out 的类型
+         typename VT,           // 内部分量 v 的类型
+         typename ZoneoutT,     // Zoneout 相关的类型
+         bool Training, bool ApplyZoneout>
 __global__ void PointwiseOperationsQuant(
     const int batch_dim,                   // 批量大小
     const int hidden_dim,                  // 隐藏单元数
@@ -375,11 +386,11 @@ __global__ void PointwiseOperationsQuant(
     const int32_t *R_sum_mul_h_zp,         // hidden_size * 3
     const int32_t *bx,                     // 输入偏置, 包含bz, br, bh
     const int32_t *br,                     // 隐藏偏置, 包含bz, br, bh
-    const QuantT *h,                       // 上一时间步隐藏状态
-    QuantT *h_out,                         // 当前时间步隐藏状态
-    QuantT *v,                             // 保存内部分量用于反向传播
-    const QuantT zoneout_prob,             // Zoneout概率
-    const QuantT *zoneout_mask,            // 训练模式用
+    const HInT *h,                         // 上一时间步隐藏状态
+    HOutT *h_out,                          // 当前时间步隐藏状态
+    VT *v,                                 // 保存内部分量用于反向传播
+    const ZoneoutT zoneout_prob,           // Zoneout概率
+    const ZoneoutT *zoneout_mask,          // 训练模式用
     const QuantGRUReScale rescale_params) {// Zoneout mask (only used if ApplyZoneout==true)
 
     /* 计算索引 */
@@ -407,34 +418,33 @@ __global__ void PointwiseOperationsQuant(
 
     /* GRU前向计算 */
 
+    const ZT z = computeZ<ZT>(b_z_idx,
+                              Wx[z_idx],
+                              Rh[z_idx],
+                              W_sum_mul_x_zp[b_z_idx],
+                              R_sum_mul_h_zp[b_z_idx],
+                              bx[b_z_idx],
+                              br[b_z_idx],
+                              rescale_params);// 更新门z
 
-    const QuantT z = computeZ<QuantT>(b_z_idx,
-                                      Wx[z_idx],
-                                      Rh[z_idx],
-                                      W_sum_mul_x_zp[b_z_idx],
-                                      R_sum_mul_h_zp[b_z_idx],
-                                      bx[b_z_idx],
-                                      br[b_z_idx],
-                                      rescale_params);// 更新门z
+    const RT r = computeR<RT>(b_r_idx,
+                              Wx[r_idx],
+                              Rh[r_idx],
+                              W_sum_mul_x_zp[b_r_idx],
+                              R_sum_mul_h_zp[b_r_idx],
+                              bx[b_r_idx],
+                              br[b_r_idx],
+                              rescale_params);// 重置门r
 
-    const QuantT r = computeR<QuantT>(b_r_idx,
-                                      Wx[r_idx],
-                                      Rh[r_idx],
-                                      W_sum_mul_x_zp[b_r_idx],
-                                      R_sum_mul_h_zp[b_r_idx],
-                                      bx[b_r_idx],
-                                      br[b_r_idx],
-                                      rescale_params);// 重置门r
-
-    const QuantT g = computeG<QuantT>(b_g_idx,
-                                      Wx[g_idx],
-                                      Rh[g_idx],
-                                      W_sum_mul_x_zp[b_g_idx],
-                                      R_sum_mul_h_zp[b_g_idx],
-                                      bx[b_g_idx],
-                                      br[b_g_idx],
-                                      r,
-                                      rescale_params);// New Gate
+    const GT g = computeG<GT, RT>(b_g_idx,
+                                  Wx[g_idx],
+                                  Rh[g_idx],
+                                  W_sum_mul_x_zp[b_g_idx],
+                                  R_sum_mul_h_zp[b_g_idx],
+                                  bx[b_g_idx],
+                                  br[b_g_idx],
+                                  r,
+                                  rescale_params);// New Gate
     // 候选状态~ht
 
 
@@ -442,17 +452,17 @@ __global__ void PointwiseOperationsQuant(
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
         const int base_v_idx = col * (hidden_dim * 4) + row;
-        v[base_v_idx + 0 * hidden_dim] = z;
-        v[base_v_idx + 1 * hidden_dim] = r;
-        v[base_v_idx + 2 * hidden_dim] = g;
-        const int8_t Rh_add_br_g = rshift_round(Rh[g_idx] - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
-                                   rshift_round(br[b_g_idx], rescale_params.n_br_div_Rh_add_br_[b_g_idx]) +
-                                   rescale_params.zp_Rh_add_br_;
+        v[base_v_idx + 0 * hidden_dim] = static_cast<VT>(z);
+        v[base_v_idx + 1 * hidden_dim] = static_cast<VT>(r);
+        v[base_v_idx + 2 * hidden_dim] = static_cast<VT>(g);
+        const VT Rh_add_br_g = rshift_round(Rh[g_idx] - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
+                               rshift_round(br[b_g_idx], rescale_params.n_br_div_Rh_add_br_[b_g_idx]) +
+                               rescale_params.zp_Rh_add_br_;
 
         v[base_v_idx + 3 * hidden_dim] = Rh_add_br_g;
     }
 
-    QuantT cur_h_value = computeH(z, g, h[output_idx], rescale_params);
+    HOutT cur_h_value = computeH<ZT, GT, HInT, HOutT>(z, g, h[output_idx], rescale_params);
 
     /* 启用Zoneout, 对GRU 隐藏状态的随机保留 */
     // TODO: 支持量化
@@ -624,21 +634,21 @@ void ForwardPassQuant<QuantT>::IterateInternal(
 
     if (training) {                        // 训练模式
         if (zoneout_prob && zoneout_mask) {// 启用Zoneout, 对GRU 隐藏状态的随机保留
-            kernel::PointwiseOperationsQuant<QuantT, true, true><<<gridDim, blockDim, 0, stream1>>>(
+            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, true, true><<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, h_out, v,
                 zoneout_prob, zoneout_mask, rescale_param_);
         } else {
-            kernel::PointwiseOperationsQuant<QuantT, true, false><<<gridDim, blockDim, 0, stream1>>>(
+            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, true, false><<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, h_out, v, 0.0f,
                 nullptr, rescale_param_);
         }
     } else {// 推理模式
         if (zoneout_prob && zoneout_mask) {
-            kernel::PointwiseOperationsQuant<QuantT, false, true><<<gridDim, blockDim, 0, stream1>>>(
+            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, false, true><<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, h_out, nullptr,
                 zoneout_prob, zoneout_mask, rescale_param_);
         } else {
-            kernel::PointwiseOperationsQuant<QuantT, false, false><<<gridDim, blockDim, 0, stream1>>>(
+            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, QuantT, false, false><<<gridDim, blockDim, 0, stream1>>>(
                 batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, h_out, nullptr,
                 0.0f, nullptr, rescale_param_);
         }
