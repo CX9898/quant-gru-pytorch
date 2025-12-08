@@ -877,3 +877,39 @@ void init_sigmoid_z_lut_int16(
     int16_t zp_y,
     float x_min = -6.0f,
     float x_max = 6.0f);
+
+template<typename T, typename QuantT>
+void calculateScale(const std::vector<T> &data_host,
+                    const bool use_symmetric,
+                    int32_t &exp2_inv,
+                    int32_t &zp,
+                    const std::string &name = "");
+
+template<typename T, typename QuantT>
+void calculateScale(const T *data_dev,
+                    const size_t size,
+                    const bool use_symmetric,
+                    int32_t &exp2_inv,
+                    int32_t &zp,
+                    const std::string &name = "");
+
+template<typename T, typename QuantT>
+std::vector<int32_t> calculateScalesPerChannels(const T *W_dev, int channel_size, int input_size,
+                                                const std::string &name = "");
+
+/**
+* 通用(仅host)scale/zp 计算函数
+* @param x_dev  -- 设备端输入数据指针
+* @param size_per_step -- 每步输入长度
+* @param steps -- 步数
+* @param use_symmetric -- 是否对称量化
+* @param name -- 调试信息
+*/
+template<typename T, typename QuantT>
+void calculateScalePerSteps(const T *x_dev,
+                            const int size_per_step,
+                            const int steps,
+                            const bool use_symmetric,
+                            int32_t &exp2_inv,
+                            int32_t &zp,
+                            const std::string &name = "");
