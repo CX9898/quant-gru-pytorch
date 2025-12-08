@@ -704,10 +704,6 @@ void calculateGRUQuantitativeParameters(const int steps,
                                                                       hidden_size * 3,
                                                                       1,
                                                                       "scale_br");
-    // TODO delete test
-    h2d(quant_parms_.exp2_inv_bx_dev_,quant_parms_.exp2_inv_bx_);
-    h2d(quant_parms_.exp2_inv_br_dev_,quant_parms_.exp2_inv_br_);
-
 
     calculateScale<T, QuantT>(z_pres_.data(),
                               z_pres_.size(),

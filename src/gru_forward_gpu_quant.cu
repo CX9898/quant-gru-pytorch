@@ -734,8 +734,10 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
     rescale_param_.n_new_contrib_div_h_ = parms.exp2_inv_new_contrib_ - parms.exp2_inv_h_;
     rescale_param_.n_old_contrib_div_h_ = parms.exp2_inv_old_contrib_ - parms.exp2_inv_h_;
 
-    // test
+    // TODO delete test
     rescale_param_.test = parms;
+    h2d(rescale_param_.test.exp2_inv_bx_dev_, parms.exp2_inv_bx_);
+    h2d(rescale_param_.test.exp2_inv_br_dev_, parms.exp2_inv_br_);
 }
 
 // C = input_size(输入维度), H = hidden_size(隐藏层维度),
