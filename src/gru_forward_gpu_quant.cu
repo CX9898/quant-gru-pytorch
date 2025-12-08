@@ -62,20 +62,9 @@ __device__ __forceinline__ QuantT computeZ(// 更新门z
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
     if constexpr (std::is_same_v<QuantT, int16_t>) {
-        // INT16 版本：使用分段线性拟合（z 门）
-        // z_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, z_pre_i32)));
-        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
-        // 输出 q_y 已经是 uint16_t，直接转换
-        z = static_cast<QuantT>(q_y);
+        z = dev::sigmoid_piecewise_linear_int16(z_pre_i8, d_sigmoid_z_lut_int16);
     } else {
-        // INT8 版本：使用分段线性拟合（z 门）
-        // z_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        // 🔥 修复：直接转换为 uint8_t，而不是先转换为 int8_t
-        uint8_t q_x = static_cast<uint8_t>(max(0, min(255, z_pre_i32)));
-        uint8_t q_y = dev::sigmoid_piecewise_linear_int8(q_x, d_sigmoid_z_lut_int8);
-        // 输出 q_y 已经是 uint8_t，直接转换
-        z = static_cast<QuantT>(q_y);
+        z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
     }
 #endif
 
@@ -159,20 +148,9 @@ __device__ __forceinline__ QuantT computeR(// 重置门r
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
     if constexpr (std::is_same_v<QuantT, int16_t>) {
-        // INT16 版本：使用分段线性拟合（r 门）
-        // r_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, r_pre_i32)));
-        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
-        // 输出 q_y 已经是 uint16_t，直接转换
-        r = static_cast<QuantT>(q_y);
+        r = dev::sigmoid_piecewise_linear_int16(r_pre_i8, d_sigmoid_r_lut_int16);
     } else {
-        // INT8 版本：使用分段线性拟合（r 门）
-        // r_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        // 🔥 修复：直接转换为 uint8_t，而不是先转换为 int8_t
-        uint8_t q_x = static_cast<uint8_t>(max(0, min(255, r_pre_i32)));
-        uint8_t q_y = dev::sigmoid_piecewise_linear_int8(q_x, d_sigmoid_r_lut_int8);
-        // 输出 q_y 已经是 uint8_t，直接转换
-        r = static_cast<QuantT>(q_y);
+        r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
     }
 #endif
 
@@ -252,20 +230,9 @@ __device__ __forceinline__ GT computeG(// New Gate
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
     if constexpr (std::is_same_v<GT, int16_t>) {
-        // INT16 版本：使用分段线性拟合
-        // g_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, g_pre_i32)));
-        uint16_t q_y = dev::tanh_piecewise_linear_int16(q_x, d_tanh_lut_int16);
-        // 输出 q_y 已经是 uint16_t，直接转换
-        g = static_cast<GT>(q_y);
+        g = dev::tanh_piecewise_linear_int16(g_pre_i8, d_tanh_lut_int16);
     } else {
-        // INT8 版本：使用分段线性拟合
-        // g_pre_i32 已经包含了 zero-point，是量化后的值（无符号域）
-        // 🔥 修复：直接转换为 uint8_t，而不是先转换为 int8_t
-        uint8_t q_x = static_cast<uint8_t>(max(0, min(255, g_pre_i32)));
-        uint8_t q_y = dev::tanh_piecewise_linear_int8(q_x, d_tanh_lut_int8);
-        // 输出 q_y 已经是 uint8_t，直接转换
-        g = static_cast<GT>(q_y);
+        g = dev::tanh_piecewise_linear_int8(g_pre_i8, d_tanh_lut_int8);
     }
 #endif
 
