@@ -75,6 +75,16 @@ __device__ __forceinline__ int32_t clamp(int x) {
     return max(min_val, min(max_val, x));
 }
 
+template<>
+__device__ __forceinline__ uint8_t clamp(int x) {
+    return static_cast<uint8_t>(max(0, min(255, x)));
+}
+
+template<>
+__device__ __forceinline__ uint16_t clamp(int x) {
+    return static_cast<uint16_t>(max(0, min(65535, x)));
+}
+
 // Round 函数：只负责四舍五入，不限制范围
 __device__ __forceinline__ int32_t round(float val) {
     // 使用 CUDA 内置函数 __float2int_rn 进行四舍五入（round to nearest）
