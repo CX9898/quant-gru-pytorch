@@ -476,5 +476,16 @@ void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params, 
             quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
             quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
             quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+
+        // 检查是否需要 uint8 sigmoid LUT（z/r 输出使用 UINT8）
+        const auto& cfg = quant_params.bitwidth_config_;
+        if (cfg.z_out_bitwidth == QuantBitWidth::UINT8 ||
+            cfg.r_out_bitwidth == QuantBitWidth::UINT8) {
+            generate_uint8_lut_from_exp2_inv(
+                quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
+                quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
+                quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+                quant_params.exp2_inv_r_out_, quant_params.zp_r_out_);
+        }
     }
 }

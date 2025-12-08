@@ -22,6 +22,10 @@ __constant__ int8_t d_sigmoid_int8_z_lut[256];
 __constant__ int8_t d_sigmoid_int8_r_lut[256];
 __constant__ int8_t d_tanh_int8_g_lut[256];
 
+// uint8 版本的 sigmoid LUT（输出范围 [0, 255]，适用于 sigmoid 输出）
+__constant__ uint8_t d_sigmoid_uint8_z_lut[256];
+__constant__ uint8_t d_sigmoid_uint8_r_lut[256];
+
 // 分段线性量化常量内存
 __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;// z 门的 Sigmoid LUT
 __constant__ SigmoidLUT_INT16 d_sigmoid_r_lut_int16;// r 门的 Sigmoid LUT
@@ -45,6 +49,27 @@ std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int zp_z_pre,
         if (y_i8 > 127) y_i8 = 127;
 
         lut[i] = static_cast<int8_t>(y_i8);
+    }
+    return lut;
+}
+
+// uint8 版本：sigmoid 输出范围 [0, 1] 映射到 [0, 255]
+std::vector<uint8_t> generate_sigmoid_uint8_lut(float scale_z_pre, int zp_z_pre,
+                                                float scale_z, int zp_z) {
+    std::vector<uint8_t> lut(256);
+
+    for (int i = 0; i < 256; i++) {
+        int x_i8 = i - 128;  // 输入仍然是 int8 范围
+
+        const float x_fp = static_cast<float>(x_i8 - zp_z_pre) * scale_z_pre;
+        const float y_fp = 1.f / (1.f + std::exp(-x_fp));
+
+        // 输出量化到 uint8 [0, 255]
+        int y_u8 = static_cast<int>(std::round(y_fp / scale_z + zp_z));
+        if (y_u8 < 0) y_u8 = 0;
+        if (y_u8 > 255) y_u8 = 255;
+
+        lut[i] = static_cast<uint8_t>(y_u8);
     }
     return lut;
 }
@@ -154,6 +179,44 @@ std::vector<int8_t> generate_tanh_int8_lut_exp2(int32_t exp2_inv_pre,
     }
 
     return lut;
+}
+
+// uint8 版本：sigmoid 输出量化到 [0, 255]
+std::vector<uint8_t> generate_sigmoid_uint8_lut_exp2(int32_t exp2_inv_z_pre,
+                                                     int zp_z_pre,
+                                                     int32_t exp2_inv_z,
+                                                     int zp_z) {
+    std::vector<uint8_t> lut(256);
+
+    for (int i = 0; i < 256; i++) {
+        int x_i8 = i - 128;  // 输入仍然是 int8 范围
+
+        // （1）反量化 x
+        float x_fp = dequantize(x_i8, exp2_inv_z_pre, zp_z_pre);
+
+        // （2）计算 sigmoid
+        float y_fp = 1.f / (1.f + std::exp(-x_fp));
+
+        // （3）量化 y 到 uint8
+        int y_u8 = quantize<uint8_t>(y_fp, exp2_inv_z, zp_z);
+
+        lut[i] = static_cast<uint8_t>(y_u8);
+    }
+
+    return lut;
+}
+
+void generate_uint8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,
+                                      int32_t exp2_inv_z_out, int32_t zp_z_out,
+                                      int32_t exp2_inv_r_pre, int32_t zp_r_pre,
+                                      int32_t exp2_inv_r_out, int32_t zp_r_out) {
+    std::vector<uint8_t> sigmoid_z_lut =
+        generate_sigmoid_uint8_lut_exp2(exp2_inv_z_pre, zp_z_pre, exp2_inv_z_out, zp_z_out);
+    std::vector<uint8_t> sigmoid_r_lut =
+        generate_sigmoid_uint8_lut_exp2(exp2_inv_r_pre, zp_r_pre, exp2_inv_r_out, zp_r_out);
+
+    cudaMemcpyToSymbol(d_sigmoid_uint8_z_lut, sigmoid_z_lut.data(), sizeof(uint8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_uint8_r_lut, sigmoid_r_lut.data(), sizeof(uint8_t) * 256);
 }
 
 void generate_int8_lut_from_exp2_inv(int32_t exp2_inv_z_pre, int32_t zp_z_pre,

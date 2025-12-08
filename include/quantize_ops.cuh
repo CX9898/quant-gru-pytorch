@@ -7,6 +7,10 @@ extern __constant__ int8_t d_sigmoid_int8_z_lut[256];
 extern __constant__ int8_t d_sigmoid_int8_r_lut[256];
 extern __constant__ int8_t d_tanh_int8_g_lut[256];
 
+// uint8 版本的 sigmoid LUT（输出范围 [0, 255]，适用于 sigmoid 输出）
+extern __constant__ uint8_t d_sigmoid_uint8_z_lut[256];
+extern __constant__ uint8_t d_sigmoid_uint8_r_lut[256];
+
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16
 
@@ -142,6 +146,13 @@ inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
 }
 
 __device__ __forceinline__ int8_t sigmoid_int8_lut(int8_t x, const int8_t *lut) {
+    // x in [-128,127], lut 长度 = 256
+    const int idx = static_cast<uint8_t>(x + 128);// 对齐 LUT 初始化
+    return lut[idx];
+}
+
+// uint8 版本的 sigmoid LUT 查找（输出范围 [0, 255]）
+__device__ __forceinline__ uint8_t sigmoid_uint8_lut(int8_t x, const uint8_t *lut) {
     // x in [-128,127], lut 长度 = 256
     const int idx = static_cast<uint8_t>(x + 128);// 对齐 LUT 初始化
     return lut[idx];

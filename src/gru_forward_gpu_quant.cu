@@ -1,6 +1,7 @@
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
+#include <type_traits>
 #include <vector>
 
 #include "blas.h"
@@ -46,8 +47,17 @@ __device__ __forceinline__ QuantT computeZ(// 更新门z
 
     const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
 
-    const QuantT z_pre_i8 = dev::clamp<QuantT>(z_pre_i32);           // clamp: 截断到int8的范围
-    QuantT z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);// TODO: 支持int16量化
+    const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);  // clamp: 截断到int8的范围（输入始终是int8）
+
+    // 根据输出类型选择正确的 LUT
+    QuantT z;
+    if constexpr (std::is_same_v<QuantT, uint8_t>) {
+        // uint8 输出：使用 uint8 sigmoid LUT
+        z = dev::sigmoid_uint8_lut(z_pre_i8, d_sigmoid_uint8_z_lut);
+    } else {
+        // int8/int16 输出：使用 int8 sigmoid LUT
+        z = static_cast<QuantT>(dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut));
+    }
 
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
@@ -134,8 +144,17 @@ __device__ __forceinline__ QuantT computeR(// 重置门r
     // scale_z_pre是通过效验阶段得到的; 通过sigmoid函数入口前的各项相加:Wx_val+Rh_val+bx_val+br_val的结果的的最大最小值计算得到
     const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
 
-    const QuantT r_pre_i8 = dev::clamp<QuantT>(r_pre_i32);           // clamp: 截断到int8的范围
-    QuantT r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut);// TODO: 支持int16量化
+    const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);  // clamp: 截断到int8的范围（输入始终是int8）
+
+    // 根据输出类型选择正确的 LUT
+    QuantT r;
+    if constexpr (std::is_same_v<QuantT, uint8_t>) {
+        // uint8 输出：使用 uint8 sigmoid LUT
+        r = dev::sigmoid_uint8_lut(r_pre_i8, d_sigmoid_uint8_r_lut);
+    } else {
+        // int8/int16 输出：使用 int8 sigmoid LUT
+        r = static_cast<QuantT>(dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut));
+    }
 
 #ifdef USE_Piecewise_linear_quantization
     // TODO: 分段线性量化
