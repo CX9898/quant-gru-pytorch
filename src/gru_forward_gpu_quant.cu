@@ -801,13 +801,10 @@ void ForwardPassQuant<QuantT>::Run(const int steps, // 时间步数, 序列长�
                           rescale_param_.n_R_mul_h_div_Rh_.data(),
                           R_sum_mul_h_zp.size(),
                           hidden_size,
-                          stream1);
+                          stream2);
 
     // 同步Wx计算
     cudaEventRecord(event, stream2);
-
-    // 同步R_sum_mul_h_zp计算
-    cudaEventRecord(event, stream1);
 
     const int NH = batch_size * hidden_size;
 
