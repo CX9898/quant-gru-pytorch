@@ -352,7 +352,7 @@ void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) 
     const auto &cfg = quant_params.bitwidth_config_;
 
     // 生成分段线性 LUT（内部根据 bitwidth_config 自动选择每个门的类型）
-    generate_piecewise_linear_lut_from_exp2_inv(quant_params);
+//    generate_piecewise_linear_lut_from_exp2_inv(quant_params);
 
     // 如果全部使用 8 位，还需要初始化传统的 int8 LUT 表
     bool z_use_16bit = is_16bit(cfg.z_out_bitwidth);
