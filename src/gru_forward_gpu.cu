@@ -1076,7 +1076,7 @@ void calculateGRUQuantitativeParameters(const int steps,
     calculateScaleFromV<T, QuantT>(h_host, v, steps, hidden_size, batch_size, quant_parms_);
 
 #ifdef DEBUG
-    std::vector<T> x_host = d2h(x, NH * steps);
+    std::vector<T> x_host = d2h(x, steps * batch_size * input_size);
     checkScale<T, QuantT>(x_host,
                           quant_parms_.exp2_inv_x_,
                           quant_parms_.zp_x_,
