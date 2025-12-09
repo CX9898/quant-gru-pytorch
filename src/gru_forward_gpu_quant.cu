@@ -606,6 +606,7 @@ void ForwardPassQuant<QuantT>::IterateInternal(
     const cudaStream_t stream1 = data_->stream[0];
     const cudaEvent_t event = data_->event;
 
+    // R * h GEMM 不依赖 tmp_Wx，可以并行执行
     cublasSetStream(blas_handle, stream1);
     blas<QuantT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3,
                        batch_size, hidden_size, &alpha, R, hidden_size * 3, h,
@@ -616,6 +617,8 @@ void ForwardPassQuant<QuantT>::IterateInternal(
     const dim3 gridDim((hidden_size + blockDim.x - 1) / blockDim.x,
                        (batch_size + blockDim.y - 1) / blockDim.y);
 
+    // 等待 stream2 上的 W*x GEMM 完成，确保 PointwiseOperations kernel
+    // 可以安全使用 tmp_Wx（W*x 的结果）
     cudaStreamWaitEvent(stream1, event, 0);
 
     // 根据 bitwidth_config_ 选择 kernel 模板参数
@@ -890,24 +893,18 @@ void ForwardPassQuant<QuantT>::Run(const int steps,          // 时间步数, �
                           rescale_param_.zp_x_,
                           rescale_param_.n_W_mul_x_div_Wx_.data(),
                           W_sum_mul_x_zp.size(),
-                          input_size,
-                          stream2);
+                          input_size, stream2);
 
-    // Rh的gemm需要补偿h_zp, 所以提前计算 h_zp * R_sum * h_zp, stream1
+    // Rh的gemm需要补偿h_zp, 所以提前计算 h_zp * R_sum * h_zp
     dev::vector<int32_t> R_sum_mul_h_zp(hidden_size * 3);
     computeWeightSumMulzp(R,
                           R_sum_mul_h_zp.data(),
                           rescale_param_.zp_h_,
                           rescale_param_.n_R_mul_h_div_Rh_.data(),
                           R_sum_mul_h_zp.size(),
-                          hidden_size,
-                          stream1);
+                          hidden_size, stream2);
 
-    // 同步Wx计算
     cudaEventRecord(event, stream2);
-
-    // 同步R_sum_mul_h_zp计算
-    cudaEventRecord(event, stream1);
 
     const int NH = batch_size * hidden_size;
 
