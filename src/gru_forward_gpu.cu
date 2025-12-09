@@ -489,11 +489,6 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
         using rRhT = typename decltype(tag)::type;
         checkScale<T, rRhT>(rRh_g, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_, "scale_rRh_g");
     });
-    dispatchByBitWidth(cfg.one_minus_update_bitwidth, [&](auto tag) {
-        using OneMinusUpdateT = typename decltype(tag)::type;
-        checkScale<T, OneMinusUpdateT>(one_minus_update, quant_parms.exp2_inv_one_minus_update_,
-                                       quant_parms.zp_one_minus_update_, "scale_one_minus_update");
-    });
     dispatchByBitWidth(cfg.new_contrib_bitwidth, [&](auto tag) {
         using NewContribT = typename decltype(tag)::type;
         checkScale<T, NewContribT>(new_contrib, quant_parms.exp2_inv_new_contrib_,
