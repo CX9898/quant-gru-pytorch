@@ -73,10 +73,8 @@ struct QuantGRUReScale {
     int32_t zp_h_;
 
     dev::vector<int32_t> n_W_mul_x_div_Wx_;  // size = hidden * 3
-    dev::vector<float> scale_W_mul_x_div_Wx_;
     int32_t zp_Wx_;
     dev::vector<int32_t> n_R_mul_h_div_Rh_;  // size = hidden * 3
-    dev::vector<float> scale_R_mul_h_div_Rh_;
     int32_t zp_Rh_;
 
     // z门

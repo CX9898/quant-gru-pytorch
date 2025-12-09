@@ -823,6 +823,7 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
     // n_z_mul_g_div_new_contrib = (exp2_inv_z_out + exp2_inv_g_out) - exp2_inv_new_contrib
     rescale_param_.n_z_mul_g_div_new_contrib_ =
         (parms.exp2_inv_z_out_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
+    rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
     rescale_param_.zp_old_contrib_ = parms.zp_old_contrib_;
     rescale_param_.n_z_mul_h_div_old_contrib_ =
         (parms.exp2_inv_z_out_ + parms.exp2_inv_h_) - parms.exp2_inv_old_contrib_;
