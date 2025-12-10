@@ -173,7 +173,7 @@ class SpeechCommands(torch.utils.data.Dataset):
         return spec, y
 
 # ===================== 1. 加载数据集 =====================
-root_path = "/home/zcx/CLionProjects/gru-pytorch/pytorch/speech_commands/SpeechCommands/speech_commands_v0.02"  # 数据集路径
+root_path = "../../../datasets/speech_commands/SpeechCommands/speech_commands_v0.02"  # 数据集路径
 sample_rate = 16000
 n_mels = 40
 
