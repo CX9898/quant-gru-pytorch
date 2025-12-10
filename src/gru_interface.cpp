@@ -1,9 +1,10 @@
 #include "gru_interface.hpp"
-#include "quantize_ops_helper.hpp"
-#include <cuda_runtime.h>
-#include <cstdio>
-#include <stdexcept>
 
+#include "parallelAlgorithm.h"
+#include "quantize_ops_helper.hpp"
+#include <cstdio>
+#include <cuda_runtime.h>
+#include <stdexcept>
 
 void calibrateGruScales(
     bool use_int16,
@@ -249,16 +250,14 @@ void quantGRUForward(bool is_training,// 是否开启训练模式，true为训�
                         quant_parms.zp_x_);
 
     dev::vector<QuantT> h_quant((time_steps + 1) * batch_size * hidden_size);
+    // 初始化 h0 区域（第一个时间步的隐藏状态）为零点值
+    dev::fill_n(h_quant.data(), batch_size * hidden_size, quant_parms.zp_h_);
 
     // 处理初始隐藏状态
-    const int NH = batch_size * hidden_size;
     if (h0 != nullptr) {
         // 如果提供了初始状态，直接量化到 h_quant[0]
-        dev::quantification(h0, h_quant.data(), NH,
+        dev::quantification(h0, h_quant.data(), batch_size * hidden_size,
                             quant_parms.exp2_inv_h_, quant_parms.zp_h_);
-    } else {
-        // 否则初始化为zp
-        h_quant.setVal(quant_parms.zp_h_);
     }
 
     dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
@@ -267,19 +266,17 @@ void quantGRUForward(bool is_training,// 是否开启训练模式，true为训�
     dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size *
                                     3);// 用于存放R * h的中间结果
 
-    {
-        gru::ForwardPassQuant<QuantT> forward = gru::ForwardPassQuant<QuantT>(
-            is_training,// training: true为训练，false为推理
-            batch_size, input_size, hidden_size, g_blas_handle);
+    gru::ForwardPassQuant<QuantT> forward = gru::ForwardPassQuant<QuantT>(
+        is_training,// training: true为训练，false为推理
+        batch_size, input_size, hidden_size, g_blas_handle);
 
-        // 得到量化GRU中使用的rescale参数
-        forward.setRescaleParam(quant_parms);
+    // 得到量化GRU中使用的rescale参数
+    forward.setRescaleParam(quant_parms);
 
-        forward.Run(time_steps, W, R, bx,
-                    br, x_quant.data(), h_quant.data(),
-                    v_quant_dev.data(), tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
-                    nullptr);
-    }
+    forward.Run(time_steps, W, R, bx,
+                br, x_quant.data(), h_quant.data(),
+                v_quant_dev.data(), tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
+                nullptr);
 
     dev::dequantification(h_quant.data(),
                           h,

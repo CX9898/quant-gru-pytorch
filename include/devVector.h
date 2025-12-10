@@ -11,19 +11,51 @@ class vector {
  public:
     vector() : size_(0), data_(nullptr){};
     vector(size_t size);
-    vector(size_t size, T value);
     vector(const vector<T> &src);
     vector(const std::vector<T> &src);
     vector(const T *src, size_t size);
 
+    // 移动构造函数
+    vector(vector<T> &&src) noexcept : size_(src.size_), data_(src.data_) {
+        src.size_ = 0;
+        src.data_ = nullptr;
+    }
+
     ~vector() {
         if (data_) { cudaFree(data_); }
-    };
+    }
+
+    // 拷贝赋值运算符
+    vector<T> &operator=(const vector<T> &src) {
+        if (this != &src) {
+            if (data_) { cudaFree(data_); }
+            size_ = src.size_;
+            data_ = nullptr;
+            if (size_ > 0) {
+                cudaMalloc(reinterpret_cast<void **>(&data_), size_ * sizeof(T));
+                if (data_) {
+                    cudaMemcpy(data_, src.data_, size_ * sizeof(T), cudaMemcpyDeviceToDevice);
+                }
+            }
+        }
+        return *this;
+    }
+
+    // 移动赋值运算符
+    vector<T> &operator=(vector<T> &&src) noexcept {
+        if (this != &src) {
+            if (data_) { cudaFree(data_); }
+            size_ = src.size_;
+            data_ = src.data_;
+            src.size_ = 0;
+            src.data_ = nullptr;
+        }
+        return *this;
+    }
 
     void resize(size_t size);
     void clear();
     void zero();
-    void setVal(T val);
 
     inline __host__ __device__ size_t size() const {
         return size_;
@@ -55,7 +87,7 @@ class vector {
 };
 
 template<typename T>
-inline vector<T>::vector(const size_t size) : vector() {
+inline vector<T>::vector(const size_t size) : size_(0), data_(nullptr) {
     size_ = size;
     if (!size_) {
         return;
@@ -63,24 +95,12 @@ inline vector<T>::vector(const size_t size) : vector() {
     cudaMalloc(reinterpret_cast<void **>(&data_), size * sizeof(T));
     if (!data_) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+        size_ = 0;
     }
 }
 
 template<typename T>
-inline vector<T>::vector(size_t size, T value) {
-    size_ = size;
-    if (!size_) {
-        return;
-    }
-    cudaMalloc(reinterpret_cast<void **>(&data_), size * sizeof(T));
-    if (!data_) {
-        fprintf(stderr, "dev::vector: Device memory allocation failed\n");
-    }
-    cudaMemset(data_, value, sizeof(T) * size_);
-}
-
-template<typename T>
-inline vector<T>::vector(const vector<T> &src) {
+inline vector<T>::vector(const vector<T> &src) : size_(0), data_(nullptr) {
     size_ = src.size_;
     if (!size_) {
         return;
@@ -88,25 +108,29 @@ inline vector<T>::vector(const vector<T> &src) {
     cudaMalloc(reinterpret_cast<void **>(&data_), src.size_ * sizeof(T));
     if (!data_) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+        size_ = 0;
+        return;
     }
     cudaMemcpy(data_, src.data_, size_ * sizeof(T), cudaMemcpyDeviceToDevice);
 }
 
 template<typename T>
-inline vector<T>::vector(const std::vector<T> &src) {
+inline vector<T>::vector(const std::vector<T> &src) : size_(0), data_(nullptr) {
     size_ = src.size();
-    cudaMalloc(reinterpret_cast<void **>(&data_), src.size() * sizeof(T));
     if (!size_) {
         return;
     }
+    cudaMalloc(reinterpret_cast<void **>(&data_), src.size() * sizeof(T));
     if (!data_) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+        size_ = 0;
+        return;
     }
     cudaMemcpy(data_, src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice);
 }
 
 template<typename T>
-inline vector<T>::vector(const T *src, size_t size) {
+inline vector<T>::vector(const T *src, size_t size) : size_(0), data_(nullptr) {
     size_ = size;
     if (!size_) {
         return;
@@ -114,6 +138,8 @@ inline vector<T>::vector(const T *src, size_t size) {
     cudaMalloc(reinterpret_cast<void **>(&data_), size * sizeof(T));
     if (!data_) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+        size_ = 0;
+        return;
     }
     cudaMemcpy(data_, src, size * sizeof(T), cudaMemcpyHostToDevice);
 }
@@ -124,14 +150,10 @@ inline void vector<T>::zero() {
 }
 
 template<typename T>
-inline void vector<T>::setVal(T val) {
-    cudaMemset(data_, val, size_ * sizeof(T));
-}
-
-template<typename T>
 inline void vector<T>::resize(size_t size) {
     if (data_) {
         cudaFree(data_);
+        data_ = nullptr;
     }
     size_ = size;
     if (!size_) {
@@ -140,6 +162,7 @@ inline void vector<T>::resize(size_t size) {
     cudaMalloc(reinterpret_cast<void **>(&data_), size * sizeof(T));
     if (!data_) {
         fprintf(stderr, "dev::vector: Device memory allocation failed\n");
+        size_ = 0;
     }
 }
 
@@ -148,6 +171,7 @@ inline void vector<T>::clear() {
     size_ = 0;
     if (data_) {
         cudaFree(data_);
+        data_ = nullptr;
     }
 }
 
@@ -183,11 +207,11 @@ inline T *vector<T>::back() const {
 template<typename T>
 inline T vector<T>::back_data() const {
     if (!data_) {
-        return 0;
+        return T{};
     }
-    T *val = (T *) malloc(sizeof(T));
-    cudaMemcpy(val, data_ + size_ - 1, sizeof(T), cudaMemcpyDeviceToHost);
-    return *val;
+    T val;
+    cudaMemcpy(&val, data_ + size_ - 1, sizeof(T), cudaMemcpyDeviceToHost);
+    return val;
 }
 
 }// namespace dev

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -15,19 +16,21 @@
 #include "gru_interface.hpp"
 #include "gru_quant.h"
 #include "quantized_unit_testing.cuh"
+#include "parallelAlgorithm.h"
 
 constexpr int BATCH_SIZE = 64;  // 批大小
 constexpr int SEQUENCE_LEN = 50;// 序列长度(T), 每个样本有T个时间步
 constexpr int HIDDEN_DIMS = 256;// 隐藏层维度(H), h_t的维度
 constexpr int INPUT_DIMS = 256; // 输入维度(I), x_t的维度
 
-cublasHandle_t g_blas_handle;// 改为非static以便在wrapper中访问
+cublasHandle_t g_blas_handle = nullptr;// 改为非static以便在wrapper中访问
+static std::once_flag g_blas_init_flag;  // 确保线程安全的一次性初始化
 
-// 初始化函数，供Python绑定调用
+// 初始化函数，供Python绑定调用（线程安全）
 void init_gru_cublas() {
-    if (g_blas_handle == nullptr) {
+    std::call_once(g_blas_init_flag, []() {
         cublasCreate(&g_blas_handle);
-    }
+    });
 }
 
 class ScopeTimer {
@@ -80,6 +83,7 @@ void GruInferenceQuant(
                                    W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(), quant_parms,
                                    W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data());
     }
+
     {
         bool is_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
         initialize_quantization_lut(quant_parms, is_int16);
@@ -201,7 +205,8 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     }
 
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
-    dev::vector<QuantT> h_quant_dev(h_size, quant_parms.zp_h_);
+    dev::vector<QuantT> h_quant_dev(h_size);
+    dev::fill_n(h_quant_dev.data(), h_size, quant_parms.zp_h_);
     dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
 
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);

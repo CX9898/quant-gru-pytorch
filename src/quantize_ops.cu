@@ -511,7 +511,6 @@ void quantification(const T *data, QuantT *quant_data, size_t size,
         printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
     }
     cudaDeviceSynchronize();
-    cudaDeviceSynchronize();
 }
 
 template void quantification<float, int8_t>(const float *data, int8_t *quant_data, size_t size,
