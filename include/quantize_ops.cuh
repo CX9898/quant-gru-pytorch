@@ -6,9 +6,9 @@
 
 #include "quantize_ops_helper.hpp"
 
-extern __constant__ int8_t d_sigmoid_int8_z_lut[256];
-extern __constant__ int8_t d_sigmoid_int8_r_lut[256];
-extern __constant__ int8_t d_tanh_int8_g_lut[256];
+extern __constant__ uint8_t d_sigmoid_int8_z_lut[256];  // sigmoid 输出 [0,1] 使用无符号
+extern __constant__ uint8_t d_sigmoid_int8_r_lut[256];  // sigmoid 输出 [0,1] 使用无符号
+extern __constant__ int8_t d_tanh_int8_g_lut[256];      // tanh 输出 [-1,1] 仍使用有符号
 
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16
@@ -78,7 +78,18 @@ __device__ __forceinline__ int32_t clamp(int x) {
     return max(min_val, min(max_val, x));
 }
 
-// Round 函数：只负责四舍五入，不限制范围
+template <>
+__device__ __forceinline__ uint8_t clamp(int x) {
+    return static_cast<uint8_t>(max(0, min(255, x)));
+}
+
+// uint16_t 特化（用于 sigmoid 输出 [0, 65535]）
+template <>
+__device__ __forceinline__ uint16_t clamp(int x) {
+    return static_cast<uint16_t>(max(0, min(65535, x)));
+}
+
+// Round 函数
 __device__ __forceinline__ int32_t round(float val) {
     // 使用 CUDA 内置函数 __float2int_rn 进行四舍五入（round to nearest）
     // 这比 roundf 更高效，因为它直接返回整数
@@ -113,6 +124,22 @@ struct QuantLimits<int32_t> {
     static __host__ __device__ constexpr int max() { return 2147483647; }
 };
 
+// uint8_t 特化（用于 sigmoid 输出）
+template <>
+struct QuantLimits<uint8_t> {
+    static __device__ __forceinline__ constexpr int32_t min() { return 0; }
+
+    static __device__ __forceinline__ constexpr int32_t max() { return 255; }
+};
+
+// uint16_t 特化（用于 sigmoid 输出）
+template <>
+struct QuantLimits<uint16_t> {
+    static __device__ __forceinline__ constexpr int32_t min() { return 0; }
+
+    static __device__ __forceinline__ constexpr int32_t max() { return 65535; }
+};
+
 template <typename QuantT>
 inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
     // CUDA device code: 与CPU版本保持一致，使用位运算
@@ -133,7 +160,8 @@ inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
     return static_cast<QuantT>(q);
 }
 
-__device__ __forceinline__ int8_t sigmoid_int8_lut(int8_t x, const int8_t* lut) {
+// sigmoid LUT 查找函数：输入为 int8_t（有符号），输出为 uint8_t（无符号，因为 sigmoid ∈ [0,1]）
+__device__ __forceinline__ uint8_t sigmoid_int8_lut(int8_t x, const uint8_t* lut) {
     // x in [-128,127], lut 长度 = 256
     const int idx = static_cast<uint8_t>(x + 128);  // 对齐 LUT 初始化
     return lut[idx];

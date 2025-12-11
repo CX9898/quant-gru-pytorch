@@ -16,9 +16,9 @@
 struct SigmoidLUT_INT16;
 struct SigmoidLUT_INT8;
 
-__constant__ int8_t d_sigmoid_int8_z_lut[256];
-__constant__ int8_t d_sigmoid_int8_r_lut[256];
-__constant__ int8_t d_tanh_int8_g_lut[256];
+__constant__ uint8_t d_sigmoid_int8_z_lut[256];  // sigmoid 输出 [0,1] 使用无符号
+__constant__ uint8_t d_sigmoid_int8_r_lut[256];  // sigmoid 输出 [0,1] 使用无符号
+__constant__ int8_t d_tanh_int8_g_lut[256];      // tanh 输出 [-1,1] 仍使用有符号
 
 // 分段线性量化常量内存
 __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;  // z 门的 Sigmoid LUT
@@ -28,9 +28,10 @@ __constant__ SigmoidLUT_INT8 d_sigmoid_z_lut_int8;  // z 门的 Sigmoid LUT
 __constant__ SigmoidLUT_INT8 d_sigmoid_r_lut_int8;  // r 门的 Sigmoid LUT
 __constant__ SigmoidLUT_INT8 d_tanh_lut_int8;
 
-std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z,
-                                              int32_t zp_z) {
-    std::vector<int8_t> lut(256);
+// sigmoid 输出使用 uint8_t，因为 sigmoid ∈ [0, 1] 没有负数
+std::vector<uint8_t> generate_sigmoid_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z,
+                                               int32_t zp_z) {
+    std::vector<uint8_t> lut(256);
 
     for (int i = 0; i < 256; i++) {
         int x_i8 = i - 128;
@@ -38,11 +39,12 @@ std::vector<int8_t> generate_sigmoid_int8_lut(float scale_z_pre, int32_t zp_z_pr
         const float x_fp = static_cast<float>(x_i8 - zp_z_pre) * scale_z_pre;
         const float y_fp = 1.f / (1.f + std::exp(-x_fp));
 
-        int y_i8 = static_cast<int>(std::round(y_fp / scale_z + zp_z));
-        if (y_i8 < -128) y_i8 = -128;
-        if (y_i8 > 127) y_i8 = 127;
+        // 输出使用 uint8_t 范围 [0, 255]
+        int y_u8 = static_cast<int>(std::round(y_fp / scale_z + zp_z));
+        if (y_u8 < 0) y_u8 = 0;
+        if (y_u8 > 255) y_u8 = 255;
 
-        lut[i] = static_cast<int8_t>(y_i8);
+        lut[i] = static_cast<uint8_t>(y_u8);
     }
     return lut;
 }
@@ -69,42 +71,27 @@ std::vector<int8_t> generate_tanh_int8_lut(float scale_pre, int32_t zp_pre, floa
 void generate_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z_out, int32_t zp_z_out,
                        float scale_r_pre, int32_t zp_r_pre, float scale_r_out, int32_t zp_r_out,
                        float scale_g_pre, int32_t zp_g_pre, float scale_g_out, int32_t zp_g_out) {
-    std::vector<int8_t> sigmoid_z_lut =
+    // sigmoid LUT 使用 uint8_t（输出 [0, 255]）
+    std::vector<uint8_t> sigmoid_z_lut =
         generate_sigmoid_int8_lut(scale_z_pre, zp_z_pre, scale_z_out, zp_z_out);
-    //    printf("scale_z_pre = %.15f, zp_z_pre = %d, scale_z_out = %.15f,
-    //    zp_z_out = %d\n",
-    //           scale_z_pre,
-    //           zp_z_pre,
-    //           scale_z_out,
-    //           zp_z_out);
-    std::vector<int8_t> sigmoid_r_lut =
+    std::vector<uint8_t> sigmoid_r_lut =
         generate_sigmoid_int8_lut(scale_r_pre, zp_r_pre, scale_r_out, zp_r_out);
-    //    printf("scale_r_pre = %.15f, zp_r_pre = %d, scale_r_out = %.15f,
-    //    zp_r_out = %d\n",
-    //           scale_r_pre,
-    //           zp_r_pre,
-    //           scale_r_out,
-    //           zp_r_out);
+    // tanh LUT 仍使用 int8_t（输出 [-128, 127]）
     std::vector<int8_t> tanh_int8_lut =
         generate_tanh_int8_lut(scale_g_pre, zp_g_pre, scale_g_out, zp_g_out);
-    //    printf("scale_g_pre = %.15f, zp_g_pre = %d, scale_g_out = %.15f,
-    //    zp_g_out = %d\n",
-    //           scale_g_pre,
-    //           zp_g_pre,
-    //           scale_g_out,
-    //           zp_g_out);
 
     cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(),
-                       sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
+                       sizeof(uint8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
     cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(),
-                       sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
+                       sizeof(uint8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
     cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(),
-                       sizeof(int8_t) * 256);  // 从host端拷贝到device端中编译期固定的地址
+                       sizeof(int8_t) * 256);   // 从host端拷贝到device端中编译期固定的地址
 }
 
-std::vector<int8_t> generate_sigmoid_int8_lut_exp2(int8_t exp2_inv_z_pre, int32_t zp_z_pre,
-                                                   int8_t exp2_inv_z, int32_t zp_z) {
-    std::vector<int8_t> lut(256);
+// sigmoid 输出使用 uint8_t，因为 sigmoid ∈ [0, 1] 没有负数
+std::vector<uint8_t> generate_sigmoid_int8_lut_exp2(int8_t exp2_inv_z_pre, int32_t zp_z_pre,
+                                                    int8_t exp2_inv_z, int32_t zp_z) {
+    std::vector<uint8_t> lut(256);
 
     for (int i = 0; i < 256; i++) {
         int x_i8 = i - 128;
@@ -115,10 +102,10 @@ std::vector<int8_t> generate_sigmoid_int8_lut_exp2(int8_t exp2_inv_z_pre, int32_
         // （2）计算 sigmoid
         float y_fp = 1.f / (1.f + std::exp(-x_fp));
 
-        // （3）量化 y
-        int y_i8 = quantize<int8_t>(y_fp, exp2_inv_z, zp_z);
+        // （3）量化 y 到 uint8_t 范围 [0, 255]
+        int y_u8 = quantize<uint8_t>(y_fp, exp2_inv_z, zp_z);
 
-        lut[i] = static_cast<int8_t>(y_i8);
+        lut[i] = static_cast<uint8_t>(y_u8);
     }
 
     return lut;
@@ -150,15 +137,17 @@ void generate_int8_lut_from_exp2_inv(int8_t exp2_inv_z_pre, int32_t zp_z_pre, in
                                      int32_t zp_z_out, int8_t exp2_inv_r_pre, int32_t zp_r_pre,
                                      int8_t exp2_inv_r_out, int32_t zp_r_out, int8_t exp2_inv_g_pre,
                                      int32_t zp_g_pre, int8_t exp2_inv_g_out, int32_t zp_g_out) {
-    std::vector<int8_t> sigmoid_z_lut =
+    // sigmoid LUT 使用 uint8_t（输出 [0, 255]）
+    std::vector<uint8_t> sigmoid_z_lut =
         generate_sigmoid_int8_lut_exp2(exp2_inv_z_pre, zp_z_pre, exp2_inv_z_out, zp_z_out);
-    std::vector<int8_t> sigmoid_r_lut =
+    std::vector<uint8_t> sigmoid_r_lut =
         generate_sigmoid_int8_lut_exp2(exp2_inv_r_pre, zp_r_pre, exp2_inv_r_out, zp_r_out);
+    // tanh LUT 仍使用 int8_t
     std::vector<int8_t> tanh_int8_lut =
         generate_tanh_int8_lut_exp2(exp2_inv_g_pre, zp_g_pre, exp2_inv_g_out, zp_g_out);
 
-    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(int8_t) * 256);
-    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(int8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_int8_z_lut, sigmoid_z_lut.data(), sizeof(uint8_t) * 256);
+    cudaMemcpyToSymbol(d_sigmoid_int8_r_lut, sigmoid_r_lut.data(), sizeof(uint8_t) * 256);
     cudaMemcpyToSymbol(d_tanh_int8_g_lut, tanh_int8_lut.data(), sizeof(int8_t) * 256);
 }
 
