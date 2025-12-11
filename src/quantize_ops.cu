@@ -332,8 +332,13 @@ __global__ void quantificationV(const T *data, QuantT *quant_data, int time_step
     quant_data[rh_idx] = dev::quantize<QuantT>(data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
 }
 
-template <typename T, typename QuantT>
-__global__ void dequantificationV(const QuantT *quant_data, T *data, int time_steps, int batch_size,
+// v 使用 int32_t 存储，但内部各部分使用不同的量化参数:
+// - z: 使用 exp2_inv_z, zp_z
+// - r: 使用 exp2_inv_r, zp_r
+// - g: 使用 exp2_inv_g, zp_g
+// - Rh_add_br_g: 使用 exp2_inv_Rh_add_br, zp_Rh_add_br
+template <typename T>
+__global__ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                                   int hidden_size, int8_t exp2_inv_z, int32_t zp_z,
                                   int8_t exp2_inv_r, int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
                                   int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br) {
@@ -356,21 +361,21 @@ __global__ void dequantificationV(const QuantT *quant_data, T *data, int time_st
 
     const int base_idx = t * (batch_size * hidden_size * 4) + b * (hidden_size * 4);
 
-    // 反量化 z_out (第0部分)
+    // 反量化 z_out (第0部分) - 从 int32_t 反量化
     const int z_idx = base_idx + 0 * hidden_size + h;
-    data[z_idx] = dequantize<QuantT>(quant_data[z_idx], exp2_inv_z, zp_z);
+    data[z_idx] = dequantize<int32_t>(quant_data[z_idx], exp2_inv_z, zp_z);
 
-    // 反量化 r_out (第1部分)
+    // 反量化 r_out (第1部分) - 从 int32_t 反量化
     const int r_idx = base_idx + 1 * hidden_size + h;
-    data[r_idx] = dequantize<QuantT>(quant_data[r_idx], exp2_inv_r, zp_r);
+    data[r_idx] = dequantize<int32_t>(quant_data[r_idx], exp2_inv_r, zp_r);
 
-    // 反量化 g_out (第2部分，对称量化，zp=0)
+    // 反量化 g_out (第2部分) - 从 int32_t 反量化
     const int g_idx = base_idx + 2 * hidden_size + h;
-    data[g_idx] = dequantize<QuantT>(quant_data[g_idx], exp2_inv_g, zp_g);
+    data[g_idx] = dequantize<int32_t>(quant_data[g_idx], exp2_inv_g, zp_g);
 
-    // 反量化 Rh_add_br_g (第3部分)
+    // 反量化 Rh_add_br_g (第3部分) - 从 int32_t 反量化
     const int rh_idx = base_idx + 3 * hidden_size + h;
-    data[rh_idx] = dequantize<QuantT>(quant_data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
+    data[rh_idx] = dequantize<int32_t>(quant_data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
 }
 
 template <typename T, typename QuantT>
@@ -511,8 +516,9 @@ template void quantificationV<float, int16_t>(const float *data, int16_t *quant_
                                               int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
                                               int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
 
-template <typename T, typename QuantT>
-void dequantificationV(const QuantT *quant_data, T *data, int time_steps, int batch_size,
+// v 统一使用 int32_t 存储
+template <typename T>
+void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                        int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
                        int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
                        int32_t zp_Rh_add_br) {
@@ -534,16 +540,11 @@ void dequantificationV(const QuantT *quant_data, T *data, int time_steps, int ba
     cudaDeviceSynchronize();
 }
 
-template void dequantificationV<float, int8_t>(const int8_t *quant_data, float *data,
-                                               int time_steps, int batch_size, int hidden_size,
-                                               int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
-                                               int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
-                                               int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
-template void dequantificationV<float, int16_t>(const int16_t *quant_data, float *data,
-                                                int time_steps, int batch_size, int hidden_size,
-                                                int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
-                                                int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
-                                                int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
+template void dequantificationV<float>(const int32_t *quant_data, float *data,
+                                       int time_steps, int batch_size, int hidden_size,
+                                       int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
+                                       int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
+                                       int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br);
 
 template <typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,

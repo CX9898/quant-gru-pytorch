@@ -187,7 +187,7 @@ GRUTrainGradients GruTrainQuant(
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
     dev::vector<QuantT> h_quant_dev(h_size);
     dev::fill_n(h_quant_dev.data(), h_size, quant_parms.zp_h_);
-    dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
+    dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size * 4);
 
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
     dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);

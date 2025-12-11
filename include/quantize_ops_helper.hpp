@@ -179,7 +179,7 @@ void computeWeightSumMulzp(
 void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, const int32_t *x_zp,
                                   int out_dim, int batch_size, cudaStream_t stream = 0);
 
-// #define DEBUG true
+#define DEBUG true
 
 /**
  * @brief
@@ -252,12 +252,17 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
 
     // 可选调试打印
 #ifdef DEBUG
-    if (!name.empty() && name == "scale_x") {
-        std::cout << "[QuantParam][" << name << "] "
-                  << "orig_min=" << orig_min << ", orig_max=" << orig_max
-                  << ", aligned_min=" << aligned_min << ", aligned_max=" << aligned_max
-                  << ", scale=" << scale << ", exp2_inv=" << exp2_inv << ", zp=" << zp
-                  << ", is_symmetric=" << is_symmetric << std::endl;
+    if (!name.empty() && (name == "scale_z_out" || name == "scale_r_out" || name == "scale_g_out")) {
+        printf("[QuantParam][%s] orig_min=%f, orig_max=%f, aligned_min=%f, aligned_max=%f, scale=%f, exp2_inv=%d, zp=%d, is_symmetric=%d\n",
+               name.c_str(),
+               static_cast<double>(orig_min),
+               static_cast<double>(orig_max),
+               static_cast<double>(aligned_min),
+               static_cast<double>(aligned_max),
+               static_cast<double>(scale),
+               static_cast<int>(exp2_inv),
+               static_cast<int>(zp),
+               static_cast<int>(is_symmetric));
     }
 #endif
 }
@@ -338,8 +343,9 @@ void quantificationV(const T *data, QuantT *quant_data, int time_steps, int batc
                      int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
                      int32_t zp_Rh_add_br);
 
-template <typename T, typename QuantT>
-void dequantificationV(const QuantT *quant_data, T *data, int time_steps, int batch_size,
+// v 统一使用 int32_t 存储，内部各部分使用不同量化参数
+template <typename T>
+void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                        int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
                        int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
                        int32_t zp_Rh_add_br);

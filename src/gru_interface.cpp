@@ -199,7 +199,7 @@ void quantGRUForward(
                             quant_parms.zp_h_);
     }
 
-    dev::vector<QuantT> v_quant_dev(time_steps * batch_size * hidden_size * 4);
+    dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size * 4);  // v 统一使用 int32_t 存储
     dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                     3);                             // 用于存放W * x的中间结果
     dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
