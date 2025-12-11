@@ -1,32 +1,33 @@
 #pragma once
 
-#include <cstdio>
-#include <cmath>
-#include <vector>
-#include <string>
-
 #include <cuda_runtime.h>
+
+#include <cmath>
+#include <cstdio>
+#include <string>
+#include <vector>
 
 const float ERROR_THRESHOLD_EPSILON = 1e-6f;
 const float ERROR_THRESHOLD_MSE_EPSILON = 1e-5f;
 
-template<typename T>
+template <typename T>
 inline bool checkOneData(const T data1, const T data2) {
     return data1 == data2;
 }
 
-template<>
+template <>
 inline bool checkOneData<float>(const float data1, const float data2) {
     constexpr float ABS_EPSILON = 1e-5f;
 
     const float absDiff = std::fabs(data1 - data2);
     if (absDiff < ABS_EPSILON) return true;
 
-    const float maxVal = std::max(std::max(std::fabs(data1), std::fabs(data2)), ERROR_THRESHOLD_EPSILON);
+    const float maxVal =
+        std::max(std::max(std::fabs(data1), std::fabs(data2)), ERROR_THRESHOLD_EPSILON);
     return (absDiff / maxVal) < ERROR_THRESHOLD_EPSILON;
 }
 
-template<>
+template <>
 inline bool checkOneData<double>(const double data1, const double data2) {
     constexpr double ABS_EPSILON = 1e-5;
 
@@ -39,7 +40,7 @@ inline bool checkOneData<double>(const double data1, const double data2) {
 }
 
 // 计算余弦相似度
-template<typename T>
+template <typename T>
 inline float computeCosineSimilarity(const std::vector<T> &a, const std::vector<T> &b) {
     double dot = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -47,36 +48,30 @@ inline float computeCosineSimilarity(const std::vector<T> &a, const std::vector<
         norm_a += a[i] * a[i];
         norm_b += b[i] * b[i];
     }
-    return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f); // 防止除零
+    return dot / (std::sqrt(norm_a) * std::sqrt(norm_b) + 1e-8f);  // 防止除零
 }
 
-template<typename T>
-inline bool checkCosineSimilarity(const std::vector<T> &a,
-                                  const std::vector<T> &b,
-                                  const std::string &name = "",
-                                  const float threshold = 0.9999f) {
+template <typename T>
+inline bool checkCosineSimilarity(const std::vector<T> &a, const std::vector<T> &b,
+                                  const std::string &name = "", const float threshold = 0.9999f) {
     const float cos_sim = computeCosineSimilarity(a, b);
     if (cos_sim < threshold) {
-        fprintf(stderr,
-                "Warning! %s check cosine similarity failed: cosine similarity = %f, threshold = %f\n",
-                name.c_str(),
-                cos_sim,
-                threshold);
+        fprintf(
+            stderr,
+            "Warning! %s check cosine similarity failed: cosine similarity = %f, threshold = %f\n",
+            name.c_str(), cos_sim, threshold);
         return false;
     }
     printf("\t%s: Check cosine similarity Pass! cosine similarity = %f, threshold = %f\n",
-           name.c_str(),
-           cos_sim,
-           threshold);
+           name.c_str(), cos_sim, threshold);
     return true;
 }
 
-
 // 计算均方误差（MSE）来比较两个数据数组
-template<typename T>
+template <typename T>
 inline float computeMSE(const T *data1, const T *data2, size_t size) {
     double mse = 0.0;
-#pragma omp parallel for reduction(+:mse)
+#pragma omp parallel for reduction(+ : mse)
     for (size_t i = 0; i < size; ++i) {
         double diff = static_cast<double>(data1[i]) - static_cast<double>(data2[i]);
         mse += diff * diff;
@@ -85,28 +80,26 @@ inline float computeMSE(const T *data1, const T *data2, size_t size) {
     return static_cast<float>(mse / static_cast<double>(size));
 }
 
-template<typename T>
+template <typename T>
 inline float computeMSE(const std::vector<T> &data1, const std::vector<T> &data2) {
     if (data1.size() != data2.size() || data1.empty()) return 0.0f;
     return computeMSE(data1.data(), data2.data(), data1.size());
 }
 
-template<typename T>
-bool checkMSE(const std::vector<T> &data1,
-              const std::vector<T> &data2,
-              const std::string &name = "",
-              float threshold = ERROR_THRESHOLD_MSE_EPSILON
-) {
+template <typename T>
+bool checkMSE(const std::vector<T> &data1, const std::vector<T> &data2,
+              const std::string &name = "", float threshold = ERROR_THRESHOLD_MSE_EPSILON) {
     const float mse = computeMSE(data1, data2);
     if (mse > threshold) {
-        fprintf(stderr, "Warning! %s check mse failed: mse = %.10f, threshold = %f\n", name.c_str(), mse, threshold);
+        fprintf(stderr, "Warning! %s check mse failed: mse = %.10f, threshold = %f\n", name.c_str(),
+                mse, threshold);
         return false;
     }
     printf("\t%s: Check mes Pass! mes = %.10f, threshold = %f\n", name.c_str(), mse, threshold);
     return true;
 }
 
-template<typename T>
+template <typename T>
 inline bool checkDataFunction(const size_t num, const T *data1, const T *data2, size_t &numError) {
     bool isCorrect = true;
 
@@ -122,18 +115,16 @@ inline bool checkDataFunction(const size_t num, const T *data1, const T *data2, 
         if (!checkOneData(oneData1, oneData2)) {
             ++errors;
             if (errors < 10) {
-                printf("| Error : idx = %d, data1 = %f, data2 = %f, difference = %f\n",
-                       idx,
-                       static_cast<float>(oneData1),
-                       static_cast<float>(oneData2),
+                printf("| Error : idx = %d, data1 = %f, data2 = %f, difference = %f\n", idx,
+                       static_cast<float>(oneData1), static_cast<float>(oneData2),
                        static_cast<float>(oneData1 - oneData2));
             }
         }
     }
     numError = errors;
     if (errors > 0) {
-        printf("| No Pass! Inconsistent data! %zu errors! Error rate : %2.2f%%\n",
-               errors, static_cast<float>(errors) / static_cast<float>(num) * 100);
+        printf("| No Pass! Inconsistent data! %zu errors! Error rate : %2.2f%%\n", errors,
+               static_cast<float>(errors) / static_cast<float>(num) * 100);
         isCorrect = false;
     } else {
         printf("| Pass! Result validates successfully.\n");
@@ -144,7 +135,7 @@ inline bool checkDataFunction(const size_t num, const T *data1, const T *data2, 
     return isCorrect;
 }
 
-template<typename T>
+template <typename T>
 inline bool checkData(const std::vector<T> &hostData1, const std::vector<T> &hostData2) {
     if (hostData1.size() != hostData2.size()) {
         return false;
@@ -153,43 +144,44 @@ inline bool checkData(const std::vector<T> &hostData1, const std::vector<T> &hos
     return checkDataFunction(hostData1.size(), hostData1.data(), hostData2.data(), numError);
 }
 
-template<typename T>
-inline bool checkData(const std::vector<T> &hostData1, const std::vector<T> &hostData2, size_t &numError) {
+template <typename T>
+inline bool checkData(const std::vector<T> &hostData1, const std::vector<T> &hostData2,
+                      size_t &numError) {
     if (hostData1.size() != hostData2.size()) {
         return false;
     }
     return checkDataFunction(hostData1.size(), hostData1.data(), hostData2.data(), numError);
 }
 
-template<typename T>
+template <typename T>
 bool checkData(const std::vector<T> &hostData1, const dev::vector<T> &devData2) {
     std::vector<T> hostData2;
     d2h(hostData2, devData2);
     return checkData(hostData1, hostData2);
 }
 
-template<typename T>
+template <typename T>
 bool checkData(const std::vector<T> &hostData1, const dev::vector<T> &devData2, size_t &numError) {
     std::vector<T> hostData2;
     d2h(hostData2, devData2);
     return checkData(hostData1, hostData2, numError);
 }
 
-template<typename T>
+template <typename T>
 bool checkData(const dev::vector<T> &devData1, const std::vector<T> &hostData2) {
     std::vector<T> hostData1;
     d2h(hostData1, devData1);
     return checkData(hostData1, hostData2);
 }
 
-template<typename T>
+template <typename T>
 bool checkData(const dev::vector<T> &devData1, const dev::vector<T> &devData2) {
     std::vector<T> hostData1 = d2h(devData1);
     std::vector<T> hostData2 = d2h(devData2);
     return checkData(hostData1, hostData2);
 }
 
-template<typename T>
+template <typename T>
 bool checkData(const dev::vector<T> &devData1, const std::vector<T> &hostData2, size_t &numError) {
     std::vector<T> hostData1;
     d2h(hostData1, devData1);

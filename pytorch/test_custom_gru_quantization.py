@@ -30,6 +30,7 @@ INPUT_HIGH = 0.8
 INPUT_DEVICE = 'cuda'
 INPUT_DTYPE = torch.float32
 
+
 # ============================================================================
 
 
@@ -79,7 +80,7 @@ def create_test_input(batch_first=None, batch_size=None, seq_len=None, input_siz
         seq_len = SEQ_LEN
     if input_size is None:
         input_size = INPUT_SIZE
-    
+
     if batch_first:
         return create_uniform_input((batch_size, seq_len, input_size))
     else:
@@ -87,11 +88,11 @@ def create_test_input(batch_first=None, batch_size=None, seq_len=None, input_siz
 
 
 def compare_gru_outputs(
-    pytorch_gru: nn.GRU,
-    custom_gru: CustomGRU,
-    input_tensor: torch.Tensor,
-    hx: torch.Tensor = None,
-    verbose: bool = True
+        pytorch_gru: nn.GRU,
+        custom_gru: CustomGRU,
+        input_tensor: torch.Tensor,
+        hx: torch.Tensor = None,
+        verbose: bool = True
 ):
     """
     比较 PyTorch GRU 和 CustomGRU 的输出
@@ -208,10 +209,10 @@ def print_results(results: dict, custom_gru: CustomGRU):
 
     print("整体统计:")
     print(f"  输出 MSE:           {results['mse_output']:.10f}")
-    print(f"  输出相对误差:       {results['rel_error_output']*100:.6f}%")
+    print(f"  输出相对误差:       {results['rel_error_output'] * 100:.6f}%")
     print(f"  输出余弦相似度:     {results['cos_sim_output']:.10f}")
     print(f"  最终状态 MSE:       {results['mse_h_n']:.10f}")
-    print(f"  最终状态相对误差:   {results['rel_error_h_n']*100:.6f}%")
+    print(f"  最终状态相对误差:   {results['rel_error_h_n'] * 100:.6f}%")
     print(f"  最终状态余弦相似度: {results['cos_sim_h_n']:.10f}")
     print()
 
@@ -304,7 +305,7 @@ def test_quantized_int8():
 
     # 创建校准数据（使用全局配置）
     calibration_data = create_test_input()
-    
+
     # 保存原始校准数据的副本，用于后续测试（避免被 _initialize_quantization 修改）
     calibration_data_backup = calibration_data.clone()
 
@@ -545,7 +546,7 @@ def test_quantized_vs_non_quantized_int8():
     print(f"✅ CustomGRU 非量化 vs 量化测试完成！MSE: {results['mse_output']:.6f}, "
           f"余弦相似度: {results['cos_sim_output']:.6f}")
     print(f"   参考值（example/gru.cc）: MSE ~ 0.000007, 余弦相似度 ~ 0.999")
-    
+
     # 验证结果是否在合理范围内
     if results['mse_output'] < 0.001 and results['cos_sim_output'] > 0.99:
         print("   ✅ 量化误差在合理范围内")
@@ -591,4 +592,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

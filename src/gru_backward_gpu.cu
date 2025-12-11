@@ -23,23 +23,15 @@
 
 namespace kernel {
 
-template<typename T, bool ApplyZoneout>
-__global__ void PointwiseOperations(const int batch_dim,
-                                    const int hidden_dim,
-                                    const T *h,
-                                    const T *v,
-                                    const T *dh_new,
-                                    T *dbx_out,
-                                    T *dbr_out,
-                                    T *dh_inout,
-                                    T *dp_out,
-                                    T *dq_out,
-                                    const T *zoneout_mask) {// Zoneout mask (only used if ApplyZoneout==true)
+template <typename T, bool ApplyZoneout>
+__global__ void PointwiseOperations(
+    const int batch_dim, const int hidden_dim, const T *h, const T *v, const T *dh_new, T *dbx_out,
+    T *dbr_out, T *dh_inout, T *dp_out, T *dq_out,
+    const T *zoneout_mask) {  // Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
     const int col = blockDim.y * blockIdx.y + threadIdx.y;
 
-    if (row >= hidden_dim || col >= batch_dim)
-        return;
+    if (row >= hidden_dim || col >= batch_dim) return;
 
     const int base_idx = col * hidden_dim + row;
 
@@ -95,27 +87,20 @@ __global__ void PointwiseOperations(const int batch_dim,
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
-template<typename T, bool ApplyZoneout>
-__global__ void PointwiseOperations(const int batch_dim,
-                                    const int hidden_dim,
-                                    const half *h,
-                                    const half *v,
-                                    const half *dh_new,
-                                    half *dbx_out,
-                                    half *dbr_out,
-                                    half *dh_inout,
-                                    half *dp_out,
-                                    half *dq_out,
+template <typename T, bool ApplyZoneout>
+__global__ void PointwiseOperations(const int batch_dim, const int hidden_dim, const half *h,
+                                    const half *v, const half *dh_new, half *dbx_out, half *dbr_out,
+                                    half *dh_inout, half *dp_out, half *dq_out,
                                     const half *zoneout_mask) {
     device_assert_fail("FP16 is not supported on compute capability < 7.0.");
 }
 #endif
 
-}// namespace kernel
+}  // namespace kernel
 
 namespace gru {
 
-template<typename T>
+template <typename T>
 struct BackwardPass<T>::private_data {
     int batch_size;
     int input_size;
@@ -126,13 +111,10 @@ struct BackwardPass<T>::private_data {
     cudaStream_t sync_stream;
 };
 
-template<typename T>
-BackwardPass<T>::BackwardPass(
-    const int batch_size,
-    const int input_size,
-    const int hidden_size,
-    const cublasHandle_t &blas_handle,
-    const cudaStream_t &stream) : data_(new private_data) {
+template <typename T>
+BackwardPass<T>::BackwardPass(const int batch_size, const int input_size, const int hidden_size,
+                              const cublasHandle_t &blas_handle, const cudaStream_t &stream)
+    : data_(new private_data) {
     data_->batch_size = batch_size;
     data_->input_size = input_size;
     data_->hidden_size = hidden_size;
@@ -143,7 +125,7 @@ BackwardPass<T>::BackwardPass(
     cudaEventCreateWithFlags(&data_->event, cudaEventDisableTiming);
 }
 
-template<typename T>
+template <typename T>
 BackwardPass<T>::~BackwardPass() {
     if (data_->sync_stream) {
         cudaEventRecord(data_->event, data_->stream[1]);
@@ -160,25 +142,24 @@ BackwardPass<T>::~BackwardPass() {
     delete data_;
 }
 
-template<typename T>
-void BackwardPass<T>::Iterate(
-    const T *W_t,           // [H*3,C]
-    const T *R_t,           // [H*3,H]
-    const T *bx,            // [H*3]
-    const T *br,            // [H*3]
-    const T *x_t,           // [C,N]
-    const T *h,             // [N,H]
-    const T *v,             // [N,H*4]
-    const T *dh_new,        // [N,H]
-    T *dx,                  // [N,C]
-    T *dW,                  // [C,H*3]
-    T *dR,                  // [H,H*3]
-    T *dbx,                 // [H*3]
-    T *dbr,                 // [H*3]
-    T *dh,                  // [N,H]
-    T *dp,                  // [N,H*3]
-    T *dq,                  // [N,H*3]
-    const T *zoneout_mask) {// [N,H]
+template <typename T>
+void BackwardPass<T>::Iterate(const T *W_t,             // [H*3,C]
+                              const T *R_t,             // [H*3,H]
+                              const T *bx,              // [H*3]
+                              const T *br,              // [H*3]
+                              const T *x_t,             // [C,N]
+                              const T *h,               // [N,H]
+                              const T *v,               // [N,H*4]
+                              const T *dh_new,          // [N,H]
+                              T *dx,                    // [N,C]
+                              T *dW,                    // [C,H*3]
+                              T *dR,                    // [H,H*3]
+                              T *dbx,                   // [H*3]
+                              T *dbr,                   // [H*3]
+                              T *dh,                    // [N,H]
+                              T *dp,                    // [N,H*3]
+                              T *dq,                    // [N,H*3]
+                              const T *zoneout_mask) {  // [N,H]
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const T alpha = static_cast<T>(1.0);
@@ -196,67 +177,38 @@ void BackwardPass<T>::Iterate(
     cudaStream_t save_stream;
     cublasGetStream(blas_handle, &save_stream);
 
-    IterateInternal(
-        R_t,
-        h,
-        v,
-        dh_new,
-        dbx,
-        dbr,
-        dh,
-        dp,
-        dq,
-        zoneout_mask);
+    IterateInternal(R_t, h, v, dh_new, dbx, dbr, dh, dp, dq, zoneout_mask);
 
     cublasSetStream(blas_handle, stream1);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_N,
-                  hidden_size * 3, input_size, batch_size,
-                  &alpha,
-                  dp, hidden_size * 3,
-                  x_t, batch_size,
-                  &beta_sum,
-                  dW, hidden_size * 3);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, input_size, batch_size,
+                  &alpha, dp, hidden_size * 3, x_t, batch_size, &beta_sum, dW, hidden_size * 3);
 
     // Wait for pointwise operations to complete since there's a
     // data dependency between its output (`dp`, `dq`) and the following matmuls.
     cudaStreamWaitEvent(stream2, event, 0);
 
     cublasSetStream(blas_handle, stream2);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_N,
-                  input_size, batch_size, hidden_size * 3,
-                  &alpha,
-                  W_t, input_size,
-                  dp, hidden_size * 3,
-                  &beta_assign,
-                  dx, input_size);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, input_size, batch_size, hidden_size * 3,
+                  &alpha, W_t, input_size, dp, hidden_size * 3, &beta_assign, dx, input_size);
 
     cublasSetStream(blas_handle, stream2);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_T,
-                  hidden_size * 3, hidden_size, batch_size,
-                  &alpha,
-                  dq, hidden_size * 3,
-                  h, hidden_size,
-                  &beta_sum,
-                  dR, hidden_size * 3);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_T, hidden_size * 3, hidden_size, batch_size,
+                  &alpha, dq, hidden_size * 3, h, hidden_size, &beta_sum, dR, hidden_size * 3);
 
     cublasSetStream(blas_handle, save_stream);
 }
 
-template<typename T>
-void BackwardPass<T>::IterateInternal(
-    const T *R_t,           // [H*3,H]
-    const T *h,             // [N,H]
-    const T *v,             // [N,H*4]
-    const T *dh_new,        // [N,H]
-    T *dbx,                 // [H*3]
-    T *dbr,                 // [H*3]
-    T *dh,                  // [N,H]
-    T *dp,                  // [N,H*3]
-    T *dq,                  // [N,H*3]
-    const T *zoneout_mask) {// [N,H]
+template <typename T>
+void BackwardPass<T>::IterateInternal(const T *R_t,             // [H*3,H]
+                                      const T *h,               // [N,H]
+                                      const T *v,               // [N,H*4]
+                                      const T *dh_new,          // [N,H]
+                                      T *dbx,                   // [H*3]
+                                      T *dbr,                   // [H*3]
+                                      T *dh,                    // [N,H]
+                                      T *dp,                    // [N,H*3]
+                                      T *dq,                    // [N,H*3]
+                                      const T *zoneout_mask) {  // [N,H]
     const T alpha = static_cast<T>(1.0);
     const T beta_sum = static_cast<T>(1.0);
 
@@ -268,70 +220,27 @@ void BackwardPass<T>::IterateInternal(
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
-    const dim3 gridDim(
-        (hidden_size + blockDim.x - 1) / blockDim.x,
-        (batch_size + blockDim.y - 1) / blockDim.y);
+    const dim3 gridDim((hidden_size + blockDim.x - 1) / blockDim.x,
+                       (batch_size + blockDim.y - 1) / blockDim.y);
 
     if (zoneout_mask) {
         kernel::PointwiseOperations<T, true><<<gridDim, blockDim, 0, stream1>>>(
-            batch_size,
-            hidden_size,
-            h,
-            v,
-            dh_new,
-            dbx,
-            dbr,
-            dh,
-            dp,
-            dq,
-            zoneout_mask);
+            batch_size, hidden_size, h, v, dh_new, dbx, dbr, dh, dp, dq, zoneout_mask);
     } else {
         kernel::PointwiseOperations<T, false><<<gridDim, blockDim, 0, stream1>>>(
-            batch_size,
-            hidden_size,
-            h,
-            v,
-            dh_new,
-            dbx,
-            dbr,
-            dh,
-            dp,
-            dq,
-            nullptr);
+            batch_size, hidden_size, h, v, dh_new, dbx, dbr, dh, dp, dq, nullptr);
     }
     cudaEventRecord(event, stream1);
 
     cublasSetStream(blas_handle, stream1);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_N,
-                  hidden_size, batch_size, hidden_size * 3,
-                  &alpha,
-                  R_t, hidden_size,
-                  dq, hidden_size * 3,
-                  &beta_sum,
-                  dh, hidden_size);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size, batch_size, hidden_size * 3,
+                  &alpha, R_t, hidden_size, dq, hidden_size * 3, &beta_sum, dh, hidden_size);
 }
 
-template<typename T>
-void BackwardPass<T>::Run(
-    const int steps,
-    const T *W_t,
-    const T *R_t,
-    const T *bx,
-    const T *br,
-    const T *x_t,
-    const T *h,
-    const T *v,
-    const T *dh_new,
-    T *dx,
-    T *dW,
-    T *dR,
-    T *dbx,
-    T *dbr,
-    T *dh,
-    T *dp,
-    T *dq,
-    const T *zoneout_mask) {
+template <typename T>
+void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *bx, const T *br,
+                          const T *x_t, const T *h, const T *v, const T *dh_new, T *dx, T *dW,
+                          T *dR, T *dbx, T *dbr, T *dh, T *dp, T *dq, const T *zoneout_mask) {
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
@@ -352,17 +261,9 @@ void BackwardPass<T>::Run(
 
     const int NH = batch_size * hidden_size;
     for (int i = steps - 1; i >= 0; --i) {
-        IterateInternal(
-            R_t,
-            h + i * NH,
-            v + i * NH * 4,
-            dh_new + (i + 1) * NH,
-            dbx,
-            dbr,
-            dh,
-            dp + i * NH * 3,
-            dq + i * NH * 3,
-            zoneout_mask ? zoneout_mask + i * NH : nullptr);
+        IterateInternal(R_t, h + i * NH, v + i * NH * 4, dh_new + (i + 1) * NH, dbx, dbr, dh,
+                        dp + i * NH * 3, dq + i * NH * 3,
+                        zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
 
     // Wait for pointwise operations to complete since there's a
@@ -370,40 +271,25 @@ void BackwardPass<T>::Run(
     cudaStreamWaitEvent(stream2, event, 0);
 
     cublasSetStream(blas_handle, stream2);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_N,
-                  input_size, batch_size * steps, hidden_size * 3,
-                  &alpha,
-                  W_t, input_size,
-                  dp, hidden_size * 3,
-                  &beta_assign,
-                  dx, input_size);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, input_size, batch_size * steps,
+                  hidden_size * 3, &alpha, W_t, input_size, dp, hidden_size * 3, &beta_assign, dx,
+                  input_size);
 
     cublasSetStream(blas_handle, stream2);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_T,
-                  hidden_size * 3, hidden_size, batch_size * steps,
-                  &alpha,
-                  dq, hidden_size * 3,
-                  h, hidden_size,
-                  &beta_sum,
-                  dR, hidden_size * 3);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_T, hidden_size * 3, hidden_size,
+                  batch_size * steps, &alpha, dq, hidden_size * 3, h, hidden_size, &beta_sum, dR,
+                  hidden_size * 3);
 
     cublasSetStream(blas_handle, stream1);
-    blas<T>::gemm(blas_handle,
-                  CUBLAS_OP_N, CUBLAS_OP_N,
-                  hidden_size * 3, input_size, batch_size * steps,
-                  &alpha,
-                  dp, hidden_size * 3,
-                  x_t, batch_size * steps,
-                  &beta_sum,
-                  dW, hidden_size * 3);
+    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, input_size,
+                  batch_size * steps, &alpha, dp, hidden_size * 3, x_t, batch_size * steps,
+                  &beta_sum, dW, hidden_size * 3);
 
     cublasSetStream(blas_handle, save_stream);
 }
 
-//template struct BackwardPass<half>;
+// template struct BackwardPass<half>;
 template struct BackwardPass<float>;
 template struct BackwardPass<double>;
 
-}// namespace gru
+}  // namespace gru

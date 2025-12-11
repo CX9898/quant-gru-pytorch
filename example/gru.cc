@@ -15,27 +15,25 @@
 #include "devVector.h"
 #include "gru_interface.hpp"
 #include "gru_quant.h"
-#include "quantized_unit_testing.cuh"
 #include "parallelAlgorithm.h"
+#include "quantized_unit_testing.cuh"
 
-constexpr int BATCH_SIZE = 64;  // 批大小
-constexpr int SEQUENCE_LEN = 50;// 序列长度(T), 每个样本有T个时间步
-constexpr int HIDDEN_DIMS = 256;// 隐藏层维度(H), h_t的维度
-constexpr int INPUT_DIMS = 256; // 输入维度(I), x_t的维度
+constexpr int BATCH_SIZE = 64;    // 批大小
+constexpr int SEQUENCE_LEN = 50;  // 序列长度(T), 每个样本有T个时间步
+constexpr int HIDDEN_DIMS = 256;  // 隐藏层维度(H), h_t的维度
+constexpr int INPUT_DIMS = 256;   // 输入维度(I), x_t的维度
 
-cublasHandle_t g_blas_handle = nullptr;// 改为非static以便在wrapper中访问
+cublasHandle_t g_blas_handle = nullptr;  // 改为非static以便在wrapper中访问
 static std::once_flag g_blas_init_flag;  // 确保线程安全的一次性初始化
 
 // 初始化函数，供Python绑定调用（线程安全）
 void init_gru_cublas() {
-    std::call_once(g_blas_init_flag, []() {
-        cublasCreate(&g_blas_handle);
-    });
+    std::call_once(g_blas_init_flag, []() { cublasCreate(&g_blas_handle); });
 }
 
 class ScopeTimer {
     // 测量时间类
- public:
+   public:
     ScopeTimer(const std::string &msg) : msg_(msg) {
         cudaEventCreate(&start_);
         cudaEventCreate(&stop_);
@@ -53,18 +51,18 @@ class ScopeTimer {
         cudaEventDestroy(stop_);
     }
 
- private:
+   private:
     std::string msg_;
     cudaEvent_t start_, stop_;
 };
 
-template<typename QuantT>
-void GruInferenceQuant(
-    const int time_steps, const int batch_size, const int input_size,
-    const int hidden_size, const std::vector<float> &W, const std::vector<float> &R, const std::vector<float> &bx,
-    const std::vector<float> &br, const std::vector<float> &x,
-    const GRUQuantitativeParameters &quant_parms,
-    std::vector<float> &h_out// (time_steps + 1) * batch_size * hidden_size
+template <typename QuantT>
+void GruInferenceQuant(const int time_steps, const int batch_size, const int input_size,
+                       const int hidden_size, const std::vector<float> &W,
+                       const std::vector<float> &R, const std::vector<float> &bx,
+                       const std::vector<float> &br, const std::vector<float> &x,
+                       const GRUQuantitativeParameters &quant_parms,
+                       std::vector<float> &h_out  // (time_steps + 1) * batch_size * hidden_size
 ) {
     dev::vector<float> x_dev(x);
 
@@ -79,9 +77,9 @@ void GruInferenceQuant(
         dev::vector<float> R_dev(R);
         dev::vector<float> bx_dev(bx);
         dev::vector<float> br_dev(br);
-        quantitativeWeight<QuantT>(input_size, hidden_size,
-                                   W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(), quant_parms,
-                                   W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data());
+        quantitativeWeight<QuantT>(input_size, hidden_size, W_dev.data(), R_dev.data(),
+                                   bx_dev.data(), br_dev.data(), quant_parms, W_quant_dev.data(),
+                                   R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data());
     }
 
     {
@@ -91,22 +89,17 @@ void GruInferenceQuant(
     {
         ScopeTimer t("GruInferenceQuant:");
         quantGRUForward<QuantT>(false, time_steps, batch_size, input_size, hidden_size,
-                                W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(), br_quant_dev.data(),
-                                x_dev.data(), nullptr, quant_parms, g_blas_handle, h_dev.data(), nullptr);
+                                W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(),
+                                br_quant_dev.data(), x_dev.data(), nullptr, quant_parms,
+                                g_blas_handle, h_dev.data(), nullptr);
     }
     d2h(h_out, h_dev);
 }
 
-void GruInference(const int time_steps,
-                  const int batch_size,
-                  const int input_size,
-                  const int hidden_size,
-                  const std::vector<float> &W,
-                  const std::vector<float> &R,
-                  const std::vector<float> &bx,
-                  const std::vector<float> &br,
-                  const std::vector<float> &x,
-                  std::vector<float> &h) {
+void GruInference(const int time_steps, const int batch_size, const int input_size,
+                  const int hidden_size, const std::vector<float> &W, const std::vector<float> &R,
+                  const std::vector<float> &bx, const std::vector<float> &br,
+                  const std::vector<float> &x, std::vector<float> &h) {
     dev::vector<float> W_dev(W);
     dev::vector<float> R_dev(R);
     dev::vector<float> bx_dev(bx);
@@ -116,54 +109,41 @@ void GruInference(const int time_steps,
 
     // 调用hasteGRUForward进行推理
     ScopeTimer t("GruInference (float):");
-    hasteGRUForward(false,
-                    time_steps,
-                    batch_size,
-                    input_size,
-                    hidden_size,
-                    W_dev.data(),
-                    R_dev.data(),
-                    bx_dev.data(),
-                    br_dev.data(),
-                    x_dev.data(),
-                    nullptr,// h0设为nullptr
-                    g_blas_handle,
-                    h_dev.data(),
-                    nullptr// reserve设为nullptr
+    hasteGRUForward(false, time_steps, batch_size, input_size, hidden_size, W_dev.data(),
+                    R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                    nullptr,  // h0设为nullptr
+                    g_blas_handle, h_dev.data(),
+                    nullptr  // reserve设为nullptr
     );
     d2h(h, h_dev);
 }
 
-
-template<typename QuantT>
-GRUTrainGradients GruTrainQuant(const int time_steps,
-                                const int batch_size,
-                                const int input_size,
-                                const int hidden_size,
-                                const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
-                                                                // hidden_size * 3] 对应三个门
-                                const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
-                                const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
-                                const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
-                                const std::vector<float> &x,    // 输入序列张量
-                                const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
-                                                                // [hidden_size, batch_size, time_steps]
+template <typename QuantT>
+GRUTrainGradients GruTrainQuant(
+    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
+    const std::vector<float> &W,      // 输入到隐藏层的权重矩阵. [input_size,
+                                      // hidden_size * 3] 对应三个门
+    const std::vector<float> &R,      // 隐藏层到隐藏层的循环权重矩阵
+    const std::vector<float> &bx,     // 输入偏置项（input bias），来自输入路径
+    const std::vector<float> &br,     // 循环偏置项（recurrent bias），来自循环路径
+    const std::vector<float> &x,      // 输入序列张量
+    const std::vector<float> &dh_new  // 来自上层网络或损失函数的反向梯度.
+                                      // [hidden_size, batch_size, time_steps]
 
 ) {
     // 步骤1: 先校验出量化参数
     GRUQuantitativeParameters quant_parms;
     {
         ScopeTimer t("Calibrate quant params:");
-        calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size,
-                           W, R, bx, br, x,
+        calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
                            g_blas_handle, quant_parms);
     }
 
-    dev::vector<float> W_dev(W);  // 输入到隐藏层的权重矩阵. [input_size,
-                                  // hidden_size * 3] 对应三个门
-    dev::vector<float> R_dev(R);  // 隐藏层到隐藏层的循环权重矩阵
-    dev::vector<float> bx_dev(bx);// 输入偏置项（input bias），来自输入路径
-    dev::vector<float> br_dev(br);// 循环偏置项（recurrent bias），来自循环路径
+    dev::vector<float> W_dev(W);    // 输入到隐藏层的权重矩阵. [input_size,
+                                    // hidden_size * 3] 对应三个门
+    dev::vector<float> R_dev(R);    // 隐藏层到隐藏层的循环权重矩阵
+    dev::vector<float> bx_dev(bx);  // 输入偏置项（input bias），来自输入路径
+    dev::vector<float> br_dev(br);  // 循环偏置项（recurrent bias），来自循环路径
     dev::vector<float> x_dev(x);
 
     // 步骤2: 将权重量化和x量化
@@ -215,16 +195,15 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     // 步骤3: 运行量化GRU (training模式)
     {
         ScopeTimer t("Train forward quant:");
-        gru::ForwardPassQuant<QuantT> forward = gru::ForwardPassQuant<QuantT>(
-            true,// training
-            batch_size, input_size, hidden_size, g_blas_handle);
+        gru::ForwardPassQuant<QuantT> forward =
+            gru::ForwardPassQuant<QuantT>(true,  // training
+                                          batch_size, input_size, hidden_size, g_blas_handle);
 
         forward.setRescaleParam(quant_parms);
 
-        forward.Run(time_steps, W_quant_dev.data(), R_quant_dev.data(),
-                    bx_quant_dev.data(), br_quant_dev.data(), x_quant_dev.data(),
-                    h_quant_dev.data(), v_quant_dev.data(), tmp_Wx_dev.data(),
-                    tmp_Rh_dev.data(), 0.0f, nullptr);
+        forward.Run(time_steps, W_quant_dev.data(), R_quant_dev.data(), bx_quant_dev.data(),
+                    br_quant_dev.data(), x_quant_dev.data(), h_quant_dev.data(), v_quant_dev.data(),
+                    tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
     }
 
     // 步骤4: 将所有量化值反量化
@@ -239,18 +218,14 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     {
         ScopeTimer t("Dequantize all values:");
         // 反量化权重 (per-channel)
-        dev::dequantificationPerChannel(W_quant_dev.data(), W_dequant_dev.data(),
-                                        input_size, channel_size,
-                                        quant_parms.exp2_inv_W_);
-        dev::dequantificationPerChannel(R_quant_dev.data(), R_dequant_dev.data(),
-                                        hidden_size, channel_size,
-                                        quant_parms.exp2_inv_R_);
+        dev::dequantificationPerChannel(W_quant_dev.data(), W_dequant_dev.data(), input_size,
+                                        channel_size, quant_parms.exp2_inv_W_);
+        dev::dequantificationPerChannel(R_quant_dev.data(), R_dequant_dev.data(), hidden_size,
+                                        channel_size, quant_parms.exp2_inv_R_);
         // 反量化偏置 (per-channel)
-        dev::dequantificationPerChannel(bx_quant_dev.data(), bx_dequant_dev.data(),
-                                        1, channel_size,
+        dev::dequantificationPerChannel(bx_quant_dev.data(), bx_dequant_dev.data(), 1, channel_size,
                                         quant_parms.exp2_inv_bx_);
-        dev::dequantificationPerChannel(br_quant_dev.data(), br_dequant_dev.data(),
-                                        1, channel_size,
+        dev::dequantificationPerChannel(br_quant_dev.data(), br_dequant_dev.data(), 1, channel_size,
                                         quant_parms.exp2_inv_br_);
         // 反量化x (全局)
         dev::dequantification(x_quant_dev.data(), x_dequant_dev.data(), x_size,
@@ -259,9 +234,8 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
         dev::dequantification(h_quant_dev.data(), h_dequant_dev.data(), h_size,
                               quant_parms.exp2_inv_h_, quant_parms.zp_h_);
         // 反量化v (v包含4个部分，每个部分使用不同的量化参数)
-        dev::dequantificationV(v_quant_dev.data(), v_dequant_dev.data(),
-                               time_steps, batch_size, hidden_size,
-                               quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+        dev::dequantificationV(v_quant_dev.data(), v_dequant_dev.data(), time_steps, batch_size,
+                               hidden_size, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
                                quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
                                quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
                                quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
@@ -282,14 +256,12 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
 
     {
         ScopeTimer t("Train backward:");
-        gru::BackwardPass<float> backward(batch_size, input_size, hidden_size,
-                                          g_blas_handle);
+        gru::BackwardPass<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
 
-        backward.Run(time_steps, W_dequant_dev.data(), R_dequant_dev.data(),
-                     bx_dequant_dev.data(), br_dequant_dev.data(),
-                     x_dequant_dev.data(), h_dequant_dev.data(), v_dequant_dev.data(),
-                     dh_new_dev.data(), dx_dev.data(), dW_dev.data(), dR_dev.data(),
-                     dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
+        backward.Run(time_steps, W_dequant_dev.data(), R_dequant_dev.data(), bx_dequant_dev.data(),
+                     br_dequant_dev.data(), x_dequant_dev.data(), h_dequant_dev.data(),
+                     v_dequant_dev.data(), dh_new_dev.data(), dx_dev.data(), dW_dev.data(),
+                     dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_dev.data(), dp_dev.data(),
                      dq_dev.data(), nullptr);
     }
 
@@ -314,18 +286,16 @@ GRUTrainGradients GruTrainQuant(const int time_steps,
     return gradients;
 }
 
-GRUTrainGradients GruTrain(const int time_steps,
-                           const int batch_size,
-                           const int input_size,
-                           const int hidden_size,
-                           const std::vector<float> &W,    // 输入到隐藏层的权重矩阵. [input_size,
-                                                           // hidden_size * 3] 对应三个门
-                           const std::vector<float> &R,    // 隐藏层到隐藏层的循环权重矩阵
-                           const std::vector<float> &bx,   // 输入偏置项（input bias），来自输入路径
-                           const std::vector<float> &br,   // 循环偏置项（recurrent bias），来自循环路径
-                           const std::vector<float> &x,    // 输入序列张量
-                           const std::vector<float> &dh_new// 来自上层网络或损失函数的反向梯度.
-                                                           // [hidden_size, batch_size, time_steps]
+GRUTrainGradients GruTrain(
+    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
+    const std::vector<float> &W,      // 输入到隐藏层的权重矩阵. [input_size,
+                                      // hidden_size * 3] 对应三个门
+    const std::vector<float> &R,      // 隐藏层到隐藏层的循环权重矩阵
+    const std::vector<float> &bx,     // 输入偏置项（input bias），来自输入路径
+    const std::vector<float> &br,     // 循环偏置项（recurrent bias），来自循环路径
+    const std::vector<float> &x,      // 输入序列张量
+    const std::vector<float> &dh_new  // 来自上层网络或损失函数的反向梯度.
+                                      // [hidden_size, batch_size, time_steps]
 ) {
     // 1. 使用dev::vector拷贝数据到GPU
     dev::vector<float> W_dev(W);
@@ -342,21 +312,12 @@ GRUTrainGradients GruTrain(const int time_steps,
     // 3. 前向传播: 调用hasteGRUForward
     {
         ScopeTimer t("hasteGRUForward (train):");
-        hasteGRUForward(
-            true,// training模式
-            time_steps,
-            batch_size,
-            input_size,
-            hidden_size,
-            W_dev.data(),
-            R_dev.data(),
-            bx_dev.data(),
-            br_dev.data(),
-            x_dev.data(),
-            nullptr,// h0
-            g_blas_handle,
-            h_dev.data(),
-            v_dev.data()// reserve
+        hasteGRUForward(true,  // training模式
+                        time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(),
+                        bx_dev.data(), br_dev.data(), x_dev.data(),
+                        nullptr,  // h0
+                        g_blas_handle, h_dev.data(),
+                        v_dev.data()  // reserve
         );
     }
 
@@ -371,26 +332,11 @@ GRUTrainGradients GruTrain(const int time_steps,
     // 5. 反向传播: 调用hasteGRUbackward
     {
         ScopeTimer t("hasteGRUbackward:");
-        hasteGRUBackward(
-            time_steps,
-            batch_size,
-            input_size,
-            hidden_size,
-            W_dev.data(),
-            R_dev.data(),
-            bx_dev.data(),
-            br_dev.data(),
-            x_dev.data(),
-            dh_new_dev.data(),
-            h_dev.data(),
-            v_dev.data(),
-            g_blas_handle,
-            dx_dev.data(),
-            dW_dev.data(),
-            dR_dev.data(),
-            dbx_dev.data(),
-            dbr_dev.data(),
-            dh_dev.data());
+        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
+                         R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                         dh_new_dev.data(), h_dev.data(), v_dev.data(), g_blas_handle,
+                         dx_dev.data(), dW_dev.data(), dR_dev.data(), dbx_dev.data(),
+                         dbr_dev.data(), dh_dev.data());
     }
 
     // 6. 拷贝结果回CPU
@@ -417,18 +363,18 @@ GRUTrainGradients GruTrain(const int time_steps,
     return gradients;
 }
 
-
 int main() {
     srand(time(0));
 
-    init_gru_cublas();// 使用初始化函数
+    init_gru_cublas();  // 使用初始化函数
 
     // Weights.
-    std::vector<float> W(INPUT_DIMS * HIDDEN_DIMS * 3); // 对应W_z/W_r/W_h的合并
-    std::vector<float> R(HIDDEN_DIMS * HIDDEN_DIMS * 3);// 对应R_z/R_r/R_h的合并
-    std::vector<float> bx(HIDDEN_DIMS * 3);             // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t
+    std::vector<float> W(INPUT_DIMS * HIDDEN_DIMS * 3);   // 对应W_z/W_r/W_h的合并
+    std::vector<float> R(HIDDEN_DIMS * HIDDEN_DIMS * 3);  // 对应R_z/R_r/R_h的合并
+    std::vector<float> bx(HIDDEN_DIMS * 3);  // 对应b_z/b_r/b_h的合并. bx 负责给 "输入 x_t
     // 到门控的线性变换" 加偏置
-    std::vector<float> br(HIDDEN_DIMS * 3);// br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态
+    std::vector<float> br(HIDDEN_DIMS *
+                          3);  // br: 3H(部分实现中偏置分输出\隐藏层. br 负责给"隐藏状态
     // h_{t-1} 到门控的线性变换" 加偏置
 
     // Input.
@@ -479,81 +425,63 @@ int main() {
 
     // 效验得到固定量化参数
     GRUQuantitativeParameters quant_parms;
-    calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size,
-                       W, R, bx, br, x,
+    calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
                        g_blas_handle, quant_parms);
 
     // Quant
-    std::vector<int8_t> W_quant(W.size());   // 对应W_z/W_r/W_h的合并
-    std::vector<int8_t> R_quant(R.size());   // 对应R_z/R_r/R_h的合并
-    std::vector<int32_t> bx_quant(bx.size());// 对应b_z/b_r/b_h的合并. bx 负责给
+    std::vector<int8_t> W_quant(W.size());     // 对应W_z/W_r/W_h的合并
+    std::vector<int8_t> R_quant(R.size());     // 对应R_z/R_r/R_h的合并
+    std::vector<int32_t> bx_quant(bx.size());  // 对应b_z/b_r/b_h的合并. bx 负责给
     // “输入 x_t 到门控的线性变换” 加偏置
-    std::vector<int32_t> br_quant(br.size());// br: 3H(部分实现中偏置分输出\隐藏层. br
+    std::vector<int32_t> br_quant(br.size());  // br: 3H(部分实现中偏置分输出\隐藏层. br
     // 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
     std::vector<int8_t> x_quant(x.size());
 
     // 使用固定量化参数将输入量化
-    GruQuantInit(time_steps, batch_size, input_size, hidden_size, W.data(),
-                 R.data(), bx.data(), br.data(), x.data(),
-                 W_quant.data(), R_quant.data(), bx_quant.data(),
-                 br_quant.data(), x_quant.data(),
-                 quant_parms);
+    GruQuantInit(time_steps, batch_size, input_size, hidden_size, W.data(), R.data(), bx.data(),
+                 br.data(), x.data(), W_quant.data(), R_quant.data(), bx_quant.data(),
+                 br_quant.data(), x_quant.data(), quant_parms);
 
     Quantized_unit_testing<int8_t> quantized_unit_testing(
-        W.data(), R.data(), bx.data(), br.data(), x.data(), dh.data(),
-        W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(),
-        x_quant.data(), hidden_size, input_size,
+        W.data(), R.data(), bx.data(), br.data(), x.data(), dh.data(), W_quant.data(),
+        R_quant.data(), bx_quant.data(), br_quant.data(), x_quant.data(), hidden_size, input_size,
         batch_size, time_steps, g_blas_handle, quant_parms);
     quantized_unit_testing.printGRUQuantitativeParameters();
     //    quantized_unit_testing.checkQuantParameters();
 
     std::vector<float> h_dequant_int8_inference((time_steps + 1) * batch_size * hidden_size);
     // 运行量化GRU得到量化结果2
-    GruInferenceQuant<int8_t>(time_steps, batch_size, input_size, hidden_size,
-                              W, R, bx, br, x, quant_parms,
-                              h_dequant_int8_inference);
+    GruInferenceQuant<int8_t>(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
+                              quant_parms, h_dequant_int8_inference);
 
-    printf("cudaError(GruInferenceQuant finish): %s\n",
-           cudaGetErrorString(cudaGetLastError()));
+    printf("cudaError(GruInferenceQuant finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 运行浮点GRU得到结果1
     std::vector<float> h_inference((time_steps + 1) * batch_size * hidden_size);
-    GruInference(time_steps,
-                 batch_size,
-                 input_size,
-                 hidden_size,
-                 W,
-                 R,
-                 bx,
-                 br,
-                 x,
-                 h_inference);
+    GruInference(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, h_inference);
 
-    printf("cudaError(GruInference finish): %s\n",
-           cudaGetErrorString(cudaGetLastError()));
+    printf("cudaError(GruInference finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     compareHValues(h_inference, h_dequant_int8_inference, time_steps, batch_size, hidden_size,
                    "Inference: Float vs Quantized");
 
     // 运行浮点训练
     printf("\n========== Running Float GRU Training ==========\n");
-    GRUTrainGradients gradients_float = GruTrain(time_steps, batch_size, input_size, hidden_size,
-                                                 W, R, bx, br, x, dh);
+    GRUTrainGradients gradients_float =
+        GruTrain(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, dh);
 
-    printf("cudaError(GruTrain finish): %s\n",
-           cudaGetErrorString(cudaGetLastError()));
+    printf("cudaError(GruTrain finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 运行量化训练
     printf("\n========== Running Quantized GRU Training ==========\n");
-    GRUTrainGradients gradients_quant = GruTrainQuant<int8_t>(time_steps, batch_size, input_size, hidden_size,
-                                                              W, R, bx, br, x, dh);
+    GRUTrainGradients gradients_quant =
+        GruTrainQuant<int8_t>(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, dh);
 
-    printf("cudaError(GruTrainQuant finish): %s\n",
-           cudaGetErrorString(cudaGetLastError()));
+    printf("cudaError(GruTrainQuant finish): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 比较V中间值
-    compareVIntermediateValues(gradients_float.v, gradients_quant.v, time_steps, batch_size, hidden_size,
-                               "Float vs Quantized");
+    compareVIntermediateValues(gradients_float.v, gradients_quant.v, time_steps, batch_size,
+                               hidden_size, "Float vs Quantized");
 
     // 比较h隐藏状态
     compareHValues(gradients_float.h, gradients_quant.h, time_steps, batch_size, hidden_size,
@@ -563,7 +491,8 @@ int main() {
     compareGRUTrainGradients(gradients_float, gradients_quant, "Float vs Quantized");
 
     // 验证CPU和GPU量化结果一致性
-    checkQuantificationHostAndDevice(W, R, bx, br, x, quant_parms, time_steps, batch_size, input_size, hidden_size);
+    checkQuantificationHostAndDevice(W, R, bx, br, x, quant_parms, time_steps, batch_size,
+                                     input_size, hidden_size);
 
     cublasDestroy(g_blas_handle);
 

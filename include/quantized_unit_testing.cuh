@@ -1,9 +1,10 @@
 #pragma once
 
+#include <cublas_v2.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cublas_v2.h>
 #include <string>
 #include <vector>
 
@@ -14,26 +15,21 @@
 
 // 梯度输出结构体
 struct GRUTrainGradients {
-    std::vector<float> dx; // 输入序列梯度 [time_steps * batch_size * input_size]
-    std::vector<float> dW; // 对输入权重的梯度 [input_size * hidden_size * 3]
-    std::vector<float> dR; // 对循环权重的梯度 [hidden_size * hidden_size * 3]
-    std::vector<float> dbx;// 对输入偏置的梯度 [hidden_size * 3]
-    std::vector<float> dbr;// 对循环偏置的梯度 [hidden_size * 3]
-    std::vector<float> dh; // 对最后隐藏状态的梯度 [batch_size * hidden_size]
-    std::vector<float> v;  // V中间值 [time_steps * batch_size * hidden_size * 4]
-    std::vector<float> h;  // 隐藏状态 [time_steps * batch_size * hidden_size] (不包含初始状态)
+    std::vector<float> dx;   // 输入序列梯度 [time_steps * batch_size * input_size]
+    std::vector<float> dW;   // 对输入权重的梯度 [input_size * hidden_size * 3]
+    std::vector<float> dR;   // 对循环权重的梯度 [hidden_size * hidden_size * 3]
+    std::vector<float> dbx;  // 对输入偏置的梯度 [hidden_size * 3]
+    std::vector<float> dbr;  // 对循环偏置的梯度 [hidden_size * 3]
+    std::vector<float> dh;   // 对最后隐藏状态的梯度 [batch_size * hidden_size]
+    std::vector<float> v;    // V中间值 [time_steps * batch_size * hidden_size * 4]
+    std::vector<float> h;    // 隐藏状态 [time_steps * batch_size * hidden_size] (不包含初始状态)
 };
 
-inline bool checkScale(const std::vector<float> &src,
-                       const std::vector<int8_t> &quant,
-                       float scale,
-                       int32_t zero_point,
-                       const std::string &name = "") {
+inline bool checkScale(const std::vector<float> &src, const std::vector<int8_t> &quant, float scale,
+                       int32_t zero_point, const std::string &name = "") {
     bool is_pass = true;
     if (scale <= 1e-6f) {
-        printf("Warning, %s: scale = %.15f <= 1e-6f\n",
-               name.c_str(),
-               scale);
+        printf("Warning, %s: scale = %.15f <= 1e-6f\n", name.c_str(), scale);
     }
 
     std::vector<float> requant(src.size());
@@ -48,13 +44,9 @@ inline bool checkScale(const std::vector<float> &src,
     return is_pass;
 }
 
-
-template<typename T, typename QuantT>
-inline bool checkScale(const std::vector<T> &src,
-                       const std::vector<QuantT> &quant,
-                       int32_t exp2_inv,
-                       int32_t zero_point,
-                       const std::string &name = "") {
+template <typename T, typename QuantT>
+inline bool checkScale(const std::vector<T> &src, const std::vector<QuantT> &quant,
+                       int32_t exp2_inv, int32_t zero_point, const std::string &name = "") {
     bool is_pass = true;
     std::vector<T> requant(src.size());
 #pragma omp parallel for
@@ -67,12 +59,9 @@ inline bool checkScale(const std::vector<T> &src,
     return is_pass;
 }
 
-template<typename T, typename QuantT>
-inline bool checkScale(const std::vector<T> &src,
-                       int32_t exp2_inv,
-                       int32_t zero_point,
+template <typename T, typename QuantT>
+inline bool checkScale(const std::vector<T> &src, int32_t exp2_inv, int32_t zero_point,
                        const std::string &name = "") {
-
     std::vector<QuantT> quant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < src.size(); ++i) {
@@ -82,12 +71,9 @@ inline bool checkScale(const std::vector<T> &src,
     return checkScale<T, QuantT>(src, quant, exp2_inv, zero_point, name);
 }
 
-template<typename QuantT>
-inline bool checkScalePerChannel(const std::vector<float> &src,
-                                 size_t channel_size,
-                                 size_t in_dim,
-                                 const std::vector<QuantT> &quant,
-                                 const std::vector<float> &scale,
+template <typename QuantT>
+inline bool checkScalePerChannel(const std::vector<float> &src, size_t channel_size, size_t in_dim,
+                                 const std::vector<QuantT> &quant, const std::vector<float> &scale,
                                  const std::string &name = "") {
     bool is_pass = true;
     std::vector<float> requant(src.size());
@@ -97,10 +83,7 @@ inline bool checkScalePerChannel(const std::vector<float> &src,
             const int idx = i * channel_size + j;
             const float scale_val = scale[j];
             if (scale_val <= 1e-6f) {
-                printf("Warning, %s: scale[%d] = %f\n",
-                       name.c_str(),
-                       j,
-                       scale_val);
+                printf("Warning, %s: scale[%d] = %f\n", name.c_str(), j, scale_val);
             }
             const float req_val = (quant[i * channel_size + j]) * scale_val;
             requant[idx] = req_val;
@@ -113,14 +96,11 @@ inline bool checkScalePerChannel(const std::vector<float> &src,
     return is_pass;
 }
 
-template<typename T, typename QuantT>
-inline bool checkScalePerChannel(const std::vector<T> &src,
-                                 size_t channel_size,
-                                 size_t in_dim,
+template <typename T, typename QuantT>
+inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size, size_t in_dim,
                                  const std::vector<QuantT> &quant,
                                  const std::vector<int32_t> &exp2_inv,
                                  const std::string &name = "") {
-
     bool is_pass = true;
     std::vector<T> requant(src.size());
 #pragma omp parallel for
@@ -138,13 +118,10 @@ inline bool checkScalePerChannel(const std::vector<T> &src,
     return is_pass;
 }
 
-template<typename T, typename QuantT>
-inline bool checkScalePerChannel(const std::vector<T> &src,
-                                 size_t channel_size,
-                                 size_t in_dim,
+template <typename T, typename QuantT>
+inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size, size_t in_dim,
                                  const std::vector<int32_t> &exp2_inv,
                                  const std::string &name = "") {
-
     std::vector<QuantT> quant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < in_dim; ++i) {
@@ -159,10 +136,8 @@ inline bool checkScalePerChannel(const std::vector<T> &src,
     return checkScalePerChannel<T, QuantT>(src, channel_size, in_dim, quant, exp2_inv, name);
 }
 
-
-template<typename QuantT>
+template <typename QuantT>
 struct Quantized_unit_testing {
-
     std::vector<float> W_;
     std::vector<float> R_;
     std::vector<float> bx_;
@@ -182,22 +157,10 @@ struct Quantized_unit_testing {
     size_t channels_;
     GRUQuantitativeParameters quant_parms_;
 
-    Quantized_unit_testing(float *W,
-                           float *R,
-                           float *bx,
-                           float *br,
-                           float *x,
-                           float *dh,
-                           QuantT *W_quant,
-                           QuantT *R_quant,
-                           int32_t *bx_quant,
-                           int32_t *br_quant,
-                           QuantT *x_quant,
-                           size_t hidden_size,
-                           size_t input_size,
-                           size_t batch_size,
-                           size_t time_steps,
-                           cublasHandle_t handle,
+    Quantized_unit_testing(float *W, float *R, float *bx, float *br, float *x, float *dh,
+                           QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant,
+                           QuantT *x_quant, size_t hidden_size, size_t input_size,
+                           size_t batch_size, size_t time_steps, cublasHandle_t handle,
                            const GRUQuantitativeParameters &quant_parms) {
         hidden_size_ = hidden_size;
         input_size_ = input_size;
@@ -227,14 +190,12 @@ struct Quantized_unit_testing {
     void printGRUQuantitativeParameters();
 };
 
-template<typename QuantT>
+template <typename QuantT>
 inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
     printf("GRUQuantitativeParameters (量化参数):\n");
     printf("  hidden_ = %d\n", quant_parms_.hidden_);
-    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n",
-           quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
-    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n",
-           quant_parms_.exp2_inv_h_, quant_parms_.zp_h_);
+    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
+    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", quant_parms_.exp2_inv_h_, quant_parms_.zp_h_);
 
     printf("  exp2_inv_W_ (size %zu): ", quant_parms_.exp2_inv_W_.size());
     for (size_t i = 0; i < quant_parms_.exp2_inv_W_.size() && i < 5; ++i) {
@@ -264,40 +225,34 @@ inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
     if (quant_parms_.exp2_inv_br_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n",
-           quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_);
-    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n",
-           quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_);
-    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n",
-           quant_parms_.exp2_inv_z_pre_, quant_parms_.zp_z_pre_);
-    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n",
-           quant_parms_.exp2_inv_r_pre_, quant_parms_.zp_r_pre_);
-    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n",
-           quant_parms_.exp2_inv_g_pre_, quant_parms_.zp_g_pre_);
-    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n",
-           quant_parms_.exp2_inv_z_out_, quant_parms_.zp_z_out_);
-    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n",
-           quant_parms_.exp2_inv_r_out_, quant_parms_.zp_r_out_);
-    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n",
-           quant_parms_.exp2_inv_g_out_, quant_parms_.zp_g_out_);
-    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n",
-           quant_parms_.exp2_inv_Rh_add_br_, quant_parms_.zp_Rh_add_br_);
-    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n",
-           quant_parms_.exp2_inv_rRh_, quant_parms_.zp_rRh_);
+    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_);
+    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_);
+    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n", quant_parms_.exp2_inv_z_pre_,
+           quant_parms_.zp_z_pre_);
+    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n", quant_parms_.exp2_inv_r_pre_,
+           quant_parms_.zp_r_pre_);
+    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n", quant_parms_.exp2_inv_g_pre_,
+           quant_parms_.zp_g_pre_);
+    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n", quant_parms_.exp2_inv_z_out_,
+           quant_parms_.zp_z_out_);
+    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n", quant_parms_.exp2_inv_r_out_,
+           quant_parms_.zp_r_out_);
+    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n", quant_parms_.exp2_inv_g_out_,
+           quant_parms_.zp_g_out_);
+    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", quant_parms_.exp2_inv_Rh_add_br_,
+           quant_parms_.zp_Rh_add_br_);
+    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", quant_parms_.exp2_inv_rRh_,
+           quant_parms_.zp_rRh_);
     printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
-           quant_parms_.exp2_inv_one_minus_update_,
-           quant_parms_.zp_one_minus_update_);
+           quant_parms_.exp2_inv_one_minus_update_, quant_parms_.zp_one_minus_update_);
     printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
-           quant_parms_.exp2_inv_new_contrib_,
-           quant_parms_.zp_new_contrib_);
+           quant_parms_.exp2_inv_new_contrib_, quant_parms_.zp_new_contrib_);
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
-           quant_parms_.exp2_inv_old_contrib_,
-           quant_parms_.zp_old_contrib_);
+           quant_parms_.exp2_inv_old_contrib_, quant_parms_.zp_old_contrib_);
 }
 
-template<typename QuantT>
+template <typename QuantT>
 inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
-
     bool is_pass = true;
     const int M = hidden_size_ * 3;
     const int N = batch_size_ * time_steps_;
@@ -365,29 +320,23 @@ inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
     return is_pass;
 }
 
-template<typename QuantT>
+template <typename QuantT>
 inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     bool is_pass = true;
 
     is_pass &= checkScale(x_, x_quant_, quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x_");
     printf("checkScale: scale_x_ over\n");
-    is_pass &= checkScalePerChannel(W_,
-                                    channels_,
-                                    input_size_,
-                                    W_quant_,
-                                    quant_parms_.exp2_inv_W_,
+    is_pass &= checkScalePerChannel(W_, channels_, input_size_, W_quant_, quant_parms_.exp2_inv_W_,
                                     "scale_W_");
     printf("checkScalePerChannel: scale_W_ over\n");
-    is_pass &= checkScalePerChannel(R_,
-                                    channels_,
-                                    hidden_size_,
-                                    R_quant_,
-                                    quant_parms_.exp2_inv_R_,
+    is_pass &= checkScalePerChannel(R_, channels_, hidden_size_, R_quant_, quant_parms_.exp2_inv_R_,
                                     "scale_R_");
     printf("checkScalePerChannel: scale_R_ over\n");
-    is_pass &= checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.exp2_inv_bx_, "scale_bx_");
+    is_pass &=
+        checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.exp2_inv_bx_, "scale_bx_");
     printf("checkScalePerChannel: scale_bx_ over\n");
-    is_pass &= checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.exp2_inv_br_, "scale_br_");
+    is_pass &=
+        checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.exp2_inv_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
     is_pass &= checkWxGemm();
     printf("checkGemm: over\n");
@@ -397,17 +346,11 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     return is_pass;
 }
 
-void checkQuantificationHostAndDevice(
-    const std::vector<float> &W,
-    const std::vector<float> &R,
-    const std::vector<float> &bx,
-    const std::vector<float> &br,
-    const std::vector<float> &x,
-    const GRUQuantitativeParameters &quant_parms,
-    int time_steps,
-    int batch_size,
-    int input_size,
-    int hidden_size) {
+void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::vector<float> &R,
+                                      const std::vector<float> &bx, const std::vector<float> &br,
+                                      const std::vector<float> &x,
+                                      const GRUQuantitativeParameters &quant_parms, int time_steps,
+                                      int batch_size, int input_size, int hidden_size) {
     // ========== 验证CPU和GPU量化结果一致性 ==========
     printf("\n========== 验证CPU和GPU量化结果一致性 ==========\n");
 
@@ -481,8 +424,7 @@ void checkQuantificationHostAndDevice(
     for (size_t i = 0; i < W_quant_cpu.size(); ++i) {
         if (W_quant_cpu[i] != W_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  W[%zu]: CPU=%d, GPU=%d\n", i,
-                       static_cast<int>(W_quant_cpu[i]),
+                printf("  W[%zu]: CPU=%d, GPU=%d\n", i, static_cast<int>(W_quant_cpu[i]),
                        static_cast<int>(W_quant_gpu_host[i]));
             }
             mismatch_count++;
@@ -500,8 +442,7 @@ void checkQuantificationHostAndDevice(
     for (size_t i = 0; i < R_quant_cpu.size(); ++i) {
         if (R_quant_cpu[i] != R_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  R[%zu]: CPU=%d, GPU=%d\n", i,
-                       static_cast<int>(R_quant_cpu[i]),
+                printf("  R[%zu]: CPU=%d, GPU=%d\n", i, static_cast<int>(R_quant_cpu[i]),
                        static_cast<int>(R_quant_gpu_host[i]));
             }
             mismatch_count++;
@@ -519,8 +460,7 @@ void checkQuantificationHostAndDevice(
     for (size_t i = 0; i < bx_quant_cpu.size(); ++i) {
         if (bx_quant_cpu[i] != bx_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  bx[%zu]: CPU=%d, GPU=%d\n", i,
-                       bx_quant_cpu[i], bx_quant_gpu_host[i]);
+                printf("  bx[%zu]: CPU=%d, GPU=%d\n", i, bx_quant_cpu[i], bx_quant_gpu_host[i]);
             }
             mismatch_count++;
         }
@@ -537,8 +477,7 @@ void checkQuantificationHostAndDevice(
     for (size_t i = 0; i < br_quant_cpu.size(); ++i) {
         if (br_quant_cpu[i] != br_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  br[%zu]: CPU=%d, GPU=%d\n", i,
-                       br_quant_cpu[i], br_quant_gpu_host[i]);
+                printf("  br[%zu]: CPU=%d, GPU=%d\n", i, br_quant_cpu[i], br_quant_gpu_host[i]);
             }
             mismatch_count++;
         }
@@ -555,8 +494,7 @@ void checkQuantificationHostAndDevice(
     for (size_t i = 0; i < x_quant_cpu.size(); ++i) {
         if (x_quant_cpu[i] != x_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  x[%zu]: CPU=%d, GPU=%d\n", i,
-                       static_cast<int>(x_quant_cpu[i]),
+                printf("  x[%zu]: CPU=%d, GPU=%d\n", i, static_cast<int>(x_quant_cpu[i]),
                        static_cast<int>(x_quant_gpu_host[i]));
             }
             mismatch_count++;
@@ -582,17 +520,15 @@ void checkQuantificationHostAndDevice(
  * @param hidden_size 隐藏层维度
  * @param prefix 输出前缀（可选）
  */
-inline void compareVIntermediateValues(
-    const std::vector<float> &v_float,
-    const std::vector<float> &v_quant_dequant,
-    int time_steps,
-    int batch_size,
-    int hidden_size,
-    const std::string &prefix = "") {
+inline void compareVIntermediateValues(const std::vector<float> &v_float,
+                                       const std::vector<float> &v_quant_dequant, int time_steps,
+                                       int batch_size, int hidden_size,
+                                       const std::string &prefix = "") {
     printf("\n========== %s V Intermediate Values Comparison ==========\n", prefix.c_str());
 
-    const int v_size_per_step = batch_size * hidden_size * 4;// 4个部分：z_out, r_out, g_out, Rh_add_br
-    const int v_size_per_part = batch_size * hidden_size;    // 每个部分的大小
+    const int v_size_per_step =
+        batch_size * hidden_size * 4;  // 4个部分：z_out, r_out, g_out, Rh_add_br
+    const int v_size_per_part = batch_size * hidden_size;  // 每个部分的大小
 
     // 验证大小
     if (v_float.size() != static_cast<size_t>(time_steps * v_size_per_step)) {
@@ -643,7 +579,7 @@ inline void compareVIntermediateValues(
 
     // 按时间步比较（所有部分）
     printf("\nPer time step comparison:\n");
-    for (int t = 0; t < time_steps && t < 10; ++t) {// 只显示前10个时间步
+    for (int t = 0; t < time_steps && t < 10; ++t) {  // 只显示前10个时间步
         const int t_offset = t * v_size_per_step;
         std::vector<float> v_float_step(v_size_per_step);
         std::vector<float> v_quant_step(v_size_per_step);
@@ -663,28 +599,27 @@ inline void compareVIntermediateValues(
 
 /**
  * @brief 比较浮点和量化版本的h隐藏状态（不包含初始状态）
- * @param h_float 浮点版本的h隐藏状态，size = time_steps * batch_size * hidden_size（不包含初始状态t=0）
+ * @param h_float 浮点版本的h隐藏状态，size = time_steps * batch_size *
+ * hidden_size（不包含初始状态t=0）
  * @param h_quant_dequant 量化后反量化的h隐藏状态，size同上
  * @param time_steps 时间步数
  * @param batch_size 批次大小
  * @param hidden_size 隐藏层维度
  * @param prefix 输出前缀（可选）
  */
-inline void compareHValues(
-    const std::vector<float> &h_float,
-    const std::vector<float> &h_quant_dequant,
-    int time_steps,
-    int batch_size,
-    int hidden_size,
-    const std::string &prefix = "") {
+inline void compareHValues(const std::vector<float> &h_float,
+                           const std::vector<float> &h_quant_dequant, int time_steps,
+                           int batch_size, int hidden_size, const std::string &prefix = "") {
     printf("\n========== %s H Hidden States Comparison ==========\n", prefix.c_str());
 
-    const int h_size_per_step = batch_size * hidden_size;// 每个时间步的大小
+    const int h_size_per_step = batch_size * hidden_size;  // 每个时间步的大小
 
     // 验证大小
     if (h_quant_dequant.size() != h_float.size()) {
-        printf("[Error] h_float and h_quant_dequant size mismatch: h_float_size = %zu, h_quant_dequant_size = %zu\n",
-                   h_float.size(), h_quant_dequant.size());
+        printf(
+            "[Error] h_float and h_quant_dequant size mismatch: h_float_size = %zu, "
+            "h_quant_dequant_size = %zu\n",
+            h_float.size(), h_quant_dequant.size());
         return;
     }
 
@@ -714,7 +649,7 @@ inline void compareHValues(
 
     // 按批次比较（所有时间步）
     printf("\nPer batch comparison:\n");
-    for (int b = 0; b < batch_size && b < 5; ++b) {// 只显示前5个批次
+    for (int b = 0; b < batch_size && b < 5; ++b) {  // 只显示前5个批次
         std::vector<float> h_float_batch(time_steps * hidden_size);
         std::vector<float> h_quant_batch(time_steps * hidden_size);
 
@@ -796,7 +731,8 @@ inline void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
 
 /**
  * @brief 检查量化h值与浮点h值的相似度（统一使用compareHValues的逻辑）
- * @param h_inference 浮点版本的h值，size = (time_steps+1) * batch_size * hidden_size（包含初始状态）
+ * @param h_inference 浮点版本的h值，size = (time_steps+1) * batch_size *
+ * hidden_size（包含初始状态）
  * @param h_quant_inference 量化版本的h值，size同上
  * @param time_steps 时间步数
  * @param batch_size 批次大小
@@ -804,45 +740,41 @@ inline void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
  * @param scaleParam 量化参数
  * @param prefix 输出前缀（可选）
  */
-template<typename QuantT>
+template <typename QuantT>
 inline void checkHQuantizationWithCosine(
-    const std::vector<float> &h_inference,// 浮点 h, size = (time_steps+1) * batch_size * hidden_size
-    const std::vector<QuantT> &h_quant_inference,// 量化 h, size 同上
-    int time_steps, int batch_size, int hidden_size,
-    const GRUQuantitativeParameters &scaleParam,
+    const std::vector<float>
+        &h_inference,  // 浮点 h, size = (time_steps+1) * batch_size * hidden_size
+    const std::vector<QuantT> &h_quant_inference,  // 量化 h, size 同上
+    int time_steps, int batch_size, int hidden_size, const GRUQuantitativeParameters &scaleParam,
     const std::string &prefix = "") {
     const int size_per_step = batch_size * hidden_size;
 
     // 验证输入数据大小
-    if (h_inference.size() !=
-        static_cast<size_t>((time_steps + 1) * size_per_step)) {
+    if (h_inference.size() != static_cast<size_t>((time_steps + 1) * size_per_step)) {
         printf("[Error] h_inference size mismatch: expected %d, got %zu\n",
                (time_steps + 1) * size_per_step, h_inference.size());
         return;
     }
-    if (h_quant_inference.size() !=
-        static_cast<size_t>((time_steps + 1) * size_per_step)) {
-        printf(
-            "[Error] h_quant_inference size mismatch: expected %d, got %zu\n",
-            (time_steps + 1) * size_per_step, h_quant_inference.size());
+    if (h_quant_inference.size() != static_cast<size_t>((time_steps + 1) * size_per_step)) {
+        printf("[Error] h_quant_inference size mismatch: expected %d, got %zu\n",
+               (time_steps + 1) * size_per_step, h_quant_inference.size());
         return;
     }
 
     // 打印量化参数信息
     printf("\n%s Quantization Parameters: exp2_inv_h_=%d, zp_h_=%d\n",
-           prefix.empty() ? "H" : prefix.c_str(),
-           scaleParam.exp2_inv_h_, scaleParam.zp_h_);
+           prefix.empty() ? "H" : prefix.c_str(), scaleParam.exp2_inv_h_, scaleParam.zp_h_);
 
     // 反量化整个量化h值（跳过初始状态t=0，只处理t=1到t=time_steps）
     std::vector<float> h_quant_dequant(time_steps * size_per_step);
     for (int t = 1; t <= time_steps; ++t) {
         const size_t t_offset = static_cast<size_t>(t) * size_per_step;
         const size_t dst_offset = static_cast<size_t>(t - 1) * size_per_step;
-        
+
         for (int idx = 0; idx < size_per_step; ++idx) {
             const QuantT quant_val = h_quant_inference[t_offset + idx];
-            h_quant_dequant[dst_offset + idx] = dequantize<QuantT>(
-                quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
+            h_quant_dequant[dst_offset + idx] =
+                dequantize<QuantT>(quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
         }
     }
 
@@ -851,7 +783,7 @@ inline void checkHQuantizationWithCosine(
     for (int t = 1; t <= time_steps; ++t) {
         const size_t src_offset = static_cast<size_t>(t) * size_per_step;
         const size_t dst_offset = static_cast<size_t>(t - 1) * size_per_step;
-        
+
         for (int idx = 0; idx < size_per_step; ++idx) {
             h_float[dst_offset + idx] = h_inference[src_offset + idx];
         }

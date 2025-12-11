@@ -7,21 +7,17 @@
 
 namespace gru {
 
-template<typename QuantT>
+template <typename QuantT>
 class ForwardPassQuant {
- public:
+   public:
     // training: `true` if the caller intends to perform a backward pass to compute gradients.
     // batch_size: the number of training/inference inputs provided in each tensor.
     // input_size: the dimension of each input vector.
     // hidden_size: the expected dimension of each output vector.
     // blas_handle: an initialized cuBLAS handle (see `cublasCreate`).
-    ForwardPassQuant(
-        const bool training,
-        const int batch_size,
-        const int input_size,
-        const int hidden_size,
-        const cublasHandle_t &blas_handle,
-        const cudaStream_t &stream = 0);
+    ForwardPassQuant(const bool training, const int batch_size, const int input_size,
+                     const int hidden_size, const cublasHandle_t &blas_handle,
+                     const cudaStream_t &stream = 0);
 
     // Releases internal resources.
     // Blocks until all iterations have completed executing on the GPU.
@@ -56,48 +52,20 @@ class ForwardPassQuant {
     // zoneout_mask: [N,H] may be null to disable zoneout. This is a random binary mask
     //     following a Bernoulli(1-zoneout_prob) distribution. A different mask is typically
     //     used for each iteration.
-    void Iterate(
-        const QuantT *W,
-        const QuantT *R,
-        const int32_t *bx,
-        const int32_t *br,
-        const QuantT *x,
-        const QuantT *h,
-        QuantT *h_out,
-        QuantT *v,
-        int32_t *tmp_Wx,
-        int32_t *tmp_Rh,
-        const float zoneout_prob,
-        const QuantT *zoneout_mask);
+    void Iterate(const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br,
+                 const QuantT *x, const QuantT *h, QuantT *h_out, QuantT *v, int32_t *tmp_Wx,
+                 int32_t *tmp_Rh, const float zoneout_prob, const QuantT *zoneout_mask);
 
-    void Run(
-        const int steps,
-        const QuantT *W,
-        const QuantT *R,
-        const int32_t *bx,
-        const int32_t *br,
-        const QuantT *x,
-        QuantT *h,
-        QuantT *v,
-        int32_t *tmp_Wx,
-        int32_t *tmp_Rh,
-        const float zoneout_prob,
-        const QuantT *zoneout_mask);
+    void Run(const int steps, const QuantT *W, const QuantT *R, const int32_t *bx,
+             const int32_t *br, const QuantT *x, QuantT *h, QuantT *v, int32_t *tmp_Wx,
+             int32_t *tmp_Rh, const float zoneout_prob, const QuantT *zoneout_mask);
 
- private:
-    void IterateInternal(
-        const QuantT *R,
-        const int32_t *bx,
-        const int32_t *br,
-        const QuantT *h,
-        QuantT *h_out,
-        QuantT *v,
-        const int32_t *tmp_Wx,
-        int32_t *tmp_Rh,
-        const int *W_sum_mul_x_zp,// hidden_size * 3
-        const int *R_sum_mul_h_zp,// hidden_size * 3
-        const float zoneout_prob,
-        const QuantT *zoneout_mask);
+   private:
+    void IterateInternal(const QuantT *R, const int32_t *bx, const int32_t *br, const QuantT *h,
+                         QuantT *h_out, QuantT *v, const int32_t *tmp_Wx, int32_t *tmp_Rh,
+                         const int *W_sum_mul_x_zp,  // hidden_size * 3
+                         const int *R_sum_mul_h_zp,  // hidden_size * 3
+                         const float zoneout_prob, const QuantT *zoneout_mask);
 
     struct private_data;
     private_data *data_;
@@ -105,4 +73,4 @@ class ForwardPassQuant {
     QuantGRUReScale rescale_param_;
 };
 
-}// namespace gru
+}  // namespace gru
