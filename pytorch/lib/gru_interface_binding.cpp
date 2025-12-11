@@ -14,39 +14,39 @@ void init_gru_cublas_wrapper() { init_gru_cublas(g_blas_handle); }
 // GRUQuantitativeParameters 的 Python 绑定
 struct GRUQuantitativeParametersPy {
     int hidden_;
-    int32_t exp2_inv_x_;
+    int8_t exp2_inv_x_;
     int32_t zp_x_;
-    int32_t exp2_inv_h_;
+    int8_t exp2_inv_h_;
     int32_t zp_h_;
-    std::vector<int32_t> exp2_inv_W_;
-    std::vector<int32_t> exp2_inv_R_;
-    int32_t exp2_inv_Wx_;
+    std::vector<int8_t> exp2_inv_W_;
+    std::vector<int8_t> exp2_inv_R_;
+    int8_t exp2_inv_Wx_;
     int32_t zp_Wx_;
-    int32_t exp2_inv_Rh_;
+    int8_t exp2_inv_Rh_;
     int32_t zp_Rh_;
-    std::vector<int32_t> exp2_inv_bx_;
-    std::vector<int32_t> exp2_inv_br_;
-    int32_t exp2_inv_z_pre_;
+    std::vector<int8_t> exp2_inv_bx_;
+    std::vector<int8_t> exp2_inv_br_;
+    int8_t exp2_inv_z_pre_;
     int32_t zp_z_pre_;
-    int32_t exp2_inv_r_pre_;
+    int8_t exp2_inv_r_pre_;
     int32_t zp_r_pre_;
-    int32_t exp2_inv_g_pre_;
+    int8_t exp2_inv_g_pre_;
     int32_t zp_g_pre_;
-    int32_t exp2_inv_z_out_;
+    int8_t exp2_inv_z_out_;
     int32_t zp_z_out_;
-    int32_t exp2_inv_r_out_;
+    int8_t exp2_inv_r_out_;
     int32_t zp_r_out_;
-    int32_t exp2_inv_g_out_;
+    int8_t exp2_inv_g_out_;
     int32_t zp_g_out_;
-    int32_t exp2_inv_Rh_add_br_;
+    int8_t exp2_inv_Rh_add_br_;
     int32_t zp_Rh_add_br_;
-    int32_t exp2_inv_rRh_;
+    int8_t exp2_inv_rRh_;
     int32_t zp_rRh_;
-    int32_t exp2_inv_one_minus_update_;
+    int8_t exp2_inv_one_minus_update_;
     int32_t zp_one_minus_update_;
-    int32_t exp2_inv_new_contrib_;
+    int8_t exp2_inv_new_contrib_;
     int32_t zp_new_contrib_;
-    int32_t exp2_inv_old_contrib_;
+    int8_t exp2_inv_old_contrib_;
     int32_t zp_old_contrib_;
 
     // 从 C++ 结构体转换

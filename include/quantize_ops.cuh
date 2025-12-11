@@ -112,7 +112,7 @@ struct QuantLimits<int32_t> {
 };
 
 template <typename QuantT>
-inline __device__ QuantT quantize(float src, int32_t exp2_inv, int32_t zp) {
+inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
     // CUDA device code: 与CPU版本保持一致，使用位运算
     // 量化公式：q = round(src / scale + zp)
     float scale;

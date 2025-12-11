@@ -46,7 +46,7 @@ inline bool checkScale(const std::vector<float> &src, const std::vector<int8_t> 
 
 template <typename T, typename QuantT>
 inline bool checkScale(const std::vector<T> &src, const std::vector<QuantT> &quant,
-                       int32_t exp2_inv, int32_t zero_point, const std::string &name = "") {
+                       int8_t exp2_inv, int32_t zero_point, const std::string &name = "") {
     bool is_pass = true;
     std::vector<T> requant(src.size());
 #pragma omp parallel for
@@ -60,7 +60,7 @@ inline bool checkScale(const std::vector<T> &src, const std::vector<QuantT> &qua
 }
 
 template <typename T, typename QuantT>
-inline bool checkScale(const std::vector<T> &src, int32_t exp2_inv, int32_t zero_point,
+inline bool checkScale(const std::vector<T> &src, int8_t exp2_inv, int32_t zero_point,
                        const std::string &name = "") {
     std::vector<QuantT> quant(src.size());
 #pragma omp parallel for
@@ -99,7 +99,7 @@ inline bool checkScalePerChannel(const std::vector<float> &src, size_t channel_s
 template <typename T, typename QuantT>
 inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size, size_t in_dim,
                                  const std::vector<QuantT> &quant,
-                                 const std::vector<int32_t> &exp2_inv,
+                                 const std::vector<int8_t> &exp2_inv,
                                  const std::string &name = "") {
     bool is_pass = true;
     std::vector<T> requant(src.size());
@@ -107,7 +107,7 @@ inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size,
     for (int i = 0; i < in_dim; ++i) {
         for (int j = 0; j < channel_size; ++j) {
             const int idx = i * channel_size + j;
-            const int exp2_inv_val = exp2_inv[j];
+            const int8_t exp2_inv_val = exp2_inv[j];
             const int zp_val = 0;
             const T req_val = dequantize(quant[idx], exp2_inv_val, zp_val);
             requant[idx] = req_val;
@@ -120,14 +120,14 @@ inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size,
 
 template <typename T, typename QuantT>
 inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size, size_t in_dim,
-                                 const std::vector<int32_t> &exp2_inv,
+                                 const std::vector<int8_t> &exp2_inv,
                                  const std::string &name = "") {
     std::vector<QuantT> quant(src.size());
 #pragma omp parallel for
     for (int i = 0; i < in_dim; ++i) {
         for (int j = 0; j < channel_size; ++j) {
             const int idx = i * channel_size + j;
-            const int exp2_inv_val = exp2_inv[j];
+            const int8_t exp2_inv_val = exp2_inv[j];
             const int zp_val = 0;
             const QuantT quant_val = quantize<QuantT>(src[idx], exp2_inv_val, zp_val);
             quant[idx] = quant_val;
@@ -275,12 +275,12 @@ inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
 
     std::vector<float> Wx_requant_cpu(Wx_cpu.size());
     std::vector<int32_t> W_sum_mul_x_zp(M);
-    const int32_t exp2_inv_x_val = quant_parms_.exp2_inv_x_;
+    const int8_t exp2_inv_x_val = quant_parms_.exp2_inv_x_;
     const int32_t zp_x_val = quant_parms_.zp_x_;
 #pragma omp parallel for collapse(2)
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
-            const int32_t exp2_inv_W_val = quant_parms_.exp2_inv_W_[m];
+            const int8_t exp2_inv_W_val = quant_parms_.exp2_inv_W_[m];
             float sum = 0;
             for (int k = 0; k < K; ++k) {
                 const int8_t W_quant_val = W_quant_[lda * k + m];
@@ -390,10 +390,10 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
     dev::vector<int32_t> br_quant_gpu(hidden_size * 3);
     dev::vector<int8_t> x_quant_gpu(x_size);
 
-    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+    dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int8_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int8_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
 
     {
         dev::quantificationPerChannel(W_dev.data(), W_quant_gpu.data(), input_size, channel_size,

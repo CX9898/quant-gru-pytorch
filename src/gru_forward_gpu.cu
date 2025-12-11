@@ -553,7 +553,7 @@ std::pair<float, int32_t> calculateQuantScale(T min_val, T max_val, bool symmetr
  */
 template <typename T, typename QuantT>
 void calculateScalePerSteps(const T *x_dev, const int size_per_step, const int steps,
-                            const bool use_symmetric, int32_t &exp2_inv, int32_t &zp,
+                            const bool use_symmetric, int8_t &exp2_inv, int32_t &zp,
                             const std::string &name = "") {
     if (size_per_step == 0 || steps == 0) {
         printf("Warning! %s input size = 0\n", name.c_str());
@@ -589,13 +589,13 @@ void calculateScalePerSteps(const T *x_dev, const int size_per_step, const int s
 }
 
 template <typename T, typename QuantT>
-std::vector<int32_t> calculateScalesPerChannels(const T *W_dev, int channel_size, int input_size,
+std::vector<int8_t> calculateScalesPerChannels(const T *W_dev, int channel_size, int input_size,
                                                 const std::string &name = "") {
     // 列主序排列
 
     std::vector<T> W_host = d2h(W_dev, channel_size * input_size);
 
-    std::vector<int32_t> exp2_inv_per_channels(channel_size);
+    std::vector<int8_t> exp2_inv_per_channels(channel_size);
     std::vector<T> min(channel_size);
     std::vector<T> max(channel_size);
 
@@ -624,7 +624,7 @@ std::vector<int32_t> calculateScalesPerChannels(const T *W_dev, int channel_size
 }
 
 template <typename T, typename QuantT>
-void calculateScale(const std::vector<T> &data_host, const bool use_symmetric, int32_t &exp2_inv,
+void calculateScale(const std::vector<T> &data_host, const bool use_symmetric, int8_t &exp2_inv,
                     int32_t &zp, const std::string &name = "") {
     T min_val = data_host[0];
     T max_val = data_host[0];
@@ -642,7 +642,7 @@ void calculateScale(const std::vector<T> &data_host, const bool use_symmetric, i
 
 template <typename T, typename QuantT>
 void calculateScale(const T *data_dev, const size_t size, const bool use_symmetric,
-                    int32_t &exp2_inv, int32_t &zp, const std::string &name = "") {
+                    int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
     std::vector<T> data_host = d2h(data_dev, size);
     calculateScale<T, QuantT>(data_host, use_symmetric, exp2_inv, zp, name);
 }
@@ -650,60 +650,60 @@ void calculateScale(const T *data_dev, const size_t size, const bool use_symmetr
 void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("GRUQuantitativeParameters (量化参数):\n");
     printf("  hidden_ = %d\n", quant_parms.hidden_);
-    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", quant_parms.exp2_inv_x_, quant_parms.zp_x_);
-    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", static_cast<int>(quant_parms.exp2_inv_x_), quant_parms.zp_x_);
+    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", static_cast<int>(quant_parms.exp2_inv_h_), quant_parms.zp_h_);
 
     printf("  exp2_inv_W_ (size %zu): ", quant_parms.exp2_inv_W_.size());
     for (size_t i = 0; i < quant_parms.exp2_inv_W_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms.exp2_inv_W_[i]);
+        printf("%d ", static_cast<int>(quant_parms.exp2_inv_W_[i]));
     }
     if (quant_parms.exp2_inv_W_.size() > 8) printf("...");
     printf("\n");
 
     printf("  exp2_inv_R_ (size %zu): ", quant_parms.exp2_inv_R_.size());
     for (size_t i = 0; i < quant_parms.exp2_inv_R_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms.exp2_inv_R_[i]);
+        printf("%d ", static_cast<int>(quant_parms.exp2_inv_R_[i]));
     }
     if (quant_parms.exp2_inv_R_.size() > 8) printf("...");
     printf("\n");
 
     printf("  exp2_inv_bx_ (size %zu): ", quant_parms.exp2_inv_bx_.size());
     for (size_t i = 0; i < quant_parms.exp2_inv_bx_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms.exp2_inv_bx_[i]);
+        printf("%d ", static_cast<int>(quant_parms.exp2_inv_bx_[i]));
     }
     if (quant_parms.exp2_inv_bx_.size() > 8) printf("...");
     printf("\n");
 
     printf("  exp2_inv_br_ (size %zu): ", quant_parms.exp2_inv_br_.size());
     for (size_t i = 0; i < quant_parms.exp2_inv_br_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms.exp2_inv_br_[i]);
+        printf("%d ", static_cast<int>(quant_parms.exp2_inv_br_[i]));
     }
     if (quant_parms.exp2_inv_br_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", quant_parms.exp2_inv_Wx_, quant_parms.zp_Wx_);
-    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", quant_parms.exp2_inv_Rh_, quant_parms.zp_Rh_);
-    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n", quant_parms.exp2_inv_z_pre_,
+    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Wx_), quant_parms.zp_Wx_);
+    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Rh_), quant_parms.zp_Rh_);
+    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n", static_cast<int>(quant_parms.exp2_inv_z_pre_),
            quant_parms.zp_z_pre_);
-    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n", quant_parms.exp2_inv_r_pre_,
+    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n", static_cast<int>(quant_parms.exp2_inv_r_pre_),
            quant_parms.zp_r_pre_);
-    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n", quant_parms.exp2_inv_g_pre_,
+    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n", static_cast<int>(quant_parms.exp2_inv_g_pre_),
            quant_parms.zp_g_pre_);
-    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n", quant_parms.exp2_inv_z_out_,
+    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_z_out_),
            quant_parms.zp_z_out_);
-    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n", quant_parms.exp2_inv_r_out_,
+    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_r_out_),
            quant_parms.zp_r_out_);
-    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n", quant_parms.exp2_inv_g_out_,
+    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_g_out_),
            quant_parms.zp_g_out_);
-    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", quant_parms.exp2_inv_Rh_add_br_,
+    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", static_cast<int>(quant_parms.exp2_inv_Rh_add_br_),
            quant_parms.zp_Rh_add_br_);
-    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_);
+    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", static_cast<int>(quant_parms.exp2_inv_rRh_), quant_parms.zp_rRh_);
     printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
-           quant_parms.exp2_inv_one_minus_update_, quant_parms.zp_one_minus_update_);
+           static_cast<int>(quant_parms.exp2_inv_one_minus_update_), quant_parms.zp_one_minus_update_);
     printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
-           quant_parms.exp2_inv_new_contrib_, quant_parms.zp_new_contrib_);
+           static_cast<int>(quant_parms.exp2_inv_new_contrib_), quant_parms.zp_new_contrib_);
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
-           quant_parms.exp2_inv_old_contrib_, quant_parms.zp_old_contrib_);
+           static_cast<int>(quant_parms.exp2_inv_old_contrib_), quant_parms.zp_old_contrib_);
 }
 template <typename T, typename QuantT>
 void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,

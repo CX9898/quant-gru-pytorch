@@ -655,20 +655,20 @@ template <typename T>
 void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms) {
     const int channel = parms.hidden_ * 3;
 
-    std::vector<int32_t> n_W_mul_x_div_Wx(channel);
-    std::vector<int32_t> n_R_mul_h_div_Rh(channel);
+    std::vector<int8_t> n_W_mul_x_div_Wx(channel);
+    std::vector<int8_t> n_R_mul_h_div_Rh(channel);
 
     // z门
-    std::vector<int32_t> n_bx_to_z(channel);
-    std::vector<int32_t> n_br_to_z(channel);
+    std::vector<int8_t> n_bx_to_z(channel);
+    std::vector<int8_t> n_br_to_z(channel);
 
     // r门
-    std::vector<int32_t> n_bx_to_r(channel);
-    std::vector<int32_t> n_br_to_r(channel);
+    std::vector<int8_t> n_bx_to_r(channel);
+    std::vector<int8_t> n_br_to_r(channel);
 
     // n门
-    std::vector<int32_t> n_br_to_Rh_add_br(channel);
-    std::vector<int32_t> n_bx_to_g(channel);
+    std::vector<int8_t> n_br_to_Rh_add_br(channel);
+    std::vector<int8_t> n_bx_to_g(channel);
 
     for (int idx = 0; idx < channel; ++idx) {  // per-channel
         n_W_mul_x_div_Wx[idx] = (parms.exp2_inv_W_[idx] + parms.exp2_inv_x_) - parms.exp2_inv_Wx_;

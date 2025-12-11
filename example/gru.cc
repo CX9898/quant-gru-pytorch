@@ -156,10 +156,10 @@ GRUTrainGradients GruTrainQuant(
     dev::vector<QuantT> x_quant_dev(x_size);
 
     // 显式创建dev::vector以避免临时对象问题
-    dev::vector<int32_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    dev::vector<int32_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    dev::vector<int32_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    dev::vector<int32_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+    dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
+    dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
+    dev::vector<int8_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
+    dev::vector<int8_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
 
     {
         ScopeTimer t("Quantize weights and x:");
