@@ -518,7 +518,7 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
 #endif
 }
 
-template <typename T, typename QuantT>
+template <typename T>
 void calculateGRUQuantitativeParameters(
     const int steps, const int batch_size, const int hidden_size, const int input_size, const T *W,
     const T *R, const T *bx, const T *br, const T *x, const T *h, const T *v, const T *tmp_Wx,
@@ -741,15 +741,10 @@ void ForwardPass<T>::Run(const int steps,
         // 同步所有 GPU 操作，确保数据计算完成
         cudaDeviceSynchronize();
         quant_parms_.hidden_ = data_->hidden_size;
-        if (!use_int16_quant_) {
-            calculateGRUQuantitativeParameters<T, int8_t>(
-                steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh,
-                z_pres_, r_pres_, g_pres_, quant_parms_);
-        } else {
-            calculateGRUQuantitativeParameters<T, int16_t>(
-                steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh,
-                z_pres_, r_pres_, g_pres_, quant_parms_);
-        }
+        // 每个算子的位宽由 bitwidth_config_ 独立控制
+        calculateGRUQuantitativeParameters<T>(
+            steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh,
+            z_pres_, r_pres_, g_pres_, quant_parms_);
     }
 }
 

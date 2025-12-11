@@ -15,6 +15,7 @@
 #include "devVector.h"
 #include "device_ptr.h"
 #include "gru_quant.h"
+#include "quantize_bitwidth_config.hpp"
 #include "quantized_unit_testing.cuh"
 
 using Tensor1f = Eigen::Tensor<float, 1>;
@@ -126,7 +127,6 @@ void GruInferenceQuant(
 }
 
 void calibrateGruScales(
-    bool use_int16,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W,
     const float *R,
@@ -134,7 +134,8 @@ void calibrateGruScales(
     const float *br,
     const float *x,
     const cublasHandle_t &g_blas_handle,
-    GRUQuantitativeParameters &quant_gru_scales) {
+    GRUQuantitativeParameters &quant_gru_scales,
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig()) {
     // Copy weights over to GPU.
     dev::vector<float> W_dev(W,input_size * hidden_size * 3);
     dev::vector<float> R_dev(R, hidden_size * hidden_size * 3);
@@ -156,7 +157,7 @@ void calibrateGruScales(
         hidden_size,
         g_blas_handle);
 
-    forward.setCalibrationMode(true, use_int16);
+    forward.setCalibrationMode(true, bitwidth_config);
 
     forward.Run(
         time_steps,
@@ -221,7 +222,7 @@ void GruTrain(const Tensor2f& W,  // 输入到隐藏层的权重矩阵. [input_s
               const Tensor3f& dh_new,  // 来自上层网络或损失函数的反向梯度.
               // [hidden_size, batch_size, time_steps]
               bool enable_quantitative = false,  // 是否启用量化推理模式
-              bool use_int16 = false             // 控制量化精度位宽
+              const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig()  // 量化位宽配置
 ) {
     const int time_steps = x.dimension(2);
     const int batch_size = x.dimension(1);

@@ -59,9 +59,10 @@ class ForwardPass {
     void Run(const int steps, const T *W, const T *R, const T *bx, const T *br, const T *x, T *h,
              T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob, const T *zoneout_mask);
 
-    void setCalibrationMode(bool calibration_mode, bool use_int16_quant) {
+    void setCalibrationMode(bool calibration_mode,
+                            const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig()) {
         calibration_mode_ = calibration_mode;
-        use_int16_quant_ = use_int16_quant;
+        quant_parms_.bitwidth_config_ = bitwidth_config;
     }
 
    private:
@@ -73,7 +74,6 @@ class ForwardPass {
     private_data *data_;
 
     bool calibration_mode_ = false;
-    bool use_int16_quant_ = false;
     GRUQuantitativeParameters quant_parms_;
     dev::vector<T> z_pres_;
     dev::vector<T> r_pres_;

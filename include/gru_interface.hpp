@@ -14,25 +14,27 @@ void init_gru_cublas(cublasHandle_t &g_blas_handle) {
     }
 }
 
-void calibrateGruScales(bool use_int16, int time_steps, int batch_size, int input_size,
-                        int hidden_size, const std::vector<float> &W, const std::vector<float> &R,
-                        const std::vector<float> &bx, const std::vector<float> &br,
-                        const std::vector<float> &x, const cublasHandle_t &g_blas_handle,
-                        GRUQuantitativeParameters &quant_gru_scales);
+// void calibrateGruScales(int time_steps, int batch_size, int input_size,
+//                         int hidden_size, const std::vector<float> &W, const std::vector<float> &R,
+//                         const std::vector<float> &bx, const std::vector<float> &br,
+//                         const std::vector<float> &x, const cublasHandle_t &g_blas_handle,
+//                         GRUQuantitativeParameters &quant_gru_scales,
+//                         const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
-GRUQuantitativeParameters calibrateGruScales(bool use_int16, int time_steps, int batch_size,
+GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size,
                                              int input_size, int hidden_size, const float *W,
                                              const float *R, const float *bx, const float *br,
-                                             const float *x, const cublasHandle_t &g_blas_handle);
+                                             const float *x, const cublasHandle_t &g_blas_handle,
+                                             const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
 // 校准量化参数并初始化 LUT 表（组合函数，方便使用）
-// 内部会根据 use_int16 参数自动选择相应的 LUT 初始化方法
-GRUQuantitativeParameters calibrateGruScalesAndInitLut(bool use_int16, int time_steps,
+GRUQuantitativeParameters calibrateGruScalesAndInitLut(int time_steps,
                                                        int batch_size, int input_size,
                                                        int hidden_size, const float *W,
                                                        const float *R, const float *bx,
                                                        const float *br, const float *x,
-                                                       const cublasHandle_t &g_blas_handle);
+                                                       const cublasHandle_t &g_blas_handle,
+                                                       const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
 template <typename QuantT>
 void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
@@ -63,7 +65,7 @@ void hasteGRUForward(
 
 void forwardInterface(
     bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    bool is_quant, bool use_int16, int time_steps, int batch_size, int input_size, int hidden_size,
+    bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bx, const float *br, const float *x,
     const float *h0,  // 初始隐藏状态，可以为 nullptr
     const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
@@ -86,6 +88,5 @@ void hasteGRUBackward(
 );
 
 // 初始化量化 LUT 表（仅在初始化时调用一次）
-// 接收量化参数对象和量化类型，内部根据类型自动选择相应的 LUT 初始化方法
-// 支持 int8 和 int16，未来可扩展支持其他类型
-void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params, bool use_int16);
+// 接收量化参数对象，内部根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
+void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params);

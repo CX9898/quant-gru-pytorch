@@ -83,8 +83,7 @@ void GruInferenceQuant(const int time_steps, const int batch_size, const int inp
     }
 
     {
-        bool is_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
-        initialize_quantization_lut(quant_parms, is_int16);
+        initialize_quantization_lut(quant_parms);
     }
     {
         ScopeTimer t("GruInferenceQuant:");
@@ -121,30 +120,32 @@ void GruInference(const int time_steps, const int batch_size, const int input_si
 template <typename QuantT>
 GRUTrainGradients GruTrainQuant(
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const std::vector<float> &W,      // 输入到隐藏层的权重矩阵. [input_size,
-                                      // hidden_size * 3] 对应三个门
-    const std::vector<float> &R,      // 隐藏层到隐藏层的循环权重矩阵
-    const std::vector<float> &bx,     // 输入偏置项（input bias），来自输入路径
-    const std::vector<float> &br,     // 循环偏置项（recurrent bias），来自循环路径
-    const std::vector<float> &x,      // 输入序列张量
-    const std::vector<float> &dh_new  // 来自上层网络或损失函数的反向梯度.
-                                      // [hidden_size, batch_size, time_steps]
+    const std::vector<float> &W,       // 输入到隐藏层的权重矩阵. [input_size,
+                                       // hidden_size * 3] 对应三个门
+    const std::vector<float> &R,       // 隐藏层到隐藏层的循环权重矩阵
+    const std::vector<float> &bx,      // 输入偏置项（input bias），来自输入路径
+    const std::vector<float> &br,      // 循环偏置项（recurrent bias），来自循环路径
+    const std::vector<float> &x,       // 输入序列张量
+    const std::vector<float> &dh_new,  // 来自上层网络或损失函数的反向梯度.
+                                       // [hidden_size, batch_size, time_steps]
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig()
 
 ) {
     // 步骤1: 先校验出量化参数
     GRUQuantitativeParameters quant_parms;
-    {
-        ScopeTimer t("Calibrate quant params:");
-        calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
-                           g_blas_handle, quant_parms);
-    }
 
-    dev::vector<float> W_dev(W);    // 输入到隐藏层的权重矩阵. [input_size,
-                                    // hidden_size * 3] 对应三个门
+    dev::vector<float> W_dev(
+        W);  // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
     dev::vector<float> R_dev(R);    // 隐藏层到隐藏层的循环权重矩阵
     dev::vector<float> bx_dev(bx);  // 输入偏置项（input bias），来自输入路径
     dev::vector<float> br_dev(br);  // 循环偏置项（recurrent bias），来自循环路径
     dev::vector<float> x_dev(x);
+    {
+        ScopeTimer t("Calibrate quant params:");
+        quant_parms = calibrateGruScales(time_steps, batch_size, input_size, hidden_size,
+                                         W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
+                                         x_dev.data(), g_blas_handle, bitwidth_config);
+    }
 
     // 步骤2: 将权重量化和x量化
     const int channel_size = hidden_size * 3;
@@ -180,8 +181,7 @@ GRUTrainGradients GruTrainQuant(
 
     // 生成LUT表
     {
-        bool is_int16 = std::is_same_v<QuantT, int16_t> ? true : false;
-        initialize_quantization_lut(quant_parms, is_int16);
+        initialize_quantization_lut(quant_parms);
     }
 
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
@@ -424,9 +424,21 @@ int main() {
     const int hidden_size = HIDDEN_DIMS;
 
     // 效验得到固定量化参数
+    OperatorQuantConfig bitwidth_config;
     GRUQuantitativeParameters quant_parms;
-    calibrateGruScales(false, time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
-                       g_blas_handle, quant_parms);
+
+    dev::vector<float> W_dev(
+        W);  // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
+    dev::vector<float> R_dev(R);    // 隐藏层到隐藏层的循环权重矩阵
+    dev::vector<float> bx_dev(bx);  // 输入偏置项（input bias），来自输入路径
+    dev::vector<float> br_dev(br);  // 循环偏置项（recurrent bias），来自循环路径
+    dev::vector<float> x_dev(x);
+    {
+        ScopeTimer t("Calibrate quant params:");
+        quant_parms = calibrateGruScales(time_steps, batch_size, input_size, hidden_size,
+                                         W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
+                                         x_dev.data(), g_blas_handle, bitwidth_config);
+    }
 
     // Quant
     std::vector<int8_t> W_quant(W.size());     // 对应W_z/W_r/W_h的合并
