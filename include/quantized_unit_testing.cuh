@@ -108,7 +108,7 @@ inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size,
         for (int j = 0; j < channel_size; ++j) {
             const int idx = i * channel_size + j;
             const int8_t exp2_inv_val = exp2_inv[j];
-            const int zp_val = 0;
+            const int32_t zp_val = 0;
             const T req_val = dequantize(quant[idx], exp2_inv_val, zp_val);
             requant[idx] = req_val;
         }
@@ -128,7 +128,7 @@ inline bool checkScalePerChannel(const std::vector<T> &src, size_t channel_size,
         for (int j = 0; j < channel_size; ++j) {
             const int idx = i * channel_size + j;
             const int8_t exp2_inv_val = exp2_inv[j];
-            const int zp_val = 0;
+            const int32_t zp_val = 0;
             const QuantT quant_val = quantize<QuantT>(src[idx], exp2_inv_val, zp_val);
             quant[idx] = quant_val;
         }

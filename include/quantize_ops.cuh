@@ -22,10 +22,10 @@ struct SegmentParams_INT16 {
 // Sigmoid/Tanh 查找表结构（INT16）
 struct SigmoidLUT_INT16 {
     SegmentParams_INT16 segments[NUM_SEGMENTS];
-    int16_t zp_x;         // 输入 zero-point (INT16)
+    int32_t zp_x;         // 输入 zero-point (INT32)
     int8_t shift_bits_x;  // 输入 shift_bits (INT8)
     int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int16_t zp_y;         // 输出 zero-point (INT16)
+    int32_t zp_y;         // 输出 zero-point (INT32)
 };
 
 // INT8 版本的段参数结构
@@ -39,10 +39,10 @@ struct SegmentParams_INT8 {
 // Sigmoid/Tanh 查找表结构（INT8）
 struct SigmoidLUT_INT8 {
     SegmentParams_INT8 segments[NUM_SEGMENTS];
-    int8_t zp_x;          // 输入 zero-point (INT8)
+    int32_t zp_x;          // 输入 zero-point (INT32)
     int8_t shift_bits_x;  // 输入 shift_bits (INT8)
     int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int8_t zp_y;          // 输出 zero-point (INT8)
+    int32_t zp_y;          // 输出 zero-point (INT32)
 };
 
 // 常量内存声明（CUDA设备端）
