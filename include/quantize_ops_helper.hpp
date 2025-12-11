@@ -8,12 +8,18 @@
 #include <vector>
 
 #include "devVector.h"
+#include "quantize_bitwidth_config.hpp"
+
+// #define DEBUG
 
 // GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
 // 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale =
 // 2^(-exp2_inv_xxx) zp_xxx 表示量化零点（zero point），用于浮点数与整数的映射：量化值 q = round(x /
 // scale + zp)，反量化 x = (q - zp) * scale
 struct GRUQuantitativeParameters {
+    // 为每个算子独立配置量化位宽
+    OperatorQuantConfig bitwidth_config_;
+
     int hidden_;  // channel = hidden * 3
     int8_t exp2_inv_x_;
     int32_t zp_x_;
@@ -179,8 +185,6 @@ void computeWeightSumMulzp(
 void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, const int32_t *x_zp,
                                   int out_dim, int batch_size, cudaStream_t stream = 0);
 
-#define DEBUG true
-
 /**
  * @brief
  * 模板化量化参数计算函数：支持任意量化类型（int8/int6等）和输入范围类型，对齐2的负n次方缩放因子
@@ -252,17 +256,15 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
 
     // 可选调试打印
 #ifdef DEBUG
-    if (!name.empty() && (name == "scale_z_out" || name == "scale_r_out" || name == "scale_g_out")) {
-        printf("[QuantParam][%s] orig_min=%f, orig_max=%f, aligned_min=%f, aligned_max=%f, scale=%f, exp2_inv=%d, zp=%d, is_symmetric=%d\n",
-               name.c_str(),
-               static_cast<double>(orig_min),
-               static_cast<double>(orig_max),
-               static_cast<double>(aligned_min),
-               static_cast<double>(aligned_max),
-               static_cast<double>(scale),
-               static_cast<int>(exp2_inv),
-               static_cast<int>(zp),
-               static_cast<int>(is_symmetric));
+    if (!name.empty() &&
+        (name == "scale_z_out" || name == "scale_r_out" || name == "scale_g_out")) {
+        printf(
+            "[QuantParam][%s] orig_min=%f, orig_max=%f, aligned_min=%f, aligned_max=%f, scale=%f, "
+            "exp2_inv=%d, zp=%d, is_symmetric=%d\n",
+            name.c_str(), static_cast<double>(orig_min), static_cast<double>(orig_max),
+            static_cast<double>(aligned_min), static_cast<double>(aligned_max),
+            static_cast<double>(scale), static_cast<int>(exp2_inv), static_cast<int>(zp),
+            static_cast<int>(is_symmetric));
     }
 #endif
 }
@@ -336,12 +338,6 @@ void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_
 
 template <typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp);
-
-template <typename T, typename QuantT>
-void quantificationV(const T *data, QuantT *quant_data, int time_steps, int batch_size,
-                     int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
-                     int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
-                     int32_t zp_Rh_add_br);
 
 // v 统一使用 int32_t 存储，内部各部分使用不同量化参数
 template <typename T>
@@ -458,3 +454,108 @@ void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bi
 // 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - z 门）
 void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
                               float x_min = -6.0f, float x_max = 6.0f);
+
+/**
+ * 通用(仅host)scale/zp 计算函数
+ * @param x_dev  -- 设备端输入数据指针
+ * @param size_per_step -- 每步输入长度
+ * @param steps -- 步数
+ * @param use_symmetric -- 是否对称量化
+ * @param name -- 调试信息
+ */
+template <typename T, typename QuantT>
+inline void calculateScalePerSteps(const T *x_dev, const int size_per_step, const int steps,
+                                   const bool use_symmetric, int8_t &exp2_inv, int32_t &zp,
+                                   const std::string &name = "") {
+    if (size_per_step == 0 || steps == 0) {
+        printf("Warning! %s input size = 0\n", name.c_str());
+        return;
+    }
+    std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
+    std::vector<T> min(steps);
+    std::vector<T> max(steps);
+
+#pragma omp parallel for
+    for (int t = 0; t < steps; ++t) {
+        const int offset = t * size_per_step;
+        min[t] = x_host[offset];
+        max[t] = x_host[offset];
+        for (int i = 1; i < size_per_step; ++i) {
+            min[t] = std::min(min[t], x_host[offset + i]);
+            max[t] = std::max(max[t], x_host[offset + i]);
+        }
+    }
+
+    T res_min = min[0];
+    T res_max = max[0];
+    for (int t = 1; t < steps; ++t) {
+        //        // TODO: 修改为原来的方法
+        //        res_min = 0.9 * res_min + 0.1 * min[t];
+        //        res_max = 0.9 * res_max + 0.1 * max[t];
+        res_min = std::min(res_min, min[t]);
+        res_max = std::max(res_max, max[t]);
+    }
+
+    calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp,
+                                    name);
+}
+
+template <typename T, typename QuantT>
+inline std::vector<int8_t> calculateScalesPerChannels(const T *W_dev, int channel_size,
+                                                      int input_size,
+                                                      const std::string &name = "") {
+    // 列主序排列
+
+    std::vector<T> W_host = d2h(W_dev, channel_size * input_size);
+
+    std::vector<int8_t> exp2_inv_per_channels(channel_size);
+    std::vector<T> min(channel_size);
+    std::vector<T> max(channel_size);
+
+#pragma omp parallel for
+    for (int i = 0; i < channel_size; ++i) {
+        min[i] = W_host[i];
+        max[i] = W_host[i];
+        for (int j = 1; j < input_size; ++j) {
+            min[i] = std::min(min[i], W_host[j * channel_size + i]);
+            max[i] = std::max(max[i], W_host[j * channel_size + i]);
+        }
+    }
+
+    std::vector<int32_t> zp_tmp(channel_size);
+#pragma omp parallel for
+    for (int i = 0; i < channel_size; ++i) {
+        if (min[i] == max[i]) {
+            const float half = std::abs(min[i]);
+            min[i] = -half;
+            max[i] = half;
+        }
+        calibrateQuantParams<T, QuantT>(min[i], max[i], true, min[i], max[i],
+                                        exp2_inv_per_channels[i], zp_tmp[i], name);
+    }
+    return exp2_inv_per_channels;
+}
+
+template <typename T, typename QuantT>
+inline void calculateScale(const std::vector<T> &data_host, const bool use_symmetric,
+                           int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
+    T min_val = data_host[0];
+    T max_val = data_host[0];
+#pragma omp parallel for reduction(min : min_val) reduction(max : max_val)
+    for (int i = 1; i < data_host.size(); ++i) {
+        const T val = data_host[i];
+        min_val = std::min(min_val, val);
+        max_val = std::max(max_val, val);
+    }
+    T min_new = min_val;
+    T max_new = max_val;
+    calibrateQuantParams<T, QuantT>(min_val, max_val, use_symmetric, min_new, max_new, exp2_inv, zp,
+                                    name);
+}
+
+template <typename T, typename QuantT>
+inline void calculateScale(const T *data_dev, const size_t size, const bool use_symmetric,
+                           int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
+    std::vector<T> data_host = d2h(data_dev, size);
+    calculateScale<T, QuantT>(data_host, use_symmetric, exp2_inv, zp, name);
+}
