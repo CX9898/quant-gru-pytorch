@@ -73,9 +73,9 @@ struct OperatorQuantConfig {
     QuantBitWidth Wx_ = QuantBitWidth::INT8;                // Wx 结果
     QuantBitWidth Rh_ = QuantBitWidth::INT8;                // Rh 结果
     QuantBitWidth z_pre_ = QuantBitWidth::INT8;             // z 门输入
-    QuantBitWidth z_out_ = QuantBitWidth::INT8;             // z 门输出
+    QuantBitWidth z_out_ = QuantBitWidth::UINT8;             // z 门输出
     QuantBitWidth r_pre_ = QuantBitWidth::INT8;             // r 门输入
-    QuantBitWidth r_out_ = QuantBitWidth::INT8;             // r 门输出
+    QuantBitWidth r_out_ = QuantBitWidth::UINT8;             // r 门输出
     QuantBitWidth g_pre_ = QuantBitWidth::INT8;             // g 门输入
     QuantBitWidth g_out_ = QuantBitWidth::INT8;             // g 门输出
     QuantBitWidth Rh_add_br_ = QuantBitWidth::INT8;         // Rh + br

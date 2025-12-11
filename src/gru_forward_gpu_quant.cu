@@ -17,8 +17,11 @@
 
 namespace kernel {
 
-template <typename QuantT>
-__device__ __forceinline__ QuantT computeZ(  // 更新门z
+// computeZ: 更新门 z = sigmoid(...)
+// sigmoid 输出 ∈ [0, 1]，使用无符号类型（UINT8 或 UINT16）
+// QuantZ_Out: z 门输出的量化类型（uint8_t 或 uint16_t）
+template <typename QuantZ_Out>
+__device__ __forceinline__ QuantZ_Out computeZ(
     const int channel_idx,
     const int32_t Wx_val,  // Wx 对应门的值
     const int32_t Rh_val,  // Rh 对应门的值
@@ -55,61 +58,27 @@ __device__ __forceinline__ QuantT computeZ(  // 更新门z
     const int32_t z_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
 
-    const QuantT z_pre_i8 = dev::clamp<QuantT>(z_pre_i32);  // clamp: 截断到int8的范围
-    const QuantT z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);  // TODO: 支持int16量化
-
-    //    // TODO: 分段线性量化
-    //    QuantT z;
-    //    if constexpr (std::is_same_v<QuantT, int16_t>) {
-    //        // INT16 版本：使用分段线性拟合（z 门）
-    //        // z_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
-    //        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, z_pre_i32)));
-    //        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
-    //        // 将结果转换回 INT16（注意：分段线性函数返回的是 UINT16，需要根据输出量化参数转换）
-    //        z = static_cast<QuantT>(q_y);
-    //    } else {
-    //        // INT8 版本：使用分段线性拟合（z 门）
-    //        const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);// clamp: 截断到int8的范围
-    //        z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
-    //    }
-
-    // const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
-    // const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
-    // const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh]
-    // 的展开索引 if (weight_idx == 1) {
-    //     float Wx_fp = dequant_from_exp2(Wx, rescale_params.test.exp2_inv_Wx_,
-    //     rescale_params.zp_Wx_); float Rh_fp = dequant_from_exp2(Rh,
-    //     rescale_params.test.exp2_inv_Rh_, rescale_params.zp_Rh_); float bx_fp =
-    //     dequant_from_exp2(bx_val, rescale_params.test.exp2_inv_bx_dev_[channel_idx], 0); float
-    //     br_fp = dequant_from_exp2(br_val, rescale_params.test.exp2_inv_br_dev_[channel_idx], 0);
-    //     float z_pre_fp = dequant_from_exp2(z_pre_i8, rescale_params.test.exp2_inv_z_pre_,
-    //     rescale_params.zp_z_pre_); float Wx_shifted_fp = dequant_from_exp2(Wx_shifted,
-    //                                             rescale_params.exp2_inv_Wx_div_z_pre_,
-    //                                             rescale_params.zp_Wx_);
-    //     float Rh_shifted_fp = dequant_from_exp2(Rh_shifted,
-    //                                             rescale_params.exp2_inv_Rh_div_z_pre_,
-    //                                             rescale_params.zp_Rh_);
-    //     float bx_shifted_fp = dequant_from_exp2(bx_shifted,
-    //     rescale_params.n_bx_div_z_[channel_idx], 0); float br_shifted_fp =
-    //     dequant_from_exp2(br_shifted, rescale_params.n_br_div_z_[channel_idx], 0); float z_fp =
-    //     dequant_from_exp2(z, rescale_params.test.exp2_inv_z_out_, rescale_params.test.zp_z_out_);
-    //     printf("quant haste computeZ: "
-    //            "Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z_out_fp=%f"
-    //            "Wx_q = %d, "
-    //            "Rh_q = %d, "
-    //            "z_pre_i32_q = %d, "
-    //            "z_pre_i8_q = %d, "
-    //            "z_out_q = %d"
-    //            "\n",
-    //            Wx_fp, Rh_fp, bx_fp, br_fp, z_pre_fp, z_fp,
-    //            Wx, Rh, z_pre_i32, z_pre_i8, z);
-    // }
+    // 根据输出类型选择不同的 sigmoid 实现
+    QuantZ_Out z;
+    if constexpr (std::is_same_v<QuantZ_Out, uint16_t>) {
+        // UINT16 版本：使用分段线性拟合（z 门）
+        // z_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
+        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, z_pre_i32)));
+        z = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
+    } else {
+        // UINT8 版本：使用 LUT 查表
+        const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);  // clamp: 截断到int8的范围
+        z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);
+    }
 
     return z;
 }
 
-template <typename QuantT>
-__device__ __forceinline__ QuantT computeR(  // 重置门r
+// computeR: 重置门 r = sigmoid(...)
+// sigmoid 输出 ∈ [0, 1]，使用无符号类型（UINT8 或 UINT16）
+// QuantR_Out: r 门输出的量化类型（uint8_t 或 uint16_t）
+template <typename QuantR_Out>
+__device__ __forceinline__ QuantR_Out computeR(
     const int channel_idx,
     const int32_t Wx_val,  // Wx 对应门的值
     const int32_t Rh_val,  // Rh 对应门的值
@@ -141,60 +110,23 @@ __device__ __forceinline__ QuantT computeR(  // 重置门r
         br_val, rescale_params
                     .n_br_div_r_[channel_idx]);  // n为: scale_br / scale_r_pre ≈ 2^-n; br为R的偏置
 
-    // scale_z_pre是通过效验阶段得到的;
+    // scale_r_pre是通过校验阶段得到的;
     // 通过sigmoid函数入口前的各项相加:Wx_val+Rh_val+bx_val+br_val的结果的的最大最小值计算得到
     const int32_t r_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
 
-    const QuantT r_pre_i8 = dev::clamp<QuantT>(r_pre_i32);  // clamp: 截断到int8的范围
-    const QuantT r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut);  // TODO: 支持int16量化
-
-    //    // TODO: 分段线性量化
-    //    QuantT r;
-    //    if constexpr (std::is_same_v<QuantT, int16_t>) {
-    //        // INT16 版本：使用分段线性拟合（r 门）
-    //        // r_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
-    //        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, r_pre_i32)));
-    //        uint16_t q_y = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
-    //        // 将结果转换回 INT16
-    //        r = static_cast<QuantT>(q_y);
-    //    } else {
-    //        // INT8 版本：使用分段线性拟合（r 门）
-    //        const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32); // clamp: 截断到int8的范围
-    //        r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
-    //    }
-
-    //    const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
-    //    const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
-    //    const int weight_idx = col * (rescale_params.test.hidden_ * 3) + row; // 用于访问 [Wx, Rh]
-    //    的展开索引 if (weight_idx == 0) {
-    //        float Wx_fp = dequant_from_exp2(Wx, rescale_params.test.exp2_inv_Wx_,
-    //        rescale_params.zp_Wx_); float Rh_fp = dequant_from_exp2(Rh,
-    //        rescale_params.test.exp2_inv_Rh_, rescale_params.zp_Rh_); float bx_fp =
-    //        dequant_from_exp2(bx_val, rescale_params.test.exp2_inv_bx_dev_[channel_idx], 0); float
-    //        br_fp = dequant_from_exp2(br_val, rescale_params.test.exp2_inv_br_dev_[channel_idx],
-    //        0); float r_pre_fp = dequant_from_exp2(r_pre_i8, rescale_params.test.exp2_inv_r_pre_,
-    //        rescale_params.zp_r_pre_); float Wx_shifted_fp = dequant_from_exp2(Wx_shifted,
-    //                                                rescale_params.exp2_inv_Wx_div_r_pre_,
-    //                                                rescale_params.zp_Wx_);
-    //        float Rh_shifted_fp = dequant_from_exp2(Rh_shifted,
-    //                                                rescale_params.exp2_inv_Rh_div_r_pre_,
-    //                                                rescale_params.zp_Rh_);
-    //        float bx_shifted_fp = dequant_from_exp2(bx_shifted,
-    //        rescale_params.n_bx_div_r_[channel_idx], 0); float br_shifted_fp =
-    //        dequant_from_exp2(br_shifted, rescale_params.n_br_div_r_[channel_idx], 0); float r_fp
-    //        = dequant_from_exp2(r, rescale_params.test.exp2_inv_r_out_,
-    //        rescale_params.test.zp_r_out_); printf(
-    //            "quant haste: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, r_pre_fp=%f,
-    //            Wx_shifted_fp=%f, Rh_shifted_fp=%f, bx_shifted_fp=%f, br_shifted_fp=%f\n", Wx_fp,
-    //            Rh_fp,
-    //            bx_fp,
-    //            br_fp,
-    //            r_pre_fp,
-    //            Wx_shifted_fp,
-    //            Rh_shifted_fp,
-    //            bx_shifted_fp,
-    //            br_shifted_fp);
+    // 根据输出类型选择不同的 sigmoid 实现
+    QuantR_Out r;
+    if constexpr (std::is_same_v<QuantR_Out, uint16_t>) {
+        // UINT16 版本：使用分段线性拟合（r 门）
+        // r_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
+        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, r_pre_i32)));
+        r = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
+    } else {
+        // UINT8 版本：使用 LUT 查表
+        const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);  // clamp: 截断到int8的范围
+        r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut);
+    }
     //        printf("computeR: "
     //               "Wx_val = %d, "
     //               "W_sum_mul_x_zp = %d, "
@@ -430,6 +362,8 @@ __global__ void PointwiseOperationsQuant(
 
     /* GRU前向计算 */
 
+    // z 和 r 门的 sigmoid 输出使用无符号类型（UINT8 或 UINT16），因为 sigmoid ∈ [0, 1]
+    // QuantZ/QuantR 类型由 OperatorQuantConfig 配置决定
     const QuantZ z = computeZ<QuantZ>(b_z_idx, Wx[z_idx], Rh[z_idx], W_sum_mul_x_zp[b_z_idx],
                                       R_sum_mul_h_zp[b_z_idx], bx[b_z_idx], br[b_z_idx],
                                       rescale_params);  // 更新门z
@@ -623,30 +557,86 @@ void ForwardPassQuant<QuantT>::IterateInternal(
 
     cudaStreamWaitEvent(stream1, event, 0);
 
-    if (training) {                          // 训练模式
-        if (zoneout_prob && zoneout_mask) {  // 启用Zoneout, 对GRU 隐藏状态的随机保留
-            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, true, true><<<gridDim, blockDim, 0, stream1>>>(
-                batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h,
-                h_out, v, zoneout_prob, zoneout_mask, rescale_param_);
+    // 根据 OperatorQuantConfig 中的 z_out_ 和 r_out_ 配置选择 kernel 实例
+    // z_out 和 r_out 只有 UINT8 和 UINT16 两种可能（sigmoid 输出无负数）
+    const auto &bw_config = rescale_param_.test.bitwidth_config_;
+    const bool z_is_uint8 = (bw_config.z_out_ == QuantBitWidth::UINT8);
+    const bool r_is_uint8 = (bw_config.r_out_ == QuantBitWidth::UINT8);
+
+    // 宏简化 kernel 调用（避免重复代码）
+    #define LAUNCH_KERNEL(QuantZ, QuantR, Training, ApplyZoneout) \
+        kernel::PointwiseOperationsQuant<QuantT, QuantZ, QuantR, QuantT, Training, ApplyZoneout> \
+            <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh, \
+                W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, h_out, \
+                Training ? v : nullptr, \
+                ApplyZoneout ? zoneout_prob : 0.0f, \
+                ApplyZoneout ? zoneout_mask : nullptr, \
+                rescale_param_)
+
+    // 根据配置分发到正确的 kernel 实例
+    if (z_is_uint8 && r_is_uint8) {
+        // z_out: UINT8, r_out: UINT8
+        if (training) {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint8_t, uint8_t, true, true);
+            } else {
+                LAUNCH_KERNEL(uint8_t, uint8_t, true, false);
+            }
         } else {
-            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, true, false>
-                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh,
-                                                    W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h,
-                                                    h_out, v, 0.0f, nullptr, rescale_param_);
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint8_t, uint8_t, false, true);
+            } else {
+                LAUNCH_KERNEL(uint8_t, uint8_t, false, false);
+            }
         }
-    } else {  // 推理模式
-        if (zoneout_prob && zoneout_mask) {
-            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, false, true>
-                <<<gridDim, blockDim, 0, stream1>>>(
-                    batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br,
-                    h, h_out, nullptr, zoneout_prob, zoneout_mask, rescale_param_);
+    } else if (z_is_uint8 && !r_is_uint8) {
+        // z_out: UINT8, r_out: UINT16
+        if (training) {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint8_t, uint16_t, true, true);
+            } else {
+                LAUNCH_KERNEL(uint8_t, uint16_t, true, false);
+            }
         } else {
-            kernel::PointwiseOperationsQuant<QuantT, QuantT, QuantT, QuantT, false, false>
-                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh,
-                                                    W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h,
-                                                    h_out, nullptr, 0.0f, nullptr, rescale_param_);
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint8_t, uint16_t, false, true);
+            } else {
+                LAUNCH_KERNEL(uint8_t, uint16_t, false, false);
+            }
+        }
+    } else if (!z_is_uint8 && r_is_uint8) {
+        // z_out: UINT16, r_out: UINT8
+        if (training) {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint16_t, uint8_t, true, true);
+            } else {
+                LAUNCH_KERNEL(uint16_t, uint8_t, true, false);
+            }
+        } else {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint16_t, uint8_t, false, true);
+            } else {
+                LAUNCH_KERNEL(uint16_t, uint8_t, false, false);
+            }
+        }
+    } else {
+        // z_out: UINT16, r_out: UINT16
+        if (training) {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint16_t, uint16_t, true, true);
+            } else {
+                LAUNCH_KERNEL(uint16_t, uint16_t, true, false);
+            }
+        } else {
+            if (zoneout_prob && zoneout_mask) {
+                LAUNCH_KERNEL(uint16_t, uint16_t, false, true);
+            } else {
+                LAUNCH_KERNEL(uint16_t, uint16_t, false, false);
+            }
         }
     }
+
+    #undef LAUNCH_KERNEL
 }
 
 template <typename T>
