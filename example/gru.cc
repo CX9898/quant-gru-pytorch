@@ -439,27 +439,7 @@ int main() {
                                          W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
                                          x_dev.data(), g_blas_handle, bitwidth_config);
     }
-
-    // Quant
-    std::vector<int8_t> W_quant(W.size());     // 对应W_z/W_r/W_h的合并
-    std::vector<int8_t> R_quant(R.size());     // 对应R_z/R_r/R_h的合并
-    std::vector<int32_t> bx_quant(bx.size());  // 对应b_z/b_r/b_h的合并. bx 负责给
-    // “输入 x_t 到门控的线性变换” 加偏置
-    std::vector<int32_t> br_quant(br.size());  // br: 3H(部分实现中偏置分输出\隐藏层. br
-    // 负责给“隐藏状态 h_{t-1} 到门控的线性变换” 加偏置
-    std::vector<int8_t> x_quant(x.size());
-
-    // 使用固定量化参数将输入量化
-    GruQuantInit(time_steps, batch_size, input_size, hidden_size, W.data(), R.data(), bx.data(),
-                 br.data(), x.data(), W_quant.data(), R_quant.data(), bx_quant.data(),
-                 br_quant.data(), x_quant.data(), quant_parms);
-
-    Quantized_unit_testing<int8_t> quantized_unit_testing(
-        W.data(), R.data(), bx.data(), br.data(), x.data(), dh.data(), W_quant.data(),
-        R_quant.data(), bx_quant.data(), br_quant.data(), x_quant.data(), hidden_size, input_size,
-        batch_size, time_steps, g_blas_handle, quant_parms);
-    quantized_unit_testing.printGRUQuantitativeParameters();
-    //    quantized_unit_testing.checkQuantParameters();
+    printParms(quant_parms);
 
     std::vector<float> h_dequant_int8_inference((time_steps + 1) * batch_size * hidden_size);
     // 运行量化GRU得到量化结果2
