@@ -227,7 +227,8 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
         T range = orig_max - orig_min;
         range = std::max(range, static_cast<T>(1e-9));
 
-        T raw_scale = range / (quant_max - quant_min);
+        // 使用浮点数计算避免 int32_t 溢出（当 QuantT=int32_t 时，quant_max - quant_min 会溢出）
+        T raw_scale = range / (static_cast<T>(quant_max) - static_cast<T>(quant_min));
 
         // scale >= raw_scale 对齐到 2^-n
         exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));
