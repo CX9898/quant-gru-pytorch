@@ -13,9 +13,9 @@
 enum class QuantBitWidth : int8_t {
     INT8 = -8,
     INT16 = -16,
-    INT32 = -32,   // 用于中间累加
-    UINT8 = 8,   // 无符号 8 位
-    UINT16 = 16  // 无符号 16 位
+    INT32 = -32,  // 用于中间累加
+    UINT8 = 8,    // 无符号 8 位
+    UINT16 = 16   // 无符号 16 位
 };
 
 // ==================== 运行时位宽分发器 ====================
@@ -64,23 +64,23 @@ inline auto dispatchByBitWidth(QuantBitWidth bw, Func &&func) -> decltype(func(T
 
 // ==================== 算子量化位宽配置结构 ====================
 struct OperatorQuantConfig {
-    QuantBitWidth x_bitwidth = QuantBitWidth::INT8;                 // 输入 x
-    QuantBitWidth h_bitwidth = QuantBitWidth::INT8;                 // 隐藏状态 h
-    QuantBitWidth W_bitwidth = QuantBitWidth::INT8;                 // 权重 W
-    QuantBitWidth R_bitwidth = QuantBitWidth::INT8;                 // 权重 R
-    QuantBitWidth bx_bitwidth = QuantBitWidth::INT8;                // 偏置 bx
-    QuantBitWidth br_bitwidth = QuantBitWidth::INT8;                // 偏置 br
-    QuantBitWidth Wx_bitwidth = QuantBitWidth::INT8;                // Wx 结果
-    QuantBitWidth Rh_bitwidth = QuantBitWidth::INT8;                // Rh 结果
-    QuantBitWidth z_pre_bitwidth = QuantBitWidth::INT8;             // z 门输入
-    QuantBitWidth z_out_bitwidth = QuantBitWidth::INT8;            // z 门输出
-    QuantBitWidth r_pre_bitwidth = QuantBitWidth::INT8;             // r 门输入
-    QuantBitWidth r_out_bitwidth = QuantBitWidth::INT8;            // r 门输出
-    QuantBitWidth g_pre_bitwidth = QuantBitWidth::INT8;             // g 门输入
-    QuantBitWidth g_out_bitwidth = QuantBitWidth::INT8;             // g 门输出
-    QuantBitWidth Rh_add_br_bitwidth = QuantBitWidth::INT8;         // Rh + br
-    QuantBitWidth rRh_bitwidth = QuantBitWidth::INT8;               // r × Rh
-    QuantBitWidth one_minus_update_bitwidth = QuantBitWidth::INT8;  // 1 - z
-    QuantBitWidth old_contrib_bitwidth = QuantBitWidth::INT8;       // z * h[output_idx]
-    QuantBitWidth new_contrib_bitwidth = QuantBitWidth::INT8;       // (1.0 - z) * g
+    QuantBitWidth x_ = QuantBitWidth::INT8;                 // 输入 x
+    QuantBitWidth h_ = QuantBitWidth::INT8;                 // 隐藏状态 h
+    QuantBitWidth W_ = QuantBitWidth::INT8;                 // 权重 W
+    QuantBitWidth R_ = QuantBitWidth::INT8;                 // 权重 R
+    QuantBitWidth bx_ = QuantBitWidth::INT8;                // 偏置 bx
+    QuantBitWidth br_ = QuantBitWidth::INT8;                // 偏置 br
+    QuantBitWidth Wx_ = QuantBitWidth::INT8;                // Wx 结果
+    QuantBitWidth Rh_ = QuantBitWidth::INT8;                // Rh 结果
+    QuantBitWidth z_pre_ = QuantBitWidth::INT8;             // z 门输入
+    QuantBitWidth z_out_ = QuantBitWidth::INT8;             // z 门输出
+    QuantBitWidth r_pre_ = QuantBitWidth::INT8;             // r 门输入
+    QuantBitWidth r_out_ = QuantBitWidth::INT8;             // r 门输出
+    QuantBitWidth g_pre_ = QuantBitWidth::INT8;             // g 门输入
+    QuantBitWidth g_out_ = QuantBitWidth::INT8;             // g 门输出
+    QuantBitWidth Rh_add_br_ = QuantBitWidth::INT8;         // Rh + br
+    QuantBitWidth rRh_ = QuantBitWidth::INT8;               // r × Rh
+    QuantBitWidth one_minus_update_ = QuantBitWidth::INT8;  // 1 - z
+    QuantBitWidth old_contrib_ = QuantBitWidth::INT8;       // z * h[output_idx]
+    QuantBitWidth new_contrib_ = QuantBitWidth::INT8;       // (1.0 - z) * g
 };

@@ -374,7 +374,7 @@ void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
            static_cast<int>(quant_parms.exp2_inv_old_contrib_), quant_parms.zp_old_contrib_);
 }
-template <typename T, typename QuantT>
+template <typename T>
 void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
                          size_t hidden_size, size_t batch_size,
                          GRUQuantitativeParameters &quant_parms) {
@@ -421,37 +421,100 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
         }
     }
 
-    calculateScale<T, QuantT>(z_out, false, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-                              "scale_z_out");
+    // z 门输出的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.z_out_, [&](auto tag) {
+        using ZOutT = typename decltype(tag)::type;
+        calculateScale<T, ZOutT>(z_out, false, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
+                                 "scale_z_out");
+    });
 
-    calculateScale<T, QuantT>(r_out, false, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-                              "scale_r_out");
-    calculateScale<T, QuantT>(g_out, true, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
-                              "scale_g_out");
-    calculateScale<T, QuantT>(Rh_add_br_g, false, quant_parms.exp2_inv_Rh_add_br_,
-                              quant_parms.zp_Rh_add_br_, "scale_Rh_add_br_g");
-    calculateScale<T, QuantT>(rRh_g, false, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_,
-                              "scale_rRh_g");
-    calculateScale<T, QuantT>(one_minus_update, false, quant_parms.exp2_inv_one_minus_update_,
-                              quant_parms.zp_one_minus_update_, "scale_one_minus_update");
-    calculateScale<T, QuantT>(new_contrib, false, quant_parms.exp2_inv_new_contrib_,
-                              quant_parms.zp_new_contrib_, "scale_new_contrib");
-    calculateScale<T, QuantT>(old_contrib, false, quant_parms.exp2_inv_old_contrib_,
-                              quant_parms.zp_old_contrib_, "scale_old_contrib");
+    // r 门输出的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.r_out_, [&](auto tag) {
+        using ROutT = typename decltype(tag)::type;
+        calculateScale<T, ROutT>(r_out, false, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
+                                 "scale_r_out");
+    });
+
+    // g 门输出的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.g_out_, [&](auto tag) {
+        using GOutT = typename decltype(tag)::type;
+        calculateScale<T, GOutT>(g_out, true, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
+                                 "scale_g_out");
+    });
+
+    // Rh + br 的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.Rh_add_br_, [&](auto tag) {
+        using RhAddBrT = typename decltype(tag)::type;
+        calculateScale<T, RhAddBrT>(Rh_add_br_g, false, quant_parms.exp2_inv_Rh_add_br_,
+                                    quant_parms.zp_Rh_add_br_, "scale_Rh_add_br_g");
+    });
+
+    // r × Rh 的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.rRh_, [&](auto tag) {
+        using rRhT = typename decltype(tag)::type;
+        calculateScale<T, rRhT>(rRh_g, false, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_,
+                                "scale_rRh_g");
+    });
+
+    // 1 - z 的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.one_minus_update_, [&](auto tag) {
+        using OneMinusUpdateT = typename decltype(tag)::type;
+        calculateScale<T, OneMinusUpdateT>(one_minus_update, false, quant_parms.exp2_inv_one_minus_update_,
+                                           quant_parms.zp_one_minus_update_, "scale_one_minus_update");
+    });
+
+    // (1.0 - z) * g 的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.new_contrib_, [&](auto tag) {
+        using NewContribT = typename decltype(tag)::type;
+        calculateScale<T, NewContribT>(new_contrib, false, quant_parms.exp2_inv_new_contrib_,
+                                       quant_parms.zp_new_contrib_, "scale_new_contrib");
+    });
+
+    // z * h[output_idx] 的量化
+    dispatchByBitWidth(quant_parms.bitwidth_config_.old_contrib_, [&](auto tag) {
+        using OldContribT = typename decltype(tag)::type;
+        calculateScale<T, OldContribT>(old_contrib, false, quant_parms.exp2_inv_old_contrib_,
+                                       quant_parms.zp_old_contrib_, "scale_old_contrib");
+    });
 
 #ifdef DEBUG
-    checkScale<T, QuantT>(z_out, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_, "scale_z_out");
-    checkScale<T, QuantT>(r_out, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_, "scale_r_out");
-    checkScale<T, QuantT>(g_out, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_, "scale_g_out");
-    checkScale<T, QuantT>(Rh_add_br_g, quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_,
-                          "scale_Rh_add_br_g");
-    checkScale<T, QuantT>(rRh_g, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_, "scale_rRh_g");
-    checkScale<T, QuantT>(one_minus_update, quant_parms.exp2_inv_one_minus_update_,
-                          quant_parms.zp_one_minus_update_, "scale_one_minus_update");
-    checkScale<T, QuantT>(new_contrib, quant_parms.exp2_inv_new_contrib_,
-                          quant_parms.zp_new_contrib_, "scale_new_contrib");
-    checkScale<T, QuantT>(old_contrib, quant_parms.exp2_inv_old_contrib_,
-                          quant_parms.zp_old_contrib_, "scale_old_contrib");
+    // TODO: DEBUG 模式下的 checkScale 也需要对应改写
+    dispatchByBitWidth(quant_parms.bitwidth_config_.z_out_, [&](auto tag) {
+        using ZOutT = typename decltype(tag)::type;
+        checkScale<T, ZOutT>(z_out, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_, "scale_z_out");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.r_out_, [&](auto tag) {
+        using ROutT = typename decltype(tag)::type;
+        checkScale<T, ROutT>(r_out, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_, "scale_r_out");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.g_out_, [&](auto tag) {
+        using GOutT = typename decltype(tag)::type;
+        checkScale<T, GOutT>(g_out, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_, "scale_g_out");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.Rh_add_br_, [&](auto tag) {
+        using RhAddBrT = typename decltype(tag)::type;
+        checkScale<T, RhAddBrT>(Rh_add_br_g, quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_,
+                                "scale_Rh_add_br_g");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.rRh_, [&](auto tag) {
+        using rRhT = typename decltype(tag)::type;
+        checkScale<T, rRhT>(rRh_g, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_, "scale_rRh_g");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.one_minus_update_, [&](auto tag) {
+        using OneMinusUpdateT = typename decltype(tag)::type;
+        checkScale<T, OneMinusUpdateT>(one_minus_update, quant_parms.exp2_inv_one_minus_update_,
+                                       quant_parms.zp_one_minus_update_, "scale_one_minus_update");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.new_contrib_, [&](auto tag) {
+        using NewContribT = typename decltype(tag)::type;
+        checkScale<T, NewContribT>(new_contrib, quant_parms.exp2_inv_new_contrib_,
+                                   quant_parms.zp_new_contrib_, "scale_new_contrib");
+    });
+    dispatchByBitWidth(quant_parms.bitwidth_config_.old_contrib_, [&](auto tag) {
+        using OldContribT = typename decltype(tag)::type;
+        checkScale<T, OldContribT>(old_contrib, quant_parms.exp2_inv_old_contrib_,
+                                   quant_parms.zp_old_contrib_, "scale_old_contrib");
+    });
 #endif
 }
 
@@ -463,75 +526,158 @@ void calculateGRUQuantitativeParameters(
     const dev::vector<T> &g_pres_, GRUQuantitativeParameters &quant_parms_) {
     const int NH = batch_size * hidden_size;
 
-    calculateScalePerSteps<T, QuantT>(x, batch_size * input_size, steps, false,
+    // 输入 x 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.x_, [&](auto tag) {
+        using XT = typename decltype(tag)::type;
+        calculateScalePerSteps<T, XT>(x, batch_size * input_size, steps, false,
                                       quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x");
+    });
 
-    calculateScalePerSteps<T, QuantT>(h + NH, NH, steps, false, quant_parms_.exp2_inv_h_,
+    // 隐藏状态 h 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.h_, [&](auto tag) {
+        using HT = typename decltype(tag)::type;
+        calculateScalePerSteps<T, HT>(h + NH, NH, steps, false, quant_parms_.exp2_inv_h_,
                                       quant_parms_.zp_h_, "scale_h");
+    });
 
-    quant_parms_.exp2_inv_W_ =
-        calculateScalesPerChannels<T, QuantT>(W, hidden_size * 3, input_size, "scale_W");
+    // 权重 W 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.W_, [&](auto tag) {
+        using WT = typename decltype(tag)::type;
+        quant_parms_.exp2_inv_W_ =
+            calculateScalesPerChannels<T, WT>(W, hidden_size * 3, input_size, "scale_W");
+    });
 
-    quant_parms_.exp2_inv_R_ =
-        calculateScalesPerChannels<T, QuantT>(R, hidden_size * 3, hidden_size, "scale_R");
+    // 权重 R 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.R_, [&](auto tag) {
+        using RT = typename decltype(tag)::type;
+        quant_parms_.exp2_inv_R_ =
+            calculateScalesPerChannels<T, RT>(R, hidden_size * 3, hidden_size, "scale_R");
+    });
 
-    calculateScale<T, QuantT>(tmp_Wx, steps * batch_size * hidden_size * 3, false,
-                              quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
+    // Wx 结果的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.Wx_, [&](auto tag) {
+        using WxT = typename decltype(tag)::type;
+        calculateScale<T, WxT>(tmp_Wx, steps * batch_size * hidden_size * 3, false,
+                               quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
+    });
 
-    calculateScale<T, QuantT>(tmp_Rh, steps * batch_size * hidden_size * 3, false,
-                              quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
+    // Rh 结果的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.Rh_, [&](auto tag) {
+        using RhT = typename decltype(tag)::type;
+        calculateScale<T, RhT>(tmp_Rh, steps * batch_size * hidden_size * 3, false,
+                               quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
+    });
 
-    quant_parms_.exp2_inv_bx_ =
-        calculateScalesPerChannels<T, QuantT>(bx, hidden_size * 3, 1, "scale_bx");
+    // 偏置 bx 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.bx_, [&](auto tag) {
+        using BxT = typename decltype(tag)::type;
+        quant_parms_.exp2_inv_bx_ =
+            calculateScalesPerChannels<T, BxT>(bx, hidden_size * 3, 1, "scale_bx");
+    });
 
-    quant_parms_.exp2_inv_br_ =
-        calculateScalesPerChannels<T, QuantT>(br, hidden_size * 3, 1, "scale_br");
+    // 偏置 br 的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.br_, [&](auto tag) {
+        using BrT = typename decltype(tag)::type;
+        quant_parms_.exp2_inv_br_ =
+            calculateScalesPerChannels<T, BrT>(br, hidden_size * 3, 1, "scale_br");
+    });
 
-    calculateScale<T, QuantT>(z_pres_.data(), z_pres_.size(), false, quant_parms_.exp2_inv_z_pre_,
-                              quant_parms_.zp_z_pre_, "scale_z_pre");
+    // z 门输入的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.z_pre_, [&](auto tag) {
+        using ZPreT = typename decltype(tag)::type;
+        calculateScale<T, ZPreT>(z_pres_.data(), z_pres_.size(), false, quant_parms_.exp2_inv_z_pre_,
+                                 quant_parms_.zp_z_pre_, "scale_z_pre");
+    });
 
-    calculateScale<T, QuantT>(r_pres_.data(), r_pres_.size(), false, quant_parms_.exp2_inv_r_pre_,
-                              quant_parms_.zp_r_pre_, "scale_r_pre");
+    // r 门输入的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.r_pre_, [&](auto tag) {
+        using RPreT = typename decltype(tag)::type;
+        calculateScale<T, RPreT>(r_pres_.data(), r_pres_.size(), false, quant_parms_.exp2_inv_r_pre_,
+                                 quant_parms_.zp_r_pre_, "scale_r_pre");
+    });
 
-    calculateScale<T, QuantT>(g_pres_.data(), g_pres_.size(), false, quant_parms_.exp2_inv_g_pre_,
-                              quant_parms_.zp_g_pre_, "scale_g_pre");
+    // g 门输入的量化
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.g_pre_, [&](auto tag) {
+        using GPreT = typename decltype(tag)::type;
+        calculateScale<T, GPreT>(g_pres_.data(), g_pres_.size(), false, quant_parms_.exp2_inv_g_pre_,
+                                 quant_parms_.zp_g_pre_, "scale_g_pre");
+    });
 
     std::vector<T> h_host = d2h(h, NH * (steps + 1));
-    calculateScaleFromV<T, QuantT>(h_host, v, steps, hidden_size, batch_size, quant_parms_);
+    calculateScaleFromV<T>(h_host, v, steps, hidden_size, batch_size, quant_parms_);
 
 #ifdef DEBUG
     std::vector<T> x_host = d2h(x, steps * batch_size * input_size);
-    checkScale<T, QuantT>(x_host, quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.x_, [&](auto tag) {
+        using XT = typename decltype(tag)::type;
+        checkScale<T, XT>(x_host, quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x");
+    });
 
-    checkScale<T, int8_t>(h_host, quant_parms_.exp2_inv_h_, quant_parms_.zp_h_, "scale_h");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.h_, [&](auto tag) {
+        using HT = typename decltype(tag)::type;
+        checkScale<T, HT>(h_host, quant_parms_.exp2_inv_h_, quant_parms_.zp_h_, "scale_h");
+    });
 
     std::vector<T> W_host = d2h(W, hidden_size * 3 * input_size);
-    checkScalePerChannel<T, int8_t>(W_host, hidden_size * 3, input_size, quant_parms_.exp2_inv_W_,
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.W_, [&](auto tag) {
+        using WT = typename decltype(tag)::type;
+        checkScalePerChannel<T, WT>(W_host, hidden_size * 3, input_size, quant_parms_.exp2_inv_W_,
                                     "scale_W");
+    });
+
     std::vector<T> R_host = d2h(R, hidden_size * 3 * hidden_size);
-    checkScalePerChannel<T, int8_t>(R_host, hidden_size * 3, hidden_size, quant_parms_.exp2_inv_R_,
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.R_, [&](auto tag) {
+        using RT = typename decltype(tag)::type;
+        checkScalePerChannel<T, RT>(R_host, hidden_size * 3, hidden_size, quant_parms_.exp2_inv_R_,
                                     "scale_R");
+    });
+
     std::vector<T> tmp_Wx_host = d2h(tmp_Wx, steps * batch_size * hidden_size * 3);
-    checkScale<T, int8_t>(tmp_Wx_host, quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.Wx_, [&](auto tag) {
+        using WxT = typename decltype(tag)::type;
+        checkScale<T, WxT>(tmp_Wx_host, quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
+    });
+
     std::vector<T> tmp_Rh_host = d2h(tmp_Rh, steps * batch_size * hidden_size * 3);
-    checkScale<T, QuantT>(tmp_Rh_host, quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.Rh_, [&](auto tag) {
+        using RhT = typename decltype(tag)::type;
+        checkScale<T, RhT>(tmp_Rh_host, quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
+    });
+
     std::vector<T> bx_host = d2h(bx, hidden_size * 3);
-    checkScalePerChannel<T, QuantT>(bx_host, hidden_size * 3, 1, quant_parms_.exp2_inv_bx_,
-                                    "scale_bx");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.bx_, [&](auto tag) {
+        using BxT = typename decltype(tag)::type;
+        checkScalePerChannel<T, BxT>(bx_host, hidden_size * 3, 1, quant_parms_.exp2_inv_bx_,
+                                     "scale_bx");
+    });
+
     std::vector<T> br_host = d2h(br, hidden_size * 3);
-    checkScalePerChannel<T, QuantT>(br_host, hidden_size * 3, 1, quant_parms_.exp2_inv_br_,
-                                    "scale_br");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.br_, [&](auto tag) {
+        using BrT = typename decltype(tag)::type;
+        checkScalePerChannel<T, BrT>(br_host, hidden_size * 3, 1, quant_parms_.exp2_inv_br_,
+                                     "scale_br");
+    });
 
     std::vector<T> z_pres_host = d2h(z_pres_.data(), z_pres_.size());
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.z_pre_, [&](auto tag) {
+        using ZPreT = typename decltype(tag)::type;
+        checkScale<T, ZPreT>(z_pres_host, quant_parms_.exp2_inv_z_pre_, quant_parms_.zp_z_pre_,
+                             "scale_z_pre");
+    });
 
-    checkScale<T, QuantT>(z_pres_host, quant_parms_.exp2_inv_z_pre_, quant_parms_.zp_z_pre_,
-                          "scale_z_pre");
     std::vector<T> r_pres_host = d2h(r_pres_.data(), r_pres_.size());
-    checkScale<T, QuantT>(r_pres_host, quant_parms_.exp2_inv_r_pre_, quant_parms_.zp_r_pre_,
-                          "scale_r_pre");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.r_pre_, [&](auto tag) {
+        using RPreT = typename decltype(tag)::type;
+        checkScale<T, RPreT>(r_pres_host, quant_parms_.exp2_inv_r_pre_, quant_parms_.zp_r_pre_,
+                             "scale_r_pre");
+    });
+
     std::vector<T> g_pres_host = d2h(g_pres_.data(), g_pres_.size());
-    checkScale<T, QuantT>(g_pres_host, quant_parms_.exp2_inv_g_pre_, quant_parms_.zp_g_pre_,
-                          "scale_g_pre");
+    dispatchByBitWidth(quant_parms_.bitwidth_config_.g_pre_, [&](auto tag) {
+        using GPreT = typename decltype(tag)::type;
+        checkScale<T, GPreT>(g_pres_host, quant_parms_.exp2_inv_g_pre_, quant_parms_.zp_g_pre_,
+                             "scale_g_pre");
+    });
 
     // print quant_parms
     printParms(quant_parms_);
