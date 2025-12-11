@@ -211,7 +211,6 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
                                  T &aligned_min, T &aligned_max, int8_t &exp2_inv, int32_t &zp,
                                  const std::string &name = "") {
     static_assert(std::is_floating_point<T>::value, "T must be float or double");
-    static_assert(std::is_signed<QuantT>::value, "QuantT must be a signed integer type");
 
     // 量化类型的范围
     const int32_t quant_min = std::numeric_limits<QuantT>::min();
