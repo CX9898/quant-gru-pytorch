@@ -90,13 +90,19 @@ GRUTrainGradients runFloatTraining(const int time_steps, const int batch_size, c
                         g_blas_handle, h_dev.data(), v_dev.data());
     }
 
-    // 创建梯度缓存
+    // 创建梯度缓存（必须初始化为零，因为反向传播是累加梯度）
     dev::vector<float> dx_dev(time_steps * batch_size * input_size);
     dev::vector<float> dW_dev(input_size * hidden_size * 3);
     dev::vector<float> dR_dev(hidden_size * hidden_size * 3);
     dev::vector<float> dbx_dev(hidden_size * 3);
     dev::vector<float> dbr_dev(hidden_size * 3);
     dev::vector<float> dh_dev(batch_size * hidden_size);
+    dx_dev.zero();
+    dW_dev.zero();
+    dR_dev.zero();
+    dbx_dev.zero();
+    dbr_dev.zero();
+    dh_dev.zero();
 
     // 反向传播
     {
@@ -146,12 +152,19 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
     }
 
     // 反向传播（使用反量化后的 h 和 v）
+    // 创建梯度缓存（必须初始化为零，因为反向传播是累加梯度）
     dev::vector<float> dx_dev(time_steps * batch_size * input_size);
     dev::vector<float> dW_dev(input_size * hidden_size * 3);
     dev::vector<float> dR_dev(hidden_size * hidden_size * 3);
     dev::vector<float> dbx_dev(hidden_size * 3);
     dev::vector<float> dbr_dev(hidden_size * 3);
     dev::vector<float> dh_dev(batch_size * hidden_size);
+    dx_dev.zero();
+    dW_dev.zero();
+    dR_dev.zero();
+    dbx_dev.zero();
+    dbr_dev.zero();
+    dh_dev.zero();
 
     // 反向传播
     {
