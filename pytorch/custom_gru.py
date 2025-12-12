@@ -696,16 +696,13 @@ class CustomGRU(nn.GRU):
         # 检查量化是否已校准完成
         if self.use_quantization and not self.is_calibrated():
             if self.quant_ranges is not None:
-                # 已累积范围但未完成校准
-                raise RuntimeError(
-                    "Quantization ranges have been accumulated but not finalized. "
-                    "Please call finalize_calibration() before forward pass."
-                )
+                # 已累积范围但未完成校准，自动调用 finalize
+                self.finalize_calibration()
             else:
                 # 未进行任何校准
                 raise RuntimeError(
                     "Quantization is enabled but not calibrated. "
-                    "Please call calibrate(data) and finalize_calibration() before forward pass, "
+                    "Please call calibrate(data) before forward pass, "
                     "or provide calibration_data in __init__."
                 )
 
