@@ -24,7 +24,7 @@ class ForwardPass {
     // Blocks until all iterations have completed executing on the GPU.
     ~ForwardPass();
 
-    const GRUQuantitativeParameters &getGRUQuantitativeParameters() const { return quant_parms_; }
+    const GRUQuantizationRanges &getGRUQuantizationRanges() const { return quant_ranges_; }
 
     // Performs one forward iteration of the GRU cell.
     //
@@ -59,10 +59,9 @@ class ForwardPass {
     void Run(const int steps, const T *W, const T *R, const T *bx, const T *br, const T *x, T *h,
              T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob, const T *zoneout_mask);
 
-    void setCalibrationMode(bool calibration_mode,
-                            const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig()) {
+    void setCalibrationMode(bool calibration_mode, GRUQuantizationRanges &quant_ranges) {
         calibration_mode_ = calibration_mode;
-        quant_parms_.bitwidth_config_ = bitwidth_config;
+        quant_ranges_ = quant_ranges;
     }
 
    private:
@@ -74,7 +73,7 @@ class ForwardPass {
     private_data *data_;
 
     bool calibration_mode_ = false;
-    GRUQuantitativeParameters quant_parms_;
+    GRUQuantizationRanges quant_ranges_;
     dev::vector<T> z_pres_;
     dev::vector<T> r_pres_;
     dev::vector<T> g_pres_;

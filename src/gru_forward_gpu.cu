@@ -316,10 +316,29 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
     }
 }
 
+// 辅助函数：计算向量的 min/max
 template <typename T>
-void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
-                         size_t hidden_size, size_t batch_size,
-                         GRUQuantitativeParameters &quant_parms) {
+inline std::pair<T, T> computeMinMax(const std::vector<T> &data) {
+    T min_val = data[0];
+    T max_val = data[0];
+#pragma omp parallel for reduction(min : min_val) reduction(max : max_val)
+    for (size_t i = 1; i < data.size(); ++i) {
+        min_val = std::min(min_val, data[i]);
+        max_val = std::max(max_val, data[i]);
+    }
+    return {min_val, max_val};
+}
+
+// 辅助函数：更新范围（取并集）
+inline void updateRange(float &min_out, float &max_out, float min_val, float max_val) {
+    min_out = std::min(min_out, min_val);
+    max_out = std::max(max_out, max_val);
+}
+
+template <typename T>
+void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
+                       size_t hidden_size, size_t batch_size,
+                       GRUQuantizationRanges &quant_ranges) {
     std::vector<T> v_host = d2h(v_dev, steps * batch_size * hidden_size * 4);
     const size_t output_size = steps * batch_size * hidden_size;
 
@@ -363,267 +382,110 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
         }
     }
 
-    // z 门输出的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.z_out_, [&](auto tag) {
-        using ZOutT = typename decltype(tag)::type;
-        calculateScale<T, ZOutT>(z_out, false, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-                                 "scale_z_out");
-    });
+    // 计算并更新各中间结果的范围
+    auto [min_z, max_z] = computeMinMax(z_out);
+    updateRange(quant_ranges.min_z_out_, quant_ranges.max_z_out_, min_z, max_z);
 
-    // r 门输出的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.r_out_, [&](auto tag) {
-        using ROutT = typename decltype(tag)::type;
-        calculateScale<T, ROutT>(r_out, false, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-                                 "scale_r_out");
-    });
+    auto [min_r, max_r] = computeMinMax(r_out);
+    updateRange(quant_ranges.min_r_out_, quant_ranges.max_r_out_, min_r, max_r);
 
-    // g 门输出的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.g_out_, [&](auto tag) {
-        using GOutT = typename decltype(tag)::type;
-        calculateScale<T, GOutT>(g_out, true, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
-                                 "scale_g_out");
-    });
+    auto [min_g, max_g] = computeMinMax(g_out);
+    updateRange(quant_ranges.min_g_out_, quant_ranges.max_g_out_, min_g, max_g);
 
-    // Rh + br 的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.Rh_add_br_, [&](auto tag) {
-        using RhAddBrT = typename decltype(tag)::type;
-        calculateScale<T, RhAddBrT>(Rh_add_br_g, false, quant_parms.exp2_inv_Rh_add_br_,
-                                    quant_parms.zp_Rh_add_br_, "scale_Rh_add_br_g");
-    });
+    auto [min_Rh_add_br, max_Rh_add_br] = computeMinMax(Rh_add_br_g);
+    updateRange(quant_ranges.min_Rh_add_br_, quant_ranges.max_Rh_add_br_, min_Rh_add_br, max_Rh_add_br);
 
-    // r × Rh 的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.rRh_, [&](auto tag) {
-        using rRhT = typename decltype(tag)::type;
-        calculateScale<T, rRhT>(rRh_g, false, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_,
-                                "scale_rRh_g");
-    });
+    auto [min_rRh, max_rRh] = computeMinMax(rRh_g);
+    updateRange(quant_ranges.min_rRh_, quant_ranges.max_rRh_, min_rRh, max_rRh);
 
-    // 1 - z 的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.one_minus_update_, [&](auto tag) {
-        using OneMinusUpdateT = typename decltype(tag)::type;
-        calculateScale<T, OneMinusUpdateT>(one_minus_update, false, quant_parms.exp2_inv_one_minus_update_,
-                                           quant_parms.zp_one_minus_update_, "scale_one_minus_update");
-    });
+    auto [min_one_minus, max_one_minus] = computeMinMax(one_minus_update);
+    updateRange(quant_ranges.min_one_minus_update_, quant_ranges.max_one_minus_update_, min_one_minus, max_one_minus);
 
-    // (1.0 - z) * g 的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.new_contrib_, [&](auto tag) {
-        using NewContribT = typename decltype(tag)::type;
-        calculateScale<T, NewContribT>(new_contrib, false, quant_parms.exp2_inv_new_contrib_,
-                                       quant_parms.zp_new_contrib_, "scale_new_contrib");
-    });
+    auto [min_new, max_new] = computeMinMax(new_contrib);
+    updateRange(quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_, min_new, max_new);
 
-    // z * h[output_idx] 的量化
-    dispatchByBitWidth(quant_parms.bitwidth_config_.old_contrib_, [&](auto tag) {
-        using OldContribT = typename decltype(tag)::type;
-        calculateScale<T, OldContribT>(old_contrib, false, quant_parms.exp2_inv_old_contrib_,
-                                       quant_parms.zp_old_contrib_, "scale_old_contrib");
-    });
+    auto [min_old, max_old] = computeMinMax(old_contrib);
+    updateRange(quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_, min_old, max_old);
+}
 
-#ifdef DEBUG
-    // TODO: DEBUG 模式下的 checkScale 也需要对应改写
-    dispatchByBitWidth(quant_parms.bitwidth_config_.z_out_, [&](auto tag) {
-        using ZOutT = typename decltype(tag)::type;
-        checkScale<T, ZOutT>(z_out, quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_, "scale_z_out");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.r_out_, [&](auto tag) {
-        using ROutT = typename decltype(tag)::type;
-        checkScale<T, ROutT>(r_out, quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_, "scale_r_out");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.g_out_, [&](auto tag) {
-        using GOutT = typename decltype(tag)::type;
-        checkScale<T, GOutT>(g_out, quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_, "scale_g_out");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.Rh_add_br_, [&](auto tag) {
-        using RhAddBrT = typename decltype(tag)::type;
-        checkScale<T, RhAddBrT>(Rh_add_br_g, quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_,
-                                "scale_Rh_add_br_g");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.rRh_, [&](auto tag) {
-        using rRhT = typename decltype(tag)::type;
-        checkScale<T, rRhT>(rRh_g, quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_, "scale_rRh_g");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.one_minus_update_, [&](auto tag) {
-        using OneMinusUpdateT = typename decltype(tag)::type;
-        checkScale<T, OneMinusUpdateT>(one_minus_update, quant_parms.exp2_inv_one_minus_update_,
-                                       quant_parms.zp_one_minus_update_, "scale_one_minus_update");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.new_contrib_, [&](auto tag) {
-        using NewContribT = typename decltype(tag)::type;
-        checkScale<T, NewContribT>(new_contrib, quant_parms.exp2_inv_new_contrib_,
-                                   quant_parms.zp_new_contrib_, "scale_new_contrib");
-    });
-    dispatchByBitWidth(quant_parms.bitwidth_config_.old_contrib_, [&](auto tag) {
-        using OldContribT = typename decltype(tag)::type;
-        checkScale<T, OldContribT>(old_contrib, quant_parms.exp2_inv_old_contrib_,
-                                   quant_parms.zp_old_contrib_, "scale_old_contrib");
-    });
-#endif
+// 辅助函数：计算设备端数据的 min/max
+template <typename T>
+inline std::pair<T, T> computeMinMaxDev(const T *data_dev, size_t size) {
+    std::vector<T> data_host = d2h(data_dev, size);
+    return computeMinMax(data_host);
+}
+
+// 辅助函数：计算 per-channel 的 min/max
+template <typename T>
+inline void computeMinMaxPerChannel(const T *data_dev, size_t input_size, size_t channel_size,
+                                    std::vector<float> &min_out, std::vector<float> &max_out) {
+    std::vector<T> data_host = d2h(data_dev, input_size * channel_size);
+
+#pragma omp parallel for
+    for (int c = 0; c < channel_size; ++c) {
+        T min_val = data_host[c];
+        T max_val = data_host[c];
+        for (int i = 1; i < input_size; ++i) {
+            const T val = data_host[i * channel_size + c];
+            min_val = std::min(min_val, val);
+            max_val = std::max(max_val, val);
+        }
+        min_out[c] = std::min(min_out[c], static_cast<float>(min_val));
+        max_out[c] = std::max(max_out[c], static_cast<float>(max_val));
+    }
 }
 
 template <typename T>
-void calculateGRUQuantitativeParameters(
+void updateGRUQuantizationRanges(
     const int steps, const int batch_size, const int hidden_size, const int input_size, const T *W,
     const T *R, const T *bx, const T *br, const T *x, const T *h, const T *v, const T *tmp_Wx,
     const T *tmp_Rh, const dev::vector<T> &z_pres_, const dev::vector<T> &r_pres_,
-    const dev::vector<T> &g_pres_, GRUQuantitativeParameters &quant_parms_) {
+    const dev::vector<T> &g_pres_, GRUQuantizationRanges &quant_ranges_) {
     const int NH = batch_size * hidden_size;
 
-    // 输入 x 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.x_, [&](auto tag) {
-        using XT = typename decltype(tag)::type;
-        calculateScalePerSteps<T, XT>(x, batch_size * input_size, steps, false,
-                                      quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x");
-    });
+    // 输入 x 的范围
+    auto [min_x, max_x] = computeMinMaxDev(x, steps * batch_size * input_size);
+    updateRange(quant_ranges_.min_x_, quant_ranges_.max_x_, min_x, max_x);
 
-    // 隐藏状态 h 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.h_, [&](auto tag) {
-        using HT = typename decltype(tag)::type;
-        calculateScalePerSteps<T, HT>(h + NH, NH, steps, false, quant_parms_.exp2_inv_h_,
-                                      quant_parms_.zp_h_, "scale_h");
-    });
+    // 隐藏状态 h 的范围（跳过初始状态 h0）
+    auto [min_h, max_h] = computeMinMaxDev(h + NH, steps * NH);
+    updateRange(quant_ranges_.min_h_, quant_ranges_.max_h_, min_h, max_h);
 
-    // 权重 W 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.W_, [&](auto tag) {
-        using WT = typename decltype(tag)::type;
-        quant_parms_.exp2_inv_W_ =
-            calculateScalesPerChannels<T, WT>(W, hidden_size * 3, input_size, "scale_W");
-    });
+    // 权重 W 的范围（per-channel）
+    computeMinMaxPerChannel(W, input_size, hidden_size * 3, quant_ranges_.min_W_, quant_ranges_.max_W_);
 
-    // 权重 R 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.R_, [&](auto tag) {
-        using RT = typename decltype(tag)::type;
-        quant_parms_.exp2_inv_R_ =
-            calculateScalesPerChannels<T, RT>(R, hidden_size * 3, hidden_size, "scale_R");
-    });
+    // 权重 R 的范围（per-channel）
+    computeMinMaxPerChannel(R, hidden_size, hidden_size * 3, quant_ranges_.min_R_, quant_ranges_.max_R_);
 
-    // Wx 结果的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.Wx_, [&](auto tag) {
-        using WxT = typename decltype(tag)::type;
-        calculateScale<T, WxT>(tmp_Wx, steps * batch_size * hidden_size * 3, false,
-                               quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
-    });
+    // Wx 结果的范围
+    auto [min_Wx, max_Wx] = computeMinMaxDev(tmp_Wx, steps * batch_size * hidden_size * 3);
+    updateRange(quant_ranges_.min_Wx_, quant_ranges_.max_Wx_, min_Wx, max_Wx);
 
-    // Rh 结果的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.Rh_, [&](auto tag) {
-        using RhT = typename decltype(tag)::type;
-        calculateScale<T, RhT>(tmp_Rh, steps * batch_size * hidden_size * 3, false,
-                               quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
-    });
+    // Rh 结果的范围
+    auto [min_Rh, max_Rh] = computeMinMaxDev(tmp_Rh, steps * batch_size * hidden_size * 3);
+    updateRange(quant_ranges_.min_Rh_, quant_ranges_.max_Rh_, min_Rh, max_Rh);
 
-    // 偏置 bx 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.bx_, [&](auto tag) {
-        using BxT = typename decltype(tag)::type;
-        quant_parms_.exp2_inv_bx_ =
-            calculateScalesPerChannels<T, BxT>(bx, hidden_size * 3, 1, "scale_bx");
-    });
+    // 偏置 bx 的范围（per-channel）
+    computeMinMaxPerChannel(bx, 1, hidden_size * 3, quant_ranges_.min_bx_, quant_ranges_.max_bx_);
 
-    // 偏置 br 的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.br_, [&](auto tag) {
-        using BrT = typename decltype(tag)::type;
-        quant_parms_.exp2_inv_br_ =
-            calculateScalesPerChannels<T, BrT>(br, hidden_size * 3, 1, "scale_br");
-    });
+    // 偏置 br 的范围（per-channel）
+    computeMinMaxPerChannel(br, 1, hidden_size * 3, quant_ranges_.min_br_, quant_ranges_.max_br_);
 
-    // z 门输入的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.z_pre_, [&](auto tag) {
-        using ZPreT = typename decltype(tag)::type;
-        calculateScale<T, ZPreT>(z_pres_.data(), z_pres_.size(), false, quant_parms_.exp2_inv_z_pre_,
-                                 quant_parms_.zp_z_pre_, "scale_z_pre");
-    });
+    // z 门输入的范围
+    auto [min_z_pre, max_z_pre] = computeMinMaxDev(z_pres_.data(), z_pres_.size());
+    updateRange(quant_ranges_.min_z_pre_, quant_ranges_.max_z_pre_, min_z_pre, max_z_pre);
 
-    // r 门输入的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.r_pre_, [&](auto tag) {
-        using RPreT = typename decltype(tag)::type;
-        calculateScale<T, RPreT>(r_pres_.data(), r_pres_.size(), false, quant_parms_.exp2_inv_r_pre_,
-                                 quant_parms_.zp_r_pre_, "scale_r_pre");
-    });
+    // r 门输入的范围
+    auto [min_r_pre, max_r_pre] = computeMinMaxDev(r_pres_.data(), r_pres_.size());
+    updateRange(quant_ranges_.min_r_pre_, quant_ranges_.max_r_pre_, min_r_pre, max_r_pre);
 
-    // g 门输入的量化
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.g_pre_, [&](auto tag) {
-        using GPreT = typename decltype(tag)::type;
-        calculateScale<T, GPreT>(g_pres_.data(), g_pres_.size(), false, quant_parms_.exp2_inv_g_pre_,
-                                 quant_parms_.zp_g_pre_, "scale_g_pre");
-    });
+    // g 门输入的范围
+    auto [min_g_pre, max_g_pre] = computeMinMaxDev(g_pres_.data(), g_pres_.size());
+    updateRange(quant_ranges_.min_g_pre_, quant_ranges_.max_g_pre_, min_g_pre, max_g_pre);
 
+    // 从 v 中计算其他中间结果的范围
     std::vector<T> h_host = d2h(h, NH * (steps + 1));
-    calculateScaleFromV<T>(h_host, v, steps, hidden_size, batch_size, quant_parms_);
-
-#ifdef DEBUG
-    std::vector<T> x_host = d2h(x, steps * batch_size * input_size);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.x_, [&](auto tag) {
-        using XT = typename decltype(tag)::type;
-        checkScale<T, XT>(x_host, quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x");
-    });
-
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.h_, [&](auto tag) {
-        using HT = typename decltype(tag)::type;
-        checkScale<T, HT>(h_host, quant_parms_.exp2_inv_h_, quant_parms_.zp_h_, "scale_h");
-    });
-
-    std::vector<T> W_host = d2h(W, hidden_size * 3 * input_size);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.W_, [&](auto tag) {
-        using WT = typename decltype(tag)::type;
-        checkScalePerChannel<T, WT>(W_host, hidden_size * 3, input_size, quant_parms_.exp2_inv_W_,
-                                    "scale_W");
-    });
-
-    std::vector<T> R_host = d2h(R, hidden_size * 3 * hidden_size);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.R_, [&](auto tag) {
-        using RT = typename decltype(tag)::type;
-        checkScalePerChannel<T, RT>(R_host, hidden_size * 3, hidden_size, quant_parms_.exp2_inv_R_,
-                                    "scale_R");
-    });
-
-    std::vector<T> tmp_Wx_host = d2h(tmp_Wx, steps * batch_size * hidden_size * 3);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.Wx_, [&](auto tag) {
-        using WxT = typename decltype(tag)::type;
-        checkScale<T, WxT>(tmp_Wx_host, quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_, "scale_Wx");
-    });
-
-    std::vector<T> tmp_Rh_host = d2h(tmp_Rh, steps * batch_size * hidden_size * 3);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.Rh_, [&](auto tag) {
-        using RhT = typename decltype(tag)::type;
-        checkScale<T, RhT>(tmp_Rh_host, quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_, "scale_Rh");
-    });
-
-    std::vector<T> bx_host = d2h(bx, hidden_size * 3);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.bx_, [&](auto tag) {
-        using BxT = typename decltype(tag)::type;
-        checkScalePerChannel<T, BxT>(bx_host, hidden_size * 3, 1, quant_parms_.exp2_inv_bx_,
-                                     "scale_bx");
-    });
-
-    std::vector<T> br_host = d2h(br, hidden_size * 3);
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.br_, [&](auto tag) {
-        using BrT = typename decltype(tag)::type;
-        checkScalePerChannel<T, BrT>(br_host, hidden_size * 3, 1, quant_parms_.exp2_inv_br_,
-                                     "scale_br");
-    });
-
-    std::vector<T> z_pres_host = d2h(z_pres_.data(), z_pres_.size());
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.z_pre_, [&](auto tag) {
-        using ZPreT = typename decltype(tag)::type;
-        checkScale<T, ZPreT>(z_pres_host, quant_parms_.exp2_inv_z_pre_, quant_parms_.zp_z_pre_,
-                             "scale_z_pre");
-    });
-
-    std::vector<T> r_pres_host = d2h(r_pres_.data(), r_pres_.size());
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.r_pre_, [&](auto tag) {
-        using RPreT = typename decltype(tag)::type;
-        checkScale<T, RPreT>(r_pres_host, quant_parms_.exp2_inv_r_pre_, quant_parms_.zp_r_pre_,
-                             "scale_r_pre");
-    });
-
-    std::vector<T> g_pres_host = d2h(g_pres_.data(), g_pres_.size());
-    dispatchByBitWidth(quant_parms_.bitwidth_config_.g_pre_, [&](auto tag) {
-        using GPreT = typename decltype(tag)::type;
-        checkScale<T, GPreT>(g_pres_host, quant_parms_.exp2_inv_g_pre_, quant_parms_.zp_g_pre_,
-                             "scale_g_pre");
-    });
-
-    // print quant_parms
-    printParms(quant_parms_);
-#endif
+    updateRangesFromV<T>(h_host, v, steps, hidden_size, batch_size, quant_ranges_);
 }
 
 template <typename T>
@@ -682,11 +544,11 @@ void ForwardPass<T>::Run(const int steps,
     if (calibration_mode_) {
         // 同步所有 GPU 操作，确保数据计算完成
         cudaDeviceSynchronize();
-        quant_parms_.hidden_ = data_->hidden_size;
-        // 每个算子的位宽由 bitwidth_config_ 独立控制
-        calculateGRUQuantitativeParameters<T>(
+        quant_ranges_.hidden_ = data_->hidden_size;
+        // 更新各算子的 min/max 范围
+        updateGRUQuantizationRanges<T>(
             steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh,
-            z_pres_, r_pres_, g_pres_, quant_parms_);
+            z_pres_, r_pres_, g_pres_, quant_ranges_);
     }
 }
 
