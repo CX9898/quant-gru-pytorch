@@ -308,9 +308,17 @@ class CustomGRU(nn.GRU):
     """
     继承自 PyTorch nn.GRU 的自定义类，支持量化前向传播
 
-    支持两种校准方式：
-    1. 立即校准：在构造函数中提供 calibration_data，立即进行校准（向后兼容）
-    2. 延迟校准：构造函数中 calibration_data=None，后续调用 calibrate() 方法（推荐）
+    量化校准流程：
+        1. 创建模型：gru = CustomGRU(..., use_quantization=True)
+        2. 累积校准数据：gru.calibrate(data1), gru.calibrate(data2), ...（可多次调用）
+        3. 完成校准：gru.finalize_calibration()（只能调用一次）
+        4. 正常使用：output, h_n = gru(input)
+        5. 如需重新校准：gru.reset_calibration() 后回到步骤 2
+
+    校准状态：
+        - quant_ranges: 累积的量化范围（min/max），calibrate() 时更新
+        - quant_params: 最终的量化参数（scale/zp），finalize_calibration() 时计算
+        - is_calibrated(): 返回 quant_params 是否已设置
 
     Args:
         input_size: 输入特征维度
@@ -318,22 +326,23 @@ class CustomGRU(nn.GRU):
         num_layers: GRU 层数（目前仅支持单层）
         bias: 是否使用偏置
         batch_first: 如果为 True，输入形状为 [batch, seq, feature]
-        dropout: 层间 dropout 概率
+        dropout: 层间 dropout 概率（目前不支持）
         bidirectional: 是否双向（目前不支持）
         use_quantization: 是否使用量化
         quant_type: 量化类型，'int8' 或 'int16'
-        calibration_data: 用于校准量化参数的输入数据（可选）
-            - 如果提供：立即进行校准（向后兼容）
-            - 如果为 None：延迟校准，需要后续调用 calibrate() 方法
+        calibration_data: 用于校准的输入数据（可选，提供则立即完成校准）
 
     Examples:
-        # 方式1：立即校准（向后兼容）
-        gru = CustomGRU(..., use_quantization=True, calibration_data=data)
+        >>> # 多次校准（推荐）
+        >>> gru = CustomGRU(64, 128, use_quantization=True)
+        >>> for batch in calibration_loader:
+        ...     gru.calibrate(batch)
+        >>> gru.finalize_calibration()
+        >>> output, h_n = gru(input_data)
 
-        # 方式2：延迟校准（推荐，可以在设置权重后校准）
-        gru = CustomGRU(..., use_quantization=True, calibration_data=None)
-        # ... 设置权重 ...
-        gru.calibrate(calibration_data)
+        >>> # 一次性校准（向后兼容）
+        >>> gru = CustomGRU(64, 128, use_quantization=True, calibration_data=data)
+        >>> output, h_n = gru(input_data)
     """
 
     def __init__(
@@ -376,16 +385,187 @@ class CustomGRU(nn.GRU):
         # 初始化 cublas handle
         gru_ops.init_gru_cublas()
 
-        # 量化参数初始化
-        if self.use_quantization:
-            if calibration_data is not None:
-                # 立即校准（向后兼容）
-                self._initialize_quantization(calibration_data)
-            else:
-                # 延迟校准
-                self.quant_params = None
-        else:
-            self.quant_params = None
+        # 量化状态初始化
+        self.quant_ranges = None  # 累积的量化范围（min/max）
+        self.quant_params = None  # 计算得到的量化参数（scale/zp）
+
+        # 如果提供了校准数据，立即完成校准（向后兼容）
+        if self.use_quantization and calibration_data is not None:
+            self._initialize_quantization(calibration_data)
+
+    # -------------------- 校准状态查询 --------------------
+
+    def is_calibrated(self) -> bool:
+        """
+        检查量化是否已完成校准
+
+        Returns:
+            True 如果已调用 finalize_calibration()，否则 False
+        """
+        return self.quant_params is not None
+
+    # -------------------- 公共校准接口 --------------------
+
+    def calibrate(self, calibration_data: torch.Tensor):
+        """
+        累积校准数据，更新量化范围
+
+        可多次调用，每次调用会将新数据的范围与已有范围合并（取并集）。
+        完成所有数据的校准后，需调用 finalize_calibration() 计算量化参数。
+
+        Args:
+            calibration_data: 校准数据，形状为 [seq_len, batch, input_size]
+                             （如果 batch_first=True，则为 [batch, seq_len, input_size]）
+
+        Raises:
+            RuntimeError: 量化未启用，或已调用过 finalize_calibration()
+
+        Note:
+            一旦调用了 finalize_calibration()，再调用此方法会报错。
+            如需重新校准，请先调用 reset_calibration()。
+        """
+        if not self.use_quantization:
+            raise RuntimeError(
+                "Cannot calibrate: quantization is not enabled. "
+                "Set use_quantization=True when creating the model."
+            )
+        if self.is_calibrated():
+            raise RuntimeError(
+                "Cannot calibrate: finalize_calibration() has already been called. "
+                "Call reset_calibration() first if you want to recalibrate."
+            )
+        self._accumulate_calibration_ranges(calibration_data)
+
+    def finalize_calibration(self):
+        """
+        完成校准，计算量化参数并初始化 LUT 表
+
+        根据累积的量化范围计算各算子的 scale 和 zero_point。
+        此方法只能调用一次。
+
+        Raises:
+            RuntimeError: 未调用过 calibrate()，或已调用过此方法
+
+        Note:
+            调用此方法后，不能再调用 calibrate()。
+            如需重新校准，请先调用 reset_calibration()。
+        """
+        if self.is_calibrated():
+            raise RuntimeError(
+                "finalize_calibration() has already been called. "
+                "Call reset_calibration() first if you want to recalibrate."
+            )
+        if self.quant_ranges is None:
+            raise RuntimeError(
+                "No calibration data accumulated. "
+                "Call calibrate(data) at least once before finalize_calibration()."
+            )
+
+        # 根据范围计算量化参数
+        self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
+            quant_ranges=self.quant_ranges
+        )
+        torch.cuda.synchronize()
+
+        # 初始化查找表
+        gru_ops.initialize_quantization_lut(quant_params=self.quant_params)
+        torch.cuda.synchronize()
+
+    def reset_calibration(self):
+        """
+        重置校准状态
+
+        清除累积的量化范围和量化参数，允许重新开始校准流程。
+        """
+        self.quant_ranges = None
+        self.quant_params = None
+
+    # -------------------- 调试与打印 --------------------
+
+    def print_quant_params(self):
+        """
+        打印量化参数
+
+        Raises:
+            RuntimeError: 未调用过 finalize_calibration()
+        """
+        if not self.is_calibrated():
+            raise RuntimeError(
+                "Quantization parameters not available. "
+                "Call finalize_calibration() first."
+            )
+
+        params = self.quant_params
+        print("=" * 60)
+        print("GRUQuantitativeParameters (量化参数)")
+        print("=" * 60)
+        print(f"  hidden_ = {params.hidden_}")
+        print(f"  [x]  exp2_inv={params.exp2_inv_x_:3d}, zp={params.zp_x_}")
+        print(f"  [h]  exp2_inv={params.exp2_inv_h_:3d}, zp={params.zp_h_}")
+        print(f"  [Wx] exp2_inv={params.exp2_inv_Wx_:3d}, zp={params.zp_Wx_}")
+        print(f"  [Rh] exp2_inv={params.exp2_inv_Rh_:3d}, zp={params.zp_Rh_}")
+        print("-" * 60)
+        print(f"  [z_pre] exp2_inv={params.exp2_inv_z_pre_:3d}, zp={params.zp_z_pre_}")
+        print(f"  [r_pre] exp2_inv={params.exp2_inv_r_pre_:3d}, zp={params.zp_r_pre_}")
+        print(f"  [g_pre] exp2_inv={params.exp2_inv_g_pre_:3d}, zp={params.zp_g_pre_}")
+        print(f"  [z_out] exp2_inv={params.exp2_inv_z_out_:3d}, zp={params.zp_z_out_}")
+        print(f"  [r_out] exp2_inv={params.exp2_inv_r_out_:3d}, zp={params.zp_r_out_}")
+        print(f"  [g_out] exp2_inv={params.exp2_inv_g_out_:3d}, zp={params.zp_g_out_}")
+        print("-" * 60)
+        print(f"  [Rh_add_br]        exp2_inv={params.exp2_inv_Rh_add_br_:3d}, zp={params.zp_Rh_add_br_}")
+        print(f"  [rRh]              exp2_inv={params.exp2_inv_rRh_:3d}, zp={params.zp_rRh_}")
+        print(f"  [one_minus_update] exp2_inv={params.exp2_inv_one_minus_update_:3d}, zp={params.zp_one_minus_update_}")
+        print(f"  [new_contrib]      exp2_inv={params.exp2_inv_new_contrib_:3d}, zp={params.zp_new_contrib_}")
+        print(f"  [old_contrib]      exp2_inv={params.exp2_inv_old_contrib_:3d}, zp={params.zp_old_contrib_}")
+        print("-" * 60)
+        if params.exp2_inv_W_:
+            print(f"  [W] exp2_inv (first 5): {list(params.exp2_inv_W_[:5])} ...")
+        if params.exp2_inv_R_:
+            print(f"  [R] exp2_inv (first 5): {list(params.exp2_inv_R_[:5])} ...")
+        if params.exp2_inv_bx_:
+            print(f"  [bx] exp2_inv (first 5): {list(params.exp2_inv_bx_[:5])} ...")
+        if params.exp2_inv_br_:
+            print(f"  [br] exp2_inv (first 5): {list(params.exp2_inv_br_[:5])} ...")
+        print("=" * 60)
+
+    def print_quant_ranges(self):
+        """
+        打印量化范围
+
+        Raises:
+            RuntimeError: 未调用过 calibrate()
+        """
+        if self.quant_ranges is None:
+            raise RuntimeError(
+                "No calibration data accumulated. "
+                "Call calibrate(data) first."
+            )
+
+        r = self.quant_ranges
+        print("=" * 60)
+        print("GRUQuantizationRanges (量化范围)")
+        print("=" * 60)
+        print(f"  hidden_ = {r.hidden_}")
+        print(f"  [x]  min={r.min_x_:12.6f}, max={r.max_x_:12.6f}")
+        print(f"  [h]  min={r.min_h_:12.6f}, max={r.max_h_:12.6f}")
+        print(f"  [Wx] min={r.min_Wx_:12.6f}, max={r.max_Wx_:12.6f}")
+        print(f"  [Rh] min={r.min_Rh_:12.6f}, max={r.max_Rh_:12.6f}")
+        print("-" * 60)
+        print(f"  [z_pre] min={r.min_z_pre_:12.6f}, max={r.max_z_pre_:12.6f}")
+        print(f"  [r_pre] min={r.min_r_pre_:12.6f}, max={r.max_r_pre_:12.6f}")
+        print(f"  [g_pre] min={r.min_g_pre_:12.6f}, max={r.max_g_pre_:12.6f}")
+        print(f"  [z_out] min={r.min_z_out_:12.6f}, max={r.max_z_out_:12.6f}")
+        print(f"  [r_out] min={r.min_r_out_:12.6f}, max={r.max_r_out_:12.6f}")
+        print(f"  [g_out] min={r.min_g_out_:12.6f}, max={r.max_g_out_:12.6f}")
+        print("-" * 60)
+        print(f"  [Rh_add_br]        min={r.min_Rh_add_br_:12.6f}, max={r.max_Rh_add_br_:12.6f}")
+        print(f"  [rRh]              min={r.min_rRh_:12.6f}, max={r.max_rRh_:12.6f}")
+        print(f"  [one_minus_update] min={r.min_one_minus_update_:12.6f}, max={r.max_one_minus_update_:12.6f}")
+        print(f"  [new_contrib]      min={r.min_new_contrib_:12.6f}, max={r.max_new_contrib_:12.6f}")
+        print(f"  [old_contrib]      min={r.min_old_contrib_:12.6f}, max={r.max_old_contrib_:12.6f}")
+        print("=" * 60)
+
+    # -------------------- 内部方法 --------------------
 
     def _convert_weights_to_haste_format(self, device: torch.device):
         """
@@ -411,41 +591,14 @@ class CustomGRU(nn.GRU):
 
         return W, R, bx, br
 
-    def is_calibrated(self) -> bool:
-        """检查量化参数是否已校准"""
-        return self.quant_params is not None
-
-    def calibrate(self, calibration_data: torch.Tensor):
-        """
-        显式校准量化参数（公共方法）
-
-        权重将在每次前向传播时实时量化，以支持训练时权重的更新。
-
-        Args:
-            calibration_data: 用于校准的输入数据，形状为 [seq_len, batch, input_size] 或 [batch, seq_len, input_size]
-
-        Raises:
-            RuntimeError: 如果未启用量化
-        """
-        if not self.use_quantization:
-            raise RuntimeError("Cannot calibrate: quantization is not enabled. Set use_quantization=True first.")
-        self._initialize_quantization(calibration_data)
-
-    def _initialize_quantization(self, calibration_data: torch.Tensor):
-        """
-        初始化量化参数（内部方法）
-
-        权重将在每次前向传播时实时量化，以支持训练时权重的更新。
-
-        Args:
-            calibration_data: 用于校准的输入数据，形状为 [seq_len, batch, input_size] 或 [batch, seq_len, input_size]
-        """
+    def _accumulate_calibration_ranges(self, calibration_data: torch.Tensor):
+        """累积校准范围（内部方法）"""
         # 确保校准数据在 CUDA 上
         device = calibration_data.device if calibration_data.is_cuda else torch.device('cuda')
         if not calibration_data.is_cuda:
             calibration_data = calibration_data.to(device)
 
-        # 确保模型参数在 GPU 上（手动移动，避免触发 flatten_parameters）
+        # 确保模型参数在 GPU 上
         if not next(self.parameters()).is_cuda:
             for param in self.parameters():
                 param.data = param.data.to(device)
@@ -462,8 +615,14 @@ class CustomGRU(nn.GRU):
         # 转换权重格式
         W, R, bx, br = self._convert_weights_to_haste_format(device)
 
-        # 校准量化参数（使用默认的 INT8 位宽配置）
-        self.quant_params = gru_ops.calibrate_gru_scales(
+        # 初始化 quant_ranges（如果尚未初始化）
+        if self.quant_ranges is None:
+            self.quant_ranges = gru_ops.GRUQuantizationRanges()
+            self.quant_ranges.resize_per_channel_vectors(hidden_size)
+            self.quant_ranges.reset()
+
+        # 累积更新量化范围
+        gru_ops.calibrate_gru_ranges(
             time_steps=time_steps,
             batch_size=batch_size,
             input_size=input_size,
@@ -472,42 +631,36 @@ class CustomGRU(nn.GRU):
             R=R,
             bx=bx,
             br=br,
-            x=calibration_data
+            x=calibration_data,
+            quant_ranges=self.quant_ranges
         )
         torch.cuda.synchronize()
 
-        # 初始化量化 LUT 表
-        gru_ops.initialize_quantization_lut(quant_params=self.quant_params)
-        torch.cuda.synchronize()
-
-        # 确保权重连续性并重置 flatten_parameters 状态
+        # 确保权重连续性
         self.weight_ih_l0.data = self.weight_ih_l0.data.contiguous()
         self.weight_hh_l0.data = self.weight_hh_l0.data.contiguous()
         if self.bias:
             self.bias_ih_l0.data = self.bias_ih_l0.data.contiguous()
             self.bias_hh_l0.data = self.bias_hh_l0.data.contiguous()
 
-        # 重置 flatten_parameters 的内部状态，避免后续 .to(device) 时出现问题
+        # 重置 flatten_parameters 的内部状态
         if hasattr(self, '_flat_weights'):
             self._flat_weights = None
 
-        # 标记量化已初始化，用于后续的 _apply 方法
-        self._quantization_initialized = True
+    def _initialize_quantization(self, calibration_data: torch.Tensor):
+        """一次性完成校准（内部方法，向后兼容）"""
+        self._accumulate_calibration_ranges(calibration_data)
+        self.finalize_calibration()
+
+    # -------------------- 重写方法 --------------------
 
     def _apply(self, fn):
         """
-        重写 _apply 方法，在量化初始化后正确处理设备迁移
+        重写 _apply 方法，在量化校准后正确处理设备迁移
 
-        主要用于向后兼容立即校准方式（方式1）：
-        - 如果使用延迟校准（方式2，推荐），此方法不会被触发
-        - 如果使用立即校准（方式1），在量化初始化后调用 .to(device) 时会触发此方法
-        - 手动应用函数，避免触发 flatten_parameters()，防止 CUDA 状态冲突
-
-        注意：延迟校准方式不需要此方法，因为 .to(device) 在量化初始化之前调用
+        量化已校准时手动应用函数，避免触发 flatten_parameters() 导致 CUDA 状态冲突。
         """
-        if hasattr(self, '_quantization_initialized') and self._quantization_initialized:
-            # 量化已初始化：手动应用函数，避免触发 flatten_parameters()
-            # 这主要用于向后兼容立即校准方式
+        if self.is_calibrated():
             if hasattr(self, '_flat_weights'):
                 self._flat_weights = None
             for param in self.parameters():
@@ -519,9 +672,7 @@ class CustomGRU(nn.GRU):
                 if buffer is not None:
                     buffer.data = fn(buffer.data)
             return self
-        else:
-            # 量化未初始化：使用父类的默认行为（正常触发 flatten_parameters()）
-            return super(CustomGRU, self)._apply(fn)
+        return super(CustomGRU, self)._apply(fn)
 
     def forward(
         self,
@@ -542,13 +693,21 @@ class CustomGRU(nn.GRU):
         Raises:
             RuntimeError: 如果启用了量化但未校准
         """
-        # 检查量化是否已校准
+        # 检查量化是否已校准完成
         if self.use_quantization and not self.is_calibrated():
-            raise RuntimeError(
-                "Quantization is enabled but not calibrated. "
-                "Please call calibrate(calibration_data) before forward pass, "
-                "or provide calibration_data in __init__."
-            )
+            if self.quant_ranges is not None:
+                # 已累积范围但未完成校准
+                raise RuntimeError(
+                    "Quantization ranges have been accumulated but not finalized. "
+                    "Please call finalize_calibration() before forward pass."
+                )
+            else:
+                # 未进行任何校准
+                raise RuntimeError(
+                    "Quantization is enabled but not calibrated. "
+                    "Please call calibrate(data) and finalize_calibration() before forward pass, "
+                    "or provide calibration_data in __init__."
+                )
 
         # 处理 batch_first
         if self.batch_first:
