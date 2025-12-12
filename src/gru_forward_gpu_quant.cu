@@ -64,8 +64,8 @@ __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
     QuantZ_Out z;
     if constexpr (std::is_same_v<QuantZ_Out, uint16_t>) {
         // UINT16 版本：使用分段线性拟合（z 门）
-        // z_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
-        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, z_pre_i32)));
+        // z_pre_i32 已经包含了 zero-point，截断到 int16_t 范围
+        int16_t q_x = dev::clamp<int16_t>(z_pre_i32);
         z = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
     } else {
         // UINT8 版本：使用 LUT 查表
@@ -131,8 +131,8 @@ __device__ __forceinline__ QuantR_Out computeR(const int channel_idx,
     QuantR_Out r;
     if constexpr (std::is_same_v<QuantR_Out, uint16_t>) {
         // UINT16 版本：使用分段线性拟合（r 门）
-        // r_pre_i32 已经包含了 zero-point，直接转换为 uint16_t
-        uint16_t q_x = static_cast<uint16_t>(max(0, min(65535, r_pre_i32)));
+        // r_pre_i32 已经包含了 zero-point，截断到 int16_t 范围
+        int16_t q_x = dev::clamp<int16_t>(r_pre_i32);
         r = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
     } else {
         // UINT8 版本：使用 LUT 查表
@@ -214,12 +214,12 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
     QuantG g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut);  // TODO: 支持int16量化
 
 #ifdef USE_LINER
-    if constexpr (std::is_same_v<QuantG, uint16_t>) {
-        const int16_t r_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
-        r = dev::tanh_piecewise_linear_int16(r_pre_i16, d_tanh_lut_int16);
+    if constexpr (std::is_same_v<QuantG, int16_t>) {
+        const int16_t g_pre_i16_linear = dev::clamp<int16_t>(g_pre_i32);
+        g = static_cast<QuantG>(dev::tanh_piecewise_linear_int16(g_pre_i16_linear, d_tanh_lut_int16));
     } else {
-        const int8_t r_pre_i8 = dev::clamp<int16_t>(g_pre_i32);
-        r = dev::tanh_piecewise_linear_int8(r_pre_i8, d_tanh_lut_int8);
+        const int8_t g_pre_i8_linear = dev::clamp<int8_t>(g_pre_i32);
+        g = static_cast<QuantG>(dev::tanh_piecewise_linear_int8(g_pre_i8_linear, d_tanh_lut_int8));
     }
 #endif
 
