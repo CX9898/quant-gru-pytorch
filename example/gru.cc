@@ -211,30 +211,20 @@ int main() {
     std::vector<float> dh((SEQUENCE_LEN + 1) * BATCH_SIZE * HIDDEN_DIMS);
 
     // W: 输入权重矩阵
-    fillVectorWithNormalDistribution(W, -1, 1);
-    for (auto &v : W) v *= 0.001f;
+    fillVectorWithNormalDistribution(W, -0.001f,  0.001f);
 
     // R: 循环权重矩阵
-    fillVectorWithNormalDistribution(R, -1, 1);
-    for (auto &v : R) v *= 0.005f;
+    fillVectorWithNormalDistribution(R, -0.005f,  0.005f);
 
     // bx, br: 偏置
-    fillVectorWithNormalDistribution(bx, -1, 1);
-    for (auto &v : bx) v *= 0.15f;
-
-    fillVectorWithNormalDistribution(br, -1, 1);
-    for (auto &v : br) v *= 0.15f;
+    fillVectorWithNormalDistribution(bx, -0.15, 0.15);
+    fillVectorWithNormalDistribution(br, -0.15, 0.15);
 
     // x: 输入序列
-    fillVectorWithNormalDistribution(x, -1, 1);
-    for (auto &v : x) {
-        v *= 0.8f;
-        v += 0.1f;
-    }
+    fillVectorWithNormalDistribution(x, -3, 3.5);
 
     // dh: 上游梯度
-    fillVectorWithNormalDistribution(dh, -1, 1);
-    for (auto &v : dh) v *= 0.5f;
+    fillVectorWithNormalDistribution(dh, -0.5, 0.5);
 
     const int time_steps = SEQUENCE_LEN;
     const int batch_size = BATCH_SIZE;

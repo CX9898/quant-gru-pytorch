@@ -248,7 +248,9 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
     if (!name.empty() &&
         (name == "scale_z_out" || name == "scale_r_out" || name == "scale_g_out")) {
         printf(
-            "[QuantParam][%s] orig_min=%f, orig_max=%f, aligned_min=%f, aligned_max=%f, scale=%f, "
+            "[DEBUG][QuantParam][%s] "
+            "orig_min=%f, orig_max=%f, "
+            "aligned_min=%f, aligned_max=%f, scale=%f, "
             "exp2_inv=%d, zp=%d, is_symmetric=%d\n",
             name.c_str(), static_cast<double>(orig_min), static_cast<double>(orig_max),
             static_cast<double>(aligned_min), static_cast<double>(aligned_max),
@@ -568,8 +570,10 @@ inline void calculateScale(const T *data_dev, const size_t size, const bool use_
 inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("GRUQuantitativeParameters (量化参数):\n");
     printf("  hidden_ = %d\n", quant_parms.hidden_);
-    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", static_cast<int>(quant_parms.exp2_inv_x_), quant_parms.zp_x_);
-    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", static_cast<int>(quant_parms.exp2_inv_h_), quant_parms.zp_h_);
+    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", static_cast<int>(quant_parms.exp2_inv_x_),
+           quant_parms.zp_x_);
+    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", static_cast<int>(quant_parms.exp2_inv_h_),
+           quant_parms.zp_h_);
 
     printf("  exp2_inv_W_ (size %zu): ", quant_parms.exp2_inv_W_.size());
     for (size_t i = 0; i < quant_parms.exp2_inv_W_.size() && i < 5; ++i) {
@@ -599,25 +603,29 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     if (quant_parms.exp2_inv_br_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Wx_), quant_parms.zp_Wx_);
-    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Rh_), quant_parms.zp_Rh_);
-    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n", static_cast<int>(quant_parms.exp2_inv_z_pre_),
-           quant_parms.zp_z_pre_);
-    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n", static_cast<int>(quant_parms.exp2_inv_r_pre_),
-           quant_parms.zp_r_pre_);
-    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n", static_cast<int>(quant_parms.exp2_inv_g_pre_),
-           quant_parms.zp_g_pre_);
-    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_z_out_),
-           quant_parms.zp_z_out_);
-    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_r_out_),
-           quant_parms.zp_r_out_);
-    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n", static_cast<int>(quant_parms.exp2_inv_g_out_),
-           quant_parms.zp_g_out_);
-    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", static_cast<int>(quant_parms.exp2_inv_Rh_add_br_),
-           quant_parms.zp_Rh_add_br_);
-    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", static_cast<int>(quant_parms.exp2_inv_rRh_), quant_parms.zp_rRh_);
+    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Wx_),
+           quant_parms.zp_Wx_);
+    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Rh_),
+           quant_parms.zp_Rh_);
+    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n",
+           static_cast<int>(quant_parms.exp2_inv_z_pre_), quant_parms.zp_z_pre_);
+    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_r_pre_), quant_parms.zp_r_pre_);
+    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_g_pre_), quant_parms.zp_g_pre_);
+    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_z_out_), quant_parms.zp_z_out_);
+    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_r_out_), quant_parms.zp_r_out_);
+    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_g_out_), quant_parms.zp_g_out_);
+    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n",
+           static_cast<int>(quant_parms.exp2_inv_Rh_add_br_), quant_parms.zp_Rh_add_br_);
+    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", static_cast<int>(quant_parms.exp2_inv_rRh_),
+           quant_parms.zp_rRh_);
     printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_one_minus_update_), quant_parms.zp_one_minus_update_);
+           static_cast<int>(quant_parms.exp2_inv_one_minus_update_),
+           quant_parms.zp_one_minus_update_);
     printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
            static_cast<int>(quant_parms.exp2_inv_new_contrib_), quant_parms.zp_new_contrib_);
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
