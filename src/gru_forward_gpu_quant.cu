@@ -458,8 +458,8 @@ __global__ void PointwiseOperationsQuant(
 
 namespace gru {
 
-template <typename T>
-struct ForwardPassQuant<T>::private_data {
+template <typename XT, typename HT, typename WT, typename RT>
+struct ForwardPassQuant<XT, HT, WT, RT>::private_data {
     bool training;
     int batch_size;
     int input_size;
@@ -470,8 +470,8 @@ struct ForwardPassQuant<T>::private_data {
     cudaStream_t sync_stream;
 };
 
-template <typename T>
-ForwardPassQuant<T>::ForwardPassQuant(const bool training, const int batch_size,
+template <typename XT, typename HT, typename WT, typename RT>
+ForwardPassQuant<XT, HT, WT, RT>::ForwardPassQuant(const bool training, const int batch_size,
                                       const int input_size, const int hidden_size,
                                       const cublasHandle_t &blas_handle, const cudaStream_t &stream)
     : data_(new private_data) {
@@ -486,8 +486,8 @@ ForwardPassQuant<T>::ForwardPassQuant(const bool training, const int batch_size,
     cudaEventCreateWithFlags(&data_->event, cudaEventDisableTiming);
 }
 
-template <typename T>
-ForwardPassQuant<T>::~ForwardPassQuant() {
+template <typename XT, typename HT, typename WT, typename RT>
+ForwardPassQuant<XT, HT, WT, RT>::~ForwardPassQuant() {
     if (data_->sync_stream) {
         cudaEventRecord(data_->event, data_->stream[1]);
         cudaStreamWaitEvent(data_->sync_stream, data_->event, 0);
@@ -503,25 +503,25 @@ ForwardPassQuant<T>::~ForwardPassQuant() {
     delete data_;
 }
 
-template <typename T>
-void ForwardPassQuant<T>::Iterate(const T *W,         // [C,H*3]
-                                  const T *R,         // [H,H*3]
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::Iterate(const WT *W,         // [C,H*3]
+                                  const RT *R,         // [H,H*3]
                                   const int32_t *bx,  // [H*3]
                                   const int32_t *br,  // [H*3]
-                                  const T *x,         // [N,C]
-                                  const T *h,         // [N,H]
-                                  T *h_out,           // [N,H]
+                                  const XT *x,         // [N,C]
+                                  const HT *h,         // [N,H]
+                                  HT *h_out,           // [N,H]
                                   int32_t *v,         // [N,H*4]
                                   int32_t *tmp_Wx,    // [N,H*3]
                                   int32_t *tmp_Rh,    // [N,H*3]
                                   const float zoneout_prob,
-                                  const T *zoneout_mask  // Zoneout mask [N,H]
+                                  const HT *zoneout_mask  // Zoneout mask [N,H]
 ) {
     // TODO : 支持量化
     //    using alpha_beta_t = std::conditional_t<
-    //        std::is_same_v<T, int8_t> || std::is_same_v<T, int16_t>,
+    //        std::is_same_v<HT, int8_t> || std::is_same_v<HT, int16_t>,
     //        int,
-    //        T>;
+    //        HT>;
     //
     //    static const alpha_beta_t alpha = static_cast<alpha_beta_t>(1);
     //    static const alpha_beta_t beta = static_cast<alpha_beta_t>(0);
@@ -539,7 +539,7 @@ void ForwardPassQuant<T>::Iterate(const T *W,         // [C,H*3]
     //    cublasGetStream(blas_handle, &save_stream);
     //
     //    cublasSetStream(blas_handle, stream2);
-    //    blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3,
+    //    blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3,
     //                  batch_size, input_size, &alpha, W, hidden_size * 3, x,
     //                  input_size, &beta, tmp_Wx, hidden_size * 3);
     //    cudaEventRecord(event, stream2);
@@ -550,22 +550,22 @@ void ForwardPassQuant<T>::Iterate(const T *W,         // [C,H*3]
     //    cublasSetStream(blas_handle, save_stream);
 }
 
-template <typename QuantT>
-void ForwardPassQuant<QuantT>::IterateInternal(
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     // C = input_size(输入维度), H = hidden_size(隐藏层维度),
     // T = time_steps(时间步), N = batch_size(批量大小)
-    const QuantT *R,            // [H,H*3]
+    const RT *R,                // [H,H*3]
     const int32_t *bx,          // [H*3]
     const int32_t *br,          // [H*3]
-    const QuantT *h,            // [N,H]
-    QuantT *h_out,              // [N,H]
+    const HT *h,                // [N,H]
+    HT *h_out,                  // [N,H]
     int32_t *v,                 // [N,H*4]
     const int32_t *tmp_Wx,      // [N,H*3]
     int32_t *tmp_Rh,            // [N,H*3]
     const int *W_sum_mul_x_zp,  // hidden_size * 3
     const int *R_sum_mul_h_zp,  // hidden_size * 3
     const float zoneout_prob,
-    const QuantT *zoneout_mask  // Zoneout mask [N,H]
+    const HT *zoneout_mask  // Zoneout mask [N,H]
 ) {
     // Constants for GEMM
     static const int32_t alpha = static_cast<int32_t>(1);
@@ -579,7 +579,7 @@ void ForwardPassQuant<QuantT>::IterateInternal(
     const cudaEvent_t event = data_->event;
 
     cublasSetStream(blas_handle, stream1);
-    blas<QuantT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size,
+    blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size,
                        hidden_size, &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh,
                        hidden_size * 3);
 
@@ -598,7 +598,7 @@ void ForwardPassQuant<QuantT>::IterateInternal(
 
 // 宏简化 kernel 调用（避免重复代码）
 #define LAUNCH_KERNEL(QuantZ, QuantR, Training, ApplyZoneout)                                   \
-    kernel::PointwiseOperationsQuant<QuantT, QuantZ, QuantR, QuantT, Training, ApplyZoneout>    \
+    kernel::PointwiseOperationsQuant<HT, QuantZ, QuantR, HT, Training, ApplyZoneout>            \
         <<<gridDim, blockDim, 0, stream1>>>(                                                    \
             batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, \
             h_out, Training ? v : nullptr, ApplyZoneout ? zoneout_prob : 0.0f,                  \
@@ -670,8 +670,8 @@ void ForwardPassQuant<QuantT>::IterateInternal(
 #undef LAUNCH_KERNEL
 }
 
-template <typename T>
-void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms) {
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeParameters &parms) {
     const int channel = parms.hidden_ * 3;
 
     std::vector<int8_t> n_W_mul_x_div_Wx(channel);
@@ -764,23 +764,23 @@ void ForwardPassQuant<T>::setRescaleParam(const GRUQuantitativeParameters &parms
 
 // C = input_size(输入维度), H = hidden_size(隐藏层维度),
 // T = time_steps(时间步), N = batch_size(批量大小)
-template <typename QuantT>
-void ForwardPassQuant<QuantT>::Run(
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::Run(
     const int steps,    // 时间步数, 序列长度T
-    const QuantT *W,    // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）, 对应 GRU 的三个门（z、r、h）。C
+    const WT *W,        // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）, 对应 GRU 的三个门（z、r、h）。C
                         // 是输入特征维度，H 是隐藏状态维度, （行主序，计算 x @ W）
-    const QuantT *R,    // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh），对应 GRU 的三个门（z、r、h）.
+    const RT *R,        // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh），对应 GRU 的三个门（z、r、h）.
                         // （行主序，计算 h @ R）
     const int32_t *bx,  // [H*3], 输入偏置（bias for W），对应 z、r、h 门
     const int32_t *br,  // [H*3], 隐状态偏置（bias for R），对应 z、r、h 门
-    const QuantT *x,    // [N,C], 输入序列，batch_size = N，特征维度 = C
-    QuantT *h,          // [N,H], 输出隐藏状态，每个时间步保存的 GRU 隐状态
+    const XT *x,        // [N,C], 输入序列，batch_size = N，特征维度 = C
+    HT *h,              // [N,H], 输出隐藏状态，每个时间步保存的 GRU 隐状态
     int32_t *v,         // [N,H*4], 临时存储向量/中间计算值，通常保存 z, r, h_tilde, h_new
                         // 的中间值，用于后向传播或 zoneout (32位存储)
     int32_t *tmp_Wx,    // [N,H*3], W * x 的临时结果
     int32_t *tmp_Rh,    // [N,H*3], R * h 的临时结果
     const float zoneout_prob,  // Zoneout 概率，用于随机丢弃部分隐藏状态
-    const QuantT
+    const HT
         *zoneout_mask  // Zoneout mask，0/1 矩阵，控制哪些隐藏单元被保留,  // Zoneout mask [N,H]
 ) {
     static const int32_t alpha = static_cast<int32_t>(1);
@@ -801,7 +801,7 @@ void ForwardPassQuant<QuantT>::Run(
     cublasGetStream(blas_handle, &save_stream);
 
     cublasSetStream(blas_handle, stream2);
-    blas<QuantT>::gemm(blas_handle,  // 提前使用cuBlas计算W * x
+    blas<WT>::gemm(blas_handle,  // 提前使用cuBlas计算W * x
                        CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size, input_size,
                        &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx, hidden_size * 3);
 
@@ -832,7 +832,8 @@ void ForwardPassQuant<QuantT>::Run(
     cublasSetStream(blas_handle, save_stream);
 }
 
-template struct ForwardPassQuant<int8_t>;
-template struct ForwardPassQuant<int16_t>;
+// 显式实例化：四个类型参数相同的情况
+template struct ForwardPassQuant<int8_t, int8_t, int8_t, int8_t>;
+template struct ForwardPassQuant<int16_t, int16_t, int16_t, int16_t>;
 
 }  // namespace gru
