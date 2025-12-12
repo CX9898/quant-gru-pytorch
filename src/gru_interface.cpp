@@ -363,8 +363,16 @@ void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) 
             quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
             quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
     } else {
-        // int8 使用传统的 LUT 表
+        // int8：同时初始化传统 LUT 表和分段线性 LUT
+        // 传统 LUT（用于非 USE_LINER 编译）
         generate_int8_lut_from_exp2_inv(
+            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
+            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
+            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+        
+        // 分段线性 LUT（用于 USE_LINER 编译）
+        generate_piecewise_linear_lut_from_exp2_inv<int8_t>(
             quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
             quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
             quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,

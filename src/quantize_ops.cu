@@ -170,21 +170,21 @@ void generate_piecewise_linear_lut_from_exp2_inv(int8_t exp2_inv_z_pre, int32_t 
         }
     };
 
-    // 🔥 关键修正：根据 Python 参考（u8.py, u16.py），非对称量化使用无符号整数范围
-    // 输入和输出使用无符号量化：[0, 2^bit_width - 1]
-    // 即使 QuantT 是 int8_t/int16_t，在计算输入/输出范围时也应使用对应的无符号范围
+    // 🔥 关键修正：C++ 实现中，sigmoid/tanh 的输入是有符号整数（来自 clamp<int8_t/int16_t>）
+    // 所以应该使用有符号整数范围：[-128, 127] 或 [-32768, 32767]
+    // 注意：这与 Python 参考不同，Python 参考使用无符号整数范围
     int32_t quant_min, quant_max;
     if constexpr (std::is_same_v<QuantT, int8_t>) {
-        // 对于 int8_t，输入/输出使用 uint8_t 范围 [0, 255]
-        quant_min = 0;
-        quant_max = 255;
+        // 对于 int8_t，输入使用有符号范围 [-128, 127]
+        quant_min = -128;
+        quant_max = 127;
     } else if constexpr (std::is_same_v<QuantT, int16_t>) {
-        // 对于 int16_t，输入/输出使用 uint16_t 范围 [0, 65535]
-        quant_min = 0;
-        quant_max = 65535;
+        // 对于 int16_t，输入使用有符号范围 [-32768, 32767]
+        quant_min = -32768;
+        quant_max = 32767;
     } else {
         // 默认情况（不应该到达这里）
-        quant_min = 0;
+        quant_min = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
         quant_max = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
     }
 
@@ -532,51 +532,108 @@ inline void linear_fit(const std::vector<float> &x, const std::vector<float> &y,
     c = (sum_y - b * sum_x) / n;
 }
 
-// 自适应分段（Sigmoid 专用）
+// 自适应分段（Sigmoid/Tanh 专用）
+// 🔥 基于导数的权重分配，与 Python 参考 (bc_ds_U8.py) 保持一致
+// 关键：中心区域固定在 x = 0 附近（sigmoid/tanh 的特性），不是输入范围的中心
 std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int num_segments) {
-    std::vector<float> segment_points(num_segments + 1);
-    segment_points[0] = x_min;
-    segment_points[num_segments] = x_max;
-
-    // 在中心区域（x ≈ 0）密集分段
-    float center_range = 2.0f;       // 中心区域范围 [-2, 2]
-    int n_dense = num_segments / 2;  // 一半段用于中心区域
-    int n_sparse = num_segments - n_dense;
-
-    // 稀疏分段（远离中心）
-    if (x_min < -center_range) {
-        float sparse_range = -center_range - x_min;
-        for (int i = 1; i <= n_sparse; i++) {
-            float ratio = static_cast<float>(i) / (n_sparse + 1);
-            segment_points[i] = x_min + sparse_range * ratio;
+    // Sigmoid/Tanh 的权重配置（与 Python 参考一致）
+    // centerWeight: 中心区域的权重倍数
+    // centerRange: 中心区域的半宽度
+    const float centerWeight = 5.0f;  // sigmoid: 5.0, tanh: 4.0
+    const float centerRange = 2.0f;   // |x| < 2.0 的区域权重增加
+    
+    // 1. 在输入范围内均匀采样，计算权重
+    const int numSamples = 1000;
+    std::vector<float> xSamples(numSamples);
+    std::vector<float> weights(numSamples - 1);
+    
+    for (int i = 0; i < numSamples; i++) {
+        xSamples[i] = x_min + (x_max - x_min) * static_cast<float>(i) / (numSamples - 1);
+    }
+    
+    // 2. 计算导数（斜率）和权重
+    for (int i = 0; i < numSamples - 1; i++) {
+        float x = xSamples[i];
+        float x_next = xSamples[i + 1];
+        
+        // 计算 sigmoid 的导数 y' = y * (1 - y)，其中 y = sigmoid(x)
+        float y = 1.0f / (1.0f + std::exp(-x));
+        float y_next = 1.0f / (1.0f + std::exp(-x_next));
+        float slope = std::abs(y_next - y) / (x_next - x + 1e-9f);
+        
+        // 距离 x = 0 的距离（与 Python 参考一致）
+        float distToCenter = std::abs(x);
+        
+        // 计算权重
+        if (distToCenter < centerRange) {
+            // 中心区域：权重随距离线性递减
+            weights[i] = centerWeight * (1.0f - distToCenter / centerRange) + 1.0f;
+        } else {
+            // 外侧区域：基于斜率的权重
+            weights[i] = 1.0f + slope * 0.5f;
         }
     }
-
-    // 密集分段（中心区域）
-    float dense_start = std::max(x_min, -center_range);
-    float dense_end = std::min(x_max, center_range);
-    float dense_range = dense_end - dense_start;
-    for (int i = 0; i < n_dense; i++) {
-        float ratio = static_cast<float>(i + 1) / (n_dense + 1);
-        segment_points[n_sparse + i] = dense_start + dense_range * ratio;
+    
+    // 3. 归一化权重
+    float sumWeights = 0.0f;
+    for (int i = 0; i < numSamples - 1; i++) {
+        sumWeights += weights[i];
     }
-
-    // 稀疏分段（远离中心，右侧）
-    if (x_max > center_range) {
-        float sparse_range = x_max - center_range;
-        for (int i = 0; i < n_sparse; i++) {
-            float ratio = static_cast<float>(i + 1) / (n_sparse + 1);
-            segment_points[n_sparse + n_dense + i] = center_range + sparse_range * ratio;
+    for (int i = 0; i < numSamples - 1; i++) {
+        weights[i] /= sumWeights;
+    }
+    
+    // 4. 计算累积权重
+    std::vector<float> cumWeights(numSamples - 1);
+    cumWeights[0] = weights[0];
+    for (int i = 1; i < numSamples - 1; i++) {
+        cumWeights[i] = cumWeights[i - 1] + weights[i];
+    }
+    
+    // 5. 根据累积权重生成分段点
+    std::vector<float> points;
+    points.push_back(x_min);
+    
+    for (int i = 1; i < num_segments; i++) {
+        float target = static_cast<float>(i) / num_segments;
+        
+        // 二分查找目标累积权重对应的 x 值
+        auto it = std::lower_bound(cumWeights.begin(), cumWeights.end(), target);
+        int idx = static_cast<int>(std::distance(cumWeights.begin(), it));
+        if (idx >= numSamples - 1) idx = numSamples - 2;
+        if (idx < 0) idx = 0;
+        
+        points.push_back(xSamples[idx]);
+    }
+    
+    points.push_back(x_max);
+    
+    // 6. 确保点单调递增且无重复
+    std::sort(points.begin(), points.end());
+    auto last = std::unique(points.begin(), points.end(),
+                            [](float a, float b) { return std::abs(a - b) < 1e-9f; });
+    points.erase(last, points.end());
+    
+    // 如果去重后点数不够，在最大间隔处插入点
+    while (static_cast<int>(points.size()) < num_segments + 1) {
+        float max_gap = 0.0f;
+        size_t max_gap_idx = 0;
+        for (size_t i = 0; i < points.size() - 1; i++) {
+            float gap = points[i + 1] - points[i];
+            if (gap > max_gap) {
+                max_gap = gap;
+                max_gap_idx = i;
+            }
         }
+        float new_point = (points[max_gap_idx] + points[max_gap_idx + 1]) / 2.0f;
+        points.insert(points.begin() + max_gap_idx + 1, new_point);
     }
-
-    // 排序确保单调递增
-    std::sort(segment_points.begin(), segment_points.end());
-
-    return segment_points;
+    
+    return points;
 }
 
 // 生成 Sigmoid 分段线性拟合 LUT（主机端）
+// 🔥 重写：采用两遍扫描方式，与 Python 参考保持一致
 SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shift_bits
                                             int32_t zp_x,         // 输入 zero-point
                                             int8_t shift_bits_y,  // 输出 shift_bits
@@ -593,7 +650,13 @@ SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shif
     // 1. 生成分段点（自适应分段）
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
 
-    // 2. 对每段进行线性拟合
+    // ===== 第一遍扫描：拟合所有分段，收集所有系数 =====
+    struct SegmentCoeffs {
+        float x_start, x_end;
+        float b, c;
+    };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
+
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         float x_start = segment_points[i];
         float x_end = segment_points[i + 1];
@@ -613,59 +676,48 @@ SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shif
         float b_fp, c_fp;
         linear_fit(x_seg, y_seg, b_fp, c_fp);
 
-        // 3. 量化系数 b（对称量化，zero-point=0）
-        int8_t shift_bits_b = determine_shift_bits_int16(std::abs(b_fp));
-        int16_t q_b = quantize_coefficient_int16(b_fp, shift_bits_b);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
+    }
 
-        // 4. 量化系数 c（需要烘焙 zero-point）
-        // c_adjusted = c + zp_y * scale_y
-        float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
-        float c_adjusted = c_fp + static_cast<float>(zp_y) * scale_y;
+    // ===== 第二遍扫描：统一量化系数 =====
+    // 计算输出 zero-point 偏移，烘焙到 c 中
+    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
-        int8_t shift_bits_c = determine_shift_bits_int16(std::abs(c_adjusted));
+    // 收集所有 b 和调整后的 c
+    float b_abs_max = 0.0f;
+    float c_abs_max = 0.0f;
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        float c_adjusted = all_coeffs[i].c + zp_y_offset;
+        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
+    }
+
+    // 为所有段创建统一的量化参数
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
+
+    int8_t shift_bits_b = determine_shift_bits_int16(b_abs_max);
+    int8_t shift_bits_c = determine_shift_bits_int16(c_abs_max);
+
+    // ===== 第三遍扫描：量化每段并计算移位 =====
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        const auto& coeff = all_coeffs[i];
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        // 使用统一的量化器量化系数
+        int16_t q_b = quantize_coefficient_int16(coeff.b, shift_bits_b);
         int16_t q_c = quantize_coefficient_int16(c_adjusted, shift_bits_c);
 
-        // 5. 计算 shift_bits_bx（根据 bx 的实际范围）
-        // bx = b * x，需要计算该段内 bx 的范围
-        float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+        // 计算融合移位位数
+        // n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y
+        // （简化：省略中间 bx 量化步骤，直接融合）
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
 
-        // 计算该段内 x_offset 的范围（去零点后的范围）
-        // x_offset = q_x - zp_x，对应的浮点范围是 x_start 到 x_end
-        // 但实际计算时，x_offset 的范围需要考虑量化后的值
-        // 简化：直接使用浮点范围计算 bx 的范围
-        float bx_at_start = b_fp * x_start;
-        float bx_at_end = b_fp * x_end;
-        float bx_min = std::min(bx_at_start, bx_at_end);
-        float bx_max = std::max(bx_at_start, bx_at_end);
-
-        // 根据 bx 的范围确定 shift_bits_bx
-        // 使用对称量化（因为 bx 可能跨越0）
-        float bx_abs_max = std::max(std::abs(bx_min), std::abs(bx_max));
-        if (bx_abs_max < 1e-9f) {
-            bx_abs_max = 1e-9f;  // 避免除零
-        }
-
-        // 计算 shift_bits_bx：使 scale_bx = 2^(-shift_bits_bx) 能够覆盖 bx 的范围
-        // 🔥 修正：根据 Python 参考（u16.py），bx 使用非对称量化（无符号），范围 [0, 65535]
-        // scale_bx >= bx_range / 65535 (UINT16 最大值)
-        const float max_uint16 = 65535.0f;
-        float bx_range = bx_max - bx_min;  // bx 的实际范围（可能包含负值，通过 zero-point 处理）
-        if (bx_range < 1e-9f) {
-            bx_range = 1e-9f;  // 避免除零
-        }
-        float raw_scale_bx = bx_range / max_uint16;
-        int8_t shift_bits_bx = static_cast<int8_t>(std::ceil(-std::log2(raw_scale_bx)));
-        shift_bits_bx = std::max(static_cast<int8_t>(0), shift_bits_bx);  // 确保非负
-
-        // 6. 计算移位位数（根据文档公式）
-        int8_t n_bx = shift_bits_b + shift_bits_x - shift_bits_bx;
-        int8_t n_yb = shift_bits_bx - shift_bits_y;
+        // 计算 n_yc
         int8_t n_yc = shift_bits_c - shift_bits_y;
 
-        // 融合移位
-        int8_t n_BX_total = n_bx + n_yb;
-
-        // 7. 预计算 term_c
+        // 预计算 term_c
         int32_t term_c_precomputed;
         if (n_yc >= 0) {
             term_c_precomputed = static_cast<int32_t>(q_c) >> n_yc;
@@ -673,8 +725,8 @@ SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shif
             term_c_precomputed = static_cast<int32_t>(q_c) << (-n_yc);
         }
 
-        // 8. 量化阈值
-        uint16_t threshold = quantize_input_uint16(x_end, shift_bits_x, zp_x);
+        // 量化阈值（使用有符号量化 INT16）
+        int16_t threshold = quantize_input_int16(coeff.x_end, shift_bits_x, zp_x);
 
         // 保存段参数
         lut.segments[i].q_b = q_b;
@@ -687,6 +739,7 @@ SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shif
 }
 
 // 生成 Tanh 分段线性拟合 LUT（主机端）
+// 🔥 重写：采用两遍扫描方式，与 Python 参考保持一致
 SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
                                          int32_t zp_y, float x_min, float x_max) {
     SigmoidLUT_INT16 lut;
@@ -695,8 +748,15 @@ SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8
     lut.shift_bits_y = shift_bits_y;
     lut.zp_y = zp_y;
 
-    // 与 sigmoid 类似的实现，但使用 tanh 函数
+    // 1. 生成分段点
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
+
+    // ===== 第一遍扫描：拟合所有分段，收集所有系数 =====
+    struct SegmentCoeffs {
+        float x_start, x_end;
+        float b, c;
+    };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         float x_start = segment_points[i];
@@ -715,37 +775,37 @@ SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8
         float b_fp, c_fp;
         linear_fit(x_seg, y_seg, b_fp, c_fp);
 
-        int8_t shift_bits_b = determine_shift_bits_int16(std::abs(b_fp));
-        int16_t q_b = quantize_coefficient_int16(b_fp, shift_bits_b);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
+    }
 
-        float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
-        float c_adjusted = c_fp + static_cast<float>(zp_y) * scale_y;
+    // ===== 第二遍扫描：统一量化系数 =====
+    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
-        int8_t shift_bits_c = determine_shift_bits_int16(std::abs(c_adjusted));
+    float b_abs_max = 0.0f;
+    float c_abs_max = 0.0f;
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        float c_adjusted = all_coeffs[i].c + zp_y_offset;
+        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
+    }
+
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
+
+    int8_t shift_bits_b = determine_shift_bits_int16(b_abs_max);
+    int8_t shift_bits_c = determine_shift_bits_int16(c_abs_max);
+
+    // ===== 第三遍扫描：量化每段并计算移位 =====
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        const auto& coeff = all_coeffs[i];
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        int16_t q_b = quantize_coefficient_int16(coeff.b, shift_bits_b);
         int16_t q_c = quantize_coefficient_int16(c_adjusted, shift_bits_c);
 
-        // 计算 shift_bits_bx（根据 bx 的实际范围）
-        float bx_at_start = b_fp * x_start;
-        float bx_at_end = b_fp * x_end;
-        float bx_min = std::min(bx_at_start, bx_at_end);
-        float bx_max = std::max(bx_at_start, bx_at_end);
-
-        // 🔥 修正：根据 Python 参考（u16.py），bx 使用非对称量化（无符号），范围 [0, 65535]
-        // scale_bx >= bx_range / 65535 (UINT16 最大值)
-        const float max_uint16 = 65535.0f;
-        float bx_range = bx_max - bx_min;  // bx 的实际范围（可能包含负值，通过 zero-point 处理）
-        if (bx_range < 1e-9f) {
-            bx_range = 1e-9f;  // 避免除零
-        }
-        float raw_scale_bx = bx_range / max_uint16;
-        int8_t shift_bits_bx = static_cast<int8_t>(std::ceil(-std::log2(raw_scale_bx)));
-        shift_bits_bx = std::max(static_cast<int8_t>(0), shift_bits_bx);
-
-        int8_t n_bx = shift_bits_b + shift_bits_x - shift_bits_bx;
-        int8_t n_yb = shift_bits_bx - shift_bits_y;
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
         int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int8_t n_BX_total = n_bx + n_yb;
 
         int32_t term_c_precomputed;
         if (n_yc >= 0) {
@@ -754,7 +814,7 @@ SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8
             term_c_precomputed = static_cast<int32_t>(q_c) << (-n_yc);
         }
 
-        uint16_t threshold = quantize_input_uint16(x_end, shift_bits_x, zp_x);
+        int16_t threshold = quantize_input_int16(coeff.x_end, shift_bits_x, zp_x);
 
         lut.segments[i].q_b = q_b;
         lut.segments[i].n_BX_total = n_BX_total;
@@ -804,30 +864,60 @@ void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
 }
 
 // ==================== INT8 版本的分段线性量化参数生成函数 ====================
+//
+// 【生成流程】三遍扫描
+//   Pass 1: 线性拟合每段 → 浮点系数 (b_fp, c_fp)
+//   Pass 2: 统计最大值 → 全局量化参数 (shift_bits_b, shift_bits_c)
+//   Pass 3: 量化系数 → (q_b, term_c_precomputed, n_BX_total)
+//
+// 【量化公式推导】
+//   浮点:  y_fp = b_fp * x_fp + c_fp
+//   
+//   量化:  x_fp = (q_x - zp_x) * scale_x     其中 scale_x = 2^(-shift_bits_x)
+//          y_fp = (q_y - zp_y) * scale_y     其中 scale_y = 2^(-shift_bits_y)
+//          b_fp = q_b * scale_b              其中 scale_b = 2^(-shift_bits_b)
+//          c_fp = q_c * scale_c              其中 scale_c = 2^(-shift_bits_c)
+//   
+//   代入:  (q_y - zp_y) * scale_y = q_b * scale_b * (q_x - zp_x) * scale_x + q_c * scale_c
+//   
+//   整理:  q_y = q_b * (q_x - zp_x) * (scale_b * scale_x / scale_y) + q_c * (scale_c / scale_y) + zp_y
+//             = q_b * (q_x - zp_x) >> (shift_bits_b + shift_bits_x - shift_bits_y)
+//               + q_c >> (shift_bits_c - shift_bits_y) + zp_y
+//   
+//   优化:  将 zp_y 烘焙到 c 中: c_adjusted = c_fp + zp_y * scale_y
+//          n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y
+//          term_c_precomputed = q_c >> (shift_bits_c - shift_bits_y)
+//   
+//   最终:  q_y = (q_b * (q_x - zp_x)) >> n_BX_total + term_c_precomputed
+//
+// =========================================================================
 
-// 生成 Sigmoid 分段线性拟合 LUT（INT8 版本）
-SigmoidLUT_INT8 generate_sigmoid_lut_int8(int8_t shift_bits_x,  // 输入 shift_bits
-                                          int32_t zp_x,         // 输入 zero-point
-                                          int8_t shift_bits_y,  // 输出 shift_bits
-                                          int32_t zp_y,         // 输出 zero-point
-                                          float x_min,          // 输入范围最小值
-                                          float x_max           // 输入范围最大值
-) {
+/**
+ * @brief 生成 Sigmoid 分段线性拟合 LUT（INT8 版本）
+ */
+SigmoidLUT_INT8 generate_sigmoid_lut_int8(int8_t shift_bits_x, int32_t zp_x,
+                                          int8_t shift_bits_y, int32_t zp_y,
+                                          float x_min, float x_max) {
     SigmoidLUT_INT8 lut;
     lut.shift_bits_x = shift_bits_x;
     lut.zp_x = zp_x;
     lut.shift_bits_y = shift_bits_y;
     lut.zp_y = zp_y;
 
-    // 1. 生成分段点（自适应分段）
+    // ===== Pass 1: 生成分段点 + 线性拟合 =====
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
 
-    // 2. 对每段进行线性拟合
+    struct SegmentCoeffs {
+        float x_start, x_end;
+        float b, c;  // y_fp = b * x_fp + c
+    };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
+
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         float x_start = segment_points[i];
         float x_end = segment_points[i + 1];
 
-        // 生成该段的训练数据
+        // 采样并拟合: sigmoid(x) = 1 / (1 + exp(-x))
         const int num_samples = 100;
         std::vector<float> x_seg(num_samples);
         std::vector<float> y_seg(num_samples);
@@ -835,73 +925,57 @@ SigmoidLUT_INT8 generate_sigmoid_lut_int8(int8_t shift_bits_x,  // 输入 shift_
         for (int j = 0; j < num_samples; j++) {
             float x_val = x_start + (x_end - x_start) * static_cast<float>(j) / (num_samples - 1);
             x_seg[j] = x_val;
-            y_seg[j] = 1.0f / (1.0f + std::exp(-x_val));  // Sigmoid
+            y_seg[j] = 1.0f / (1.0f + std::exp(-x_val));
         }
 
-        // 线性拟合: y = b*x + c
         float b_fp, c_fp;
         linear_fit(x_seg, y_seg, b_fp, c_fp);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
+    }
 
-        // 3. 量化系数 b（对称量化，zero-point=0）
-        int8_t shift_bits_b = determine_shift_bits_int8(std::abs(b_fp));
-        int8_t q_b = quantize_coefficient_int8(b_fp, shift_bits_b);
+    // ===== Pass 2: 确定全局量化参数 =====
+    // 公式: c_adjusted = c_fp + zp_y * scale_y  (将输出零点烘焙到 c)
+    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
-        // 4. 量化系数 c（需要烘焙 zero-point）
-        // c_adjusted = c + zp_y * scale_y
-        float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
-        float c_adjusted = c_fp + static_cast<float>(zp_y) * scale_y;
+    // 统计 |b| 和 |c_adjusted| 的最大值，用于确定 shift_bits
+    float b_abs_max = 0.0f, c_abs_max = 0.0f;
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        c_abs_max = std::max(c_abs_max, std::abs(all_coeffs[i].c + zp_y_offset));
+    }
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
-        int8_t shift_bits_c = determine_shift_bits_int8(std::abs(c_adjusted));
+    // 公式: scale_b = 2^(-shift_bits_b), 使得 |q_b| <= 127
+    int8_t shift_bits_b = determine_shift_bits_int8(b_abs_max);
+    int8_t shift_bits_c = determine_shift_bits_int8(c_abs_max);
+
+    // ===== Pass 3: 量化系数并计算预计算项 =====
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        const auto& coeff = all_coeffs[i];
+
+        // 公式: c_adjusted = c_fp + zp_y * scale_y
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        // 公式: q_b = round(b_fp / scale_b), q_c = round(c_adjusted / scale_c)
+        int8_t q_b = quantize_coefficient_int8(coeff.b, shift_bits_b);
         int16_t q_c = quantize_coefficient_int16(c_adjusted, shift_bits_c);
 
-        // 5. 计算 shift_bits_bx（根据 bx 的实际范围）
-        float bx_at_start = b_fp * x_start;
-        float bx_at_end = b_fp * x_end;
-        float bx_min = std::min(bx_at_start, bx_at_end);
-        float bx_max = std::max(bx_at_start, bx_at_end);
+        // 公式: n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
 
-        // 根据 bx 的范围确定 shift_bits_bx
-        float bx_abs_max = std::max(std::abs(bx_min), std::abs(bx_max));
-        if (bx_abs_max < 1e-9f) {
-            bx_abs_max = 1e-9f;  // 避免除零
-        }
-
-        // 计算 shift_bits_bx：使 scale_bx = 2^(-shift_bits_bx) 能够覆盖 bx 的范围
-        // 🔥 修正：根据 Python 参考（u8.py），bx 使用非对称量化（无符号），范围 [0, 255]
-        // scale_bx >= bx_range / 255 (UINT8 最大值)
-        const float max_uint8 = 255.0f;
-        float bx_range = bx_max - bx_min;  // bx 的实际范围（可能包含负值，通过 zero-point 处理）
-        if (bx_range < 1e-9f) {
-            bx_range = 1e-9f;  // 避免除零
-        }
-        float raw_scale_bx = bx_range / max_uint8;
-        int8_t shift_bits_bx = static_cast<int8_t>(std::ceil(-std::log2(raw_scale_bx)));
-        shift_bits_bx = std::max(static_cast<int8_t>(0), shift_bits_bx);  // 确保非负
-
-        // 6. 计算移位位数（根据文档公式）
-        int8_t n_bx = shift_bits_b + shift_bits_x - shift_bits_bx;
-        int8_t n_yb = shift_bits_bx - shift_bits_y;
+        // 公式: n_yc = shift_bits_c - shift_bits_y
         int8_t n_yc = shift_bits_c - shift_bits_y;
 
-        // 融合移位
-        int8_t n_BX_total = n_bx + n_yb;
+        // 公式: term_c_precomputed = q_c >> n_yc (或 << 如果 n_yc < 0)
+        int16_t term_c_precomputed = (n_yc >= 0) ? static_cast<int16_t>(q_c >> n_yc)
+                                                 : static_cast<int16_t>(q_c << (-n_yc));
+        term_c_precomputed = std::max<int16_t>(-32768, std::min<int16_t>(32767, term_c_precomputed));
 
-        // 7. 预计算 term_c（INT16 存储）
-        int16_t term_c_precomputed;
-        if (n_yc >= 0) {
-            term_c_precomputed = static_cast<int16_t>(q_c >> n_yc);
-        } else {
-            term_c_precomputed = static_cast<int16_t>(q_c << (-n_yc));
-        }
-        // 确保在 INT16 范围内
-        term_c_precomputed =
-            std::max(-32768, std::min(32767, static_cast<int32_t>(term_c_precomputed)));
+        // 公式: threshold = round(x_end / scale_x) + zp_x
+        int8_t threshold = quantize_input_int8(coeff.x_end, shift_bits_x, zp_x);
 
-        // 8. 量化阈值（使用无符号量化，直接使用 quantize_input_uint8）
-        // 🔥 修正：根据 Python 参考，输入应使用无符号量化 [0, 255]
-        uint8_t threshold = quantize_input_uint8(x_end, shift_bits_x, zp_x);
-
-        // 保存段参数
         lut.segments[i].q_b = q_b;
         lut.segments[i].n_BX_total = n_BX_total;
         lut.segments[i].term_c_precomputed = term_c_precomputed;
@@ -911,17 +985,28 @@ SigmoidLUT_INT8 generate_sigmoid_lut_int8(int8_t shift_bits_x,  // 输入 shift_
     return lut;
 }
 
-// 生成 Tanh 分段线性拟合 LUT（INT8 版本）
-SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                                       int32_t zp_y, float x_min, float x_max) {
+/**
+ * @brief 生成 Tanh 分段线性拟合 LUT（INT8 版本）
+ * @note Tanh 输出范围 [-1, 1]，使用有符号输出
+ */
+SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x,
+                                       int8_t shift_bits_y, int32_t zp_y,
+                                       float x_min, float x_max) {
     SigmoidLUT_INT8 lut;
     lut.shift_bits_x = shift_bits_x;
     lut.zp_x = zp_x;
     lut.shift_bits_y = shift_bits_y;
     lut.zp_y = zp_y;
 
-    // 与 sigmoid 类似的实现，但使用 tanh 函数
+    // 1. 生成分段点
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
+
+    // ===== 第一遍扫描：拟合所有分段，收集所有系数 =====
+    struct SegmentCoeffs {
+        float x_start, x_end;
+        float b, c;
+    };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         float x_start = segment_points[i];
@@ -940,37 +1025,37 @@ SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t
         float b_fp, c_fp;
         linear_fit(x_seg, y_seg, b_fp, c_fp);
 
-        int8_t shift_bits_b = determine_shift_bits_int8(std::abs(b_fp));
-        int8_t q_b = quantize_coefficient_int8(b_fp, shift_bits_b);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
+    }
 
-        float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
-        float c_adjusted = c_fp + static_cast<float>(zp_y) * scale_y;
+    // ===== 第二遍扫描：统一量化系数 =====
+    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
-        int8_t shift_bits_c = determine_shift_bits_int8(std::abs(c_adjusted));
+    float b_abs_max = 0.0f;
+    float c_abs_max = 0.0f;
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        float c_adjusted = all_coeffs[i].c + zp_y_offset;
+        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
+    }
+
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
+
+    int8_t shift_bits_b = determine_shift_bits_int8(b_abs_max);
+    int8_t shift_bits_c = determine_shift_bits_int8(c_abs_max);
+
+    // ===== 第三遍扫描：量化每段并计算移位 =====
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        const auto& coeff = all_coeffs[i];
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        int8_t q_b = quantize_coefficient_int8(coeff.b, shift_bits_b);
         int16_t q_c = quantize_coefficient_int16(c_adjusted, shift_bits_c);
 
-        // 计算 shift_bits_bx（根据 bx 的实际范围）
-        float bx_at_start = b_fp * x_start;
-        float bx_at_end = b_fp * x_end;
-        float bx_min = std::min(bx_at_start, bx_at_end);
-        float bx_max = std::max(bx_at_start, bx_at_end);
-
-        // 🔥 修正：根据 Python 参考（u8.py），bx 使用非对称量化（无符号），范围 [0, 255]
-        // scale_bx >= bx_range / 255 (UINT8 最大值)
-        const float max_uint8 = 255.0f;
-        float bx_range = bx_max - bx_min;  // bx 的实际范围（可能包含负值，通过 zero-point 处理）
-        if (bx_range < 1e-9f) {
-            bx_range = 1e-9f;  // 避免除零
-        }
-        float raw_scale_bx = bx_range / max_uint8;
-        int8_t shift_bits_bx = static_cast<int8_t>(std::ceil(-std::log2(raw_scale_bx)));
-        shift_bits_bx = std::max(static_cast<int8_t>(0), shift_bits_bx);
-
-        int8_t n_bx = shift_bits_b + shift_bits_x - shift_bits_bx;
-        int8_t n_yb = shift_bits_bx - shift_bits_y;
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
         int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int8_t n_BX_total = n_bx + n_yb;
 
         int16_t term_c_precomputed;
         if (n_yc >= 0) {
@@ -979,10 +1064,9 @@ SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t
             term_c_precomputed = static_cast<int16_t>(q_c << (-n_yc));
         }
         term_c_precomputed =
-            std::max(-32768, std::min(32767, static_cast<int32_t>(term_c_precomputed)));
+            std::max(static_cast<int16_t>(-32768), std::min(static_cast<int16_t>(32767), term_c_precomputed));
 
-        // 🔥 修正：根据 Python 参考，输入应使用无符号量化 [0, 255]
-        uint8_t threshold = quantize_input_uint8(x_end, shift_bits_x, zp_x);
+        int8_t threshold = quantize_input_int8(coeff.x_end, shift_bits_x, zp_x);
 
         lut.segments[i].q_b = q_b;
         lut.segments[i].n_BX_total = n_BX_total;
@@ -993,41 +1077,37 @@ SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t
     return lut;
 }
 
-// 初始化 LUT（将数据复制到 CUDA 常量内存，INT8 版本 - z 门）
-void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                             float x_min, float x_max) {
-    SigmoidLUT_INT8 lut =
-        generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
+// ==================== INT8 版本的 LUT 初始化函数 ====================
+// 生成 LUT 并复制到 CUDA 常量内存
 
+/// @brief 初始化 z 门的 Sigmoid LUT（INT8 版本）
+void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x,
+                             int8_t shift_bits_y, int32_t zp_y,
+                             float x_min, float x_max) {
+    SigmoidLUT_INT8 lut = generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_sigmoid_z_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
-
     if (err != cudaSuccess) {
-        printf("Failed to copy sigmoid z LUT (INT8) to constant memory: %s\n",
-               cudaGetErrorString(err));
+        printf("Failed to copy sigmoid z LUT (INT8) to constant memory: %s\n", cudaGetErrorString(err));
     }
 }
 
-// 初始化 LUT（将数据复制到 CUDA 常量内存，INT8 版本 - r 门）
-void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
+/// @brief 初始化 r 门的 Sigmoid LUT（INT8 版本）
+void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x,
+                             int8_t shift_bits_y, int32_t zp_y,
                              float x_min, float x_max) {
-    SigmoidLUT_INT8 lut =
-        generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
-
+    SigmoidLUT_INT8 lut = generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_sigmoid_r_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
-
     if (err != cudaSuccess) {
-        printf("Failed to copy sigmoid r LUT (INT8) to constant memory: %s\n",
-               cudaGetErrorString(err));
+        printf("Failed to copy sigmoid r LUT (INT8) to constant memory: %s\n", cudaGetErrorString(err));
     }
 }
 
-void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
+/// @brief 初始化 g 门的 Tanh LUT（INT8 版本）
+void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x,
+                        int8_t shift_bits_y, int32_t zp_y,
                         float x_min, float x_max) {
-    SigmoidLUT_INT8 lut =
-        generate_tanh_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
-
+    SigmoidLUT_INT8 lut = generate_tanh_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_tanh_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
-
     if (err != cudaSuccess) {
         printf("Failed to copy tanh LUT (INT8) to constant memory: %s\n", cudaGetErrorString(err));
     }
