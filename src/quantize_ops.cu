@@ -632,15 +632,28 @@ std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int n
     return points;
 }
 
-// 生成 Sigmoid 分段线性拟合 LUT（主机端）
-// 🔥 重写：采用两遍扫描方式，与 Python 参考保持一致
-SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shift_bits
-                                            int32_t zp_x,         // 输入 zero-point
-                                            int8_t shift_bits_y,  // 输出 shift_bits
-                                            int32_t zp_y,         // 输出 zero-point
-                                            float x_min,          // 输入范围最小值
-                                            float x_max           // 输入范围最大值
-) {
+// ==================== INT16 版本的分段线性量化参数生成函数 ====================
+//
+// 【生成流程】三遍扫描（与 INT8 版本相同，仅位宽不同）
+//   Pass 1: 线性拟合每段 → 浮点系数 (b_fp, c_fp)
+//   Pass 2: 统计最大值 → 全局量化参数 (shift_bits_b, shift_bits_c)
+//   Pass 3: 量化系数 → (q_b, term_c_precomputed, n_BX_total)
+//
+// 【最终公式】q_y = (q_b * (q_x - zp_x)) >> n_BX_total + term_c_precomputed
+//
+// 【与 INT8 的区别】
+//   - q_b: int16_t（范围 [-32768, 32767]）
+//   - term_c_precomputed: int32_t（INT8 版本为 int16_t）
+//   - threshold: int16_t
+//
+// =========================================================================
+
+/**
+ * @brief 生成 Sigmoid 分段线性拟合 LUT（INT16 版本）
+ */
+SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x, int32_t zp_x,
+                                            int8_t shift_bits_y, int32_t zp_y,
+                                            float x_min, float x_max) {
     SigmoidLUT_INT16 lut;
     lut.shift_bits_x = shift_bits_x;
     lut.zp_x = zp_x;
@@ -738,8 +751,10 @@ SigmoidLUT_INT16 generate_sigmoid_lut_int16(int8_t shift_bits_x,  // 输入 shif
     return lut;
 }
 
-// 生成 Tanh 分段线性拟合 LUT（主机端）
-// 🔥 重写：采用两遍扫描方式，与 Python 参考保持一致
+/**
+ * @brief 生成 Tanh 分段线性拟合 LUT（INT16 版本）
+ * @note Tanh 输出范围 [-1, 1]，设备端返回 int16_t
+ */
 SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
                                          int32_t zp_y, float x_min, float x_max) {
     SigmoidLUT_INT16 lut;
