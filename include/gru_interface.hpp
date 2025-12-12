@@ -6,6 +6,7 @@
 
 #include "gru.h"
 #include "gru_quant.h"
+#include "gru_quantization_ranges.hpp"
 
 // 初始化函数，供Python绑定调用
 void init_gru_cublas(cublasHandle_t &g_blas_handle) {
@@ -13,6 +14,17 @@ void init_gru_cublas(cublasHandle_t &g_blas_handle) {
         cublasCreate(&g_blas_handle);
     }
 }
+
+// 校准 GRU 量化范围（min/max），用于收集数据分布
+void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidden_size,
+                        const float *W, const float *R, const float *bx, const float *br,
+                        const float *x, const cublasHandle_t &g_blas_handle,
+                        GRUQuantizationRanges &quant_ranges);
+
+// 根据量化范围和位宽配置计算量化参数（scale 和 zero point）
+GRUQuantitativeParameters calculateGRUQuantitativeParameters(
+    const GRUQuantizationRanges &quant_ranges,
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
 GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size,
                                              int input_size, int hidden_size, const float *W,
