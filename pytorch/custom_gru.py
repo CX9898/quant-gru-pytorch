@@ -617,9 +617,7 @@ class CustomGRU(nn.GRU):
 
         # 初始化 quant_ranges（如果尚未初始化）
         if self.quant_ranges is None:
-            self.quant_ranges = gru_ops.GRUQuantizationRanges()
-            self.quant_ranges.resize_per_channel_vectors(hidden_size)
-            self.quant_ranges.reset()
+            self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
 
         # 累积更新量化范围
         gru_ops.calibrate_gru_ranges(

@@ -22,8 +22,7 @@ void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidd
 
     // 初始化 quant_ranges（如果尚未初始化）
     if (quant_ranges.hidden_ != hidden_size) {
-        quant_ranges.resizePerChannelVectors(hidden_size);
-        quant_ranges.reset();
+        quant_ranges.reset(hidden_size);
     }
 
     gru::ForwardPass<float> forward =
@@ -263,9 +262,7 @@ GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int
                                              const cublasHandle_t &g_blas_handle,
                                              const OperatorQuantConfig &bitwidth_config) {
     // 首先校准范围
-    GRUQuantizationRanges quant_ranges;
-    quant_ranges.resizePerChannelVectors(hidden_size);
-    quant_ranges.reset();
+    GRUQuantizationRanges quant_ranges(hidden_size);
 
     calibrateGruRanges(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
                        g_blas_handle, quant_ranges);

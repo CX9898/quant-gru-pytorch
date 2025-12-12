@@ -14,6 +14,14 @@ void init_gru_cublas_wrapper() { init_gru_cublas(g_blas_handle); }
 
 // GRUQuantizationRanges 的 Python 绑定
 struct GRUQuantizationRangesPy {
+    // 默认构造函数
+    GRUQuantizationRangesPy() = default;
+
+    // 带 hidden 参数的构造函数
+    explicit GRUQuantizationRangesPy(int hidden) : hidden_(hidden) {
+        reset();
+    }
+
     int hidden_ = 0;
 
     // 输入和隐藏状态
@@ -154,8 +162,15 @@ struct GRUQuantizationRangesPy {
         return cpp_ranges;
     }
 
-    // 重置为无效值
-    void reset() {
+    // 重置所有范围为无效值
+    // 如果传入 hidden > 0，则更新 hidden_ 并重新分配 per-channel 向量
+    void reset(int hidden = -1) {
+        // 如果传入有效的 hidden 值，则更新 hidden_
+        if (hidden > 0) {
+            hidden_ = hidden;
+        }
+
+        // 重置所有标量范围
         min_x_ = std::numeric_limits<float>::max();
         max_x_ = std::numeric_limits<float>::lowest();
         min_h_ = std::numeric_limits<float>::max();
@@ -187,23 +202,18 @@ struct GRUQuantizationRangesPy {
         min_old_contrib_ = std::numeric_limits<float>::max();
         max_old_contrib_ = std::numeric_limits<float>::lowest();
 
+        // 重置 per-channel 向量
         if (hidden_ > 0) {
-            resize_per_channel_vectors(hidden_);
+            const int channel_size = hidden_ * 3;
+            min_W_.assign(channel_size, std::numeric_limits<float>::max());
+            max_W_.assign(channel_size, std::numeric_limits<float>::lowest());
+            min_R_.assign(channel_size, std::numeric_limits<float>::max());
+            max_R_.assign(channel_size, std::numeric_limits<float>::lowest());
+            min_bx_.assign(channel_size, std::numeric_limits<float>::max());
+            max_bx_.assign(channel_size, std::numeric_limits<float>::lowest());
+            min_br_.assign(channel_size, std::numeric_limits<float>::max());
+            max_br_.assign(channel_size, std::numeric_limits<float>::lowest());
         }
-    }
-
-    // 调整 per-channel 向量大小
-    void resize_per_channel_vectors(int hidden) {
-        hidden_ = hidden;
-        const int channel_size = hidden * 3;
-        min_W_.assign(channel_size, std::numeric_limits<float>::max());
-        max_W_.assign(channel_size, std::numeric_limits<float>::lowest());
-        min_R_.assign(channel_size, std::numeric_limits<float>::max());
-        max_R_.assign(channel_size, std::numeric_limits<float>::lowest());
-        min_bx_.assign(channel_size, std::numeric_limits<float>::max());
-        max_bx_.assign(channel_size, std::numeric_limits<float>::lowest());
-        min_br_.assign(channel_size, std::numeric_limits<float>::max());
-        max_br_.assign(channel_size, std::numeric_limits<float>::lowest());
     }
 };
 
@@ -805,6 +815,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // GRUQuantizationRanges 绑定
     py::class_<GRUQuantizationRangesPy>(m, "GRUQuantizationRanges")
         .def(py::init<>())
+        .def(py::init<int>(), py::arg("hidden"))
         .def_readwrite("hidden_", &GRUQuantizationRangesPy::hidden_)
         .def_readwrite("min_x_", &GRUQuantizationRangesPy::min_x_)
         .def_readwrite("max_x_", &GRUQuantizationRangesPy::max_x_)
@@ -844,9 +855,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("max_new_contrib_", &GRUQuantizationRangesPy::max_new_contrib_)
         .def_readwrite("min_old_contrib_", &GRUQuantizationRangesPy::min_old_contrib_)
         .def_readwrite("max_old_contrib_", &GRUQuantizationRangesPy::max_old_contrib_)
-        .def("reset", &GRUQuantizationRangesPy::reset, "Reset all ranges to invalid values")
-        .def("resize_per_channel_vectors", &GRUQuantizationRangesPy::resize_per_channel_vectors,
-             "Resize per-channel vectors", py::arg("hidden"));
+        .def("reset", &GRUQuantizationRangesPy::reset,
+             "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize per-channel vectors.",
+             py::arg("hidden") = -1);
 
     // GRUQuantitativeParameters 绑定
     py::class_<GRUQuantitativeParametersPy>(m, "GRUQuantitativeParameters")

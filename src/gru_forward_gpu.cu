@@ -335,6 +335,27 @@ inline void updateRange(float &min_out, float &max_out, float min_val, float max
     max_out = std::max(max_out, max_val);
 }
 
+// 辅助函数：检查范围是否已初始化
+inline bool isRangeUninitialized(float min_val, float max_val) {
+    return min_val == std::numeric_limits<float>::max() &&
+           max_val == std::numeric_limits<float>::lowest();
+}
+
+// 辅助函数：平滑更新范围（EMA）
+// 如果未初始化，直接使用当前值；否则使用 90% 旧值 + 10% 新值
+inline void updateRangeEMA(float &min_out, float &max_out, float min_val, float max_val,
+                           float decay = 0.9f) {
+    if (isRangeUninitialized(min_out, max_out)) {
+        // 第一次更新，直接赋值
+        min_out = min_val;
+        max_out = max_val;
+    } else {
+        // 平滑更新：90% 旧值 + 10% 新值
+        min_out = decay * min_out + (1.0f - decay) * min_val;
+        max_out = decay * max_out + (1.0f - decay) * max_val;
+    }
+}
+
 template <typename T>
 void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
                        size_t hidden_size, size_t batch_size,
@@ -415,6 +436,27 @@ inline std::pair<T, T> computeMinMaxDev(const T *data_dev, size_t size) {
     return computeMinMax(data_host);
 }
 
+// 辅助函数：分时间步计算设备端数据的 min/max 并使用 EMA 更新范围
+template <typename T>
+inline void computeMinMaxPerStepEMA(const T *data_dev, int steps, int step_size,
+                                    float &min_out, float &max_out, float decay = 0.9f) {
+    // 一次性拷贝所有数据
+    std::vector<T> data_host = d2h(data_dev, steps * step_size);
+
+    // 分时间步计算 min/max 并使用 EMA 更新
+    for (int t = 0; t < steps; ++t) {
+        const T *step_data = data_host.data() + t * step_size;
+        T min_val = step_data[0];
+        T max_val = step_data[0];
+#pragma omp parallel for reduction(min : min_val) reduction(max : max_val)
+        for (int i = 1; i < step_size; ++i) {
+            min_val = std::min(min_val, step_data[i]);
+            max_val = std::max(max_val, step_data[i]);
+        }
+        updateRangeEMA(min_out, max_out, static_cast<float>(min_val), static_cast<float>(max_val), decay);
+    }
+}
+
 // 辅助函数：计算 per-channel 的 min/max
 template <typename T>
 inline void computeMinMaxPerChannel(const T *data_dev, size_t input_size, size_t channel_size,
@@ -442,14 +484,13 @@ void updateGRUQuantizationRanges(
     const T *tmp_Rh, const dev::vector<T> &z_pres_, const dev::vector<T> &r_pres_,
     const dev::vector<T> &g_pres_, GRUQuantizationRanges &quant_ranges_) {
     const int NH = batch_size * hidden_size;
+    const int NI = batch_size * input_size;
 
-    // 输入 x 的范围
-    auto [min_x, max_x] = computeMinMaxDev(x, steps * batch_size * input_size);
-    updateRange(quant_ranges_.min_x_, quant_ranges_.max_x_, min_x, max_x);
+    // 输入 x 的范围（一次拷贝，分时间步平滑更新）
+    computeMinMaxPerStepEMA(x, steps, NI, quant_ranges_.min_x_, quant_ranges_.max_x_);
 
-    // 隐藏状态 h 的范围（跳过初始状态 h0）
-    auto [min_h, max_h] = computeMinMaxDev(h + NH, steps * NH);
-    updateRange(quant_ranges_.min_h_, quant_ranges_.max_h_, min_h, max_h);
+    // 隐藏状态 h 的范围（跳过初始状态 h0，一次拷贝，分时间步平滑更新）
+    computeMinMaxPerStepEMA(h + NH, steps, NH, quant_ranges_.min_h_, quant_ranges_.max_h_);
 
     // 权重 W 的范围（per-channel）
     computeMinMaxPerChannel(W, input_size, hidden_size * 3, quant_ranges_.min_W_, quant_ranges_.max_W_);
