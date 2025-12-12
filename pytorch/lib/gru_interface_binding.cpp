@@ -76,12 +76,10 @@ struct GRUQuantitativeParametersPy {
         zp_r_out_ = cpp_params.zp_r_out_;
         exp2_inv_g_out_ = cpp_params.exp2_inv_g_out_;
         zp_g_out_ = cpp_params.zp_g_out_;
-        exp2_inv_Rh_add_br_ = cpp_params.exp2_inv_Rh_add_br_;
-        zp_Rh_add_br_ = cpp_params.zp_Rh_add_br_;
+        exp2_inv_Rh_add_br_g_ = cpp_params.exp2_inv_Rh_add_br_g_;
+        zp_Rh_add_br_g_ = cpp_params.zp_Rh_add_br_g_;
         exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
         zp_rRh_ = cpp_params.zp_rRh_;
-        exp2_inv_one_minus_update_ = cpp_params.exp2_inv_one_minus_update_;
-        zp_one_minus_update_ = cpp_params.zp_one_minus_update_;
         exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
         zp_new_contrib_ = cpp_params.zp_new_contrib_;
         exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
@@ -116,12 +114,10 @@ struct GRUQuantitativeParametersPy {
         cpp_params.zp_r_out_ = zp_r_out_;
         cpp_params.exp2_inv_g_out_ = exp2_inv_g_out_;
         cpp_params.zp_g_out_ = zp_g_out_;
-        cpp_params.exp2_inv_Rh_add_br_ = exp2_inv_Rh_add_br_;
-        cpp_params.zp_Rh_add_br_ = zp_Rh_add_br_;
+        cpp_params.exp2_inv_Rh_add_br_g_ = exp2_inv_Rh_add_br_g_;
+        cpp_params.zp_Rh_add_br_g_ = zp_Rh_add_br_g_;
         cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
         cpp_params.zp_rRh_ = zp_rRh_;
-        cpp_params.exp2_inv_one_minus_update_ = exp2_inv_one_minus_update_;
-        cpp_params.zp_one_minus_update_ = zp_one_minus_update_;
         cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
         cpp_params.zp_new_contrib_ = zp_new_contrib_;
         cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
@@ -583,8 +579,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_r_out_", &GRUQuantitativeParametersPy::zp_r_out_)
         .def_readwrite("exp2_inv_g_out_", &GRUQuantitativeParametersPy::exp2_inv_g_out_)
         .def_readwrite("zp_g_out_", &GRUQuantitativeParametersPy::zp_g_out_)
-        .def_readwrite("exp2_inv_Rh_add_br_", &GRUQuantitativeParametersPy::exp2_inv_Rh_add_br_)
-        .def_readwrite("zp_Rh_add_br_", &GRUQuantitativeParametersPy::zp_Rh_add_br_)
+        .def_readwrite("exp2_inv_Rh_add_br_g_", &GRUQuantitativeParametersPy::exp2_inv_Rh_add_br_g_)
+        .def_readwrite("zp_Rh_add_br_g_", &GRUQuantitativeParametersPy::zp_Rh_add_br_g_)
         .def_readwrite("exp2_inv_rRh_", &GRUQuantitativeParametersPy::exp2_inv_rRh_)
         .def_readwrite("zp_rRh_", &GRUQuantitativeParametersPy::zp_rRh_)
         .def_readwrite("exp2_inv_one_minus_update_",

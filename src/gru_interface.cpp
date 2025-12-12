@@ -74,14 +74,6 @@ GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int
         throw std::runtime_error(std::string("CUDA error in calibrateGruScales: ") + err_str);
     }
 
-    // 确保 cublas stream 已恢复（forward.Run() 内部会恢复，但这里再次确认）
-    cudaStream_t current_stream;
-    cublasGetStream(g_blas_handle, &current_stream);
-    // 如果 stream 不是默认的，同步它
-    if (current_stream != nullptr) {
-        cudaStreamSynchronize(current_stream);
-    }
-
     return forward.getGRUQuantitativeParameters();
 }
 
@@ -226,8 +218,13 @@ void quantGRUForward(
                                quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
                                quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
                                quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
-                               quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+                               quant_parms.exp2_inv_Rh_add_br_g_, quant_parms.zp_Rh_add_br_g_);
+    } else {
+        forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), nullptr,
+                    tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
     }
+
+    dev::dequantification(h_quant.data(), h, h_quant.size(), quant_parms.exp2_inv_h_, quant_parms.zp_h_);
 }
 
 void forwardInterface(

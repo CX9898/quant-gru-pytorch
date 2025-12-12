@@ -305,7 +305,13 @@ __device__ __forceinline__ QuantT computeH(  // 最终h
                                        rescale_params.n_new_contrib_div_h_) +
                           rescale_params.zp_h_;
 
-    const QuantT h = dev::clamp<QuantT>(h_i32);
+    const int32_t h_i32 = rshift_round(old_contrib - rescale_params.zp_old_contrib_,
+                                       rescale_params.n_old_contrib_div_h_) +
+                          rshift_round(new_contrib - rescale_params.zp_new_contrib_,
+                                       rescale_params.n_new_contrib_div_h_) +
+                          rescale_params.zp_h_;
+
+    const HT h = dev::clamp<HT>(h_i32);
 
     // const int row = blockDim.x * blockIdx.x + threadIdx.x; // 当前线程对应的隐藏单元
     // const int col = blockDim.y * blockIdx.y + threadIdx.y; // 当前线程对应的batch样本
@@ -578,6 +584,7 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const cudaStream_t stream1 = data_->stream[0];
     const cudaEvent_t event = data_->event;
 
+    // R * h GEMM 不依赖 tmp_Wx，可以并行执行
     cublasSetStream(blas_handle, stream1);
     blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size,
                        hidden_size, &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh,
@@ -588,6 +595,8 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const dim3 gridDim((hidden_size + blockDim.x - 1) / blockDim.x,
                        (batch_size + blockDim.y - 1) / blockDim.y);
 
+    // 等待 stream2 上的 W*x GEMM 完成，确保 PointwiseOperations kernel
+    // 可以安全使用 tmp_Wx（W*x 的结果）
     cudaStreamWaitEvent(stream1, event, 0);
 
     // 根据 OperatorQuantConfig 中的 z_out_ 和 r_out_ 配置选择 kernel 实例
@@ -702,7 +711,7 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
         n_br_to_r[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_r_pre_;
 
         // n门
-        n_br_to_Rh_add_br[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_Rh_add_br_;
+        n_br_to_Rh_add_br[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_Rh_add_br_g_;
         n_bx_to_g[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_g_pre_;
     }
 
@@ -736,30 +745,31 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
     rescale_param_.zp_g_out_ = parms.zp_g_out_;
     rescale_param_.n_Rh_div_Rh_add_br_ = parms.exp2_inv_Rh_ - parms.exp2_inv_Rh_add_br_;
     h2d(rescale_param_.n_br_div_Rh_add_br_, n_br_to_Rh_add_br);
-    rescale_param_.zp_Rh_add_br_ = parms.zp_Rh_add_br_;
+    rescale_param_.zp_Rh_add_br_ = parms.zp_Rh_add_br_g_;
     rescale_param_.n_r_mul_Rh_add_br_div_rRh_ =
-        (parms.exp2_inv_r_out_ + parms.exp2_inv_Rh_add_br_) - parms.exp2_inv_rRh_;
+        (parms.exp2_inv_r_out_ + parms.exp2_inv_Rh_add_br_g_) - parms.exp2_inv_rRh_;
     rescale_param_.zp_rRh_ = parms.zp_rRh_;
     rescale_param_.n_Wx_div_g_pre_ = parms.exp2_inv_Wx_ - parms.exp2_inv_g_pre_;
     rescale_param_.n_rRh_div_g_pre_ = parms.exp2_inv_rRh_ - parms.exp2_inv_g_pre_;
     h2d(rescale_param_.exp2_inv_bx_div_g_pre_, n_bx_to_g);
 
     // h_new
-    rescale_param_.one_div_one_minus_update_ = rshift_round(1, -parms.exp2_inv_one_minus_update_);
-    rescale_param_.n_z_out_div_one_minus_update_ =
-        parms.exp2_inv_z_out_ - parms.exp2_inv_one_minus_update_;
-    rescale_param_.zp_one_minus_update_ = parms.zp_one_minus_update_;
+    rescale_param_.one_in_z_scale_ = (1 << parms.exp2_inv_z_out_);
+    // n_z_mul_g_div_new_contrib = (exp2_inv_z_out + exp2_inv_g_out) - exp2_inv_new_contrib
+    rescale_param_.n_z_mul_g_div_new_contrib_ =
+        (parms.exp2_inv_z_out_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
     rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
-    rescale_param_.n_one_minus_update_mul_g_div_new_contrib_ =
-        (parms.exp2_inv_one_minus_update_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
     rescale_param_.zp_old_contrib_ = parms.zp_old_contrib_;
     rescale_param_.n_z_mul_h_div_old_contrib_ =
         (parms.exp2_inv_z_out_ + parms.exp2_inv_h_) - parms.exp2_inv_old_contrib_;
     rescale_param_.n_new_contrib_div_h_ = parms.exp2_inv_new_contrib_ - parms.exp2_inv_h_;
     rescale_param_.n_old_contrib_div_h_ = parms.exp2_inv_old_contrib_ - parms.exp2_inv_h_;
 
-    // test
-    rescale_param_.test = parms;
+    // 保存完整的量化参数（用于调试）
+//    rescale_param_.test = parms;
+
+    // 保存位宽配置
+    bitwidth_config_ = parms.bitwidth_config_;
 }
 
 // C = input_size(输入维度), H = hidden_size(隐藏层维度),

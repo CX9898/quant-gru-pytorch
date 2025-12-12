@@ -6,11 +6,13 @@
 #include <cstdio>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "blas.h"
 #include "device_assert.h"
 #include "gru.h"
 #include "inline_ops.h"
+#include "quantize_bitwidth_config.hpp"
 #include "quantize_ops_helper.hpp"
 #include "quantized_unit_testing.cuh"
 
@@ -328,7 +330,6 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
     std::vector<T> g_out(output_size);
     std::vector<T> Rh_add_br_g(output_size);
     std::vector<T> rRh_g(output_size);
-    std::vector<T> one_minus_update(output_size);
     std::vector<T> new_contrib(output_size);
     std::vector<T> old_contrib(output_size);
 
@@ -356,7 +357,6 @@ void calculateScaleFromV(const std::vector<T> &h_host, const T *v_dev, size_t st
                 g_out[offset_h] = g_val;
                 Rh_add_br_g[offset_h] = Rh_add_br_g_val;
                 rRh_g[offset_h] = rRh_g_val;
-                one_minus_update[offset_h] = one_minus_update_val;
                 new_contrib[offset_h] = new_contrib_val;
                 old_contrib[offset_h] = old_contrib_val;
             }

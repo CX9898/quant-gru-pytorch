@@ -5,7 +5,9 @@
 #include <thrust/reduce.h>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 
 #include "devVector.h"
@@ -15,10 +17,16 @@
 // 前向声明
 struct SigmoidLUT_INT16;
 struct SigmoidLUT_INT8;
+struct TanhLUT_INT16;
+struct TanhLUT_INT8;
 
 __constant__ uint8_t d_sigmoid_int8_z_lut[256];  // sigmoid 输出 [0,1] 使用无符号
 __constant__ uint8_t d_sigmoid_int8_r_lut[256];  // sigmoid 输出 [0,1] 使用无符号
 __constant__ int8_t d_tanh_int8_g_lut[256];      // tanh 输出 [-1,1] 仍使用有符号
+
+// uint8 版本的 sigmoid LUT（输出范围 [0, 255]，适用于 sigmoid 输出）
+__constant__ uint8_t d_sigmoid_uint8_z_lut[256];
+__constant__ uint8_t d_sigmoid_uint8_r_lut[256];
 
 // 分段线性量化常量内存
 __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;  // z 门的 Sigmoid LUT
@@ -222,8 +230,8 @@ void generate_piecewise_linear_lut_from_exp2_inv(int8_t exp2_inv_z_pre, int32_t 
 
         init_tanh_lut_int16(exp2_inv_g_pre, zp_g_pre, exp2_inv_g_out, zp_g_out, x_min_g, x_max_g);
     } else {
-        static_assert(std::is_same_v<QuantT, int8_t> || std::is_same_v<QuantT, int16_t>,
-                      "QuantT must be int8_t or int16_t");
+        init_tanh_lut_int8(shift_bits_g_pre, params.zp_g_pre_, shift_bits_g_out, params.zp_g_out_,
+                           x_min_g, x_max_g);
     }
 }
 

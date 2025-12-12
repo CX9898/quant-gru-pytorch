@@ -13,6 +13,7 @@
 #include "devVector.h"
 #include "gru_interface.hpp"
 #include "quantized_unit_testing.cuh"
+#include "parallelAlgorithm.h"
 
 constexpr int BATCH_SIZE = 64;    // 批大小
 constexpr int SEQUENCE_LEN = 50;  // 序列长度(T), 每个样本有T个时间步
@@ -187,6 +188,7 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
     const int h_output_size = time_steps * batch_size * hidden_size;
     gradients.h.resize(h_output_size);
     d2h(gradients.h.data(), h_dev.data() + batch_size * hidden_size, h_output_size);
+    d2h(gradients.v, v_dev);
 
     // v 中间值
     d2h(gradients.v, v_dev);

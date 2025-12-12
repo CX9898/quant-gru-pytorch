@@ -178,7 +178,7 @@ void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, c
  * @brief
  * 模板化量化参数计算函数：支持任意量化类型（int8/int6等）和输入范围类型，对齐2的负n次方缩放因子
  * @tparam T 输入范围数据类型（如float、double，需支持算术运算和std::log2）
- * @tparam QuantT 量化目标类型（如int8_t、int6_t，必须是有符号整数类型）
+ * @tparam QuantT 量化目标类型（如int8_t、uint8_t、int16_t、uint16_t等）
  * @param[in] orig_min 原始数据最小值（输入，类型T）
  * @param[in] orig_max 原始数据最大值（输入，类型T）
  * @param[in] is_symmetric 是否使用对称量化（true=对称，false=非对称）

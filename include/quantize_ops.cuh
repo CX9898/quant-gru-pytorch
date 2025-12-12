@@ -10,8 +10,14 @@ extern __constant__ uint8_t d_sigmoid_int8_z_lut[256];  // sigmoid 输出 [0,1] 
 extern __constant__ uint8_t d_sigmoid_int8_r_lut[256];  // sigmoid 输出 [0,1] 使用无符号
 extern __constant__ int8_t d_tanh_int8_g_lut[256];      // tanh 输出 [-1,1] 仍使用有符号
 
+// uint8 版本的 sigmoid LUT（输出范围 [0, 255]，适用于 sigmoid 输出）
+extern __constant__ uint8_t d_sigmoid_uint8_z_lut[256];
+extern __constant__ uint8_t d_sigmoid_uint8_r_lut[256];
+
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16
+
+// ==================== INT16 版本 ====================
 
 // INT16 版本的段参数结构
 struct SegmentParams_INT16 {
@@ -21,7 +27,7 @@ struct SegmentParams_INT16 {
     int16_t threshold;           // 段阈值 (INT16，量化后的输入值)
 };
 
-// Sigmoid/Tanh 查找表结构（INT16）
+// Sigmoid 查找表结构（INT16）- 输入 int16，输出 uint16
 struct SigmoidLUT_INT16 {
     SegmentParams_INT16 segments[NUM_SEGMENTS];
     int32_t zp_x;         // 输入 zero-point (INT32)
@@ -29,6 +35,17 @@ struct SigmoidLUT_INT16 {
     int8_t shift_bits_y;  // 输出 shift_bits (INT8)
     int32_t zp_y;         // 输出 zero-point (INT32)
 };
+
+// Tanh 查找表结构（INT16）- 输入 int16，输出 int16
+struct TanhLUT_INT16 {
+    SegmentParams_INT16 segments[NUM_SEGMENTS];
+    int32_t zp_x;         // 输入 zero-point (INT32)
+    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
+    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
+    int32_t zp_y;         // 输出 zero-point (INT32)
+};
+
+// ==================== INT8 版本 ====================
 
 // INT8 版本的段参数结构
 struct SegmentParams_INT8 {
@@ -38,7 +55,7 @@ struct SegmentParams_INT8 {
     int8_t threshold;            // 段阈值 (INT8，量化后的输入值)
 };
 
-// Sigmoid/Tanh 查找表结构（INT8）
+// Sigmoid 查找表结构（INT8）- 输入 int8，输出 uint8
 struct SigmoidLUT_INT8 {
     SegmentParams_INT8 segments[NUM_SEGMENTS];
     int32_t zp_x;          // 输入 zero-point (INT32)
@@ -47,13 +64,26 @@ struct SigmoidLUT_INT8 {
     int32_t zp_y;          // 输出 zero-point (INT32)
 };
 
-// 常量内存声明（CUDA设备端）
-extern __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;  // z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT16 d_sigmoid_r_lut_int16;  // r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT16 d_tanh_lut_int16;
-extern __constant__ SigmoidLUT_INT8 d_sigmoid_z_lut_int8;  // z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT8 d_sigmoid_r_lut_int8;  // r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT8 d_tanh_lut_int8;
+// Tanh 查找表结构（INT8）- 输入 int8，输出 int8
+struct TanhLUT_INT8 {
+    SegmentParams_INT8 segments[NUM_SEGMENTS];
+    int32_t zp_x;         // 输入 zero-point (INT32)
+    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
+    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
+    int32_t zp_y;         // 输出 zero-point (INT32)
+};
+
+// ==================== 常量内存声明（CUDA设备端）====================
+
+// Sigmoid LUT（z/r 门）- 输出无符号
+extern __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;
+extern __constant__ SigmoidLUT_INT16 d_sigmoid_r_lut_int16;
+extern __constant__ SigmoidLUT_INT8 d_sigmoid_z_lut_int8;
+extern __constant__ SigmoidLUT_INT8 d_sigmoid_r_lut_int8;
+
+// Tanh LUT（g 门）- 输出有符号
+extern __constant__ TanhLUT_INT16 d_tanh_lut_int16;
+extern __constant__ TanhLUT_INT8 d_tanh_lut_int8;
 
 namespace dev {
 

@@ -82,6 +82,7 @@ class ForwardPassQuant {
     private_data *data_;
 
     QuantGRUReScale rescale_param_;
+    OperatorQuantConfig bitwidth_config_;  // 位宽配置
 };
 
 }  // namespace gru
