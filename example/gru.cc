@@ -14,6 +14,36 @@
 #include "gru_interface.hpp"
 #include "quantized_unit_testing.cuh"
 
+// ==================== 矩阵转置工具函数 ====================
+
+// 使用 cuBLAS 进行 2D 矩阵转置: [rows, cols] -> [cols, rows]
+// A: 输入矩阵 [rows x cols]
+// A_t: 输出矩阵 [cols x rows]
+void transpose2D(cublasHandle_t handle, const float *A, float *A_t, int rows, int cols) {
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    // cublasSgeam: C = alpha * op(A) + beta * op(B)
+    // 使用 CUBLAS_OP_T 转置 A，B 设为 nullptr 或相同矩阵
+    cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, cols, &alpha, A, cols, &beta, A, cols, A_t,
+                rows);
+}
+
+// 3D 张量 permute: [T, B, I] -> [I, T, B]
+// 使用 CPU 实现，因为这个操作只在初始化时进行一次
+void permute3D_TBI_to_ITB(const std::vector<float> &src, std::vector<float> &dst, int T, int B,
+                          int I) {
+    dst.resize(I * T * B);
+    for (int t = 0; t < T; ++t) {
+        for (int b = 0; b < B; ++b) {
+            for (int i = 0; i < I; ++i) {
+                // src[t, b, i] = src[t * B * I + b * I + i]
+                // dst[i, t, b] = dst[i * T * B + t * B + b]
+                dst[i * T * B + t * B + b] = src[t * B * I + b * I + i];
+            }
+        }
+    }
+}
+
 constexpr int BATCH_SIZE = 64;    // 批大小
 constexpr int SEQUENCE_LEN = 50;  // 序列长度(T), 每个样本有T个时间步
 constexpr int HIDDEN_DIMS = 256;  // 隐藏层维度(H), h_t的维度
@@ -74,9 +104,11 @@ void runQuantInference(const int time_steps, const int batch_size, const int inp
 // ==================== 训练接口 ====================
 
 // 浮点 GRU 训练
+// 注意: W_t, R_t, x_t 是转置后的数据
 GRUTrainGradients runFloatTraining(const int time_steps, const int batch_size, const int input_size,
                                    const int hidden_size, const float *W, const float *R,
                                    const float *bx, const float *br, const float *x,
+                                   const float *W_t, const float *R_t, const float *x_t,
                                    const float *dh_new) {
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
     dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
@@ -105,11 +137,14 @@ GRUTrainGradients runFloatTraining(const int time_steps, const int batch_size, c
     dh_dev.zero();
 
     // 反向传播
+    // 注意：反向传播需要转置后的数据
+    // W_t: [H*3, C], R_t: [H*3, H], x_t: [I, T, B]
     {
         ScopeTimer t("FloatTraining Backward:");
-        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, dh_new,
-                         h_dev.data(), v_dev.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
-                         dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_dev.data());
+        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size, W_t, R_t, bx, br, x_t,
+                         dh_new, h_dev.data(), v_dev.data(), g_blas_handle, dx_dev.data(),
+                         dW_dev.data(), dR_dev.data(), dbx_dev.data(), dbr_dev.data(),
+                         dh_dev.data());
     }
 
     // 拷贝结果回 CPU
@@ -133,9 +168,11 @@ GRUTrainGradients runFloatTraining(const int time_steps, const int batch_size, c
 }
 
 // 量化 GRU 训练（使用统一接口 forwardInterface 进行前向传播）
+// 注意: W_t, R_t, x_t 是转置后的数据
 GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, const int input_size,
                                    const int hidden_size, const float *W, const float *R,
                                    const float *bx, const float *br, const float *x,
+                                   const float *W_t, const float *R_t, const float *x_t,
                                    const float *dh_new,
                                    const GRUQuantitativeParameters &quant_params) {
     dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
@@ -167,11 +204,14 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
     dh_dev.zero();
 
     // 反向传播
+    // 注意：反向传播需要转置后的数据
+    // W_t: [H*3, C], R_t: [H*3, H], x_t: [I, T, B]
     {
         ScopeTimer t("QuantTraining Backward:");
-        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x, dh_new,
-                         h_dev.data(), v_dev.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
-                         dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_dev.data());
+        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size, W_t, R_t, bx, br, x_t,
+                         dh_new, h_dev.data(), v_dev.data(), g_blas_handle, dx_dev.data(),
+                         dW_dev.data(), dR_dev.data(), dbx_dev.data(), dbr_dev.data(),
+                         dh_dev.data());
     }
 
     // 拷贝结果回 CPU
@@ -278,19 +318,44 @@ int main() {
     // ========== 6. 训练测试 ==========
     printf("\n========== Running Training Tests ==========\n");
 
+    // ========== 6.1 准备反向传播所需的转置数据 ==========
+    // 根据 gru.h 中的注释，反向传播需要转置后的数据：
+    // W_t: [H*3, C] (原 W 是 [C, H*3])
+    // R_t: [H*3, H] (原 R 是 [H, H*3])
+    // x_t: [I, T, B] (原 x 是 [T, B, I])
+    printf("\n----- Preparing Transposed Data for Backward -----\n");
+
+    // 转置 W: [C, H*3] -> [H*3, C]
+    dev::vector<float> W_t_dev(input_size * hidden_size * 3);
+    transpose2D(g_blas_handle, W_dev.data(), W_t_dev.data(), hidden_size * 3, input_size);
+
+    // 转置 R: [H, H*3] -> [H*3, H]
+    dev::vector<float> R_t_dev(hidden_size * hidden_size * 3);
+    transpose2D(g_blas_handle, R_dev.data(), R_t_dev.data(), hidden_size * 3, hidden_size);
+
+    // 转置 x: [T, B, I] -> [I, T, B]
+    std::vector<float> x_t;
+    permute3D_TBI_to_ITB(x, x_t, time_steps, batch_size, input_size);
+    dev::vector<float> x_t_dev(x_t);
+
+    cudaDeviceSynchronize();
+    printf("Transposed data prepared.\n");
+
     // 浮点训练
     printf("\n----- Float Training -----\n");
     GRUTrainGradients gradients_float =
         runFloatTraining(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
-                         R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(), dh_dev.data());
+                         R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(), W_t_dev.data(),
+                         R_t_dev.data(), x_t_dev.data(), dh_dev.data());
 
     printf("cudaError(FloatTraining): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 量化训练
     printf("\n----- Quant Training -----\n");
-    GRUTrainGradients gradients_quant = runQuantTraining(
-        time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(), bx_dev.data(),
-        br_dev.data(), x_dev.data(), dh_dev.data(), quant_params);
+    GRUTrainGradients gradients_quant =
+        runQuantTraining(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
+                         R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(), W_t_dev.data(),
+                         R_t_dev.data(), x_t_dev.data(), dh_dev.data(), quant_params);
 
     printf("cudaError(QuantTraining): %s\n", cudaGetErrorString(cudaGetLastError()));
 

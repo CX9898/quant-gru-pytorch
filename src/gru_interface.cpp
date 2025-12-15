@@ -1,3 +1,7 @@
+// =====================================================================
+// GRU 接口层实现 (gru_interface.cpp)
+// =====================================================================
+
 #include "gru_interface.hpp"
 
 #include <cuda_runtime.h>
@@ -8,7 +12,10 @@
 #include "parallelAlgorithm.h"
 #include "quantize_ops_helper.hpp"
 
-// 校准 GRU 量化范围（min/max）
+// =====================================================================
+// 量化校准实现
+// =====================================================================
+
 void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidden_size,
                         const float *W, const float *R, const float *bx, const float *br,
                         const float *x, const cublasHandle_t &g_blas_handle,
@@ -49,30 +56,28 @@ void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidd
     quant_ranges = forward.getGRUQuantizationRanges();
 }
 
-// 根据量化范围和位宽配置计算量化参数
 GRUQuantitativeParameters calculateGRUQuantitativeParameters(
-    const GRUQuantizationRanges &quant_ranges,
-    const OperatorQuantConfig &bitwidth_config) {
+    const GRUQuantizationRanges &quant_ranges, const OperatorQuantConfig &bitwidth_config) {
     GRUQuantitativeParameters quant_params;
     quant_params.hidden_ = quant_ranges.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
-    // 输入 x 的量化
+    // 输入 x 的量化（使用配置的对称量化设置）
     dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
         using XT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, XT>(quant_ranges.min_x_, quant_ranges.max_x_, false,
-                                        aligned_min, aligned_max, quant_params.exp2_inv_x_,
-                                        quant_params.zp_x_, "scale_x");
+        calibrateQuantParams<float, XT>(quant_ranges.min_x_, quant_ranges.max_x_,
+                                        bitwidth_config.x_symmetric_, aligned_min, aligned_max,
+                                        quant_params.exp2_inv_x_, quant_params.zp_x_, "scale_x");
     });
 
     // 隐藏状态 h 的量化
     dispatchByBitWidth(bitwidth_config.h_, [&](auto tag) {
         using HT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, HT>(quant_ranges.min_h_, quant_ranges.max_h_, false,
-                                        aligned_min, aligned_max, quant_params.exp2_inv_h_,
-                                        quant_params.zp_h_, "scale_h");
+        calibrateQuantParams<float, HT>(quant_ranges.min_h_, quant_ranges.max_h_,
+                                        bitwidth_config.h_symmetric_, aligned_min, aligned_max,
+                                        quant_params.exp2_inv_h_, quant_params.zp_h_, "scale_h");
     });
 
     // 权重 W 的量化（per-channel）
@@ -83,9 +88,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, WT>(quant_ranges.min_W_[c], quant_ranges.max_W_[c], true,
-                                            aligned_min, aligned_max, quant_params.exp2_inv_W_[c],
-                                            zp_tmp, "scale_W");
+            calibrateQuantParams<float, WT>(quant_ranges.min_W_[c], quant_ranges.max_W_[c],
+                                            bitwidth_config.W_symmetric_, aligned_min, aligned_max,
+                                            quant_params.exp2_inv_W_[c], zp_tmp, "scale_W");
         }
     });
 
@@ -96,9 +101,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, RT>(quant_ranges.min_R_[c], quant_ranges.max_R_[c], true,
-                                            aligned_min, aligned_max, quant_params.exp2_inv_R_[c],
-                                            zp_tmp, "scale_R");
+            calibrateQuantParams<float, RT>(quant_ranges.min_R_[c], quant_ranges.max_R_[c],
+                                            bitwidth_config.R_symmetric_, aligned_min, aligned_max,
+                                            quant_params.exp2_inv_R_[c], zp_tmp, "scale_R");
         }
     });
 
@@ -106,18 +111,18 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.Wx_, [&](auto tag) {
         using WxT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, WxT>(quant_ranges.min_Wx_, quant_ranges.max_Wx_, false,
-                                         aligned_min, aligned_max, quant_params.exp2_inv_Wx_,
-                                         quant_params.zp_Wx_, "scale_Wx");
+        calibrateQuantParams<float, WxT>(
+            quant_ranges.min_Wx_, quant_ranges.max_Wx_, bitwidth_config.Wx_symmetric_, aligned_min,
+            aligned_max, quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, "scale_Wx");
     });
 
     // Rh 结果的量化
     dispatchByBitWidth(bitwidth_config.Rh_, [&](auto tag) {
         using RhT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RhT>(quant_ranges.min_Rh_, quant_ranges.max_Rh_, false,
-                                         aligned_min, aligned_max, quant_params.exp2_inv_Rh_,
-                                         quant_params.zp_Rh_, "scale_Rh");
+        calibrateQuantParams<float, RhT>(
+            quant_ranges.min_Rh_, quant_ranges.max_Rh_, bitwidth_config.Rh_symmetric_, aligned_min,
+            aligned_max, quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, "scale_Rh");
     });
 
     // 偏置 bx 的量化（per-channel）
@@ -127,9 +132,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, BxT>(quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], true,
-                                             aligned_min, aligned_max, quant_params.exp2_inv_bx_[c],
-                                             zp_tmp, "scale_bx");
+            calibrateQuantParams<float, BxT>(
+                quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], bitwidth_config.bx_symmetric_,
+                aligned_min, aligned_max, quant_params.exp2_inv_bx_[c], zp_tmp, "scale_bx");
         }
     });
 
@@ -140,9 +145,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, BrT>(quant_ranges.min_br_[c], quant_ranges.max_br_[c], true,
-                                             aligned_min, aligned_max, quant_params.exp2_inv_br_[c],
-                                             zp_tmp, "scale_br");
+            calibrateQuantParams<float, BrT>(
+                quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_symmetric_,
+                aligned_min, aligned_max, quant_params.exp2_inv_br_[c], zp_tmp, "scale_br");
         }
     });
 
@@ -150,8 +155,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
         using ZPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ZPreT>(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_z_pre_,
+        calibrateQuantParams<float, ZPreT>(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_,
+                                           bitwidth_config.z_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_z_pre_,
                                            quant_params.zp_z_pre_, "scale_z_pre");
     });
 
@@ -159,8 +165,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.r_pre_, [&](auto tag) {
         using RPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RPreT>(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_r_pre_,
+        calibrateQuantParams<float, RPreT>(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_,
+                                           bitwidth_config.r_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_r_pre_,
                                            quant_params.zp_r_pre_, "scale_r_pre");
     });
 
@@ -168,8 +175,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.g_pre_, [&](auto tag) {
         using GPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, GPreT>(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_g_pre_,
+        calibrateQuantParams<float, GPreT>(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_,
+                                           bitwidth_config.g_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_g_pre_,
                                            quant_params.zp_g_pre_, "scale_g_pre");
     });
 
@@ -177,8 +185,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ZOutT>(quant_ranges.min_z_out_, quant_ranges.max_z_out_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
+        calibrateQuantParams<float, ZOutT>(quant_ranges.min_z_out_, quant_ranges.max_z_out_,
+                                           bitwidth_config.z_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
     });
 
@@ -186,8 +195,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ROutT>(quant_ranges.min_r_out_, quant_ranges.max_r_out_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
+        calibrateQuantParams<float, ROutT>(quant_ranges.min_r_out_, quant_ranges.max_r_out_,
+                                           bitwidth_config.r_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
     });
 
@@ -195,8 +205,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, GOutT>(quant_ranges.min_g_out_, quant_ranges.max_g_out_, true,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
+        calibrateQuantParams<float, GOutT>(quant_ranges.min_g_out_, quant_ranges.max_g_out_,
+                                           bitwidth_config.g_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
     });
 
@@ -204,54 +215,60 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
         using RhAddBrT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RhAddBrT>(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
-                                              false, aligned_min, aligned_max,
-                                              quant_params.exp2_inv_Rh_add_br_,
-                                              quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
+        calibrateQuantParams<float, RhAddBrT>(
+            quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
+            bitwidth_config.Rh_add_br_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
     });
 
     // r × Rh 的量化
     dispatchByBitWidth(bitwidth_config.rRh_, [&](auto tag) {
         using rRhT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, rRhT>(quant_ranges.min_rRh_, quant_ranges.max_rRh_, false,
-                                          aligned_min, aligned_max, quant_params.exp2_inv_rRh_,
-                                          quant_params.zp_rRh_, "scale_rRh");
+        calibrateQuantParams<float, rRhT>(quant_ranges.min_rRh_, quant_ranges.max_rRh_,
+                                          bitwidth_config.rRh_symmetric_, aligned_min, aligned_max,
+                                          quant_params.exp2_inv_rRh_, quant_params.zp_rRh_,
+                                          "scale_rRh");
     });
 
-    // 注意: 1-z 不再需要单独的 scale，直接复用 z_out 的 scale
-    // 常数 1 可以直接对齐到 z_out 的量化空间进行减法
+    // 1 - z 的量化
+    dispatchByBitWidth(bitwidth_config.one_minus_update_, [&](auto tag) {
+        using OneMinusUpdateT = typename decltype(tag)::type;
+        float aligned_min, aligned_max;
+        calibrateQuantParams<float, OneMinusUpdateT>(
+            quant_ranges.min_one_minus_update_, quant_ranges.max_one_minus_update_,
+            bitwidth_config.one_minus_update_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_one_minus_update_, quant_params.zp_one_minus_update_,
+            "scale_one_minus_update");
+    });
 
     // (1.0 - z) * g 的量化
     dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
         using NewContribT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, NewContribT>(quant_ranges.min_new_contrib_,
-                                                 quant_ranges.max_new_contrib_, false,
-                                                 aligned_min, aligned_max,
-                                                 quant_params.exp2_inv_new_contrib_,
-                                                 quant_params.zp_new_contrib_, "scale_new_contrib");
+        calibrateQuantParams<float, NewContribT>(
+            quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_,
+            bitwidth_config.new_contrib_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_, "scale_new_contrib");
     });
 
     // z * h 的量化
     dispatchByBitWidth(bitwidth_config.old_contrib_, [&](auto tag) {
         using OldContribT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, OldContribT>(quant_ranges.min_old_contrib_,
-                                                 quant_ranges.max_old_contrib_, false,
-                                                 aligned_min, aligned_max,
-                                                 quant_params.exp2_inv_old_contrib_,
-                                                 quant_params.zp_old_contrib_, "scale_old_contrib");
+        calibrateQuantParams<float, OldContribT>(
+            quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_,
+            bitwidth_config.old_contrib_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_, "scale_old_contrib");
     });
 
     return quant_params;
 }
 
-GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int input_size,
-                                             int hidden_size, const float *W, const float *R,
-                                             const float *bx, const float *br, const float *x,
-                                             const cublasHandle_t &g_blas_handle,
-                                             const OperatorQuantConfig &bitwidth_config) {
+GRUQuantitativeParameters calibrateGruScales(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const cublasHandle_t &g_blas_handle, const OperatorQuantConfig &bitwidth_config) {
     // 首先校准范围
     GRUQuantizationRanges quant_ranges(hidden_size);
 
@@ -262,7 +279,6 @@ GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int
     return calculateGRUQuantitativeParameters(quant_ranges, bitwidth_config);
 }
 
-// 校准量化参数并初始化 LUT 表（组合函数，方便使用）
 GRUQuantitativeParameters calibrateGruScalesAndInitLut(
     int time_steps, int batch_size, int input_size, int hidden_size, const float *W, const float *R,
     const float *bx, const float *br, const float *x, const cublasHandle_t &g_blas_handle,
@@ -278,15 +294,14 @@ GRUQuantitativeParameters calibrateGruScalesAndInitLut(
     return quant_params;
 }
 
+// =====================================================================
+// 前向传播实现
+// =====================================================================
+
 void hasteGRUForward(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const cublasHandle_t &g_blas_handle,
-    float *h,  // (time_steps + 1) * batch_size * hidden_size
-    float *v   // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
-) {
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const float *W, const float *R, const float *bx, const float *br,
+    const float *x, const float *h0, const cublasHandle_t &g_blas_handle, float *h, float *v) {
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                   3);                             // 用于存放W * x的中间结果
     dev::vector<float> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
@@ -307,22 +322,29 @@ void hasteGRUForward(
 
     forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
                 nullptr);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in hasteGRUForward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in hasteGRUForward: ") + err_str);
+    }
 }
 
+// =====================================================================
+// 反向传播实现
+// =====================================================================
+
+// ★★★ 重要：W_t、R_t、x_t 需要传入【转置后】的数据！★★★
 void hasteGRUBackward(
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const float *dh_new,
-    const float *h,  // (time_steps + 1) * batch_size * hidden_size
-    const float *v,  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
-    const cublasHandle_t &g_blas_handle,
-    float *dx,   // (time_steps *batch_size * input_size) 输入序列梯度
-    float *dW,   // (input_size * hidden_size * 3)// 对输入权重的梯度
-    float *dR,   // (hidden_size * hidden_size * 3) // 对循环权重的梯度
-    float *dbx,  // (hidden_size * 3)// 对输入偏置的梯度
-    float *dbr,  // (hidden_size * 3)// 对循环偏置的梯度
-    float *dh    // (batch_size * hidden_size)// 对最后隐藏状态的梯度
-) {
+    const float *W_t, const float *R_t, const float *bx, const float *br, const float *x_t,
+    const float *dh_new, const float *h, const float *v, const cublasHandle_t &g_blas_handle,
+    float *dx, float *dW, float *dR, float *dbx, float *dbr, float *dh) {
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size *
                               3);  // 临时缓存梯度（内部结构用）
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size *
@@ -330,15 +352,31 @@ void hasteGRUBackward(
 
     gru::BackwardPass<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
 
-    backward.Run(time_steps, W, R, bx, br, x, h, v, dh_new, dx, dW, dR, dbx, dbr, dh, dp_dev.data(),
-                 dq_dev.data(), nullptr);
+    backward.Run(time_steps, W_t, R_t, bx, br, x_t, h, v, dh_new, dx, dW, dR, dbx, dbr, dh,
+                 dp_dev.data(), dq_dev.data(), nullptr);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in hasteGRUBackward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in hasteGRUBackward: ") + err_str);
+    }
 }
 
+// =====================================================================
+// 权重量化实现
+// =====================================================================
+
 template <typename QuantT>
-void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
-                        const float *bx, const float *br,
-                        const GRUQuantitativeParameters &quant_parms, QuantT *W_quant,
-                        QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant) {
+void quantitativeWeight(
+    const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br,
+    const GRUQuantitativeParameters &quant_parms,
+    QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant) {
     // 显式创建dev::vector以避免临时对象问题
     dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
     dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
@@ -349,18 +387,26 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
     dev::quantificationPerChannel(R, R_quant, hidden_size, 3 * hidden_size, exp2_inv_R_dev);
     dev::quantificationPerChannel(bx, bx_quant, 1, 3 * hidden_size, exp2_inv_bx_dev);
     dev::quantificationPerChannel(br, br_quant, 1, 3 * hidden_size, exp2_inv_br_dev);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantitativeWeight: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantitativeWeight: ") + err_str);
+    }
 }
 
+// 量化 GRU 前向传播
 template <typename QuantT>
 void quantGRUForward(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const GRUQuantitativeParameters &quant_parms, const cublasHandle_t &g_blas_handle,
-    float *h,  // (time_steps + 1) * batch_size * hidden_size
-    float *v   // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
-) {
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
 
     dev::vector<QuantT> x_quant(x_size);
@@ -405,16 +451,26 @@ void quantGRUForward(
                                quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
                                quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
     }
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantGRUForward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForward: ") + err_str);
+    }
 }
 
+// 统一前向传播接口
 void forwardInterface(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size, const float *W,
-    const float *R, const float *bx, const float *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
-    float *h,    // (time_steps + 1) * batch_size * hidden_size，包含初始状态
-    float *v) {  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+    bool is_training, bool is_quant,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0, const GRUQuantitativeParameters &quant_gru_scales,
+    const cublasHandle_t &g_blas_handle, float *h, float *v) {
     if (is_quant) {
         // 根据 bitwidth_config_.W_ 决定权重量化位宽
         const auto &config = quant_gru_scales.bitwidth_config_;
@@ -445,59 +501,10 @@ void forwardInterface(
     }
 }
 
-template <typename QuantT>
-void GruQuantInit(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant, QuantT *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams) {
-    const int channel_size = hidden_size * 3;
-    // N : batch_size
-    // C : input_size
+// =====================================================================
+// 模板显式实例化（供 Python 绑定使用）
+// =====================================================================
 
-    // 权重是per-channel的，大小为H * 3（hidden_size * 3）
-    // W: [H*3, C]，W_quant: [H*3, C]，scale_W_: [H*3]
-    quantificationPerChannel(W, W_quant, input_size, channel_size, gruRescaleParams.exp2_inv_W_);
-    // R: [H*3, H]，R_quant: [H*3, H]，scale_R_: [H*3]
-    quantificationPerChannel(R, R_quant, hidden_size, channel_size, gruRescaleParams.exp2_inv_R_);
-
-    // 偏置per-channel，H*3
-    // bx_quant: [H*3], scale_bx_: [H*3]
-    quantificationPerChannel(bx, bx_quant, 1, channel_size, gruRescaleParams.exp2_inv_bx_);
-    // br_quant: [H*3], scale_br_: [H*3]
-    quantificationPerChannel(br, br_quant, 1, channel_size, gruRescaleParams.exp2_inv_br_);
-
-    // x: [C, N, T], x_quant: [C, N, T]
-    // 量化用全局scale_x_和zp_x_
-    quantification(x, x_quant, time_steps * batch_size * input_size, gruRescaleParams.exp2_inv_x_,
-                   gruRescaleParams.zp_x_);
-}
-
-template void GruQuantInit<int8_t>(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    int8_t *W_quant, int8_t *R_quant, int32_t *bx_quant, int32_t *br_quant, int8_t *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams);
-
-template void GruQuantInit<int16_t>(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    int16_t *W_quant, int16_t *R_quant, int32_t *bx_quant, int32_t *br_quant, int16_t *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams);
-
-// 显式实例化 quantitativeWeight 和 quantGRUForward 模板函数，供 Python 绑定使用
 template void quantitativeWeight<int8_t>(const int input_size, const int hidden_size,
                                          const float *W, const float *R, const float *bx,
                                          const float *br,
@@ -523,37 +530,26 @@ template void quantGRUForward<int8_t>(bool is_training, const int time_steps, co
 template void quantGRUForward<int16_t>(bool is_training, const int time_steps, const int batch_size,
                                        const int input_size, const int hidden_size,
                                        const int16_t *W, const int16_t *R, const int32_t *bx,
-                                       const int32_t *br, const float *x,
-                                       const float *h0,  // 初始隐藏状态，可以为 nullptr
+                                       const int32_t *br, const float *x, const float *h0,
                                        const GRUQuantitativeParameters &quant_parms,
                                        const cublasHandle_t &g_blas_handle, float *h, float *v);
 
-// 初始化量化 LUT 表（仅在初始化时调用一次）
-// 接收量化参数对象，内部根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
-void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
-    const auto &config = quant_params.bitwidth_config_;
-    // 根据 z_pre_ 的位宽选择 LUT 类型（假设所有门使用相同的位宽）
-    if (config.z_pre_ == QuantBitWidth::INT16) {
-        // int16 使用分段线性量化表
-        generate_piecewise_linear_lut_from_exp2_inv<int16_t>(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
-    } else {
-        // int8：同时初始化传统 LUT 表和分段线性 LUT
-        // 传统 LUT（用于非 USE_LINER 编译）
-        generate_int8_lut_from_exp2_inv(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+// =====================================================================
+// LUT 初始化实现
+// =====================================================================
 
-        // 分段线性 LUT（用于 USE_LINER 编译）
-        generate_piecewise_linear_lut_from_exp2_inv<int8_t>(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
+    generate_piecewise_linear_lut(quant_params);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in initialize_quantization_lut: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in initialize_quantization_lut: ") +
+                                 err_str);
     }
 }
