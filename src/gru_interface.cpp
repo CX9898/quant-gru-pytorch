@@ -1,3 +1,7 @@
+// =====================================================================
+// GRU 接口层实现 (gru_interface.cpp)
+// =====================================================================
+
 #include "gru_interface.hpp"
 
 #include <cuda_runtime.h>
@@ -8,7 +12,10 @@
 #include "parallelAlgorithm.h"
 #include "quantize_ops_helper.hpp"
 
-// 校准 GRU 量化范围（min/max）
+// =====================================================================
+// 量化校准实现
+// =====================================================================
+
 void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidden_size,
                         const float *W, const float *R, const float *bx, const float *br,
                         const float *x, const cublasHandle_t &g_blas_handle,
@@ -49,7 +56,6 @@ void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidd
     quant_ranges = forward.getGRUQuantizationRanges();
 }
 
-// 根据量化范围和位宽配置计算量化参数
 GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges, const OperatorQuantConfig &bitwidth_config) {
     GRUQuantitativeParameters quant_params;
@@ -259,11 +265,10 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     return quant_params;
 }
 
-GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int input_size,
-                                             int hidden_size, const float *W, const float *R,
-                                             const float *bx, const float *br, const float *x,
-                                             const cublasHandle_t &g_blas_handle,
-                                             const OperatorQuantConfig &bitwidth_config) {
+GRUQuantitativeParameters calibrateGruScales(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const cublasHandle_t &g_blas_handle, const OperatorQuantConfig &bitwidth_config) {
     // 首先校准范围
     GRUQuantizationRanges quant_ranges(hidden_size);
 
@@ -274,7 +279,6 @@ GRUQuantitativeParameters calibrateGruScales(int time_steps, int batch_size, int
     return calculateGRUQuantitativeParameters(quant_ranges, bitwidth_config);
 }
 
-// 校准量化参数并初始化 LUT 表（组合函数，方便使用）
 GRUQuantitativeParameters calibrateGruScalesAndInitLut(
     int time_steps, int batch_size, int input_size, int hidden_size, const float *W, const float *R,
     const float *bx, const float *br, const float *x, const cublasHandle_t &g_blas_handle,
@@ -290,15 +294,14 @@ GRUQuantitativeParameters calibrateGruScalesAndInitLut(
     return quant_params;
 }
 
+// =====================================================================
+// 前向传播实现
+// =====================================================================
+
 void hasteGRUForward(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const cublasHandle_t &g_blas_handle,
-    float *h,  // (time_steps + 1) * batch_size * hidden_size
-    float *v   // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
-) {
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const float *W, const float *R, const float *bx, const float *br,
+    const float *x, const float *h0, const cublasHandle_t &g_blas_handle, float *h, float *v) {
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                   3);                             // 用于存放W * x的中间结果
     dev::vector<float> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
@@ -332,20 +335,16 @@ void hasteGRUForward(
     }
 }
 
+// =====================================================================
+// 反向传播实现
+// =====================================================================
+
+// ★★★ 重要：W_t、R_t、x_t 需要传入【转置后】的数据！★★★
 void hasteGRUBackward(
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const float *dh_new,
-    const float *h,  // (time_steps + 1) * batch_size * hidden_size
-    const float *v,  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
-    const cublasHandle_t &g_blas_handle,
-    float *dx,   // (time_steps *batch_size * input_size) 输入序列梯度
-    float *dW,   // (input_size * hidden_size * 3)// 对输入权重的梯度
-    float *dR,   // (hidden_size * hidden_size * 3) // 对循环权重的梯度
-    float *dbx,  // (hidden_size * 3)// 对输入偏置的梯度
-    float *dbr,  // (hidden_size * 3)// 对循环偏置的梯度
-    float *dh    // (batch_size * hidden_size)// 对最后隐藏状态的梯度
-) {
+    const float *W_t, const float *R_t, const float *bx, const float *br, const float *x_t,
+    const float *dh_new, const float *h, const float *v, const cublasHandle_t &g_blas_handle,
+    float *dx, float *dW, float *dR, float *dbx, float *dbr, float *dh) {
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size *
                               3);  // 临时缓存梯度（内部结构用）
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size *
@@ -353,8 +352,8 @@ void hasteGRUBackward(
 
     gru::BackwardPass<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
 
-    backward.Run(time_steps, W, R, bx, br, x, h, v, dh_new, dx, dW, dR, dbx, dbr, dh, dp_dev.data(),
-                 dq_dev.data(), nullptr);
+    backward.Run(time_steps, W_t, R_t, bx, br, x_t, h, v, dh_new, dx, dW, dR, dbx, dbr, dh,
+                 dp_dev.data(), dq_dev.data(), nullptr);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -368,11 +367,16 @@ void hasteGRUBackward(
     }
 }
 
+// =====================================================================
+// 权重量化实现
+// =====================================================================
+
 template <typename QuantT>
-void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
-                        const float *bx, const float *br,
-                        const GRUQuantitativeParameters &quant_parms, QuantT *W_quant,
-                        QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant) {
+void quantitativeWeight(
+    const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br,
+    const GRUQuantitativeParameters &quant_parms,
+    QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant) {
     // 显式创建dev::vector以避免临时对象问题
     dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
     dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
@@ -396,16 +400,13 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
     }
 }
 
+// 量化 GRU 前向传播
 template <typename QuantT>
 void quantGRUForward(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const GRUQuantitativeParameters &quant_parms, const cublasHandle_t &g_blas_handle,
-    float *h,  // (time_steps + 1) * batch_size * hidden_size
-    float *v   // (time_steps * batch_size * hidden_size * 4)，反量化后的v，可以为 nullptr
-) {
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
 
     dev::vector<QuantT> x_quant(x_size);
@@ -463,14 +464,13 @@ void quantGRUForward(
     }
 }
 
+// 统一前向传播接口
 void forwardInterface(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size, const float *W,
-    const float *R, const float *bx, const float *br, const float *x,
-    const float *h0,  // 初始隐藏状态，可以为 nullptr
-    const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
-    float *h,    // (time_steps + 1) * batch_size * hidden_size，包含初始状态
-    float *v) {  // (time_steps * batch_size * hidden_size * 4)，中间值v，可以为 nullptr
+    bool is_training, bool is_quant,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0, const GRUQuantitativeParameters &quant_gru_scales,
+    const cublasHandle_t &g_blas_handle, float *h, float *v) {
     if (is_quant) {
         // 根据 bitwidth_config_.W_ 决定权重量化位宽
         const auto &config = quant_gru_scales.bitwidth_config_;
@@ -501,7 +501,10 @@ void forwardInterface(
     }
 }
 
-// 显式实例化 quantitativeWeight 和 quantGRUForward 模板函数，供 Python 绑定使用
+// =====================================================================
+// 模板显式实例化（供 Python 绑定使用）
+// =====================================================================
+
 template void quantitativeWeight<int8_t>(const int input_size, const int hidden_size,
                                          const float *W, const float *R, const float *bx,
                                          const float *br,
@@ -527,15 +530,15 @@ template void quantGRUForward<int8_t>(bool is_training, const int time_steps, co
 template void quantGRUForward<int16_t>(bool is_training, const int time_steps, const int batch_size,
                                        const int input_size, const int hidden_size,
                                        const int16_t *W, const int16_t *R, const int32_t *bx,
-                                       const int32_t *br, const float *x,
-                                       const float *h0,  // 初始隐藏状态，可以为 nullptr
+                                       const int32_t *br, const float *x, const float *h0,
                                        const GRUQuantitativeParameters &quant_parms,
                                        const cublasHandle_t &g_blas_handle, float *h, float *v);
 
-// 初始化量化 LUT 表（仅在初始化时调用一次）
-// 接收量化参数对象，内部根据 bitwidth_config_ 自动选择各门相应的 LUT 初始化方法
+// =====================================================================
+// LUT 初始化实现
+// =====================================================================
+
 void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
-    // 根据 bitwidth_config_ 中各门的实际位宽配置生成对应的 LUT
     generate_piecewise_linear_lut(quant_params);
 
     // 同步 CUDA 操作
