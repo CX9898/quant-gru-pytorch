@@ -373,76 +373,195 @@ void calibrate_gru_ranges_wrapper(
     quant_ranges.from_cpp(cpp_ranges);
 }
 
-// OperatorQuantConfig 的 Python 绑定
+// ============================================================================
+//                    位宽转换辅助函数
+// ============================================================================
+//
+// 设计说明：
+// - Python 端只配置位宽数量（8, 16, 32），不关心实际类型（INT/UINT）
+// - C++ 端在 to_cpp() 时决定实际类型：
+//   - 大多数操作 → INT 类型（bitwidthToQuantType）
+//   - sigmoid 输出（z_out, r_out）→ UINT 类型（bitwidthToUnsignedQuantType）
+// - 这样 Python 配置简单，类型选择由 C++ 根据语义自动决定
+//
+// ============================================================================
+
+/**
+ * @brief 将位宽数值转换为有符号 QuantBitWidth 枚举
+ * @param bitwidth 位宽数值（8, 16, 32）
+ * @return 对应的有符号 QuantBitWidth（INT8, INT16, INT32）
+ * @note 用于大多数操作（输入、权重、中间计算等）
+ */
+inline QuantBitWidth bitwidthToQuantType(int8_t bitwidth) {
+    switch (bitwidth) {
+        case 8:  return QuantBitWidth::INT8;
+        case 16: return QuantBitWidth::INT16;
+        case 32: return QuantBitWidth::INT32;
+        default:
+            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
+                                        ". Supported values: 8, 16, 32");
+    }
+}
+
+/**
+ * @brief 将位宽数值转换为无符号 QuantBitWidth 枚举
+ * @param bitwidth 位宽数值（8, 16, 32）
+ * @return 对应的无符号 QuantBitWidth（UINT8, UINT16，32位回退到 INT32）
+ * @note 专用于 sigmoid 输出（z_out, r_out），因为输出范围是 [0, 1]
+ */
+inline QuantBitWidth bitwidthToUnsignedQuantType(int8_t bitwidth) {
+    switch (bitwidth) {
+        case 8:  return QuantBitWidth::UINT8;
+        case 16: return QuantBitWidth::UINT16;
+        case 32: return QuantBitWidth::INT32;  // 32 位无 UINT 类型，回退到 INT32
+        default:
+            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
+                                        ". Supported values: 8, 16, 32");
+    }
+}
+
+/**
+ * @brief 将 QuantBitWidth 枚举转换为位宽数值
+ * @param bw QuantBitWidth 枚举
+ * @return 位宽数值（8, 16, 32）
+ * @note 用于 from_cpp()，将 C++ 类型转回 Python 可见的位宽数值
+ */
+inline int8_t quantTypeToBitwidth(QuantBitWidth bw) {
+    switch (bw) {
+        case QuantBitWidth::INT8:
+        case QuantBitWidth::UINT8:
+            return 8;
+        case QuantBitWidth::INT16:
+        case QuantBitWidth::UINT16:
+            return 16;
+        case QuantBitWidth::INT32:
+            return 32;
+        default:
+            return 8;
+    }
+}
+
+// ============================================================================
+//                    OperatorQuantConfig Python 绑定
+// ============================================================================
+//
+// 设计说明：
+// - Python 端只配置位宽数量（8, 16, 32）和对称量化标志
+// - to_cpp() 时自动决定实际类型：大多数用 INT，sigmoid 输出用 UINT
+// - is_symmetric 只影响 zero_point 计算，与位宽类型完全解耦
+//
+// ============================================================================
+
+/**
+ * @brief OperatorQuantConfig 的 Python 绑定结构体
+ *
+ * 与 C++ OperatorQuantConfig 的区别：
+ * - 位宽字段使用 int8_t 存储数值（8, 16, 32），而非 QuantBitWidth 枚举
+ * - to_cpp() 负责类型转换：z_out/r_out → UINT，其他 → INT
+ */
 struct OperatorQuantConfigPy {
     // ==================== 位宽配置 ====================
-    int8_t x_ = -8;           // INT8
-    int8_t h_ = -8;           // INT8
-    int8_t W_ = -8;           // INT8
-    int8_t R_ = -8;           // INT8
-    int8_t bx_ = -8;          // INT8
-    int8_t br_ = -8;          // INT8
-    int8_t Wx_ = -8;          // INT8
-    int8_t Rh_ = -8;          // INT8
-    int8_t z_pre_ = -8;       // INT8
-    int8_t z_out_ = 8;        // UINT8
-    int8_t r_pre_ = -8;       // INT8
-    int8_t r_out_ = 8;        // UINT8
-    int8_t g_pre_ = -8;       // INT8
-    int8_t g_out_ = -8;       // INT8
-    int8_t Rh_add_br_ = -8;   // INT8
-    int8_t rRh_ = -8;         // INT8
-    int8_t one_minus_update_ = -8;  // INT8
-    int8_t old_contrib_ = -8; // INT8
-    int8_t new_contrib_ = -8; // INT8
+    // 存储位宽数量（8, 16, 32），to_cpp() 时决定实际类型
+
+    // 输入
+    int8_t x_ = 8;   // 输入序列 x
+    int8_t h_ = 8;   // 隐藏状态 h
+
+    // 权重
+    int8_t W_ = 8;   // 输入权重 W
+    int8_t R_ = 8;   // 循环权重 R
+    int8_t bx_ = 8;  // 输入偏置 bx
+    int8_t br_ = 8;  // 循环偏置 br
+
+    // 矩阵乘法结果
+    int8_t Wx_ = 8;  // W @ x
+    int8_t Rh_ = 8;  // R @ h
+
+    // 门控 - 更新门
+    int8_t z_pre_ = 8;  // sigmoid 前
+    int8_t z_out_ = 8;  // sigmoid 后 [0,1]，to_cpp() 时转为 UINT
+
+    // 门控 - 重置门
+    int8_t r_pre_ = 8;  // sigmoid 前
+    int8_t r_out_ = 8;  // sigmoid 后 [0,1]，to_cpp() 时转为 UINT
+
+    // 门控 - 候选门
+    int8_t g_pre_ = 8;  // tanh 前
+    int8_t g_out_ = 8;  // tanh 后 [-1,1]
+
+    // 中间运算
+    int8_t Rh_add_br_ = 8;        // Rh + br
+    int8_t rRh_ = 8;              // r × Rh
+    int8_t one_minus_update_ = 8; // 1 - z
+    int8_t old_contrib_ = 8;      // z × h[t-1]
+    int8_t new_contrib_ = 8;      // (1-z) × g
 
     // ==================== 对称量化配置 ====================
-    // is_symmetric = true:  对称量化，zero_point = 0
-    // is_symmetric = false: 非对称量化，zero_point ≠ 0
-    bool x_symmetric_ = false;                 // 输入 x
-    bool h_symmetric_ = false;                 // 隐藏状态 h
-    bool W_symmetric_ = true;                 // 权重 W
-    bool R_symmetric_ = true;                 // 权重 R
-    bool bx_symmetric_ = true;                // 偏置 bx
-    bool br_symmetric_ = true;                // 偏置 br
-    bool Wx_symmetric_ = false;                // Wx 结果
-    bool Rh_symmetric_ = false;                // Rh 结果
-    bool z_pre_symmetric_ = false;             // z 门输入
-    bool z_out_symmetric_ = false;            // z 门输出（sigmoid 后 [0,1]）
-    bool r_pre_symmetric_ = false;             // r 门输入
-    bool r_out_symmetric_ = false;            // r 门输出（sigmoid 后 [0,1]）
-    bool g_pre_symmetric_ = false;             // g 门输入
-    bool g_out_symmetric_ = false;             // g 门输出（tanh 后 [-1,1]）
-    bool Rh_add_br_symmetric_ = false;         // Rh + br
-    bool rRh_symmetric_ = false;               // r × Rh
-    bool one_minus_update_symmetric_ = false;  // 1 - z
-    bool old_contrib_symmetric_ = false;       // z * h
-    bool new_contrib_symmetric_ = false;       // (1.0 - z) * g
+    // is_symmetric 只影响 zero_point 计算：
+    //   - true:  对称量化，zp = 0
+    //   - false: 非对称量化，zp ≠ 0
 
-    // 转换为 C++ 结构体
+    // 输入（通常非对称）
+    bool x_symmetric_ = false;
+    bool h_symmetric_ = false;
+
+    // 权重（通常对称）
+    bool W_symmetric_ = true;
+    bool R_symmetric_ = true;
+    bool bx_symmetric_ = true;
+    bool br_symmetric_ = true;
+
+    // 矩阵乘法结果
+    bool Wx_symmetric_ = false;
+    bool Rh_symmetric_ = false;
+
+    // 门控
+    bool z_pre_symmetric_ = false;
+    bool z_out_symmetric_ = false;  // sigmoid 输出 [0,1]
+    bool r_pre_symmetric_ = false;
+    bool r_out_symmetric_ = false;  // sigmoid 输出 [0,1]
+    bool g_pre_symmetric_ = false;
+    bool g_out_symmetric_ = false;  // tanh 输出 [-1,1]
+
+    // 中间运算
+    bool Rh_add_br_symmetric_ = false;
+    bool rRh_symmetric_ = false;
+    bool one_minus_update_symmetric_ = false;
+    bool old_contrib_symmetric_ = false;
+    bool new_contrib_symmetric_ = false;
+
+    /**
+     * @brief 转换为 C++ OperatorQuantConfig
+     *
+     * 关键转换逻辑：
+     * - z_out_, r_out_ → bitwidthToUnsignedQuantType() → UINT 类型
+     * - 其他字段 → bitwidthToQuantType() → INT 类型
+     */
     OperatorQuantConfig to_cpp() const {
         OperatorQuantConfig cfg;
-        // 位宽配置
-        cfg.x_ = static_cast<QuantBitWidth>(x_);
-        cfg.h_ = static_cast<QuantBitWidth>(h_);
-        cfg.W_ = static_cast<QuantBitWidth>(W_);
-        cfg.R_ = static_cast<QuantBitWidth>(R_);
-        cfg.bx_ = static_cast<QuantBitWidth>(bx_);
-        cfg.br_ = static_cast<QuantBitWidth>(br_);
-        cfg.Wx_ = static_cast<QuantBitWidth>(Wx_);
-        cfg.Rh_ = static_cast<QuantBitWidth>(Rh_);
-        cfg.z_pre_ = static_cast<QuantBitWidth>(z_pre_);
-        cfg.z_out_ = static_cast<QuantBitWidth>(z_out_);
-        cfg.r_pre_ = static_cast<QuantBitWidth>(r_pre_);
-        cfg.r_out_ = static_cast<QuantBitWidth>(r_out_);
-        cfg.g_pre_ = static_cast<QuantBitWidth>(g_pre_);
-        cfg.g_out_ = static_cast<QuantBitWidth>(g_out_);
-        cfg.Rh_add_br_ = static_cast<QuantBitWidth>(Rh_add_br_);
-        cfg.rRh_ = static_cast<QuantBitWidth>(rRh_);
-        cfg.one_minus_update_ = static_cast<QuantBitWidth>(one_minus_update_);
-        cfg.old_contrib_ = static_cast<QuantBitWidth>(old_contrib_);
-        cfg.new_contrib_ = static_cast<QuantBitWidth>(new_contrib_);
-        // 对称量化配置
+
+        // 位宽配置：大多数操作使用 INT 类型
+        cfg.x_ = bitwidthToQuantType(x_);
+        cfg.h_ = bitwidthToQuantType(h_);
+        cfg.W_ = bitwidthToQuantType(W_);
+        cfg.R_ = bitwidthToQuantType(R_);
+        cfg.bx_ = bitwidthToQuantType(bx_);
+        cfg.br_ = bitwidthToQuantType(br_);
+        cfg.Wx_ = bitwidthToQuantType(Wx_);
+        cfg.Rh_ = bitwidthToQuantType(Rh_);
+        cfg.z_pre_ = bitwidthToQuantType(z_pre_);
+        cfg.z_out_ = bitwidthToUnsignedQuantType(z_out_);  // sigmoid → UINT
+        cfg.r_pre_ = bitwidthToQuantType(r_pre_);
+        cfg.r_out_ = bitwidthToUnsignedQuantType(r_out_);  // sigmoid → UINT
+        cfg.g_pre_ = bitwidthToQuantType(g_pre_);
+        cfg.g_out_ = bitwidthToQuantType(g_out_);
+        cfg.Rh_add_br_ = bitwidthToQuantType(Rh_add_br_);
+        cfg.rRh_ = bitwidthToQuantType(rRh_);
+        cfg.one_minus_update_ = bitwidthToQuantType(one_minus_update_);
+        cfg.old_contrib_ = bitwidthToQuantType(old_contrib_);
+        cfg.new_contrib_ = bitwidthToQuantType(new_contrib_);
+
+        // 对称量化配置（直接复制）
         cfg.x_symmetric_ = x_symmetric_;
         cfg.h_symmetric_ = h_symmetric_;
         cfg.W_symmetric_ = W_symmetric_;
@@ -462,32 +581,38 @@ struct OperatorQuantConfigPy {
         cfg.one_minus_update_symmetric_ = one_minus_update_symmetric_;
         cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
         cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
+
         return cfg;
     }
 
-    // 从 C++ 结构体转换
+    /**
+     * @brief 从 C++ OperatorQuantConfig 转换
+     *
+     * 将 QuantBitWidth 枚举转换回位宽数值（INT8/UINT8 → 8 等）
+     */
     void from_cpp(const OperatorQuantConfig &cfg) {
-        // 位宽配置
-        x_ = static_cast<int8_t>(cfg.x_);
-        h_ = static_cast<int8_t>(cfg.h_);
-        W_ = static_cast<int8_t>(cfg.W_);
-        R_ = static_cast<int8_t>(cfg.R_);
-        bx_ = static_cast<int8_t>(cfg.bx_);
-        br_ = static_cast<int8_t>(cfg.br_);
-        Wx_ = static_cast<int8_t>(cfg.Wx_);
-        Rh_ = static_cast<int8_t>(cfg.Rh_);
-        z_pre_ = static_cast<int8_t>(cfg.z_pre_);
-        z_out_ = static_cast<int8_t>(cfg.z_out_);
-        r_pre_ = static_cast<int8_t>(cfg.r_pre_);
-        r_out_ = static_cast<int8_t>(cfg.r_out_);
-        g_pre_ = static_cast<int8_t>(cfg.g_pre_);
-        g_out_ = static_cast<int8_t>(cfg.g_out_);
-        Rh_add_br_ = static_cast<int8_t>(cfg.Rh_add_br_);
-        rRh_ = static_cast<int8_t>(cfg.rRh_);
-        one_minus_update_ = static_cast<int8_t>(cfg.one_minus_update_);
-        old_contrib_ = static_cast<int8_t>(cfg.old_contrib_);
-        new_contrib_ = static_cast<int8_t>(cfg.new_contrib_);
-        // 对称量化配置
+        // 位宽配置：枚举 → 数值
+        x_ = quantTypeToBitwidth(cfg.x_);
+        h_ = quantTypeToBitwidth(cfg.h_);
+        W_ = quantTypeToBitwidth(cfg.W_);
+        R_ = quantTypeToBitwidth(cfg.R_);
+        bx_ = quantTypeToBitwidth(cfg.bx_);
+        br_ = quantTypeToBitwidth(cfg.br_);
+        Wx_ = quantTypeToBitwidth(cfg.Wx_);
+        Rh_ = quantTypeToBitwidth(cfg.Rh_);
+        z_pre_ = quantTypeToBitwidth(cfg.z_pre_);
+        z_out_ = quantTypeToBitwidth(cfg.z_out_);
+        r_pre_ = quantTypeToBitwidth(cfg.r_pre_);
+        r_out_ = quantTypeToBitwidth(cfg.r_out_);
+        g_pre_ = quantTypeToBitwidth(cfg.g_pre_);
+        g_out_ = quantTypeToBitwidth(cfg.g_out_);
+        Rh_add_br_ = quantTypeToBitwidth(cfg.Rh_add_br_);
+        rRh_ = quantTypeToBitwidth(cfg.rRh_);
+        one_minus_update_ = quantTypeToBitwidth(cfg.one_minus_update_);
+        old_contrib_ = quantTypeToBitwidth(cfg.old_contrib_);
+        new_contrib_ = quantTypeToBitwidth(cfg.new_contrib_);
+
+        // 对称量化配置（直接复制）
         x_symmetric_ = cfg.x_symmetric_;
         h_symmetric_ = cfg.h_symmetric_;
         W_symmetric_ = cfg.W_symmetric_;
@@ -999,7 +1124,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("hidden") = -1);
 
     // OperatorQuantConfig 绑定（位宽配置 + 对称量化配置）
-    // 位宽值: INT8=-8, INT16=-16, INT32=-32, UINT8=8, UINT16=16
+    // 位宽值: 8, 16, 32（Python 端只看到位宽数量，C++ 端决定实际类型）
     // 对称量化: is_symmetric=true 对称量化(zp=0), is_symmetric=false 非对称量化(zp≠0)
     py::class_<OperatorQuantConfigPy>(m, "OperatorQuantConfig")
         .def(py::init<>())

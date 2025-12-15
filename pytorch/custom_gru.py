@@ -24,16 +24,13 @@ def _get_bitwidth_value(op_cfg: dict) -> int:
     """
     从操作配置中获取位宽值
     
-    根据 output_bitwidth/weight_bitwidth 和 is_symmetric 字段计算位宽枚举值:
-    - is_symmetric=True:  对称量化，返回负值 (INT8=-8, INT16=-16, INT32=-32)
-    - is_symmetric=False: 非对称量化，返回正值 (UINT8=8, UINT16=16)
-    """
-    # 优先使用 output_bitwidth，其次 weight_bitwidth，默认 8
-    bitwidth = op_cfg.get('output_bitwidth', op_cfg.get('weight_bitwidth', 8))
-    is_symmetric = op_cfg.get('is_symmetric', True)
+    Python 端只关注位宽数量（8, 16, 32），不关心实际类型（INT/UINT）。
+    实际类型由 C++ 端在 to_cpp() 时根据位宽数值决定。
     
-    # 对称量化返回负值，非对称量化返回正值
-    return -bitwidth if is_symmetric else bitwidth
+    返回值:
+        正整数表示位宽: 8, 16, 32
+    """
+    return op_cfg.get('bitwidth', 8)
 
 
 def _get_symmetric_value(op_cfg: dict) -> bool:
@@ -112,10 +109,8 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
 
 def _format_bitwidth(val: int) -> str:
     """格式化位宽值为可读字符串"""
-    if val < 0:
-        return f"INT{-val}"
-    else:
-        return f"UINT{val}"
+    # Python 端只显示位宽数量
+    return f"{abs(val)}bit"
 
 
 def _format_symmetric(is_symmetric: bool) -> str:
