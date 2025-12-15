@@ -61,8 +61,8 @@ struct GRUQuantizationRangesPy {
     float max_g_out_ = std::numeric_limits<float>::lowest();
 
     // 中间计算结果
-    float min_Rh_add_br_ = std::numeric_limits<float>::max();
-    float max_Rh_add_br_ = std::numeric_limits<float>::lowest();
+    float min_Rh_add_br_g_ = std::numeric_limits<float>::max();
+    float max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
     float min_rRh_ = std::numeric_limits<float>::max();
     float max_rRh_ = std::numeric_limits<float>::lowest();
 
@@ -105,8 +105,8 @@ struct GRUQuantizationRangesPy {
         max_r_out_ = cpp_ranges.max_r_out_;
         min_g_out_ = cpp_ranges.min_g_out_;
         max_g_out_ = cpp_ranges.max_g_out_;
-        min_Rh_add_br_ = cpp_ranges.min_Rh_add_br_;
-        max_Rh_add_br_ = cpp_ranges.max_Rh_add_br_;
+        min_Rh_add_br_g_ = cpp_ranges.min_Rh_add_br_g_;
+        max_Rh_add_br_g_ = cpp_ranges.max_Rh_add_br_g_;
         min_rRh_ = cpp_ranges.min_rRh_;
         max_rRh_ = cpp_ranges.max_rRh_;
         min_one_minus_update_ = cpp_ranges.min_one_minus_update_;
@@ -149,8 +149,8 @@ struct GRUQuantizationRangesPy {
         cpp_ranges.max_r_out_ = max_r_out_;
         cpp_ranges.min_g_out_ = min_g_out_;
         cpp_ranges.max_g_out_ = max_g_out_;
-        cpp_ranges.min_Rh_add_br_ = min_Rh_add_br_;
-        cpp_ranges.max_Rh_add_br_ = max_Rh_add_br_;
+        cpp_ranges.min_Rh_add_br_g_ = min_Rh_add_br_g_;
+        cpp_ranges.max_Rh_add_br_g_ = max_Rh_add_br_g_;
         cpp_ranges.min_rRh_ = min_rRh_;
         cpp_ranges.max_rRh_ = max_rRh_;
         cpp_ranges.min_one_minus_update_ = min_one_minus_update_;
@@ -191,8 +191,8 @@ struct GRUQuantizationRangesPy {
         max_r_out_ = std::numeric_limits<float>::lowest();
         min_g_out_ = std::numeric_limits<float>::max();
         max_g_out_ = std::numeric_limits<float>::lowest();
-        min_Rh_add_br_ = std::numeric_limits<float>::max();
-        max_Rh_add_br_ = std::numeric_limits<float>::lowest();
+        min_Rh_add_br_g_ = std::numeric_limits<float>::max();
+        max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
         min_rRh_ = std::numeric_limits<float>::max();
         max_rRh_ = std::numeric_limits<float>::lowest();
         min_one_minus_update_ = std::numeric_limits<float>::max();
@@ -845,8 +845,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("max_r_out_", &GRUQuantizationRangesPy::max_r_out_)
         .def_readwrite("min_g_out_", &GRUQuantizationRangesPy::min_g_out_)
         .def_readwrite("max_g_out_", &GRUQuantizationRangesPy::max_g_out_)
-        .def_readwrite("min_Rh_add_br_", &GRUQuantizationRangesPy::min_Rh_add_br_)
-        .def_readwrite("max_Rh_add_br_", &GRUQuantizationRangesPy::max_Rh_add_br_)
+        .def_readwrite("min_Rh_add_br_g_", &GRUQuantizationRangesPy::min_Rh_add_br_g_)
+        .def_readwrite("max_Rh_add_br_g_", &GRUQuantizationRangesPy::max_Rh_add_br_g_)
         .def_readwrite("min_rRh_", &GRUQuantizationRangesPy::min_rRh_)
         .def_readwrite("max_rRh_", &GRUQuantizationRangesPy::max_rRh_)
         .def_readwrite("min_one_minus_update_", &GRUQuantizationRangesPy::min_one_minus_update_)

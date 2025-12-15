@@ -414,7 +414,7 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     updateRange(quant_ranges.min_g_out_, quant_ranges.max_g_out_, min_g, max_g);
 
     auto [min_Rh_add_br, max_Rh_add_br] = computeMinMax(Rh_add_br_g);
-    updateRange(quant_ranges.min_Rh_add_br_, quant_ranges.max_Rh_add_br_, min_Rh_add_br, max_Rh_add_br);
+    updateRange(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_, min_Rh_add_br, max_Rh_add_br);
 
     auto [min_rRh, max_rRh] = computeMinMax(rRh_g);
     updateRange(quant_ranges.min_rRh_, quant_ranges.max_rRh_, min_rRh, max_rRh);
