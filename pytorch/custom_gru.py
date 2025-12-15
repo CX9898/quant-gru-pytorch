@@ -67,10 +67,10 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
     """
     with open(config_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    
+
     config = gru_ops.OperatorQuantConfig()
     op_config = data.get('operator_config', {})
-    
+
     # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
     field_map = {
         "input.x": ("x_", "x_symmetric_"),
@@ -93,7 +93,7 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
         "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
         "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
     }
-    
+
     for json_key, (bw_attr, sym_attr) in field_map.items():
         if json_key in op_config:
             op_cfg = op_config[json_key]
@@ -103,7 +103,7 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
             # 设置对称量化配置
             sym_val = _get_symmetric_value(op_cfg)
             setattr(config, sym_attr, sym_val)
-    
+
     return config
 
 
@@ -133,14 +133,14 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
         成功配置的字段数量
     """
     loaded = load_bitwidth_config(config_file)
-    
+
     # 复制位宽配置字段
     bitwidth_attrs = ['x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
                       'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
                       'Rh_add_br_', 'rRh_', 'one_minus_update_', 'old_contrib_', 'new_contrib_']
     for attr in bitwidth_attrs:
         setattr(config, attr, getattr(loaded, attr))
-    
+
     # 复制对称量化配置字段
     symmetric_attrs = ['x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
                        'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
@@ -149,7 +149,7 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
                        'one_minus_update_symmetric_', 'old_contrib_symmetric_', 'new_contrib_symmetric_']
     for attr in symmetric_attrs:
         setattr(config, attr, getattr(loaded, attr))
-    
+
     if verbose:
         print("\n" + "=" * 70)
         print("🔧 应用 GRU 量化配置（位宽 + 对称量化）")
@@ -170,13 +170,17 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
         print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
         print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
         print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
-        print(f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
+        print(
+            f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
         print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
-        print(f"          1-z: {_format_bitwidth(config.one_minus_update_):6s} ({_format_symmetric(config.one_minus_update_symmetric_)})")
-        print(f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
-        print(f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
+        print(
+            f"          1-z: {_format_bitwidth(config.one_minus_update_):6s} ({_format_symmetric(config.one_minus_update_symmetric_)})")
+        print(
+            f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
+        print(
+            f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
         print("=" * 70 + "\n")
-    
+
     return 38  # 19 位宽字段 + 19 对称量化字段
 
 
@@ -200,9 +204,9 @@ def reorder_weights_pytorch_to_haste(w: torch.Tensor) -> torch.Tensor:
 
     # PyTorch: [r0...rH, z0...zH, n0...nH] -> Haste: [z0...zH, r0...rH, n0...nH]
     indices = torch.cat([
-        torch.arange(hidden_size_3, 2*hidden_size_3, device=device),  # z
-        torch.arange(0, hidden_size_3, device=device),                 # r
-        torch.arange(2*hidden_size_3, 3*hidden_size_3, device=device) # n
+        torch.arange(hidden_size_3, 2 * hidden_size_3, device=device),  # z
+        torch.arange(0, hidden_size_3, device=device),  # r
+        torch.arange(2 * hidden_size_3, 3 * hidden_size_3, device=device)  # n
     ])
 
     return w.index_select(0, indices).contiguous()
@@ -224,9 +228,9 @@ def reorder_weights_haste_to_pytorch(w: torch.Tensor) -> torch.Tensor:
 
     # Haste: [z0...zH, r0...rH, n0...nH] -> PyTorch: [r0...rH, z0...zH, n0...nH]
     indices = torch.cat([
-        torch.arange(hidden_size_3, 2*hidden_size_3, device=device),  # r (在 Haste 中是第二部分)
-        torch.arange(0, hidden_size_3, device=device),                 # z (在 Haste 中是第一部分)
-        torch.arange(2*hidden_size_3, 3*hidden_size_3, device=device) # n (在 Haste 中是第三部分)
+        torch.arange(hidden_size_3, 2 * hidden_size_3, device=device),  # r (在 Haste 中是第二部分)
+        torch.arange(0, hidden_size_3, device=device),  # z (在 Haste 中是第一部分)
+        torch.arange(2 * hidden_size_3, 3 * hidden_size_3, device=device)  # n (在 Haste 中是第三部分)
     ])
 
     return w.index_select(0, indices).contiguous()
@@ -264,7 +268,7 @@ class GRUFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight_ih, weight_hh, bias_ih, bias_hh, h0, is_training,
-                use_quantization=False, quant_type='int8', quant_params=None):
+                use_quantization=False, quant_params=None):
         """
         前向传播
 
@@ -278,8 +282,7 @@ class GRUFunction(torch.autograd.Function):
             h0: 初始隐藏状态 [batch_size, hidden_size] 或 None
             is_training: 是否处于训练模式
             use_quantization: 是否使用量化
-            quant_type: 量化类型，'int8' 或 'int16'
-            quant_params: 量化参数
+            quant_params: 量化参数（包含位宽配置）
 
         Returns:
             output: 输出序列 [time_steps, batch_size, hidden_size]
@@ -365,7 +368,7 @@ class GRUFunction(torch.autograd.Function):
 
         # 分离输出：output_full[0] 是初始状态，output_full[1:] 是时间步输出
         output = output_full[1:]  # [time_steps, batch_size, hidden_size]
-        h_n = output_full[-1:]    # [1, batch_size, hidden_size]
+        h_n = output_full[-1:]  # [1, batch_size, hidden_size]
 
         # 保存中间结果用于反向传播
         ctx.save_for_backward(W, R, bx, br, input, output_full, v)
@@ -462,67 +465,101 @@ class GRUFunction(torch.autograd.Function):
         # 处理 h0 梯度
         grad_h0 = None if ctx.h0_is_none else dh
 
-        # 返回梯度（对应 forward 的 10 个参数）
-        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None, None
+        # 返回梯度（对应 forward 的 9 个参数）
+        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None
 
 
 # ==================== CustomGRU：自定义 GRU 类 ====================
 
 class CustomGRU(nn.GRU):
     """
-    继承自 PyTorch nn.GRU 的自定义类，支持量化前向传播
+    继承自 PyTorch nn.GRU 的自定义 GRU 实现，支持量化前向传播
+    
+    设计原则：
+        - 延迟初始化：CUDA handle 在首次 forward/calibrate 时初始化，而非构造时
+        - 配置与创建分离：位宽配置通过 load_bitwidth_config() 单独加载
+        - 校准与创建分离：校准通过 calibrate() + finalize_calibration() 单独执行
+        - 可序列化：使用 Python 字典存储配置，支持 pickle/deepcopy
 
-    量化校准流程：
+    量化使用流程：
         1. 创建模型：gru = CustomGRU(..., use_quantization=True)
-        2. 累积校准数据：gru.calibrate(data1), gru.calibrate(data2), ...（可多次调用）
-        3. 完成校准：gru.finalize_calibration()（只能调用一次）
-        4. 正常使用：output, h_n = gru(input)
-        5. 如需重新校准：gru.reset_calibration() 后回到步骤 2
+        2. (可选) 加载位宽配置：gru.load_bitwidth_config("config.json")
+        3. 累积校准数据：gru.calibrate(data1), gru.calibrate(data2), ...
+        4. 完成校准：gru.finalize_calibration()
+        5. 正常推理：output, h_n = gru(input)
+        
+    增量校准（支持中途重新校准）：
+        - 可随时调用 calibrate() 累积更多数据
+        - 在下次 forward() 前调用 finalize_calibration() 更新量化参数
+        - 如需完全重置范围：gru.reset_calibration()
 
-    校准状态：
-        - quant_ranges: 累积的量化范围（min/max），calibrate() 时更新
-        - quant_params: 最终的量化参数（scale/zp），finalize_calibration() 时计算
-        - is_calibrated(): 返回 quant_params 是否已设置
+    内部状态：
+        - _cublas_initialized: CUDA handle 是否已初始化
+        - _bitwidth_config_dict: 位宽配置（Python 字典，可序列化）
+        - quant_ranges: 校准范围（C++ 对象，calibrate() 时创建）
+        - quant_params: 量化参数（C++ 对象，finalize_calibration() 时创建）
 
     Args:
         input_size: 输入特征维度
         hidden_size: 隐藏状态维度
-        num_layers: GRU 层数（目前仅支持单层）
+        num_layers: GRU 层数（目前仅支持 1）
         bias: 是否使用偏置
         batch_first: 如果为 True，输入形状为 [batch, seq, feature]
         dropout: 层间 dropout 概率（目前不支持）
         bidirectional: 是否双向（目前不支持）
-        use_quantization: 是否使用量化
-        quant_type: 量化类型，'int8' 或 'int16'
-        calibration_data: 用于校准的输入数据（可选，提供则立即完成校准）
+        use_quantization: 是否启用量化（位宽通过 load_bitwidth_config() 配置）
 
     Examples:
-        >>> # 多次校准（推荐）
+        >>> # 基本使用（非量化）
+        >>> gru = CustomGRU(64, 128, batch_first=True)
+        >>> output, h_n = gru(input_data)
+        
+        >>> # 量化使用
         >>> gru = CustomGRU(64, 128, use_quantization=True)
+        >>> gru.load_bitwidth_config("config.json")  # 可选
         >>> for batch in calibration_loader:
         ...     gru.calibrate(batch)
         >>> gru.finalize_calibration()
         >>> output, h_n = gru(input_data)
-
-        >>> # 一次性校准（向后兼容）
-        >>> gru = CustomGRU(64, 128, use_quantization=True, calibration_data=data)
-        >>> output, h_n = gru(input_data)
     """
 
     def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        num_layers: int = 1,
-        bias: bool = True,
-        batch_first: bool = False,
-        dropout: float = 0.0,
-        bidirectional: bool = False,
-        use_quantization: bool = False,
-        quant_type: str = 'int8',
-        calibration_data: Optional[torch.Tensor] = None,
-        bitwidth_config_file: Optional[str] = None
+            self,
+            input_size: int,
+            hidden_size: int,
+            num_layers: int = 1,
+            bias: bool = True,
+            batch_first: bool = False,
+            dropout: float = 0.0,
+            bidirectional: bool = False,
+            use_quantization: bool = False,
     ):
+        """
+        初始化 CustomGRU
+        
+        设计原则：
+            - __init__ 只做最基本的属性初始化
+            - 复杂操作（CUDA 初始化、校准等）延迟到需要时执行
+            - 位宽配置通过 load_bitwidth_config() 单独加载
+        
+        Args:
+            input_size: 输入特征维度
+            hidden_size: 隐藏状态维度
+            num_layers: GRU 层数（目前仅支持 1）
+            bias: 是否使用偏置
+            batch_first: 输入格式是否为 [batch, seq, feature]
+            dropout: dropout 概率（目前不支持）
+            bidirectional: 是否双向（目前不支持）
+            use_quantization: 是否启用量化
+        
+        量化使用流程：
+            1. 创建模型: gru = CustomGRU(..., use_quantization=True)
+            2. (可选) 加载位宽配置: gru.load_bitwidth_config("config.json")
+            3. 累积校准: gru.calibrate(data1), gru.calibrate(data2), ...
+            4. 完成校准: gru.finalize_calibration()
+            5. 正常推理: output, h_n = gru(input)
+            6. (可选) 增量校准: calibrate() -> finalize_calibration() -> forward()
+        """
         # 检查限制
         if num_layers != 1:
             raise NotImplementedError("Currently only supports num_layers=1")
@@ -541,30 +578,90 @@ class CustomGRU(nn.GRU):
             bidirectional=bidirectional
         )
 
-        # 量化相关配置
+        # ===== 基本配置（只设置属性，不执行复杂操作） =====
         self.use_quantization = use_quantization
-        self.quant_type = quant_type.lower()
-        if self.quant_type not in ['int8', 'int16']:
-            raise ValueError(f"quant_type must be 'int8' or 'int16', got {self.quant_type}")
 
-        # 初始化 cublas handle
-        gru_ops.init_gru_cublas()
+        # ===== 量化状态（初始化为 None，延迟创建） =====
+        self.quant_ranges = None  # C++ 对象，calibrate() 时创建
+        self.quant_params = None  # C++ 对象，finalize_calibration() 时创建
 
-        # 量化状态初始化
-        self.quant_ranges = None  # 累积的量化范围（min/max）
-        self.quant_params = None  # 计算得到的量化参数（scale/zp）
-        
-        # 位宽配置
-        self.bitwidth_config = gru_ops.OperatorQuantConfig()
-        if bitwidth_config_file is not None:
-            self.load_bitwidth_config(bitwidth_config_file)
+        # ===== 位宽配置（延迟初始化，使用 Python 字典以支持序列化） =====
+        self._bitwidth_config_dict = None  # 延迟初始化，首次访问时创建默认配置
 
-        # 如果提供了校准数据，立即完成校准（向后兼容）
-        if self.use_quantization and calibration_data is not None:
-            self._initialize_quantization(calibration_data)
+        # ===== CUDA 初始化标志（延迟初始化） =====
+        self._cublas_initialized = False
 
-    # -------------------- 位宽配置接口 --------------------
+    # -------------------- CUDA 延迟初始化 --------------------
+
+    def _ensure_cublas_initialized(self):
+        """
+        确保 cublas handle 已初始化（延迟初始化模式）
+        只在第一次需要时初始化，避免在 __init__ 中过早初始化
+        """
+        if not self._cublas_initialized:
+            gru_ops.init_gru_cublas()
+            self._cublas_initialized = True
+
+    # -------------------- 位宽配置内部方法 --------------------
     
+    def _load_bitwidth_config_to_dict(self, config_file: str):
+        """从 JSON 文件加载配置到内部字典"""
+        # 初始化字典（只存储用户指定的配置）
+        if self._bitwidth_config_dict is None:
+            self._bitwidth_config_dict = {}
+        
+        with open(config_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        op_config = data.get('operator_config', {})
+
+        # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
+        field_map = {
+            "input.x": ("x_", "x_symmetric_"),
+            "input.h": ("h_", "h_symmetric_"),
+            "weight.W": ("W_", "W_symmetric_"),
+            "weight.R": ("R_", "R_symmetric_"),
+            "weight.bx": ("bx_", "bx_symmetric_"),
+            "weight.br": ("br_", "br_symmetric_"),
+            "matmul.Wx": ("Wx_", "Wx_symmetric_"),
+            "matmul.Rh": ("Rh_", "Rh_symmetric_"),
+            "gate.z_pre": ("z_pre_", "z_pre_symmetric_"),
+            "gate.z_out": ("z_out_", "z_out_symmetric_"),
+            "gate.r_pre": ("r_pre_", "r_pre_symmetric_"),
+            "gate.r_out": ("r_out_", "r_out_symmetric_"),
+            "gate.g_pre": ("g_pre_", "g_pre_symmetric_"),
+            "gate.g_out": ("g_out_", "g_out_symmetric_"),
+            "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
+            "op.rRh": ("rRh_", "rRh_symmetric_"),
+            "op.one_minus_update": ("one_minus_update_", "one_minus_update_symmetric_"),
+            "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
+            "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
+        }
+
+        for json_key, (bw_attr, sym_attr) in field_map.items():
+            if json_key in op_config:
+                op_cfg = op_config[json_key]
+                self._bitwidth_config_dict[bw_attr] = op_cfg.get('bitwidth', 8)
+                self._bitwidth_config_dict[sym_attr] = op_cfg.get('is_symmetric', True)
+
+    def _get_cpp_bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
+        """
+        获取 C++ OperatorQuantConfig 对象
+        
+        如果用户未加载自定义配置，返回默认的 C++ 对象（C++ 端使用默认值）
+        如果用户已加载配置，从 Python 字典创建 C++ 对象
+        """
+        config = gru_ops.OperatorQuantConfig()
+        
+        # 只有用户加载了自定义配置时，才覆盖 C++ 默认值
+        if self._bitwidth_config_dict is not None:
+            for attr, value in self._bitwidth_config_dict.items():
+                setattr(config, attr, value)
+        
+        return config
+
+    # -------------------- 位宽配置公开接口 --------------------
+
     def load_bitwidth_config(self, config_file: str, verbose: bool = False):
         """
         从 JSON 配置文件加载量化位宽配置
@@ -576,8 +673,21 @@ class CustomGRU(nn.GRU):
         使用示例:
             gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json", verbose=True)
         """
-        apply_bitwidth_config(self.bitwidth_config, config_file, verbose)
-    
+        self._load_bitwidth_config_to_dict(config_file)
+        if verbose:
+            cpp_config = self._get_cpp_bitwidth_config()
+            apply_bitwidth_config(cpp_config, config_file, verbose=True)
+
+    @property
+    def bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
+        """
+        获取当前的位宽配置对象（兼容旧接口）
+        
+        Returns:
+            OperatorQuantConfig 对象（每次调用都创建新对象）
+        """
+        return self._get_cpp_bitwidth_config()
+
     def get_bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
         """
         获取当前的位宽配置对象
@@ -585,7 +695,7 @@ class CustomGRU(nn.GRU):
         Returns:
             OperatorQuantConfig 对象
         """
-        return self.bitwidth_config
+        return self._get_cpp_bitwidth_config()
 
     # -------------------- 校准状态查询 --------------------
 
@@ -604,29 +714,24 @@ class CustomGRU(nn.GRU):
         """
         累积校准数据，更新量化范围
 
-        可多次调用，每次调用会将新数据的范围与已有范围合并（取并集）。
-        完成所有数据的校准后，需调用 finalize_calibration() 计算量化参数。
+        可随时调用，每次调用会将新数据的范围与已有范围合并（取并集）。
+        完成数据收集后，需调用 finalize_calibration() 计算量化参数。
 
         Args:
             calibration_data: 校准数据，形状为 [seq_len, batch, input_size]
                              （如果 batch_first=True，则为 [batch, seq_len, input_size]）
 
         Raises:
-            RuntimeError: 量化未启用，或已调用过 finalize_calibration()
+            RuntimeError: 量化未启用
 
         Note:
-            一旦调用了 finalize_calibration()，再调用此方法会报错。
-            如需重新校准，请先调用 reset_calibration()。
+            支持增量校准：即使已调用过 finalize_calibration()，仍可继续调用
+            calibrate() 累积更多数据，然后再次调用 finalize_calibration()。
         """
         if not self.use_quantization:
             raise RuntimeError(
                 "Cannot calibrate: quantization is not enabled. "
                 "Set use_quantization=True when creating the model."
-            )
-        if self.is_calibrated():
-            raise RuntimeError(
-                "Cannot calibrate: finalize_calibration() has already been called. "
-                "Call reset_calibration() first if you want to recalibrate."
             )
         self._accumulate_calibration_ranges(calibration_data)
 
@@ -635,22 +740,19 @@ class CustomGRU(nn.GRU):
         完成校准，计算量化参数并初始化 LUT 表
 
         根据累积的量化范围和位宽配置计算各算子的 scale 和 zero_point。
-        此方法只能调用一次。
+        可多次调用，每次会根据当前累积的范围重新计算量化参数。
 
         Raises:
-            RuntimeError: 未调用过 calibrate()，或已调用过此方法
+            RuntimeError: 未调用过 calibrate()
 
         Note:
-            调用此方法后，不能再调用 calibrate()。
-            如需重新校准，请先调用 reset_calibration()。
+            支持增量校准流程：
+                calibrate(data1) -> finalize_calibration() -> forward() ->
+                calibrate(data2) -> finalize_calibration() -> forward() -> ...
             
             如果需要自定义位宽配置，请在调用此方法前先调用 load_bitwidth_config()。
+            如需完全重置范围，请调用 reset_calibration()。
         """
-        if self.is_calibrated():
-            raise RuntimeError(
-                "finalize_calibration() has already been called. "
-                "Call reset_calibration() first if you want to recalibrate."
-            )
         if self.quant_ranges is None:
             raise RuntimeError(
                 "No calibration data accumulated. "
@@ -790,6 +892,9 @@ class CustomGRU(nn.GRU):
 
     def _accumulate_calibration_ranges(self, calibration_data: torch.Tensor):
         """累积校准范围（内部方法）"""
+        # 延迟初始化 cublas
+        self._ensure_cublas_initialized()
+
         # 确保校准数据在 CUDA 上
         device = calibration_data.device if calibration_data.is_cuda else torch.device('cuda')
         if not calibration_data.is_cuda:
@@ -849,30 +954,10 @@ class CustomGRU(nn.GRU):
 
     # -------------------- 重写方法 --------------------
 
-    def _apply(self, fn):
-        """
-        重写 _apply 方法，在量化校准后正确处理设备迁移
-
-        量化已校准时手动应用函数，避免触发 flatten_parameters() 导致 CUDA 状态冲突。
-        """
-        if self.is_calibrated():
-            if hasattr(self, '_flat_weights'):
-                self._flat_weights = None
-            for param in self.parameters():
-                if param is not None:
-                    param.data = fn(param.data)
-                    if param._grad is not None:
-                        param._grad.data = fn(param._grad.data)
-            for buffer in self.buffers():
-                if buffer is not None:
-                    buffer.data = fn(buffer.data)
-            return self
-        return super(CustomGRU, self)._apply(fn)
-
     def forward(
-        self,
-        input: torch.Tensor,
-        hx: Optional[torch.Tensor] = None
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播
@@ -888,6 +973,9 @@ class CustomGRU(nn.GRU):
         Raises:
             RuntimeError: 如果启用了量化但未校准
         """
+        # 延迟初始化 cublas（第一次 forward 时）
+        self._ensure_cublas_initialized()
+
         # 检查量化是否已校准完成
         if self.use_quantization and not self.is_calibrated():
             if self.quant_ranges is not None:
@@ -897,8 +985,7 @@ class CustomGRU(nn.GRU):
                 # 未进行任何校准
                 raise RuntimeError(
                     "Quantization is enabled but not calibrated. "
-                    "Please call calibrate(data) before forward pass, "
-                    "or provide calibration_data in __init__."
+                    "Please call calibrate(data) then finalize_calibration() before forward pass."
                 )
 
         # 处理 batch_first
@@ -940,7 +1027,6 @@ class CustomGRU(nn.GRU):
             h0,
             self.training,
             self.use_quantization,
-            self.quant_type,
             self.quant_params
         )
 
