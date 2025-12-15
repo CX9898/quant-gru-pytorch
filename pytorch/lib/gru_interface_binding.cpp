@@ -373,14 +373,153 @@ void calibrate_gru_ranges_wrapper(
     quant_ranges.from_cpp(cpp_ranges);
 }
 
-// 根据量化范围计算量化参数的包装函数
+// OperatorQuantConfig 的 Python 绑定
+struct OperatorQuantConfigPy {
+    // ==================== 位宽配置 ====================
+    int8_t x_ = -8;           // INT8
+    int8_t h_ = -8;           // INT8
+    int8_t W_ = -8;           // INT8
+    int8_t R_ = -8;           // INT8
+    int8_t bx_ = -8;          // INT8
+    int8_t br_ = -8;          // INT8
+    int8_t Wx_ = -8;          // INT8
+    int8_t Rh_ = -8;          // INT8
+    int8_t z_pre_ = -8;       // INT8
+    int8_t z_out_ = 8;        // UINT8
+    int8_t r_pre_ = -8;       // INT8
+    int8_t r_out_ = 8;        // UINT8
+    int8_t g_pre_ = -8;       // INT8
+    int8_t g_out_ = -8;       // INT8
+    int8_t Rh_add_br_ = -8;   // INT8
+    int8_t rRh_ = -8;         // INT8
+    int8_t one_minus_update_ = -8;  // INT8
+    int8_t old_contrib_ = -8; // INT8
+    int8_t new_contrib_ = -8; // INT8
+
+    // ==================== 对称量化配置 ====================
+    // is_symmetric = true:  对称量化，zero_point = 0
+    // is_symmetric = false: 非对称量化，zero_point ≠ 0
+    bool x_symmetric_ = false;                 // 输入 x
+    bool h_symmetric_ = false;                 // 隐藏状态 h
+    bool W_symmetric_ = true;                 // 权重 W
+    bool R_symmetric_ = true;                 // 权重 R
+    bool bx_symmetric_ = true;                // 偏置 bx
+    bool br_symmetric_ = true;                // 偏置 br
+    bool Wx_symmetric_ = false;                // Wx 结果
+    bool Rh_symmetric_ = false;                // Rh 结果
+    bool z_pre_symmetric_ = false;             // z 门输入
+    bool z_out_symmetric_ = false;            // z 门输出（sigmoid 后 [0,1]）
+    bool r_pre_symmetric_ = false;             // r 门输入
+    bool r_out_symmetric_ = false;            // r 门输出（sigmoid 后 [0,1]）
+    bool g_pre_symmetric_ = false;             // g 门输入
+    bool g_out_symmetric_ = false;             // g 门输出（tanh 后 [-1,1]）
+    bool Rh_add_br_symmetric_ = false;         // Rh + br
+    bool rRh_symmetric_ = false;               // r × Rh
+    bool one_minus_update_symmetric_ = false;  // 1 - z
+    bool old_contrib_symmetric_ = false;       // z * h
+    bool new_contrib_symmetric_ = false;       // (1.0 - z) * g
+
+    // 转换为 C++ 结构体
+    OperatorQuantConfig to_cpp() const {
+        OperatorQuantConfig cfg;
+        // 位宽配置
+        cfg.x_ = static_cast<QuantBitWidth>(x_);
+        cfg.h_ = static_cast<QuantBitWidth>(h_);
+        cfg.W_ = static_cast<QuantBitWidth>(W_);
+        cfg.R_ = static_cast<QuantBitWidth>(R_);
+        cfg.bx_ = static_cast<QuantBitWidth>(bx_);
+        cfg.br_ = static_cast<QuantBitWidth>(br_);
+        cfg.Wx_ = static_cast<QuantBitWidth>(Wx_);
+        cfg.Rh_ = static_cast<QuantBitWidth>(Rh_);
+        cfg.z_pre_ = static_cast<QuantBitWidth>(z_pre_);
+        cfg.z_out_ = static_cast<QuantBitWidth>(z_out_);
+        cfg.r_pre_ = static_cast<QuantBitWidth>(r_pre_);
+        cfg.r_out_ = static_cast<QuantBitWidth>(r_out_);
+        cfg.g_pre_ = static_cast<QuantBitWidth>(g_pre_);
+        cfg.g_out_ = static_cast<QuantBitWidth>(g_out_);
+        cfg.Rh_add_br_ = static_cast<QuantBitWidth>(Rh_add_br_);
+        cfg.rRh_ = static_cast<QuantBitWidth>(rRh_);
+        cfg.one_minus_update_ = static_cast<QuantBitWidth>(one_minus_update_);
+        cfg.old_contrib_ = static_cast<QuantBitWidth>(old_contrib_);
+        cfg.new_contrib_ = static_cast<QuantBitWidth>(new_contrib_);
+        // 对称量化配置
+        cfg.x_symmetric_ = x_symmetric_;
+        cfg.h_symmetric_ = h_symmetric_;
+        cfg.W_symmetric_ = W_symmetric_;
+        cfg.R_symmetric_ = R_symmetric_;
+        cfg.bx_symmetric_ = bx_symmetric_;
+        cfg.br_symmetric_ = br_symmetric_;
+        cfg.Wx_symmetric_ = Wx_symmetric_;
+        cfg.Rh_symmetric_ = Rh_symmetric_;
+        cfg.z_pre_symmetric_ = z_pre_symmetric_;
+        cfg.z_out_symmetric_ = z_out_symmetric_;
+        cfg.r_pre_symmetric_ = r_pre_symmetric_;
+        cfg.r_out_symmetric_ = r_out_symmetric_;
+        cfg.g_pre_symmetric_ = g_pre_symmetric_;
+        cfg.g_out_symmetric_ = g_out_symmetric_;
+        cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
+        cfg.rRh_symmetric_ = rRh_symmetric_;
+        cfg.one_minus_update_symmetric_ = one_minus_update_symmetric_;
+        cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
+        cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
+        return cfg;
+    }
+
+    // 从 C++ 结构体转换
+    void from_cpp(const OperatorQuantConfig &cfg) {
+        // 位宽配置
+        x_ = static_cast<int8_t>(cfg.x_);
+        h_ = static_cast<int8_t>(cfg.h_);
+        W_ = static_cast<int8_t>(cfg.W_);
+        R_ = static_cast<int8_t>(cfg.R_);
+        bx_ = static_cast<int8_t>(cfg.bx_);
+        br_ = static_cast<int8_t>(cfg.br_);
+        Wx_ = static_cast<int8_t>(cfg.Wx_);
+        Rh_ = static_cast<int8_t>(cfg.Rh_);
+        z_pre_ = static_cast<int8_t>(cfg.z_pre_);
+        z_out_ = static_cast<int8_t>(cfg.z_out_);
+        r_pre_ = static_cast<int8_t>(cfg.r_pre_);
+        r_out_ = static_cast<int8_t>(cfg.r_out_);
+        g_pre_ = static_cast<int8_t>(cfg.g_pre_);
+        g_out_ = static_cast<int8_t>(cfg.g_out_);
+        Rh_add_br_ = static_cast<int8_t>(cfg.Rh_add_br_);
+        rRh_ = static_cast<int8_t>(cfg.rRh_);
+        one_minus_update_ = static_cast<int8_t>(cfg.one_minus_update_);
+        old_contrib_ = static_cast<int8_t>(cfg.old_contrib_);
+        new_contrib_ = static_cast<int8_t>(cfg.new_contrib_);
+        // 对称量化配置
+        x_symmetric_ = cfg.x_symmetric_;
+        h_symmetric_ = cfg.h_symmetric_;
+        W_symmetric_ = cfg.W_symmetric_;
+        R_symmetric_ = cfg.R_symmetric_;
+        bx_symmetric_ = cfg.bx_symmetric_;
+        br_symmetric_ = cfg.br_symmetric_;
+        Wx_symmetric_ = cfg.Wx_symmetric_;
+        Rh_symmetric_ = cfg.Rh_symmetric_;
+        z_pre_symmetric_ = cfg.z_pre_symmetric_;
+        z_out_symmetric_ = cfg.z_out_symmetric_;
+        r_pre_symmetric_ = cfg.r_pre_symmetric_;
+        r_out_symmetric_ = cfg.r_out_symmetric_;
+        g_pre_symmetric_ = cfg.g_pre_symmetric_;
+        g_out_symmetric_ = cfg.g_out_symmetric_;
+        Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
+        rRh_symmetric_ = cfg.rRh_symmetric_;
+        one_minus_update_symmetric_ = cfg.one_minus_update_symmetric_;
+        old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
+        new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
+    }
+};
+
+// 根据量化范围计算量化参数的包装函数（支持自定义位宽配置）
 GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
-    const GRUQuantizationRangesPy &quant_ranges) {
+    const GRUQuantizationRangesPy &quant_ranges,
+    const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy()) {
     // 转换为 C++ 结构体
     GRUQuantizationRanges cpp_ranges = quant_ranges.to_cpp();
+    OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
 
-    // 调用 C++ 函数（使用默认的位宽配置）
-    GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParameters(cpp_ranges);
+    // 调用 C++ 函数
+    GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParameters(cpp_ranges, cpp_bitwidth);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -859,6 +998,52 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize per-channel vectors.",
              py::arg("hidden") = -1);
 
+    // OperatorQuantConfig 绑定（位宽配置 + 对称量化配置）
+    // 位宽值: INT8=-8, INT16=-16, INT32=-32, UINT8=8, UINT16=16
+    // 对称量化: is_symmetric=true 对称量化(zp=0), is_symmetric=false 非对称量化(zp≠0)
+    py::class_<OperatorQuantConfigPy>(m, "OperatorQuantConfig")
+        .def(py::init<>())
+        // 位宽配置
+        .def_readwrite("x_", &OperatorQuantConfigPy::x_)
+        .def_readwrite("h_", &OperatorQuantConfigPy::h_)
+        .def_readwrite("W_", &OperatorQuantConfigPy::W_)
+        .def_readwrite("R_", &OperatorQuantConfigPy::R_)
+        .def_readwrite("bx_", &OperatorQuantConfigPy::bx_)
+        .def_readwrite("br_", &OperatorQuantConfigPy::br_)
+        .def_readwrite("Wx_", &OperatorQuantConfigPy::Wx_)
+        .def_readwrite("Rh_", &OperatorQuantConfigPy::Rh_)
+        .def_readwrite("z_pre_", &OperatorQuantConfigPy::z_pre_)
+        .def_readwrite("z_out_", &OperatorQuantConfigPy::z_out_)
+        .def_readwrite("r_pre_", &OperatorQuantConfigPy::r_pre_)
+        .def_readwrite("r_out_", &OperatorQuantConfigPy::r_out_)
+        .def_readwrite("g_pre_", &OperatorQuantConfigPy::g_pre_)
+        .def_readwrite("g_out_", &OperatorQuantConfigPy::g_out_)
+        .def_readwrite("Rh_add_br_", &OperatorQuantConfigPy::Rh_add_br_)
+        .def_readwrite("rRh_", &OperatorQuantConfigPy::rRh_)
+        .def_readwrite("one_minus_update_", &OperatorQuantConfigPy::one_minus_update_)
+        .def_readwrite("old_contrib_", &OperatorQuantConfigPy::old_contrib_)
+        .def_readwrite("new_contrib_", &OperatorQuantConfigPy::new_contrib_)
+        // 对称量化配置
+        .def_readwrite("x_symmetric_", &OperatorQuantConfigPy::x_symmetric_)
+        .def_readwrite("h_symmetric_", &OperatorQuantConfigPy::h_symmetric_)
+        .def_readwrite("W_symmetric_", &OperatorQuantConfigPy::W_symmetric_)
+        .def_readwrite("R_symmetric_", &OperatorQuantConfigPy::R_symmetric_)
+        .def_readwrite("bx_symmetric_", &OperatorQuantConfigPy::bx_symmetric_)
+        .def_readwrite("br_symmetric_", &OperatorQuantConfigPy::br_symmetric_)
+        .def_readwrite("Wx_symmetric_", &OperatorQuantConfigPy::Wx_symmetric_)
+        .def_readwrite("Rh_symmetric_", &OperatorQuantConfigPy::Rh_symmetric_)
+        .def_readwrite("z_pre_symmetric_", &OperatorQuantConfigPy::z_pre_symmetric_)
+        .def_readwrite("z_out_symmetric_", &OperatorQuantConfigPy::z_out_symmetric_)
+        .def_readwrite("r_pre_symmetric_", &OperatorQuantConfigPy::r_pre_symmetric_)
+        .def_readwrite("r_out_symmetric_", &OperatorQuantConfigPy::r_out_symmetric_)
+        .def_readwrite("g_pre_symmetric_", &OperatorQuantConfigPy::g_pre_symmetric_)
+        .def_readwrite("g_out_symmetric_", &OperatorQuantConfigPy::g_out_symmetric_)
+        .def_readwrite("Rh_add_br_symmetric_", &OperatorQuantConfigPy::Rh_add_br_symmetric_)
+        .def_readwrite("rRh_symmetric_", &OperatorQuantConfigPy::rRh_symmetric_)
+        .def_readwrite("one_minus_update_symmetric_", &OperatorQuantConfigPy::one_minus_update_symmetric_)
+        .def_readwrite("old_contrib_symmetric_", &OperatorQuantConfigPy::old_contrib_symmetric_)
+        .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_);
+
     // GRUQuantitativeParameters 绑定
     py::class_<GRUQuantitativeParametersPy>(m, "GRUQuantitativeParameters")
         .def(py::init<>())
@@ -906,10 +1091,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
           py::arg("x"), py::arg("quant_ranges"));
 
-    // 根据量化范围计算量化参数
+    // 根据量化范围计算量化参数（支持自定义位宽配置）
     m.def("calculate_gru_quantitative_parameters", &calculate_gru_quantitative_parameters_wrapper,
           "Calculate GRU quantitative parameters from quantization ranges",
-          py::arg("quant_ranges"));
+          py::arg("quant_ranges"),
+          py::arg("bitwidth_config") = OperatorQuantConfigPy());
 
     // 校准量化参数（一次性完成，向后兼容）
     m.def("calibrate_gru_scales", &calibrate_gru_scales_wrapper,
