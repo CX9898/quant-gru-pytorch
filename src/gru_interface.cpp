@@ -231,17 +231,6 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
                                           "scale_rRh");
     });
 
-    // 1 - z 的量化
-    dispatchByBitWidth(bitwidth_config.one_minus_update_, [&](auto tag) {
-        using OneMinusUpdateT = typename decltype(tag)::type;
-        float aligned_min, aligned_max;
-        calibrateQuantParams<float, OneMinusUpdateT>(
-            quant_ranges.min_one_minus_update_, quant_ranges.max_one_minus_update_,
-            bitwidth_config.one_minus_update_symmetric_, aligned_min, aligned_max,
-            quant_params.exp2_inv_one_minus_update_, quant_params.zp_one_minus_update_,
-            "scale_one_minus_update");
-    });
-
     // (1.0 - z) * g 的量化
     dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
         using NewContribT = typename decltype(tag)::type;
