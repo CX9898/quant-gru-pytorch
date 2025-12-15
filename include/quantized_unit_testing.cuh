@@ -243,8 +243,6 @@ inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
            quant_parms_.zp_Rh_add_br_);
     printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", quant_parms_.exp2_inv_rRh_,
            quant_parms_.zp_rRh_);
-    printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
-           quant_parms_.exp2_inv_one_minus_update_, quant_parms_.zp_one_minus_update_);
     printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
            quant_parms_.exp2_inv_new_contrib_, quant_parms_.zp_new_contrib_);
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",

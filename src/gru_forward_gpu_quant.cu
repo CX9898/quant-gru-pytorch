@@ -216,7 +216,8 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
 #ifdef USE_LINER
     if constexpr (std::is_same_v<QuantG, int16_t>) {
         const int16_t g_pre_i16_linear = dev::clamp<int16_t>(g_pre_i32);
-        g = static_cast<QuantG>(dev::tanh_piecewise_linear_int16(g_pre_i16_linear, d_tanh_lut_int16));
+        g = static_cast<QuantG>(
+            dev::tanh_piecewise_linear_int16(g_pre_i16_linear, d_tanh_lut_int16));
     } else {
         const int8_t g_pre_i8_linear = dev::clamp<int8_t>(g_pre_i32);
         g = static_cast<QuantG>(dev::tanh_piecewise_linear_int8(g_pre_i8_linear, d_tanh_lut_int8));
@@ -289,15 +290,16 @@ __device__ __forceinline__ QuantT computeH(  // 最终h
                                              rescale_params.n_z_mul_h_div_old_contrib_) +
                                 rescale_params.zp_old_contrib_;
 
+    // 1-z 直接在 z_out 的量化空间计算：one_in_z_scale 是常数1对齐到 z_out 量化空间的值
+    // one_minus_update = one_in_z_scale - z + zp_z_out (结果仍在 z_out 的量化空间)
     const int32_t one_minus_update =
-        rescale_params.one_div_one_minus_update_ -
-        rshift_round(static_cast<int32_t>(z) - rescale_params.zp_z_out_,
-                     rescale_params.n_z_out_div_one_minus_update_) +
-        rescale_params.zp_one_minus_update_;
+        rescale_params.one_in_z_scale_ - static_cast<int32_t>(z) + rescale_params.zp_z_out_;
+
+    // new_contrib = (one_minus_update - zp_z_out) * (g - zp_g_out) >> n + zp_new_contrib
     const int32_t new_contrib =
-        rshift_round((one_minus_update - rescale_params.zp_one_minus_update_) *
+        rshift_round((one_minus_update - rescale_params.zp_z_out_) *
                          (static_cast<int32_t>(g) - rescale_params.zp_g_out_),
-                     rescale_params.n_one_minus_update_mul_g_div_new_contrib_) +
+                     rescale_params.n_z_out_mul_g_div_new_contrib_) +
         rescale_params.zp_new_contrib_;
     const int32_t h_i32 = rshift_round(old_contrib - rescale_params.zp_old_contrib_,
                                        rescale_params.n_old_contrib_div_h_) +
@@ -472,8 +474,9 @@ struct ForwardPassQuant<XT, HT, WT, RT>::private_data {
 
 template <typename XT, typename HT, typename WT, typename RT>
 ForwardPassQuant<XT, HT, WT, RT>::ForwardPassQuant(const bool training, const int batch_size,
-                                      const int input_size, const int hidden_size,
-                                      const cublasHandle_t &blas_handle, const cudaStream_t &stream)
+                                                   const int input_size, const int hidden_size,
+                                                   const cublasHandle_t &blas_handle,
+                                                   const cudaStream_t &stream)
     : data_(new private_data) {
     data_->training = training;
     data_->batch_size = batch_size;
@@ -504,18 +507,18 @@ ForwardPassQuant<XT, HT, WT, RT>::~ForwardPassQuant() {
 }
 
 template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuant<XT, HT, WT, RT>::Iterate(const WT *W,         // [C,H*3]
-                                  const RT *R,         // [H,H*3]
-                                  const int32_t *bx,  // [H*3]
-                                  const int32_t *br,  // [H*3]
-                                  const XT *x,         // [N,C]
-                                  const HT *h,         // [N,H]
-                                  HT *h_out,           // [N,H]
-                                  int32_t *v,         // [N,H*4]
-                                  int32_t *tmp_Wx,    // [N,H*3]
-                                  int32_t *tmp_Rh,    // [N,H*3]
-                                  const float zoneout_prob,
-                                  const HT *zoneout_mask  // Zoneout mask [N,H]
+void ForwardPassQuant<XT, HT, WT, RT>::Iterate(const WT *W,        // [C,H*3]
+                                               const RT *R,        // [H,H*3]
+                                               const int32_t *bx,  // [H*3]
+                                               const int32_t *br,  // [H*3]
+                                               const XT *x,        // [N,C]
+                                               const HT *h,        // [N,H]
+                                               HT *h_out,          // [N,H]
+                                               int32_t *v,         // [N,H*4]
+                                               int32_t *tmp_Wx,    // [N,H*3]
+                                               int32_t *tmp_Rh,    // [N,H*3]
+                                               const float zoneout_prob,
+                                               const HT *zoneout_mask  // Zoneout mask [N,H]
 ) {
     // TODO : 支持量化
     //    using alpha_beta_t = std::conditional_t<
@@ -579,9 +582,8 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const cudaEvent_t event = data_->event;
 
     cublasSetStream(blas_handle, stream1);
-    blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size,
-                       hidden_size, &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh,
-                       hidden_size * 3);
+    blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size, hidden_size,
+                   &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh, hidden_size * 3);
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -745,13 +747,14 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
     h2d(rescale_param_.exp2_inv_bx_div_g_pre_, n_bx_to_g);
 
     // h_new
-    rescale_param_.one_div_one_minus_update_ = rshift_round(1, -parms.exp2_inv_one_minus_update_);
-    rescale_param_.n_z_out_div_one_minus_update_ =
-        parms.exp2_inv_z_out_ - parms.exp2_inv_one_minus_update_;
-    rescale_param_.zp_one_minus_update_ = parms.zp_one_minus_update_;
+    // 1-z 直接复用 z_out 的 scale：将常数1对齐到 z_out 的量化空间
+    // one_in_z_scale =
+    //      round(1.0 / scale_z_out) + zp_z_out = round(1.0 * 2^exp2_inv_z_out) + zp_z_out
+    rescale_param_.one_in_z_scale_ = rshift_round(1, -parms.exp2_inv_z_out_) + parms.zp_z_out_;
     rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
-    rescale_param_.n_one_minus_update_mul_g_div_new_contrib_ =
-        (parms.exp2_inv_one_minus_update_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
+    // n_z_out_mul_g_div_new_contrib = (exp2_inv_z_out + exp2_inv_g_out) - exp2_inv_new_contrib
+    rescale_param_.n_z_out_mul_g_div_new_contrib_ =
+        (parms.exp2_inv_z_out_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
     rescale_param_.zp_old_contrib_ = parms.zp_old_contrib_;
     rescale_param_.n_z_mul_h_div_old_contrib_ =
         (parms.exp2_inv_z_out_ + parms.exp2_inv_h_) - parms.exp2_inv_old_contrib_;
@@ -802,8 +805,8 @@ void ForwardPassQuant<XT, HT, WT, RT>::Run(
 
     cublasSetStream(blas_handle, stream2);
     blas<WT>::gemm(blas_handle,  // 提前使用cuBlas计算W * x
-                       CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size, input_size,
-                       &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx, hidden_size * 3);
+                   CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size, input_size,
+                   &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx, hidden_size * 3);
 
     // 计算W_sum_mul_zp用于补偿x_zp
     dev::vector<int32_t> W_sum_mul_x_zp(hidden_size * 3);

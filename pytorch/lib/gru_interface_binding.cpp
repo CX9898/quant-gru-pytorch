@@ -67,8 +67,6 @@ struct GRUQuantizationRangesPy {
     float max_rRh_ = std::numeric_limits<float>::lowest();
 
     // 最终输出计算
-    float min_one_minus_update_ = std::numeric_limits<float>::max();
-    float max_one_minus_update_ = std::numeric_limits<float>::lowest();
     float min_new_contrib_ = std::numeric_limits<float>::max();
     float max_new_contrib_ = std::numeric_limits<float>::lowest();
     float min_old_contrib_ = std::numeric_limits<float>::max();
@@ -109,8 +107,6 @@ struct GRUQuantizationRangesPy {
         max_Rh_add_br_g_ = cpp_ranges.max_Rh_add_br_g_;
         min_rRh_ = cpp_ranges.min_rRh_;
         max_rRh_ = cpp_ranges.max_rRh_;
-        min_one_minus_update_ = cpp_ranges.min_one_minus_update_;
-        max_one_minus_update_ = cpp_ranges.max_one_minus_update_;
         min_new_contrib_ = cpp_ranges.min_new_contrib_;
         max_new_contrib_ = cpp_ranges.max_new_contrib_;
         min_old_contrib_ = cpp_ranges.min_old_contrib_;
@@ -153,8 +149,6 @@ struct GRUQuantizationRangesPy {
         cpp_ranges.max_Rh_add_br_g_ = max_Rh_add_br_g_;
         cpp_ranges.min_rRh_ = min_rRh_;
         cpp_ranges.max_rRh_ = max_rRh_;
-        cpp_ranges.min_one_minus_update_ = min_one_minus_update_;
-        cpp_ranges.max_one_minus_update_ = max_one_minus_update_;
         cpp_ranges.min_new_contrib_ = min_new_contrib_;
         cpp_ranges.max_new_contrib_ = max_new_contrib_;
         cpp_ranges.min_old_contrib_ = min_old_contrib_;
@@ -195,8 +189,6 @@ struct GRUQuantizationRangesPy {
         max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
         min_rRh_ = std::numeric_limits<float>::max();
         max_rRh_ = std::numeric_limits<float>::lowest();
-        min_one_minus_update_ = std::numeric_limits<float>::max();
-        max_one_minus_update_ = std::numeric_limits<float>::lowest();
         min_new_contrib_ = std::numeric_limits<float>::max();
         max_new_contrib_ = std::numeric_limits<float>::lowest();
         min_old_contrib_ = std::numeric_limits<float>::max();
@@ -248,8 +240,6 @@ struct GRUQuantitativeParametersPy {
     int32_t zp_Rh_add_br_;
     int8_t exp2_inv_rRh_;
     int32_t zp_rRh_;
-    int8_t exp2_inv_one_minus_update_;
-    int32_t zp_one_minus_update_;
     int8_t exp2_inv_new_contrib_;
     int32_t zp_new_contrib_;
     int8_t exp2_inv_old_contrib_;
@@ -286,8 +276,6 @@ struct GRUQuantitativeParametersPy {
         zp_Rh_add_br_ = cpp_params.zp_Rh_add_br_;
         exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
         zp_rRh_ = cpp_params.zp_rRh_;
-        exp2_inv_one_minus_update_ = cpp_params.exp2_inv_one_minus_update_;
-        zp_one_minus_update_ = cpp_params.zp_one_minus_update_;
         exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
         zp_new_contrib_ = cpp_params.zp_new_contrib_;
         exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
@@ -326,8 +314,6 @@ struct GRUQuantitativeParametersPy {
         cpp_params.zp_Rh_add_br_ = zp_Rh_add_br_;
         cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
         cpp_params.zp_rRh_ = zp_rRh_;
-        cpp_params.exp2_inv_one_minus_update_ = exp2_inv_one_minus_update_;
-        cpp_params.zp_one_minus_update_ = zp_one_minus_update_;
         cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
         cpp_params.zp_new_contrib_ = zp_new_contrib_;
         cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
@@ -849,8 +835,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("max_Rh_add_br_g_", &GRUQuantizationRangesPy::max_Rh_add_br_g_)
         .def_readwrite("min_rRh_", &GRUQuantizationRangesPy::min_rRh_)
         .def_readwrite("max_rRh_", &GRUQuantizationRangesPy::max_rRh_)
-        .def_readwrite("min_one_minus_update_", &GRUQuantizationRangesPy::min_one_minus_update_)
-        .def_readwrite("max_one_minus_update_", &GRUQuantizationRangesPy::max_one_minus_update_)
         .def_readwrite("min_new_contrib_", &GRUQuantizationRangesPy::min_new_contrib_)
         .def_readwrite("max_new_contrib_", &GRUQuantizationRangesPy::max_new_contrib_)
         .def_readwrite("min_old_contrib_", &GRUQuantizationRangesPy::min_old_contrib_)
@@ -891,9 +875,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_Rh_add_br_", &GRUQuantitativeParametersPy::zp_Rh_add_br_)
         .def_readwrite("exp2_inv_rRh_", &GRUQuantitativeParametersPy::exp2_inv_rRh_)
         .def_readwrite("zp_rRh_", &GRUQuantitativeParametersPy::zp_rRh_)
-        .def_readwrite("exp2_inv_one_minus_update_",
-                       &GRUQuantitativeParametersPy::exp2_inv_one_minus_update_)
-        .def_readwrite("zp_one_minus_update_", &GRUQuantitativeParametersPy::zp_one_minus_update_)
         .def_readwrite("exp2_inv_new_contrib_", &GRUQuantitativeParametersPy::exp2_inv_new_contrib_)
         .def_readwrite("zp_new_contrib_", &GRUQuantitativeParametersPy::zp_new_contrib_)
         .def_readwrite("exp2_inv_old_contrib_", &GRUQuantitativeParametersPy::exp2_inv_old_contrib_)

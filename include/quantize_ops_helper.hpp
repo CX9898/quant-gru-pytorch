@@ -59,8 +59,6 @@ struct GRUQuantitativeParameters {
     int8_t exp2_inv_rRh_;
     int32_t zp_rRh_;
 
-    int8_t exp2_inv_one_minus_update_;
-    int32_t zp_one_minus_update_;
     int8_t exp2_inv_new_contrib_;
     int32_t zp_new_contrib_;
     int8_t exp2_inv_old_contrib_;
@@ -111,14 +109,11 @@ struct QuantGRUReScale {
     dev::vector<int8_t> exp2_inv_bx_div_g_pre_;
 
     // h_new
-    int32_t one_div_one_minus_update_;
-    int8_t n_z_out_div_one_minus_update_;         // n12
-    int8_t exp2_inv_z_out_div_one_minus_update_;  // S12
-    int32_t zp_one_minus_update_;
+    // 1-z 直接复用 z_out 的 scale，将常数1对齐到 z_out 的量化空间
+    int32_t one_in_z_scale_;  // 1 对应的量化值: round(1.0 / scale_z_out) + zp_z_out
 
     int32_t zp_new_contrib_;
-    int8_t n_one_minus_update_mul_g_div_new_contrib_;         // n13
-    int8_t exp2_inv_one_minus_update_mul_g_div_new_contrib_;  // S13
+    int8_t n_z_out_mul_g_div_new_contrib_;  // (1-z)*g 计算时的 rescale 参数
     int32_t zp_old_contrib_;
     int8_t n_z_mul_h_div_old_contrib_;         // n14
     int8_t exp2_inv_z_mul_h_div_old_contrib_;  // S14
@@ -624,9 +619,6 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
            static_cast<int>(quant_parms.exp2_inv_Rh_add_br_), quant_parms.zp_Rh_add_br_);
     printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", static_cast<int>(quant_parms.exp2_inv_rRh_),
            quant_parms.zp_rRh_);
-    printf("  exp2_inv_one_minus_update_ = %d, zp_one_minus_update_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_one_minus_update_),
-           quant_parms.zp_one_minus_update_);
     printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
            static_cast<int>(quant_parms.exp2_inv_new_contrib_), quant_parms.zp_new_contrib_);
     printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",

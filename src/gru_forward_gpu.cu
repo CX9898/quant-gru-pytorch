@@ -368,7 +368,6 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     std::vector<T> g_out(output_size);
     std::vector<T> Rh_add_br_g(output_size);
     std::vector<T> rRh_g(output_size);
-    std::vector<T> one_minus_update(output_size);
     std::vector<T> new_contrib(output_size);
     std::vector<T> old_contrib(output_size);
 
@@ -396,7 +395,6 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
                 g_out[offset_h] = g_val;
                 Rh_add_br_g[offset_h] = Rh_add_br_g_val;
                 rRh_g[offset_h] = rRh_g_val;
-                one_minus_update[offset_h] = one_minus_update_val;
                 new_contrib[offset_h] = new_contrib_val;
                 old_contrib[offset_h] = old_contrib_val;
             }
@@ -419,8 +417,7 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     auto [min_rRh, max_rRh] = computeMinMax(rRh_g);
     updateRange(quant_ranges.min_rRh_, quant_ranges.max_rRh_, min_rRh, max_rRh);
 
-    auto [min_one_minus, max_one_minus] = computeMinMax(one_minus_update);
-    updateRange(quant_ranges.min_one_minus_update_, quant_ranges.max_one_minus_update_, min_one_minus, max_one_minus);
+    // 注意: one_minus_update 不再单独记录范围，直接复用 z_out 的 scale
 
     auto [min_new, max_new] = computeMinMax(new_contrib);
     updateRange(quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_, min_new, max_new);

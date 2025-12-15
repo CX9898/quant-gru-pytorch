@@ -80,7 +80,6 @@ struct OperatorQuantConfig {
     QuantBitWidth g_out_ = QuantBitWidth::INT8;             // g 门输出
     QuantBitWidth Rh_add_br_ = QuantBitWidth::INT8;         // Rh + br
     QuantBitWidth rRh_ = QuantBitWidth::INT8;               // r × Rh
-    QuantBitWidth one_minus_update_ = QuantBitWidth::INT8;  // 1 - z
     QuantBitWidth old_contrib_ = QuantBitWidth::INT8;       // z * h[output_idx]
     QuantBitWidth new_contrib_ = QuantBitWidth::INT8;       // (1.0 - z) * g
 };
