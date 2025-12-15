@@ -486,31 +486,8 @@ template void quantGRUForward<int16_t>(bool is_training, const int time_steps, c
                                        const cublasHandle_t &g_blas_handle, float *h, float *v);
 
 // 初始化量化 LUT 表（仅在初始化时调用一次）
-// 接收量化参数对象，内部根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
+// 接收量化参数对象，内部根据 bitwidth_config_ 自动选择各门相应的 LUT 初始化方法
 void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
-    const auto &config = quant_params.bitwidth_config_;
-    // 根据 z_pre_ 的位宽选择 LUT 类型（假设所有门使用相同的位宽）
-    if (config.z_pre_ == QuantBitWidth::INT16) {
-        // int16 使用分段线性量化表
-        generate_piecewise_linear_lut_from_exp2_inv<int16_t>(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
-    } else {
-        // int8：同时初始化传统 LUT 表和分段线性 LUT
-        // 传统 LUT（用于非 USE_LINER 编译）
-        generate_int8_lut_from_exp2_inv(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
-
-        // 分段线性 LUT（用于 USE_LINER 编译）
-        generate_piecewise_linear_lut_from_exp2_inv<int8_t>(
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, quant_params.exp2_inv_z_out_,
-            quant_params.zp_z_out_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, quant_params.exp2_inv_g_pre_,
-            quant_params.zp_g_pre_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
-    }
+    // 根据 bitwidth_config_ 中各门的实际位宽配置生成对应的 LUT
+    generate_piecewise_linear_lut(quant_params);
 }

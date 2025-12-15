@@ -15,8 +15,6 @@
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.hpp"
 
-#define USE_LINER
-
 namespace kernel {
 
 // computeZ: 更新门 z = sigmoid(...)
@@ -63,25 +61,12 @@ __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
     // 根据输出类型选择不同的 sigmoid 实现
     QuantZ_Out z;
     if constexpr (std::is_same_v<QuantZ_Out, uint16_t>) {
-        // UINT16 版本：使用分段线性拟合（z 门）
-        // z_pre_i32 已经包含了 zero-point，截断到 int16_t 范围
-        int16_t q_x = dev::clamp<int16_t>(z_pre_i32);
-        z = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_z_lut_int16);
-    } else {
-        // UINT8 版本：使用 LUT 查表
-        const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);  // clamp: 截断到int8的范围
-        z = dev::sigmoid_int8_lut(z_pre_i8, d_sigmoid_int8_z_lut);
-    }
-
-#ifdef USE_LINER
-    if constexpr (std::is_same_v<QuantZ_Out, uint16_t>) {
         const int16_t z_pre_i16 = dev::clamp<int16_t>(z_pre_i32);
         z = dev::sigmoid_piecewise_linear_int16(z_pre_i16, d_sigmoid_z_lut_int16);
     } else {
         const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);
         z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
     }
-#endif
 
     return z;
 }
@@ -130,25 +115,12 @@ __device__ __forceinline__ QuantR_Out computeR(const int channel_idx,
     // 根据输出类型选择不同的 sigmoid 实现
     QuantR_Out r;
     if constexpr (std::is_same_v<QuantR_Out, uint16_t>) {
-        // UINT16 版本：使用分段线性拟合（r 门）
-        // r_pre_i32 已经包含了 zero-point，截断到 int16_t 范围
-        int16_t q_x = dev::clamp<int16_t>(r_pre_i32);
-        r = dev::sigmoid_piecewise_linear_int16(q_x, d_sigmoid_r_lut_int16);
-    } else {
-        // UINT8 版本：使用 LUT 查表
-        const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);  // clamp: 截断到int8的范围
-        r = dev::sigmoid_int8_lut(r_pre_i8, d_sigmoid_int8_r_lut);
-    }
-
-#ifdef USE_LINER
-    if constexpr (std::is_same_v<QuantR_Out, uint16_t>) {
         const int16_t r_pre_i16 = dev::clamp<int16_t>(r_pre_i32);
         r = dev::sigmoid_piecewise_linear_int16(r_pre_i16, d_sigmoid_r_lut_int16);
     } else {
         const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);  // clamp: 截断到int8的范围
         r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
     }
-#endif
 
     //        printf("computeR: "
     //               "Wx_val = %d, "
@@ -210,10 +182,7 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
     // 累加求和
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
 
-    const QuantG g_pre_i8 = dev::clamp<QuantG>(g_pre_i32);       // 截断到int8
-    QuantG g = dev::tanh_int8_lut(g_pre_i8, d_tanh_int8_g_lut);  // TODO: 支持int16量化
-
-#ifdef USE_LINER
+    QuantG g;
     if constexpr (std::is_same_v<QuantG, int16_t>) {
         const int16_t g_pre_i16_linear = dev::clamp<int16_t>(g_pre_i32);
         g = static_cast<QuantG>(dev::tanh_piecewise_linear_int16(g_pre_i16_linear, d_tanh_lut_int16));
@@ -221,7 +190,6 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
         const int8_t g_pre_i8_linear = dev::clamp<int8_t>(g_pre_i32);
         g = static_cast<QuantG>(dev::tanh_piecewise_linear_int8(g_pre_i8_linear, d_tanh_lut_int8));
     }
-#endif
 
     //    // TODO: 分段线性量化
     //    QuantT g;

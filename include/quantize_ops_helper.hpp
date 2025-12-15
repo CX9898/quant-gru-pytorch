@@ -131,24 +131,13 @@ struct QuantGRUReScale {
     GRUQuantitativeParameters test;
 };
 
-void generate_int8_lut_from_exp2_inv(int8_t exp2_inv_z_pre, int32_t zp_z_pre, int8_t exp2_inv_z_out,
-                                     int32_t zp_z_out, int8_t exp2_inv_r_pre, int32_t zp_r_pre,
-                                     int8_t exp2_inv_r_out, int32_t zp_r_out, int8_t exp2_inv_g_pre,
-                                     int32_t zp_g_pre, int8_t exp2_inv_g_out, int32_t zp_g_out);
-
 // 生成分段线性量化表（基于exp2_inv参数，支持模板类型）
 // x_min 和 x_max 从量化参数（exp2_inv_pre 和 zp_pre）自动计算：
 //   - scale = 2^(-exp2_inv_pre) = 1.0f / (1 << exp2_inv_pre)
 //   - x_min = (quant_min - zp_pre) * scale
 //   - x_max = (quant_max - zp_pre) * scale
-// 其中 quant_min 和 quant_max 由量化类型 QuantT 决定
-template <typename QuantT>
-void generate_piecewise_linear_lut_from_exp2_inv(int8_t exp2_inv_z_pre, int32_t zp_z_pre,
-                                                 int8_t exp2_inv_z_out, int32_t zp_z_out,
-                                                 int8_t exp2_inv_r_pre, int32_t zp_r_pre,
-                                                 int8_t exp2_inv_r_out, int32_t zp_r_out,
-                                                 int8_t exp2_inv_g_pre, int32_t zp_g_pre,
-                                                 int8_t exp2_inv_g_out, int32_t zp_g_out);
+// 生成分段线性量化表（根据 GRUQuantitativeParameters 中的 bitwidth_config_ 决定各门的位宽）
+void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params);
 
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (n <= 0) return x << (-n);
