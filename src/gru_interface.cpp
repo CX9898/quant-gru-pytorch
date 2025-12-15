@@ -204,7 +204,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
         using RhAddBrT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RhAddBrT>(quant_ranges.min_Rh_add_br_, quant_ranges.max_Rh_add_br_,
+        calibrateQuantParams<float, RhAddBrT>(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
                                               false, aligned_min, aligned_max,
                                               quant_params.exp2_inv_Rh_add_br_,
                                               quant_params.zp_Rh_add_br_, "scale_Rh_add_br");

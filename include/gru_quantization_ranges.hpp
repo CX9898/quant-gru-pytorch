@@ -43,7 +43,7 @@ struct GRUQuantizationRanges {
     float min_g_out_, max_g_out_;
 
     // 中间计算结果
-    float min_Rh_add_br_, max_Rh_add_br_;
+    float min_Rh_add_br_g_, max_Rh_add_br_g_;
     float min_rRh_, max_rRh_;
 
     // 最终输出计算
@@ -89,8 +89,8 @@ inline void GRUQuantizationRanges::reset(int hidden) {
     max_r_out_ = std::numeric_limits<float>::lowest();
     min_g_out_ = std::numeric_limits<float>::max();
     max_g_out_ = std::numeric_limits<float>::lowest();
-    min_Rh_add_br_ = std::numeric_limits<float>::max();
-    max_Rh_add_br_ = std::numeric_limits<float>::lowest();
+    min_Rh_add_br_g_ = std::numeric_limits<float>::max();
+    max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
     min_rRh_ = std::numeric_limits<float>::max();
     max_rRh_ = std::numeric_limits<float>::lowest();
     min_one_minus_update_ = std::numeric_limits<float>::max();
@@ -127,7 +127,7 @@ inline void GRUQuantizationRanges::print() const {
     printf("  z_out: [%f, %f]\n", min_z_out_, max_z_out_);
     printf("  r_out: [%f, %f]\n", min_r_out_, max_r_out_);
     printf("  g_out: [%f, %f]\n", min_g_out_, max_g_out_);
-    printf("  Rh_add_br: [%f, %f]\n", min_Rh_add_br_, max_Rh_add_br_);
+    printf("  Rh_add_br_g: [%f, %f]\n", min_Rh_add_br_g_, max_Rh_add_br_g_);
     printf("  rRh: [%f, %f]\n", min_rRh_, max_rRh_);
     printf("  one_minus_update: [%f, %f]\n", min_one_minus_update_, max_one_minus_update_);
     printf("  new_contrib: [%f, %f]\n", min_new_contrib_, max_new_contrib_);
