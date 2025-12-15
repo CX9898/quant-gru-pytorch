@@ -678,25 +678,6 @@ class CustomGRU(nn.GRU):
             cpp_config = self._get_cpp_bitwidth_config()
             apply_bitwidth_config(cpp_config, config_file, verbose=True)
 
-    @property
-    def bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
-        """
-        获取当前的位宽配置对象（兼容旧接口）
-        
-        Returns:
-            OperatorQuantConfig 对象（每次调用都创建新对象）
-        """
-        return self._get_cpp_bitwidth_config()
-
-    def get_bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
-        """
-        获取当前的位宽配置对象
-        
-        Returns:
-            OperatorQuantConfig 对象
-        """
-        return self._get_cpp_bitwidth_config()
-
     # -------------------- 校准状态查询 --------------------
 
     def is_calibrated(self) -> bool:
@@ -760,15 +741,20 @@ class CustomGRU(nn.GRU):
             )
 
         # 根据范围和位宽配置计算量化参数
-        self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
-            quant_ranges=self.quant_ranges,
-            bitwidth_config=self.bitwidth_config
-        )
-        torch.cuda.synchronize()
+        if self._bitwidth_config_dict is not None:
+            # 用户加载了自定义配置
+            self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
+                quant_ranges=self.quant_ranges,
+                bitwidth_config=self._get_cpp_bitwidth_config()
+            )
+        else:
+            # 使用 C++ 端默认配置
+            self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
+                quant_ranges=self.quant_ranges
+            )
 
         # 初始化查找表
         gru_ops.initialize_quantization_lut(quant_params=self.quant_params)
-        torch.cuda.synchronize()
 
     def reset_calibration(self):
         """
@@ -934,7 +920,6 @@ class CustomGRU(nn.GRU):
             x=calibration_data,
             quant_ranges=self.quant_ranges
         )
-        torch.cuda.synchronize()
 
         # 确保权重连续性
         self.weight_ih_l0.data = self.weight_ih_l0.data.contiguous()
