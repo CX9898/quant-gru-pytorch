@@ -6,10 +6,6 @@
 
 #include "quantize_ops_helper.hpp"
 
-extern __constant__ uint8_t d_sigmoid_int8_z_lut[256];  // sigmoid 输出 [0,1] 使用无符号
-extern __constant__ uint8_t d_sigmoid_int8_r_lut[256];  // sigmoid 输出 [0,1] 使用无符号
-extern __constant__ int8_t d_tanh_int8_g_lut[256];      // tanh 输出 [-1,1] 仍使用有符号
-
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16
 
