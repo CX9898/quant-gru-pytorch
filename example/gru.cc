@@ -251,6 +251,8 @@ int main() {
     }
     printf("Calibration completed.\n");
 
+    printParms(quant_params);
+
     // ========== 5. 推理测试 ==========
     printf("\n========== Running Inference Tests ==========\n");
 
