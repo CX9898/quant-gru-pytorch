@@ -454,58 +454,6 @@ void forwardInterface(
     }
 }
 
-template <typename QuantT>
-void GruQuantInit(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant, QuantT *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams) {
-    const int channel_size = hidden_size * 3;
-    // N : batch_size
-    // C : input_size
-
-    // 权重是per-channel的，大小为H * 3（hidden_size * 3）
-    // W: [H*3, C]，W_quant: [H*3, C]，scale_W_: [H*3]
-    quantificationPerChannel(W, W_quant, input_size, channel_size, gruRescaleParams.exp2_inv_W_);
-    // R: [H*3, H]，R_quant: [H*3, H]，scale_R_: [H*3]
-    quantificationPerChannel(R, R_quant, hidden_size, channel_size, gruRescaleParams.exp2_inv_R_);
-
-    // 偏置per-channel，H*3
-    // bx_quant: [H*3], scale_bx_: [H*3]
-    quantificationPerChannel(bx, bx_quant, 1, channel_size, gruRescaleParams.exp2_inv_bx_);
-    // br_quant: [H*3], scale_br_: [H*3]
-    quantificationPerChannel(br, br_quant, 1, channel_size, gruRescaleParams.exp2_inv_br_);
-
-    // x: [C, N, T], x_quant: [C, N, T]
-    // 量化用全局scale_x_和zp_x_
-    quantification(x, x_quant, time_steps * batch_size * input_size, gruRescaleParams.exp2_inv_x_,
-                   gruRescaleParams.zp_x_);
-}
-
-template void GruQuantInit<int8_t>(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    int8_t *W_quant, int8_t *R_quant, int32_t *bx_quant, int32_t *br_quant, int8_t *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams);
-
-template void GruQuantInit<int16_t>(
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W,   // 输入到隐藏层的权重矩阵. [input_size, hidden_size * 3] 对应三个门
-    const float *R,   // 隐藏层到隐藏层的循环权重矩阵
-    const float *bx,  // 输入偏置项（input bias），来自输入路径
-    const float *br,  // 循环偏置项（recurrent bias），来自循环路径
-    const float *x,   // 输入序列张量
-    int16_t *W_quant, int16_t *R_quant, int32_t *bx_quant, int32_t *br_quant, int16_t *x_quant,
-    const GRUQuantitativeParameters &gruRescaleParams);
-
 // 显式实例化 quantitativeWeight 和 quantGRUForward 模板函数，供 Python 绑定使用
 template void quantitativeWeight<int8_t>(const int input_size, const int hidden_size,
                                          const float *W, const float *R, const float *bx,
