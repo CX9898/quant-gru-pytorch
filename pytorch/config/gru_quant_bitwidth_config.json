@@ -1,0 +1,126 @@
+{
+  "description": "GRU 量化位宽配置 - 对应 OperatorQuantConfig 结构体",
+  "comment": "位宽选项: 8(INT8/UINT8), 16(INT16/UINT16), 32(INT32); is_symmetric=true 对称量化(zp=0), is_symmetric=false 非对称量化(zp≠0)",
+
+  "default_bitwidth": {
+    "weight": 8,
+    "activation": 8
+  },
+
+  "operator_config": {
+    "input.x": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "输入序列 x - 非对称量化以更好利用量化范围"
+    },
+    "input.h": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "隐藏状态 h - 非对称量化"
+    },
+    "weight.W": {
+      "weight_bitwidth": 8,
+      "is_symmetric": true,
+      "comment": "输入权重 W (input -> gates) - 权重通常对称"
+    },
+    "weight.R": {
+      "weight_bitwidth": 8,
+      "is_symmetric": true,
+      "comment": "循环权重 R (hidden -> gates) - 权重通常对称"
+    },
+    "weight.bx": {
+      "weight_bitwidth": 8,
+      "is_symmetric": true,
+      "comment": "输入偏置 bx - 偏置通常对称"
+    },
+    "weight.br": {
+      "weight_bitwidth": 8,
+      "is_symmetric": true,
+      "comment": "循环偏置 br - 偏置通常对称"
+    },
+    "matmul.Wx": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "矩阵乘法 W @ x 的输出 - 非对称量化"
+    },
+    "matmul.Rh": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "矩阵乘法 R @ h 的输出 - 非对称量化"
+    },
+    "gate.z_pre": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "更新门(update gate) sigmoid 激活前 - 非对称量化"
+    },
+    "gate.z_out": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "更新门(update gate) sigmoid 激活后，输出范围 [0,1] - 非对称量化"
+    },
+    "gate.r_pre": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "重置门(reset gate) sigmoid 激活前 - 非对称量化"
+    },
+    "gate.r_out": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "重置门(reset gate) sigmoid 激活后，输出范围 [0,1] - 非对称量化"
+    },
+    "gate.g_pre": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "候选门(candidate gate) tanh 激活前 - 非对称量化"
+    },
+    "gate.g_out": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "候选门(candidate gate) tanh 激活后，输出范围 [-1,1] - 非对称量化"
+    },
+    "op.Rh_add_br": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "Rh + br 加法运算 - 非对称量化"
+    },
+    "op.rRh": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "r * Rh 元素乘法 (reset gate 与 Rh 相乘) - 非对称量化"
+    },
+    "op.one_minus_update": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "1 - z 减法运算，范围 [0,1] - 非对称量化"
+    },
+    "op.old_contrib": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "z * h 旧状态贡献 - 非对称量化"
+    },
+    "op.new_contrib": {
+      "input_bitwidth": 8,
+      "output_bitwidth": 8,
+      "is_symmetric": false,
+      "comment": "(1-z) * g 新状态贡献 - 非对称量化"
+    }
+  },
+
+  "default_config": {
+    "disable_quantization": false
+  }
+}

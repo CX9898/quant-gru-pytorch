@@ -51,28 +51,27 @@ void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidd
 
 // 根据量化范围和位宽配置计算量化参数
 GRUQuantitativeParameters calculateGRUQuantitativeParameters(
-    const GRUQuantizationRanges &quant_ranges,
-    const OperatorQuantConfig &bitwidth_config) {
+    const GRUQuantizationRanges &quant_ranges, const OperatorQuantConfig &bitwidth_config) {
     GRUQuantitativeParameters quant_params;
     quant_params.hidden_ = quant_ranges.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
-    // 输入 x 的量化
+    // 输入 x 的量化（使用配置的对称量化设置）
     dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
         using XT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, XT>(quant_ranges.min_x_, quant_ranges.max_x_, false,
-                                        aligned_min, aligned_max, quant_params.exp2_inv_x_,
-                                        quant_params.zp_x_, "scale_x");
+        calibrateQuantParams<float, XT>(quant_ranges.min_x_, quant_ranges.max_x_,
+                                        bitwidth_config.x_symmetric_, aligned_min, aligned_max,
+                                        quant_params.exp2_inv_x_, quant_params.zp_x_, "scale_x");
     });
 
     // 隐藏状态 h 的量化
     dispatchByBitWidth(bitwidth_config.h_, [&](auto tag) {
         using HT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, HT>(quant_ranges.min_h_, quant_ranges.max_h_, false,
-                                        aligned_min, aligned_max, quant_params.exp2_inv_h_,
-                                        quant_params.zp_h_, "scale_h");
+        calibrateQuantParams<float, HT>(quant_ranges.min_h_, quant_ranges.max_h_,
+                                        bitwidth_config.h_symmetric_, aligned_min, aligned_max,
+                                        quant_params.exp2_inv_h_, quant_params.zp_h_, "scale_h");
     });
 
     // 权重 W 的量化（per-channel）
@@ -83,9 +82,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, WT>(quant_ranges.min_W_[c], quant_ranges.max_W_[c], true,
-                                            aligned_min, aligned_max, quant_params.exp2_inv_W_[c],
-                                            zp_tmp, "scale_W");
+            calibrateQuantParams<float, WT>(quant_ranges.min_W_[c], quant_ranges.max_W_[c],
+                                            bitwidth_config.W_symmetric_, aligned_min, aligned_max,
+                                            quant_params.exp2_inv_W_[c], zp_tmp, "scale_W");
         }
     });
 
@@ -96,9 +95,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, RT>(quant_ranges.min_R_[c], quant_ranges.max_R_[c], true,
-                                            aligned_min, aligned_max, quant_params.exp2_inv_R_[c],
-                                            zp_tmp, "scale_R");
+            calibrateQuantParams<float, RT>(quant_ranges.min_R_[c], quant_ranges.max_R_[c],
+                                            bitwidth_config.R_symmetric_, aligned_min, aligned_max,
+                                            quant_params.exp2_inv_R_[c], zp_tmp, "scale_R");
         }
     });
 
@@ -106,18 +105,18 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.Wx_, [&](auto tag) {
         using WxT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, WxT>(quant_ranges.min_Wx_, quant_ranges.max_Wx_, false,
-                                         aligned_min, aligned_max, quant_params.exp2_inv_Wx_,
-                                         quant_params.zp_Wx_, "scale_Wx");
+        calibrateQuantParams<float, WxT>(
+            quant_ranges.min_Wx_, quant_ranges.max_Wx_, bitwidth_config.Wx_symmetric_, aligned_min,
+            aligned_max, quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, "scale_Wx");
     });
 
     // Rh 结果的量化
     dispatchByBitWidth(bitwidth_config.Rh_, [&](auto tag) {
         using RhT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RhT>(quant_ranges.min_Rh_, quant_ranges.max_Rh_, false,
-                                         aligned_min, aligned_max, quant_params.exp2_inv_Rh_,
-                                         quant_params.zp_Rh_, "scale_Rh");
+        calibrateQuantParams<float, RhT>(
+            quant_ranges.min_Rh_, quant_ranges.max_Rh_, bitwidth_config.Rh_symmetric_, aligned_min,
+            aligned_max, quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, "scale_Rh");
     });
 
     // 偏置 bx 的量化（per-channel）
@@ -127,9 +126,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, BxT>(quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], true,
-                                             aligned_min, aligned_max, quant_params.exp2_inv_bx_[c],
-                                             zp_tmp, "scale_bx");
+            calibrateQuantParams<float, BxT>(
+                quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], bitwidth_config.bx_symmetric_,
+                aligned_min, aligned_max, quant_params.exp2_inv_bx_[c], zp_tmp, "scale_bx");
         }
     });
 
@@ -140,9 +139,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         for (int c = 0; c < channel_size; ++c) {
             float aligned_min, aligned_max;
             int32_t zp_tmp;
-            calibrateQuantParams<float, BrT>(quant_ranges.min_br_[c], quant_ranges.max_br_[c], true,
-                                             aligned_min, aligned_max, quant_params.exp2_inv_br_[c],
-                                             zp_tmp, "scale_br");
+            calibrateQuantParams<float, BrT>(
+                quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_symmetric_,
+                aligned_min, aligned_max, quant_params.exp2_inv_br_[c], zp_tmp, "scale_br");
         }
     });
 
@@ -150,8 +149,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
         using ZPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ZPreT>(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_z_pre_,
+        calibrateQuantParams<float, ZPreT>(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_,
+                                           bitwidth_config.z_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_z_pre_,
                                            quant_params.zp_z_pre_, "scale_z_pre");
     });
 
@@ -159,8 +159,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.r_pre_, [&](auto tag) {
         using RPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RPreT>(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_r_pre_,
+        calibrateQuantParams<float, RPreT>(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_,
+                                           bitwidth_config.r_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_r_pre_,
                                            quant_params.zp_r_pre_, "scale_r_pre");
     });
 
@@ -168,8 +169,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.g_pre_, [&](auto tag) {
         using GPreT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, GPreT>(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_g_pre_,
+        calibrateQuantParams<float, GPreT>(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_,
+                                           bitwidth_config.g_pre_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_g_pre_,
                                            quant_params.zp_g_pre_, "scale_g_pre");
     });
 
@@ -177,8 +179,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ZOutT>(quant_ranges.min_z_out_, quant_ranges.max_z_out_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
+        calibrateQuantParams<float, ZOutT>(quant_ranges.min_z_out_, quant_ranges.max_z_out_,
+                                           bitwidth_config.z_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
     });
 
@@ -186,8 +189,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, ROutT>(quant_ranges.min_r_out_, quant_ranges.max_r_out_, false,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
+        calibrateQuantParams<float, ROutT>(quant_ranges.min_r_out_, quant_ranges.max_r_out_,
+                                           bitwidth_config.r_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
     });
 
@@ -195,8 +199,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, GOutT>(quant_ranges.min_g_out_, quant_ranges.max_g_out_, true,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
+        calibrateQuantParams<float, GOutT>(quant_ranges.min_g_out_, quant_ranges.max_g_out_,
+                                           bitwidth_config.g_out_symmetric_, aligned_min,
+                                           aligned_max, quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
     });
 
@@ -204,53 +209,51 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
         using RhAddBrT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, RhAddBrT>(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
-                                              false, aligned_min, aligned_max,
-                                              quant_params.exp2_inv_Rh_add_br_,
-                                              quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
+        calibrateQuantParams<float, RhAddBrT>(
+            quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
+            bitwidth_config.Rh_add_br_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
     });
 
     // r × Rh 的量化
     dispatchByBitWidth(bitwidth_config.rRh_, [&](auto tag) {
         using rRhT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, rRhT>(quant_ranges.min_rRh_, quant_ranges.max_rRh_, false,
-                                          aligned_min, aligned_max, quant_params.exp2_inv_rRh_,
-                                          quant_params.zp_rRh_, "scale_rRh");
+        calibrateQuantParams<float, rRhT>(quant_ranges.min_rRh_, quant_ranges.max_rRh_,
+                                          bitwidth_config.rRh_symmetric_, aligned_min, aligned_max,
+                                          quant_params.exp2_inv_rRh_, quant_params.zp_rRh_,
+                                          "scale_rRh");
     });
 
     // 1 - z 的量化
     dispatchByBitWidth(bitwidth_config.one_minus_update_, [&](auto tag) {
         using OneMinusUpdateT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, OneMinusUpdateT>(quant_ranges.min_one_minus_update_,
-                                                     quant_ranges.max_one_minus_update_, false,
-                                                     aligned_min, aligned_max,
-                                                     quant_params.exp2_inv_one_minus_update_,
-                                                     quant_params.zp_one_minus_update_,
-                                                     "scale_one_minus_update");
+        calibrateQuantParams<float, OneMinusUpdateT>(
+            quant_ranges.min_one_minus_update_, quant_ranges.max_one_minus_update_,
+            bitwidth_config.one_minus_update_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_one_minus_update_, quant_params.zp_one_minus_update_,
+            "scale_one_minus_update");
     });
 
     // (1.0 - z) * g 的量化
     dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
         using NewContribT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, NewContribT>(quant_ranges.min_new_contrib_,
-                                                 quant_ranges.max_new_contrib_, false,
-                                                 aligned_min, aligned_max,
-                                                 quant_params.exp2_inv_new_contrib_,
-                                                 quant_params.zp_new_contrib_, "scale_new_contrib");
+        calibrateQuantParams<float, NewContribT>(
+            quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_,
+            bitwidth_config.new_contrib_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_, "scale_new_contrib");
     });
 
     // z * h 的量化
     dispatchByBitWidth(bitwidth_config.old_contrib_, [&](auto tag) {
         using OldContribT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, OldContribT>(quant_ranges.min_old_contrib_,
-                                                 quant_ranges.max_old_contrib_, false,
-                                                 aligned_min, aligned_max,
-                                                 quant_params.exp2_inv_old_contrib_,
-                                                 quant_params.zp_old_contrib_, "scale_old_contrib");
+        calibrateQuantParams<float, OldContribT>(
+            quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_,
+            bitwidth_config.old_contrib_symmetric_, aligned_min, aligned_max,
+            quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_, "scale_old_contrib");
     });
 
     return quant_params;

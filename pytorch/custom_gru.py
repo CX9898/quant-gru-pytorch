@@ -3,9 +3,10 @@
 支持量化和非量化两种前向传播模式
 """
 
+import json
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 try:
     import gru_interface_binding as gru_ops
@@ -14,6 +15,174 @@ except ImportError:
         "gru_interface_binding module not found. "
         "Please compile the C++ extension first using setup.py"
     )
+
+
+# ==================== 位宽配置工具函数 ====================
+
+
+def _get_bitwidth_value(op_cfg: dict) -> int:
+    """
+    从操作配置中获取位宽值
+    
+    根据 output_bitwidth/weight_bitwidth 和 is_symmetric 字段计算位宽枚举值:
+    - is_symmetric=True:  对称量化，返回负值 (INT8=-8, INT16=-16, INT32=-32)
+    - is_symmetric=False: 非对称量化，返回正值 (UINT8=8, UINT16=16)
+    """
+    # 优先使用 output_bitwidth，其次 weight_bitwidth，默认 8
+    bitwidth = op_cfg.get('output_bitwidth', op_cfg.get('weight_bitwidth', 8))
+    is_symmetric = op_cfg.get('is_symmetric', True)
+    
+    # 对称量化返回负值，非对称量化返回正值
+    return -bitwidth if is_symmetric else bitwidth
+
+
+def _get_symmetric_value(op_cfg: dict) -> bool:
+    """
+    从操作配置中获取是否使用对称量化
+    
+    Args:
+        op_cfg: 操作配置字典
+        
+    Returns:
+        True 表示对称量化，False 表示非对称量化
+    """
+    return op_cfg.get('is_symmetric', True)
+
+
+def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
+    """
+    从 JSON 配置文件加载量化位宽配置（包括对称量化配置）
+    
+    Args:
+        config_file: JSON 配置文件路径
+        
+    Returns:
+        OperatorQuantConfig 对象
+        
+    JSON 格式示例:
+    {
+        "operator_config": {
+            "input.x": { "output_bitwidth": 8, "is_symmetric": true },
+            "gate.z_out": { "output_bitwidth": 8, "is_symmetric": false },
+            ...
+        }
+    }
+    """
+    with open(config_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    config = gru_ops.OperatorQuantConfig()
+    op_config = data.get('operator_config', {})
+    
+    # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
+    field_map = {
+        "input.x": ("x_", "x_symmetric_"),
+        "input.h": ("h_", "h_symmetric_"),
+        "weight.W": ("W_", "W_symmetric_"),
+        "weight.R": ("R_", "R_symmetric_"),
+        "weight.bx": ("bx_", "bx_symmetric_"),
+        "weight.br": ("br_", "br_symmetric_"),
+        "matmul.Wx": ("Wx_", "Wx_symmetric_"),
+        "matmul.Rh": ("Rh_", "Rh_symmetric_"),
+        "gate.z_pre": ("z_pre_", "z_pre_symmetric_"),
+        "gate.z_out": ("z_out_", "z_out_symmetric_"),
+        "gate.r_pre": ("r_pre_", "r_pre_symmetric_"),
+        "gate.r_out": ("r_out_", "r_out_symmetric_"),
+        "gate.g_pre": ("g_pre_", "g_pre_symmetric_"),
+        "gate.g_out": ("g_out_", "g_out_symmetric_"),
+        "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
+        "op.rRh": ("rRh_", "rRh_symmetric_"),
+        "op.one_minus_update": ("one_minus_update_", "one_minus_update_symmetric_"),
+        "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
+        "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
+    }
+    
+    for json_key, (bw_attr, sym_attr) in field_map.items():
+        if json_key in op_config:
+            op_cfg = op_config[json_key]
+            # 设置位宽
+            bw_val = _get_bitwidth_value(op_cfg)
+            setattr(config, bw_attr, bw_val)
+            # 设置对称量化配置
+            sym_val = _get_symmetric_value(op_cfg)
+            setattr(config, sym_attr, sym_val)
+    
+    return config
+
+
+def _format_bitwidth(val: int) -> str:
+    """格式化位宽值为可读字符串"""
+    if val < 0:
+        return f"INT{-val}"
+    else:
+        return f"UINT{val}"
+
+
+def _format_symmetric(is_symmetric: bool) -> str:
+    """格式化对称量化值为可读字符串"""
+    return "对称" if is_symmetric else "非对称"
+
+
+def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
+                          config_file: str,
+                          verbose: bool = False) -> int:
+    """
+    从 JSON 配置文件应用量化位宽配置（包括对称量化配置）
+    
+    Args:
+        config: 要更新的 OperatorQuantConfig 对象
+        config_file: JSON 配置文件路径
+        verbose: 是否打印详细信息
+        
+    Returns:
+        成功配置的字段数量
+    """
+    loaded = load_bitwidth_config(config_file)
+    
+    # 复制位宽配置字段
+    bitwidth_attrs = ['x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
+                      'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
+                      'Rh_add_br_', 'rRh_', 'one_minus_update_', 'old_contrib_', 'new_contrib_']
+    for attr in bitwidth_attrs:
+        setattr(config, attr, getattr(loaded, attr))
+    
+    # 复制对称量化配置字段
+    symmetric_attrs = ['x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
+                       'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
+                       'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
+                       'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
+                       'one_minus_update_symmetric_', 'old_contrib_symmetric_', 'new_contrib_symmetric_']
+    for attr in symmetric_attrs:
+        setattr(config, attr, getattr(loaded, attr))
+    
+    if verbose:
+        print("\n" + "=" * 70)
+        print("🔧 应用 GRU 量化配置（位宽 + 对称量化）")
+        print("=" * 70)
+        print(f"📄 配置文件: {config_file}")
+        print("-" * 70)
+        print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
+        print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+        print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
+        print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
+        print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
+        print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
+        print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
+        print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")
+        print(f"  [门控]  z_pre: {_format_bitwidth(config.z_pre_):6s} ({_format_symmetric(config.z_pre_symmetric_)})")
+        print(f"          z_out: {_format_bitwidth(config.z_out_):6s} ({_format_symmetric(config.z_out_symmetric_)})")
+        print(f"          r_pre: {_format_bitwidth(config.r_pre_):6s} ({_format_symmetric(config.r_pre_symmetric_)})")
+        print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
+        print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
+        print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
+        print(f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
+        print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
+        print(f"          1-z: {_format_bitwidth(config.one_minus_update_):6s} ({_format_symmetric(config.one_minus_update_symmetric_)})")
+        print(f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
+        print(f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
+        print("=" * 70 + "\n")
+    
+    return 38  # 19 位宽字段 + 19 对称量化字段
 
 
 # ==================== 工具函数：权重格式转换 ====================
@@ -356,7 +525,8 @@ class CustomGRU(nn.GRU):
         bidirectional: bool = False,
         use_quantization: bool = False,
         quant_type: str = 'int8',
-        calibration_data: Optional[torch.Tensor] = None
+        calibration_data: Optional[torch.Tensor] = None,
+        bitwidth_config_file: Optional[str] = None
     ):
         # 检查限制
         if num_layers != 1:
@@ -388,10 +558,39 @@ class CustomGRU(nn.GRU):
         # 量化状态初始化
         self.quant_ranges = None  # 累积的量化范围（min/max）
         self.quant_params = None  # 计算得到的量化参数（scale/zp）
+        
+        # 位宽配置
+        self.bitwidth_config = gru_ops.OperatorQuantConfig()
+        if bitwidth_config_file is not None:
+            self.load_bitwidth_config(bitwidth_config_file)
 
         # 如果提供了校准数据，立即完成校准（向后兼容）
         if self.use_quantization and calibration_data is not None:
             self._initialize_quantization(calibration_data)
+
+    # -------------------- 位宽配置接口 --------------------
+    
+    def load_bitwidth_config(self, config_file: str, verbose: bool = False):
+        """
+        从 JSON 配置文件加载量化位宽配置
+        
+        Args:
+            config_file: JSON 配置文件路径
+            verbose: 是否打印详细信息
+            
+        使用示例:
+            gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json", verbose=True)
+        """
+        apply_bitwidth_config(self.bitwidth_config, config_file, verbose)
+    
+    def get_bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
+        """
+        获取当前的位宽配置对象
+        
+        Returns:
+            OperatorQuantConfig 对象
+        """
+        return self.bitwidth_config
 
     # -------------------- 校准状态查询 --------------------
 
@@ -440,7 +639,7 @@ class CustomGRU(nn.GRU):
         """
         完成校准，计算量化参数并初始化 LUT 表
 
-        根据累积的量化范围计算各算子的 scale 和 zero_point。
+        根据累积的量化范围和位宽配置计算各算子的 scale 和 zero_point。
         此方法只能调用一次。
 
         Raises:
@@ -449,6 +648,8 @@ class CustomGRU(nn.GRU):
         Note:
             调用此方法后，不能再调用 calibrate()。
             如需重新校准，请先调用 reset_calibration()。
+            
+            如果需要自定义位宽配置，请在调用此方法前先调用 load_bitwidth_config()。
         """
         if self.is_calibrated():
             raise RuntimeError(
@@ -461,9 +662,10 @@ class CustomGRU(nn.GRU):
                 "Call calibrate(data) at least once before finalize_calibration()."
             )
 
-        # 根据范围计算量化参数
+        # 根据范围和位宽配置计算量化参数
         self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
-            quant_ranges=self.quant_ranges
+            quant_ranges=self.quant_ranges,
+            bitwidth_config=self.bitwidth_config
         )
         torch.cuda.synchronize()
 
