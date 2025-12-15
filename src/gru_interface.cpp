@@ -319,6 +319,17 @@ void hasteGRUForward(
 
     forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
                 nullptr);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in hasteGRUForward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in hasteGRUForward: ") + err_str);
+    }
 }
 
 void hasteGRUBackward(
@@ -344,6 +355,17 @@ void hasteGRUBackward(
 
     backward.Run(time_steps, W, R, bx, br, x, h, v, dh_new, dx, dW, dR, dbx, dbr, dh, dp_dev.data(),
                  dq_dev.data(), nullptr);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in hasteGRUBackward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in hasteGRUBackward: ") + err_str);
+    }
 }
 
 template <typename QuantT>
@@ -361,6 +383,17 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
     dev::quantificationPerChannel(R, R_quant, hidden_size, 3 * hidden_size, exp2_inv_R_dev);
     dev::quantificationPerChannel(bx, bx_quant, 1, 3 * hidden_size, exp2_inv_bx_dev);
     dev::quantificationPerChannel(br, br_quant, 1, 3 * hidden_size, exp2_inv_br_dev);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantitativeWeight: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantitativeWeight: ") + err_str);
+    }
 }
 
 template <typename QuantT>
@@ -416,6 +449,17 @@ void quantGRUForward(
                                quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
                                quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
                                quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+    }
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantGRUForward: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForward: ") + err_str);
     }
 }
 
@@ -493,4 +537,16 @@ template void quantGRUForward<int16_t>(bool is_training, const int time_steps, c
 void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
     // 根据 bitwidth_config_ 中各门的实际位宽配置生成对应的 LUT
     generate_piecewise_linear_lut(quant_params);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in initialize_quantization_lut: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in initialize_quantization_lut: ") +
+                                 err_str);
+    }
 }
