@@ -2,100 +2,102 @@
   "description": "GRU 量化位宽配置文件",
   "comment": "位宽: 8/16/32; is_symmetric: true(zp=0) / false(zp≠0)",
 
-  "default_config": {
-    "disable_quantization": false
-  },
+  "GRU_config": {
+    "default_config": {
+      "disable_quantization": false
+    },
 
-  "operator_config": {
-    "input.x": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "输入序列 x"
-    },
-    "input.h": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "隐藏状态 h"
-    },
-    "weight.W": {
-      "bitwidth": 8,
-      "is_symmetric": true,
-      "comment": "输入权重 W"
-    },
-    "weight.R": {
-      "bitwidth": 8,
-      "is_symmetric": true,
-      "comment": "循环权重 R"
-    },
-    "weight.bx": {
-      "bitwidth": 8,
-      "is_symmetric": true,
-      "comment": "输入偏置 bx"
-    },
-    "weight.br": {
-      "bitwidth": 8,
-      "is_symmetric": true,
-      "comment": "循环偏置 br"
-    },
-    "matmul.Wx": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "矩阵乘法 W @ x 结果"
-    },
-    "matmul.Rh": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "矩阵乘法 R @ h 结果"
-    },
-    "gate.z_pre": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "更新门 sigmoid 激活前"
-    },
-    "gate.z_out": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "更新门 sigmoid 激活后 [0,1]"
-    },
-    "gate.r_pre": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "重置门 sigmoid 激活前"
-    },
-    "gate.r_out": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "重置门 sigmoid 激活后 [0,1]"
-    },
-    "gate.g_pre": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "候选门 tanh 激活前"
-    },
-    "gate.g_out": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "候选门 tanh 激活后 [-1,1]"
-    },
-    "op.Rh_add_br": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "Rh + br 加法运算"
-    },
-    "op.rRh": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "r * Rh 元素乘法"
-    },
-    "op.old_contrib": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "z * h 旧状态贡献"
-    },
-    "op.new_contrib": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "(1-z) * g 新状态贡献"
+    "operator_config": {
+      "input.x": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "输入序列 x"
+      },
+      "input.h": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "隐藏状态 h"
+      },
+      "weight.W": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "comment": "输入权重 W"
+      },
+      "weight.R": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "comment": "循环权重 R"
+      },
+      "weight.bx": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "comment": "输入偏置 bx"
+      },
+      "weight.br": {
+        "bitwidth": 8,
+        "is_symmetric": true,
+        "comment": "循环偏置 br"
+      },
+      "matmul.Wx": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "矩阵乘法 W @ x 结果"
+      },
+      "matmul.Rh": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "矩阵乘法 R @ h 结果"
+      },
+      "gate.z_pre": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "更新门 sigmoid 激活前"
+      },
+      "gate.z_out": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "更新门 sigmoid 激活后 [0,1]"
+      },
+      "gate.r_pre": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "重置门 sigmoid 激活前"
+      },
+      "gate.r_out": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "重置门 sigmoid 激活后 [0,1]"
+      },
+      "gate.g_pre": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "候选门 tanh 激活前"
+      },
+      "gate.g_out": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "候选门 tanh 激活后 [-1,1]"
+      },
+      "op.Rh_add_br": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "Rh + br 加法运算"
+      },
+      "op.rRh": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "r * Rh 元素乘法"
+      },
+      "op.old_contrib": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "z * h 旧状态贡献"
+      },
+      "op.new_contrib": {
+        "bitwidth": 8,
+        "is_symmetric": false,
+        "comment": "(1-z) * g 新状态贡献"
+      }
     }
   }
 }

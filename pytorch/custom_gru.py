@@ -58,10 +58,12 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
         
     JSON 格式示例:
     {
-        "operator_config": {
-            "input.x": { "output_bitwidth": 8, "is_symmetric": true },
-            "gate.z_out": { "output_bitwidth": 8, "is_symmetric": false },
-            ...
+        "GRU_config": {
+            "operator_config": {
+                "input.x": { "bitwidth": 8, "is_symmetric": true },
+                "gate.z_out": { "bitwidth": 8, "is_symmetric": false },
+                ...
+            }
         }
     }
     """
@@ -69,7 +71,8 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
         data = json.load(f)
 
     config = gru_ops.OperatorQuantConfig()
-    op_config = data.get('operator_config', {})
+    gru_config = data.get('GRU_config', {})
+    op_config = gru_config.get('operator_config', {})
 
     # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
     field_map = {
@@ -651,13 +654,16 @@ class CustomGRU(nn.Module):
         with open(config_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # 读取 GRU_config 节点下的配置
+        gru_config = data.get('GRU_config', {})
+
         # 读取全局配置
-        default_config = data.get('default_config', {})
+        default_config = gru_config.get('default_config', {})
         if 'disable_quantization' in default_config:
             # disable_quantization=true 表示禁用量化，所以 use_quantization 取反
             self.use_quantization = not default_config['disable_quantization']
 
-        op_config = data.get('operator_config', {})
+        op_config = gru_config.get('operator_config', {})
 
         # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
         field_map = {
