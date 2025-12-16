@@ -23,9 +23,27 @@ void transpose2D(cublasHandle_t handle, const float *A, float *A_t, int rows, in
     const float alpha = 1.0f;
     const float beta = 0.0f;
     // cublasSgeam: C = alpha * op(A) + beta * op(B)
-    // 使用 CUBLAS_OP_T 转置 A，B 设为 nullptr 或相同矩阵
-    cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, cols, &alpha, A, cols, &beta, A, cols, A_t,
-                rows);
+    // 将 A [cols, rows] 转置为 A_t [rows, cols]
+    // 
+    // 输入 A: 原始矩阵形状 [cols, rows]（列优先存储，lda = cols）
+    // 输出 A_t: 转置后矩阵形状 [rows, cols]（列优先存储，ldc = rows）
+    // 
+    // cublasSgeam 参数说明:
+    //   transa = CUBLAS_OP_T: 对 A 进行转置
+    //   transb = CUBLAS_OP_N: B 不转置（但 beta=0 所以 B 不会被使用）
+    //   m = rows: 输出矩阵 C 的行数
+    //   n = cols: 输出矩阵 C 的列数
+    //   lda = cols: A 的 leading dimension（A 的行数）
+    //   ldb = rows: B 的 leading dimension（需要 >= m，即使 beta=0 也要有效）
+    //   ldc = rows: C 的 leading dimension
+    cublasStatus_t status = cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
+                                         rows, cols, 
+                                         &alpha, A, cols,    // A: [cols, rows], lda = cols
+                                         &beta, A_t, rows,   // B: 使用 A_t 作为占位符, ldb = rows (>= m)
+                                         A_t, rows);         // C: [rows, cols], ldc = rows
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "cublasSgeam failed with status %d\n", status);
+    }
 }
 
 // 3D 张量 permute: [T, B, I] -> [I, T, B]
