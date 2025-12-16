@@ -135,7 +135,6 @@ struct OperatorQuantConfig {
     // 中间运算
     QuantBitWidth Rh_add_br_ = QuantBitWidth::INT8;        // Rh + br
     QuantBitWidth rRh_ = QuantBitWidth::INT8;              // r × Rh
-    QuantBitWidth one_minus_update_ = QuantBitWidth::INT8; // 1 - z
     QuantBitWidth old_contrib_ = QuantBitWidth::INT8;      // z × h[t-1]
     QuantBitWidth new_contrib_ = QuantBitWidth::INT8;      // (1-z) × g
 
@@ -173,7 +172,6 @@ struct OperatorQuantConfig {
     // 中间运算
     bool Rh_add_br_symmetric_ = false;        // Rh + br
     bool rRh_symmetric_ = false;              // r × Rh
-    bool one_minus_update_symmetric_ = false; // 1 - z（范围 [0,1]）
     bool old_contrib_symmetric_ = false;      // z × h
     bool new_contrib_symmetric_ = false;      // (1-z) × g
 };
