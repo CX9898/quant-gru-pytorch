@@ -471,15 +471,16 @@ class GRUFunction(torch.autograd.Function):
 
 # ==================== CustomGRU：自定义 GRU 类 ====================
 
-class CustomGRU(nn.GRU):
+class CustomGRU(nn.Module):
     """
-    继承自 PyTorch nn.GRU 的自定义 GRU 实现，支持量化前向传播
+    自定义 GRU 实现，支持量化前向传播和双向 GRU
     
     设计原则：
         - 延迟初始化：CUDA handle 在首次 forward/calibrate 时初始化，而非构造时
         - 配置与创建分离：位宽配置通过 load_bitwidth_config() 单独加载
         - 校准与创建分离：校准通过 calibrate() + finalize_calibration() 单独执行
         - 可序列化：使用 Python 字典存储配置，支持 pickle/deepcopy
+        - 双向支持：内部使用两个单向 GRU 模拟双向 GRU，对外接口与 nn.GRU 一致
 
     量化使用流程：
         1. 创建模型：gru = CustomGRU(..., use_quantization=True)
@@ -496,8 +497,8 @@ class CustomGRU(nn.GRU):
     内部状态：
         - _cublas_initialized: CUDA handle 是否已初始化
         - _bitwidth_config_dict: 位宽配置（Python 字典，可序列化）
-        - quant_ranges: 校准范围（C++ 对象，calibrate() 时创建）
-        - quant_params: 量化参数（C++ 对象，finalize_calibration() 时创建）
+        - quant_ranges / quant_ranges_reverse: 校准范围（C++ 对象，calibrate() 时创建）
+        - quant_params / quant_params_reverse: 量化参数（C++ 对象，finalize_calibration() 时创建）
 
     Args:
         input_size: 输入特征维度
@@ -506,20 +507,27 @@ class CustomGRU(nn.GRU):
         bias: 是否使用偏置
         batch_first: 如果为 True，输入形状为 [batch, seq, feature]
         dropout: 层间 dropout 概率（目前不支持）
-        bidirectional: 是否双向（目前不支持）
-        use_quantization: 是否启用量化（位宽通过 load_bitwidth_config() 配置）
+        bidirectional: 是否双向 GRU（True 时输出维度为 2*hidden_size）
+
+    Attributes:
+        use_quantization: 是否启用量化（默认 False，可随时修改）
 
     Examples:
-        >>> # 基本使用（非量化）
+        >>> # 基本使用（非量化，单向）
         >>> gru = CustomGRU(64, 128, batch_first=True)
         >>> output, h_n = gru(input_data)
         
-        >>> # 量化使用
-        >>> gru = CustomGRU(64, 128, use_quantization=True)
+        >>> # 双向 GRU（与 nn.GRU 接口一致）
+        >>> gru = CustomGRU(64, 128, batch_first=True, bidirectional=True)
+        >>> output, h_n = gru(input_data)  # output: [B, T, 2*H], h_n: [2, B, H]
+        
+        >>> # 量化使用（先校准，再开启量化）
+        >>> gru = CustomGRU(64, 128)
         >>> gru.load_bitwidth_config("config.json")  # 可选
         >>> for batch in calibration_loader:
-        ...     gru.calibrate(batch)
+        ...     gru.calibrate(batch)  # 校准时无需开启量化
         >>> gru.finalize_calibration()
+        >>> gru.use_quantization = True  # 推理时开启量化
         >>> output, h_n = gru(input_data)
     """
 
@@ -532,7 +540,6 @@ class CustomGRU(nn.GRU):
             batch_first: bool = False,
             dropout: float = 0.0,
             bidirectional: bool = False,
-            use_quantization: bool = False,
     ):
         """
         初始化 CustomGRU
@@ -541,6 +548,8 @@ class CustomGRU(nn.GRU):
             - __init__ 只做最基本的属性初始化
             - 复杂操作（CUDA 初始化、校准等）延迟到需要时执行
             - 位宽配置通过 load_bitwidth_config() 单独加载
+            - 双向 GRU 内部使用两套权重，分别处理正向和反向
+            - 量化开关 use_quantization 可随时修改，仅影响 forward
         
         Args:
             input_size: 输入特征维度
@@ -549,47 +558,78 @@ class CustomGRU(nn.GRU):
             bias: 是否使用偏置
             batch_first: 输入格式是否为 [batch, seq, feature]
             dropout: dropout 概率（目前不支持）
-            bidirectional: 是否双向（目前不支持）
-            use_quantization: 是否启用量化
+            bidirectional: 是否双向 GRU
         
         量化使用流程：
-            1. 创建模型: gru = CustomGRU(..., use_quantization=True)
+            1. 创建模型: gru = CustomGRU(...)
             2. (可选) 加载位宽配置: gru.load_bitwidth_config("config.json")
             3. 累积校准: gru.calibrate(data1), gru.calibrate(data2), ...
             4. 完成校准: gru.finalize_calibration()
-            5. 正常推理: output, h_n = gru(input)
-            6. (可选) 增量校准: calibrate() -> finalize_calibration() -> forward()
+            5. 开启量化: gru.use_quantization = True
+            6. 正常推理: output, h_n = gru(input)
         """
+        super(CustomGRU, self).__init__()
+
         # 检查限制
         if num_layers != 1:
             raise NotImplementedError("Currently only supports num_layers=1")
-        if bidirectional:
-            raise NotImplementedError("Currently does not support bidirectional GRU")
         if dropout > 0:
             raise NotImplementedError("Currently does not support dropout")
 
-        super(CustomGRU, self).__init__(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            bias=bias,
-            batch_first=batch_first,
-            dropout=dropout,
-            bidirectional=bidirectional
-        )
+        # ===== 基本配置 =====
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bias = bias
+        self.batch_first = batch_first
+        self.dropout = dropout
+        self.bidirectional = bidirectional
+        self.use_quantization = False  # 默认关闭量化，校准完成后可设置为 True
+        self.num_directions = 2 if bidirectional else 1
 
-        # ===== 基本配置（只设置属性，不执行复杂操作） =====
-        self.use_quantization = use_quantization
+        # ===== 权重参数（与 nn.GRU 命名一致） =====
+        # 前向方向权重
+        self.weight_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size, input_size))
+        self.weight_hh_l0 = nn.Parameter(torch.empty(3 * hidden_size, hidden_size))
+        if bias:
+            self.bias_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size))
+            self.bias_hh_l0 = nn.Parameter(torch.empty(3 * hidden_size))
+        else:
+            self.register_parameter('bias_ih_l0', None)
+            self.register_parameter('bias_hh_l0', None)
+
+        # 反向方向权重（仅双向时使用）
+        if bidirectional:
+            self.weight_ih_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size, input_size))
+            self.weight_hh_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size, hidden_size))
+            if bias:
+                self.bias_ih_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size))
+                self.bias_hh_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size))
+            else:
+                self.register_parameter('bias_ih_l0_reverse', None)
+                self.register_parameter('bias_hh_l0_reverse', None)
+
+        # 初始化权重
+        self._init_weights()
 
         # ===== 量化状态（初始化为 None，延迟创建） =====
-        self.quant_ranges = None  # C++ 对象，calibrate() 时创建
-        self.quant_params = None  # C++ 对象，finalize_calibration() 时创建
+        self.quant_ranges = None  # 前向 C++ 对象，calibrate() 时创建
+        self.quant_params = None  # 前向 C++ 对象，finalize_calibration() 时创建
+        if bidirectional:
+            self.quant_ranges_reverse = None  # 反向 C++ 对象
+            self.quant_params_reverse = None  # 反向 C++ 对象
 
         # ===== 位宽配置（延迟初始化，使用 Python 字典以支持序列化） =====
         self._bitwidth_config_dict = None  # 延迟初始化，首次访问时创建默认配置
 
         # ===== CUDA 初始化标志（延迟初始化） =====
         self._cublas_initialized = False
+
+    def _init_weights(self):
+        """初始化权重，使用与 nn.GRU 相同的初始化策略"""
+        stdv = 1.0 / (self.hidden_size ** 0.5)
+        for weight in self.parameters():
+            nn.init.uniform_(weight, -stdv, stdv)
 
     # -------------------- CUDA 延迟初始化 --------------------
 
@@ -603,13 +643,13 @@ class CustomGRU(nn.GRU):
             self._cublas_initialized = True
 
     # -------------------- 位宽配置内部方法 --------------------
-    
+
     def _load_bitwidth_config_to_dict(self, config_file: str):
         """从 JSON 文件加载配置到内部字典"""
         # 初始化字典（只存储用户指定的配置）
         if self._bitwidth_config_dict is None:
             self._bitwidth_config_dict = {}
-        
+
         with open(config_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
@@ -652,12 +692,12 @@ class CustomGRU(nn.GRU):
         如果用户已加载配置，从 Python 字典创建 C++ 对象
         """
         config = gru_ops.OperatorQuantConfig()
-        
+
         # 只有用户加载了自定义配置时，才覆盖 C++ 默认值
         if self._bitwidth_config_dict is not None:
             for attr, value in self._bitwidth_config_dict.items():
                 setattr(config, attr, value)
-        
+
         return config
 
     # -------------------- 位宽配置公开接口 --------------------
@@ -686,7 +726,10 @@ class CustomGRU(nn.GRU):
 
         Returns:
             True 如果已调用 finalize_calibration()，否则 False
+            对于双向 GRU，需要正向和反向都已校准
         """
+        if self.bidirectional:
+            return self.quant_params is not None and self.quant_params_reverse is not None
         return self.quant_params is not None
 
     # -------------------- 公共校准接口 --------------------
@@ -702,18 +745,12 @@ class CustomGRU(nn.GRU):
             calibration_data: 校准数据，形状为 [seq_len, batch, input_size]
                              （如果 batch_first=True，则为 [batch, seq_len, input_size]）
 
-        Raises:
-            RuntimeError: 量化未启用
-
         Note:
-            支持增量校准：即使已调用过 finalize_calibration()，仍可继续调用
-            calibrate() 累积更多数据，然后再次调用 finalize_calibration()。
+            - 校准时无需开启 use_quantization，校准与量化开关解耦
+            - 支持增量校准：即使已调用过 finalize_calibration()，仍可继续调用
+              calibrate() 累积更多数据，然后再次调用 finalize_calibration()
+            - 校准完成后，通过设置 use_quantization = True 开启量化推理
         """
-        if not self.use_quantization:
-            raise RuntimeError(
-                "Cannot calibrate: quantization is not enabled. "
-                "Set use_quantization=True when creating the model."
-            )
         self._accumulate_calibration_ranges(calibration_data)
 
     def finalize_calibration(self):
@@ -733,6 +770,7 @@ class CustomGRU(nn.GRU):
             
             如果需要自定义位宽配置，请在调用此方法前先调用 load_bitwidth_config()。
             如需完全重置范围，请调用 reset_calibration()。
+            对于双向 GRU，会为正向和反向分别计算量化参数。
         """
         if self.quant_ranges is None:
             raise RuntimeError(
@@ -740,30 +778,53 @@ class CustomGRU(nn.GRU):
                 "Call calibrate(data) at least once before finalize_calibration()."
             )
 
-        # 根据范围和位宽配置计算量化参数
+        # ===== 前向方向：计算量化参数 =====
         if self._bitwidth_config_dict is not None:
-            # 用户加载了自定义配置
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges,
                 bitwidth_config=self._get_cpp_bitwidth_config()
             )
         else:
-            # 使用 C++ 端默认配置
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges
             )
 
-        # 初始化查找表
+        # 初始化查找表（前向）
         gru_ops.initialize_quantization_lut(quant_params=self.quant_params)
+
+        # ===== 反向方向：计算量化参数（仅双向时） =====
+        if self.bidirectional:
+            if self.quant_ranges_reverse is None:
+                raise RuntimeError(
+                    "No reverse calibration data accumulated. "
+                    "This should not happen for bidirectional GRU."
+                )
+
+            if self._bitwidth_config_dict is not None:
+                self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
+                    quant_ranges=self.quant_ranges_reverse,
+                    bitwidth_config=self._get_cpp_bitwidth_config()
+                )
+            else:
+                self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
+                    quant_ranges=self.quant_ranges_reverse
+                )
+
+            # 初始化查找表（反向）
+            gru_ops.initialize_quantization_lut(quant_params=self.quant_params_reverse)
 
     def reset_calibration(self):
         """
         重置校准状态
 
         清除累积的量化范围和量化参数，允许重新开始校准流程。
+        对于双向 GRU，会同时重置正向和反向的状态。
         """
         self.quant_ranges = None
         self.quant_params = None
+        if self.bidirectional:
+            self.quant_ranges_reverse = None
+            self.quant_params_reverse = None
 
     # -------------------- 调试与打印 --------------------
 
@@ -850,21 +911,34 @@ class CustomGRU(nn.GRU):
 
     # -------------------- 内部方法 --------------------
 
-    def _convert_weights_to_haste_format(self, device: torch.device):
+    def _convert_weights_to_haste_format(self, device: torch.device, reverse: bool = False):
         """
         将 PyTorch 格式的权重转换为 Haste 格式（用于量化校准）
+
+        Args:
+            device: 目标设备
+            reverse: 是否获取反向方向的权重（仅双向 GRU 时有效）
 
         Returns:
             W, R, bx, br: Haste 格式的权重和偏置
         """
-        weight_ih = ensure_cuda_float32(self.weight_ih_l0, device)
-        weight_hh = ensure_cuda_float32(self.weight_hh_l0, device)
+        if reverse and self.bidirectional:
+            weight_ih = ensure_cuda_float32(self.weight_ih_l0_reverse, device)
+            weight_hh = ensure_cuda_float32(self.weight_hh_l0_reverse, device)
+        else:
+            weight_ih = ensure_cuda_float32(self.weight_ih_l0, device)
+            weight_hh = ensure_cuda_float32(self.weight_hh_l0, device)
+
         W = reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
         R = reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
 
         if self.bias:
-            bias_ih = ensure_cuda_float32(self.bias_ih_l0, device)
-            bias_hh = ensure_cuda_float32(self.bias_hh_l0, device)
+            if reverse and self.bidirectional:
+                bias_ih = ensure_cuda_float32(self.bias_ih_l0_reverse, device)
+                bias_hh = ensure_cuda_float32(self.bias_hh_l0_reverse, device)
+            else:
+                bias_ih = ensure_cuda_float32(self.bias_ih_l0, device)
+                bias_hh = ensure_cuda_float32(self.bias_hh_l0, device)
             bx = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
             br = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
         else:
@@ -898,14 +972,14 @@ class CustomGRU(nn.GRU):
         time_steps, batch_size, input_size = calibration_data.shape
         hidden_size = self.hidden_size
 
-        # 转换权重格式
-        W, R, bx, br = self._convert_weights_to_haste_format(device)
+        # ===== 前向方向校准 =====
+        W, R, bx, br = self._convert_weights_to_haste_format(device, reverse=False)
 
         # 初始化 quant_ranges（如果尚未初始化）
         if self.quant_ranges is None:
             self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
 
-        # 累积更新量化范围
+        # 累积更新量化范围（前向）
         gru_ops.calibrate_gru_ranges(
             time_steps=time_steps,
             batch_size=batch_size,
@@ -919,6 +993,31 @@ class CustomGRU(nn.GRU):
             quant_ranges=self.quant_ranges
         )
 
+        # ===== 反向方向校准（仅双向时） =====
+        if self.bidirectional:
+            W_rev, R_rev, bx_rev, br_rev = self._convert_weights_to_haste_format(device, reverse=True)
+
+            # 初始化反向 quant_ranges
+            if self.quant_ranges_reverse is None:
+                self.quant_ranges_reverse = gru_ops.GRUQuantizationRanges(hidden_size)
+
+            # 反向输入：时间维度翻转
+            calibration_data_reversed = calibration_data.flip(0).contiguous()
+
+            # 累积更新量化范围（反向）
+            gru_ops.calibrate_gru_ranges(
+                time_steps=time_steps,
+                batch_size=batch_size,
+                input_size=input_size,
+                hidden_size=hidden_size,
+                W=W_rev,
+                R=R_rev,
+                bx=bx_rev,
+                br=br_rev,
+                x=calibration_data_reversed,
+                quant_ranges=self.quant_ranges_reverse
+            )
+
         # 确保权重连续性
         self.weight_ih_l0.data = self.weight_ih_l0.data.contiguous()
         self.weight_hh_l0.data = self.weight_hh_l0.data.contiguous()
@@ -926,9 +1025,12 @@ class CustomGRU(nn.GRU):
             self.bias_ih_l0.data = self.bias_ih_l0.data.contiguous()
             self.bias_hh_l0.data = self.bias_hh_l0.data.contiguous()
 
-        # 重置 flatten_parameters 的内部状态
-        if hasattr(self, '_flat_weights'):
-            self._flat_weights = None
+        if self.bidirectional:
+            self.weight_ih_l0_reverse.data = self.weight_ih_l0_reverse.data.contiguous()
+            self.weight_hh_l0_reverse.data = self.weight_hh_l0_reverse.data.contiguous()
+            if self.bias:
+                self.bias_ih_l0_reverse.data = self.bias_ih_l0_reverse.data.contiguous()
+                self.bias_hh_l0_reverse.data = self.bias_hh_l0_reverse.data.contiguous()
 
     def _initialize_quantization(self, calibration_data: torch.Tensor):
         """一次性完成校准（内部方法，向后兼容）"""
@@ -947,16 +1049,22 @@ class CustomGRU(nn.GRU):
 
         Args:
             input: 输入张量，形状为 [seq_len, batch, input_size] 或 [batch, seq_len, input_size]
-            hx: 初始隐藏状态，形状为 [num_layers, batch, hidden_size]
+            hx: 初始隐藏状态
+                - 单向: [num_layers, batch, hidden_size]
+                - 双向: [num_layers * 2, batch, hidden_size]
 
         Returns:
-            output: 输出张量，形状与 input 相同但最后一维为 hidden_size
-            h_n: 最终隐藏状态，形状为 [num_layers, batch, hidden_size]
+            output: 输出张量
+                - 单向: [seq_len, batch, hidden_size] 或 [batch, seq_len, hidden_size]
+                - 双向: [seq_len, batch, 2*hidden_size] 或 [batch, seq_len, 2*hidden_size]
+            h_n: 最终隐藏状态
+                - 单向: [num_layers, batch, hidden_size]
+                - 双向: [num_layers * 2, batch, hidden_size]
 
         Raises:
             RuntimeError: 如果启用了量化但未校准
         """
-        # 延迟初始化 cublas（第一次 forward 时）
+        # 初始化 cublas
         self._ensure_cublas_initialized()
 
         # 检查量化是否已校准完成
@@ -973,51 +1081,84 @@ class CustomGRU(nn.GRU):
 
         # 处理 batch_first
         if self.batch_first:
-            input = input.transpose(0, 1).contiguous()  # [B, T, I] -> [T, B, I]，确保连续内存布局
+            input = input.transpose(0, 1).contiguous()  # [B, T, I] -> [T, B, I]
 
         seq_len, batch_size, input_size = input.shape
         hidden_size = self.hidden_size
-
-        # 处理初始隐藏状态
-        h0 = None
-        if hx is not None:
-            expected_shape = (self.num_layers, batch_size, hidden_size)
-            if hx.shape != expected_shape:
-                raise ValueError(
-                    f"Expected hx shape {expected_shape} (num_layers={self.num_layers}, "
-                    f"batch_size={batch_size}, hidden_size={hidden_size}), got {hx.shape}"
-                )
-            device = input.device if input.is_cuda else torch.device('cuda')
-            h0 = ensure_cuda_float32(hx[0], device)
 
         # 确保输入在 CUDA 上且为 float32
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
 
-        # 获取权重和偏置
+        # 处理初始隐藏状态
+        h0_forward = None
+        h0_reverse = None
+        if hx is not None:
+            expected_layers = self.num_layers * self.num_directions
+            expected_shape = (expected_layers, batch_size, hidden_size)
+            if hx.shape != expected_shape:
+                raise ValueError(
+                    f"Expected hx shape {expected_shape} (num_layers*num_directions={expected_layers}, "
+                    f"batch_size={batch_size}, hidden_size={hidden_size}), got {hx.shape}"
+                )
+            h0_forward = ensure_cuda_float32(hx[0], device)
+            if self.bidirectional:
+                h0_reverse = ensure_cuda_float32(hx[1], device)
+
+        # ===== 前向方向 =====
         weight_ih = self.weight_ih_l0
         weight_hh = self.weight_hh_l0
         bias_ih = self.bias_ih_l0 if self.bias else None
         bias_hh = self.bias_hh_l0 if self.bias else None
 
-        # 调用 GRUFunction 进行前向传播
-        output, h_n_from_func = GRUFunction.apply(
+        output_forward, h_n_forward = GRUFunction.apply(
             input,
             weight_ih,
             weight_hh,
             bias_ih,
             bias_hh,
-            h0,
+            h0_forward,
             self.training,
             self.use_quantization,
             self.quant_params
         )
 
+        if self.bidirectional:
+            # ===== 反向方向 =====
+            weight_ih_rev = self.weight_ih_l0_reverse
+            weight_hh_rev = self.weight_hh_l0_reverse
+            bias_ih_rev = self.bias_ih_l0_reverse if self.bias else None
+            bias_hh_rev = self.bias_hh_l0_reverse if self.bias else None
+
+            # 反转输入的时间维度
+            input_reversed = input.flip(0)
+
+            output_reverse, h_n_reverse = GRUFunction.apply(
+                input_reversed,
+                weight_ih_rev,
+                weight_hh_rev,
+                bias_ih_rev,
+                bias_hh_rev,
+                h0_reverse,
+                self.training,
+                self.use_quantization,
+                self.quant_params_reverse
+            )
+
+            # 反转反向输出以对齐时间步
+            output_reverse = output_reverse.flip(0)
+
+            # 拼接前向和反向输出：[T, B, H] + [T, B, H] -> [T, B, 2H]
+            output = torch.cat([output_forward, output_reverse], dim=-1)
+
+            # 拼接隐藏状态：[1, B, H] + [1, B, H] -> [2, B, H]
+            h_n = torch.cat([h_n_forward, h_n_reverse], dim=0)
+        else:
+            output = output_forward
+            h_n = h_n_forward
+
         # 处理 batch_first
         if self.batch_first:
-            output = output.transpose(0, 1).contiguous()  # [T, B, H] -> [B, T, H]，确保连续内存布局
+            output = output.transpose(0, 1).contiguous()  # [T, B, H] -> [B, T, H]
 
-        # 确保 h_n 形状正确
-        assert h_n_from_func.shape[0] == 1, f"Expected h_n shape [1, batch, hidden_size], got {h_n_from_func.shape}"
-
-        return output, h_n_from_func
+        return output, h_n
