@@ -2,9 +2,8 @@
   "description": "GRU 量化位宽配置文件",
   "comment": "位宽: 8/16/32; is_symmetric: true(zp=0) / false(zp≠0)",
 
-  "default_bitwidth": {
-    "weight": 8,
-    "activation": 8
+  "default_config": {
+    "disable_quantization": false
   },
 
   "operator_config": {
@@ -88,11 +87,6 @@
       "is_symmetric": false,
       "comment": "r * Rh 元素乘法"
     },
-    "op.one_minus_update": {
-      "bitwidth": 8,
-      "is_symmetric": false,
-      "comment": "1 - z 减法运算"
-    },
     "op.old_contrib": {
       "bitwidth": 8,
       "is_symmetric": false,
@@ -103,9 +97,5 @@
       "is_symmetric": false,
       "comment": "(1-z) * g 新状态贡献"
     }
-  },
-
-  "default_config": {
-    "disable_quantization": false
   }
 }

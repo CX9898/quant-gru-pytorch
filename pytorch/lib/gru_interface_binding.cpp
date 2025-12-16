@@ -478,7 +478,6 @@ struct OperatorQuantConfigPy {
     // 中间运算
     int8_t Rh_add_br_ = 8;        // Rh + br
     int8_t rRh_ = 8;              // r × Rh
-    int8_t one_minus_update_ = 8; // 1 - z
     int8_t old_contrib_ = 8;      // z × h[t-1]
     int8_t new_contrib_ = 8;      // (1-z) × g
 
@@ -512,7 +511,6 @@ struct OperatorQuantConfigPy {
     // 中间运算
     bool Rh_add_br_symmetric_ = false;
     bool rRh_symmetric_ = false;
-    bool one_minus_update_symmetric_ = false;
     bool old_contrib_symmetric_ = false;
     bool new_contrib_symmetric_ = false;
 
@@ -543,7 +541,6 @@ struct OperatorQuantConfigPy {
         cfg.g_out_ = bitwidthToQuantType(g_out_);
         cfg.Rh_add_br_ = bitwidthToQuantType(Rh_add_br_);
         cfg.rRh_ = bitwidthToQuantType(rRh_);
-        cfg.one_minus_update_ = bitwidthToQuantType(one_minus_update_);
         cfg.old_contrib_ = bitwidthToQuantType(old_contrib_);
         cfg.new_contrib_ = bitwidthToQuantType(new_contrib_);
 
@@ -564,7 +561,6 @@ struct OperatorQuantConfigPy {
         cfg.g_out_symmetric_ = g_out_symmetric_;
         cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
         cfg.rRh_symmetric_ = rRh_symmetric_;
-        cfg.one_minus_update_symmetric_ = one_minus_update_symmetric_;
         cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
         cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
 
@@ -594,7 +590,6 @@ struct OperatorQuantConfigPy {
         g_out_ = quantTypeToBitwidth(cfg.g_out_);
         Rh_add_br_ = quantTypeToBitwidth(cfg.Rh_add_br_);
         rRh_ = quantTypeToBitwidth(cfg.rRh_);
-        one_minus_update_ = quantTypeToBitwidth(cfg.one_minus_update_);
         old_contrib_ = quantTypeToBitwidth(cfg.old_contrib_);
         new_contrib_ = quantTypeToBitwidth(cfg.new_contrib_);
 
@@ -615,7 +610,6 @@ struct OperatorQuantConfigPy {
         g_out_symmetric_ = cfg.g_out_symmetric_;
         Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
         rRh_symmetric_ = cfg.rRh_symmetric_;
-        one_minus_update_symmetric_ = cfg.one_minus_update_symmetric_;
         old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
         new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
     }
@@ -1129,7 +1123,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("g_out_", &OperatorQuantConfigPy::g_out_)
         .def_readwrite("Rh_add_br_", &OperatorQuantConfigPy::Rh_add_br_)
         .def_readwrite("rRh_", &OperatorQuantConfigPy::rRh_)
-        .def_readwrite("one_minus_update_", &OperatorQuantConfigPy::one_minus_update_)
         .def_readwrite("old_contrib_", &OperatorQuantConfigPy::old_contrib_)
         .def_readwrite("new_contrib_", &OperatorQuantConfigPy::new_contrib_)
         // 对称量化配置
@@ -1149,7 +1142,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("g_out_symmetric_", &OperatorQuantConfigPy::g_out_symmetric_)
         .def_readwrite("Rh_add_br_symmetric_", &OperatorQuantConfigPy::Rh_add_br_symmetric_)
         .def_readwrite("rRh_symmetric_", &OperatorQuantConfigPy::rRh_symmetric_)
-        .def_readwrite("one_minus_update_symmetric_", &OperatorQuantConfigPy::one_minus_update_symmetric_)
         .def_readwrite("old_contrib_symmetric_", &OperatorQuantConfigPy::old_contrib_symmetric_)
         .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_);
 

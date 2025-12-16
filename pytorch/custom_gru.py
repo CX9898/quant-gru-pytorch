@@ -89,7 +89,6 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
         "gate.g_out": ("g_out_", "g_out_symmetric_"),
         "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
         "op.rRh": ("rRh_", "rRh_symmetric_"),
-        "op.one_minus_update": ("one_minus_update_", "one_minus_update_symmetric_"),
         "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
         "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
     }
@@ -137,7 +136,7 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     # 复制位宽配置字段
     bitwidth_attrs = ['x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
                       'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
-                      'Rh_add_br_', 'rRh_', 'one_minus_update_', 'old_contrib_', 'new_contrib_']
+                      'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_']
     for attr in bitwidth_attrs:
         setattr(config, attr, getattr(loaded, attr))
 
@@ -146,7 +145,7 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
                        'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
                        'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
                        'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
-                       'one_minus_update_symmetric_', 'old_contrib_symmetric_', 'new_contrib_symmetric_']
+                       'old_contrib_symmetric_', 'new_contrib_symmetric_']
     for attr in symmetric_attrs:
         setattr(config, attr, getattr(loaded, attr))
 
@@ -173,8 +172,6 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
         print(
             f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
         print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
-        print(
-            f"          1-z: {_format_bitwidth(config.one_minus_update_):6s} ({_format_symmetric(config.one_minus_update_symmetric_)})")
         print(
             f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
         print(
@@ -540,6 +537,7 @@ class CustomGRU(nn.Module):
             batch_first: bool = False,
             dropout: float = 0.0,
             bidirectional: bool = False,
+            use_quantization: bool = False,
     ):
         """
         初始化 CustomGRU
@@ -584,7 +582,7 @@ class CustomGRU(nn.Module):
         self.batch_first = batch_first
         self.dropout = dropout
         self.bidirectional = bidirectional
-        self.use_quantization = False  # 默认关闭量化，校准完成后可设置为 True
+        self.use_quantization = use_quantization  # 默认关闭量化，校准完成后可设置为 True
         self.num_directions = 2 if bidirectional else 1
 
         # ===== 权重参数（与 nn.GRU 命名一致） =====
@@ -653,6 +651,12 @@ class CustomGRU(nn.Module):
         with open(config_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
+        # 读取全局配置
+        default_config = data.get('default_config', {})
+        if 'disable_quantization' in default_config:
+            # disable_quantization=true 表示禁用量化，所以 use_quantization 取反
+            self.use_quantization = not default_config['disable_quantization']
+
         op_config = data.get('operator_config', {})
 
         # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
@@ -673,7 +677,6 @@ class CustomGRU(nn.Module):
             "gate.g_out": ("g_out_", "g_out_symmetric_"),
             "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
             "op.rRh": ("rRh_", "rRh_symmetric_"),
-            "op.one_minus_update": ("one_minus_update_", "one_minus_update_symmetric_"),
             "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
             "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
         }
@@ -717,6 +720,7 @@ class CustomGRU(nn.Module):
         if verbose:
             cpp_config = self._get_cpp_bitwidth_config()
             apply_bitwidth_config(cpp_config, config_file, verbose=True)
+            print(f"  [全局]  use_quantization: {self.use_quantization}")
 
     # -------------------- 校准状态查询 --------------------
 
