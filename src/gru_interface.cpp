@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
+#include <iostream>
 #include <stdexcept>
 
 #include "parallelAlgorithm.h"
@@ -224,9 +225,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
             min_val = 0.0f;
             max_val = 1.0f;
         }
-        calibrateQuantParams<float, ZOutT>(min_val, max_val,
-                                           bitwidth_config.z_out_symmetric_, aligned_min,
-                                           aligned_max, quant_params.exp2_inv_z_out_,
+        calibrateQuantParams<float, ZOutT>(min_val, max_val, bitwidth_config.z_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
     });
 
@@ -243,9 +243,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
             min_val = 0.0f;
             max_val = 1.0f;
         }
-        calibrateQuantParams<float, ROutT>(min_val, max_val,
-                                           bitwidth_config.r_out_symmetric_, aligned_min,
-                                           aligned_max, quant_params.exp2_inv_r_out_,
+        calibrateQuantParams<float, ROutT>(min_val, max_val, bitwidth_config.r_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
     });
 
@@ -262,10 +261,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
             min_val = -1.0f;
             max_val = 1.0f;
         }
-        calibrateQuantParams<float, GOutT>(min_val, max_val,
-                                           bitwidth_config.g_out_symmetric_,
-                                           aligned_min, aligned_max,
-                                           quant_params.exp2_inv_g_out_,
+        calibrateQuantParams<float, GOutT>(min_val, max_val, bitwidth_config.g_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
     });
 
@@ -484,7 +481,8 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     // 得到量化GRU中使用的rescale参数
     forward.setRescaleParam(quant_parms);
 
-    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f, nullptr);
+    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f,
+                nullptr);
 
     dev::dequantification(h_quant.data(), h, (time_steps + 1) * batch_size * hidden_size,
                           quant_parms.exp2_inv_h_, quant_parms.zp_h_);

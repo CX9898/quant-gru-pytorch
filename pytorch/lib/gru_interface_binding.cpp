@@ -2,6 +2,8 @@
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+#include <iostream>
+
 #include "gru_interface.hpp"
 #include "gru_quantization_ranges.hpp"
 #include "quantize_ops_helper.hpp"
@@ -12,15 +14,177 @@ static cublasHandle_t g_blas_handle = nullptr;
 // 初始化 cublas handle 的包装函数
 void init_gru_cublas_wrapper() { init_gru_cublas(g_blas_handle); }
 
+// ============================================================================
+//                    位宽转换辅助函数（前置定义）
+// ============================================================================
+//
+// 设计说明：
+// - Python 端只配置位宽数量（8, 16, 32），不关心实际类型（INT/UINT）
+// - C++ 端在 to_cpp() 时决定实际类型
+// - 这些辅助函数需要在 OperatorQuantConfigPy 之前定义
+//
+// ============================================================================
+
+inline QuantBitWidth bitwidthToQuantType_early(int8_t bitwidth) {
+    switch (bitwidth) {
+        case 8:
+            return QuantBitWidth::INT8;
+        case 16:
+            return QuantBitWidth::INT16;
+        case 32:
+            return QuantBitWidth::INT32;
+        default:
+            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth));
+    }
+}
+
+inline QuantBitWidth bitwidthToUnsignedQuantType_early(int8_t bitwidth) {
+    switch (bitwidth) {
+        case 8:
+            return QuantBitWidth::UINT8;
+        case 16:
+            return QuantBitWidth::UINT16;
+        case 32:
+            return QuantBitWidth::INT32;
+        default:
+            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth));
+    }
+}
+
+inline int8_t quantTypeToBitwidth_early(QuantBitWidth bw) {
+    switch (bw) {
+        case QuantBitWidth::INT8:
+        case QuantBitWidth::UINT8:
+            return 8;
+        case QuantBitWidth::INT16:
+        case QuantBitWidth::UINT16:
+            return 16;
+        case QuantBitWidth::INT32:
+            return 32;
+        default:
+            return 8;
+    }
+}
+
+// ============================================================================
+//                    OperatorQuantConfig Python 绑定（前置定义）
+// ============================================================================
+//
+// 注意：这个结构体需要在 GRUQuantitativeParametersPy 之前定义，
+// 因为 GRUQuantitativeParametersPy 中包含 OperatorQuantConfigPy 成员
+//
+// ============================================================================
+
+struct OperatorQuantConfigPy {
+    // 位宽配置（存储位宽数量 8, 16, 32）
+    int8_t x_ = 8, h_ = 8;
+    int8_t W_ = 8, R_ = 8, bx_ = 8, br_ = 8;
+    int8_t Wx_ = 8, Rh_ = 8;
+    int8_t z_pre_ = 8, z_out_ = 8;
+    int8_t r_pre_ = 8, r_out_ = 8;
+    int8_t g_pre_ = 8, g_out_ = 8;
+    int8_t Rh_add_br_ = 8, rRh_ = 8, old_contrib_ = 8, new_contrib_ = 8;
+
+    // 对称量化配置
+    bool x_symmetric_ = false, h_symmetric_ = false;
+    bool W_symmetric_ = true, R_symmetric_ = true, bx_symmetric_ = true, br_symmetric_ = true;
+    bool Wx_symmetric_ = false, Rh_symmetric_ = false;
+    bool z_pre_symmetric_ = false, z_out_symmetric_ = false;
+    bool r_pre_symmetric_ = false, r_out_symmetric_ = false;
+    bool g_pre_symmetric_ = false, g_out_symmetric_ = false;
+    bool Rh_add_br_symmetric_ = false, rRh_symmetric_ = false;
+    bool old_contrib_symmetric_ = false, new_contrib_symmetric_ = false;
+
+    OperatorQuantConfig to_cpp() const {
+        OperatorQuantConfig cfg;
+        cfg.x_ = bitwidthToQuantType_early(x_);
+        cfg.h_ = bitwidthToQuantType_early(h_);
+        cfg.W_ = bitwidthToQuantType_early(W_);
+        cfg.R_ = bitwidthToQuantType_early(R_);
+        cfg.bx_ = bitwidthToQuantType_early(bx_);
+        cfg.br_ = bitwidthToQuantType_early(br_);
+        cfg.Wx_ = bitwidthToQuantType_early(Wx_);
+        cfg.Rh_ = bitwidthToQuantType_early(Rh_);
+        cfg.z_pre_ = bitwidthToQuantType_early(z_pre_);
+        cfg.z_out_ = bitwidthToUnsignedQuantType_early(z_out_);  // sigmoid → UINT
+        cfg.r_pre_ = bitwidthToQuantType_early(r_pre_);
+        cfg.r_out_ = bitwidthToUnsignedQuantType_early(r_out_);  // sigmoid → UINT
+        cfg.g_pre_ = bitwidthToQuantType_early(g_pre_);
+        cfg.g_out_ = bitwidthToQuantType_early(g_out_);
+        cfg.Rh_add_br_ = bitwidthToQuantType_early(Rh_add_br_);
+        cfg.rRh_ = bitwidthToQuantType_early(rRh_);
+        cfg.old_contrib_ = bitwidthToQuantType_early(old_contrib_);
+        cfg.new_contrib_ = bitwidthToQuantType_early(new_contrib_);
+        // 对称量化配置
+        cfg.x_symmetric_ = x_symmetric_;
+        cfg.h_symmetric_ = h_symmetric_;
+        cfg.W_symmetric_ = W_symmetric_;
+        cfg.R_symmetric_ = R_symmetric_;
+        cfg.bx_symmetric_ = bx_symmetric_;
+        cfg.br_symmetric_ = br_symmetric_;
+        cfg.Wx_symmetric_ = Wx_symmetric_;
+        cfg.Rh_symmetric_ = Rh_symmetric_;
+        cfg.z_pre_symmetric_ = z_pre_symmetric_;
+        cfg.z_out_symmetric_ = z_out_symmetric_;
+        cfg.r_pre_symmetric_ = r_pre_symmetric_;
+        cfg.r_out_symmetric_ = r_out_symmetric_;
+        cfg.g_pre_symmetric_ = g_pre_symmetric_;
+        cfg.g_out_symmetric_ = g_out_symmetric_;
+        cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
+        cfg.rRh_symmetric_ = rRh_symmetric_;
+        cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
+        cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
+        return cfg;
+    }
+
+    void from_cpp(const OperatorQuantConfig &cfg) {
+        x_ = quantTypeToBitwidth_early(cfg.x_);
+        h_ = quantTypeToBitwidth_early(cfg.h_);
+        W_ = quantTypeToBitwidth_early(cfg.W_);
+        R_ = quantTypeToBitwidth_early(cfg.R_);
+        bx_ = quantTypeToBitwidth_early(cfg.bx_);
+        br_ = quantTypeToBitwidth_early(cfg.br_);
+        Wx_ = quantTypeToBitwidth_early(cfg.Wx_);
+        Rh_ = quantTypeToBitwidth_early(cfg.Rh_);
+        z_pre_ = quantTypeToBitwidth_early(cfg.z_pre_);
+        z_out_ = quantTypeToBitwidth_early(cfg.z_out_);
+        r_pre_ = quantTypeToBitwidth_early(cfg.r_pre_);
+        r_out_ = quantTypeToBitwidth_early(cfg.r_out_);
+        g_pre_ = quantTypeToBitwidth_early(cfg.g_pre_);
+        g_out_ = quantTypeToBitwidth_early(cfg.g_out_);
+        Rh_add_br_ = quantTypeToBitwidth_early(cfg.Rh_add_br_);
+        rRh_ = quantTypeToBitwidth_early(cfg.rRh_);
+        old_contrib_ = quantTypeToBitwidth_early(cfg.old_contrib_);
+        new_contrib_ = quantTypeToBitwidth_early(cfg.new_contrib_);
+        // 对称量化配置
+        x_symmetric_ = cfg.x_symmetric_;
+        h_symmetric_ = cfg.h_symmetric_;
+        W_symmetric_ = cfg.W_symmetric_;
+        R_symmetric_ = cfg.R_symmetric_;
+        bx_symmetric_ = cfg.bx_symmetric_;
+        br_symmetric_ = cfg.br_symmetric_;
+        Wx_symmetric_ = cfg.Wx_symmetric_;
+        Rh_symmetric_ = cfg.Rh_symmetric_;
+        z_pre_symmetric_ = cfg.z_pre_symmetric_;
+        z_out_symmetric_ = cfg.z_out_symmetric_;
+        r_pre_symmetric_ = cfg.r_pre_symmetric_;
+        r_out_symmetric_ = cfg.r_out_symmetric_;
+        g_pre_symmetric_ = cfg.g_pre_symmetric_;
+        g_out_symmetric_ = cfg.g_out_symmetric_;
+        Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
+        rRh_symmetric_ = cfg.rRh_symmetric_;
+        old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
+        new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
+    }
+};
+
 // GRUQuantizationRanges 的 Python 绑定
 struct GRUQuantizationRangesPy {
     // 默认构造函数
     GRUQuantizationRangesPy() = default;
 
     // 带 hidden 参数的构造函数
-    explicit GRUQuantizationRangesPy(int hidden) : hidden_(hidden) {
-        reset();
-    }
+    explicit GRUQuantizationRangesPy(int hidden) : hidden_(hidden) { reset(); }
 
     int hidden_ = 0;
 
@@ -245,6 +409,10 @@ struct GRUQuantitativeParametersPy {
     int8_t exp2_inv_old_contrib_;
     int32_t zp_old_contrib_;
 
+    // ⚠️ 关键字段：位宽配置必须在 Python 和 C++ 之间正确传递
+    // 否则 forwardInterface 会使用默认的 8 位配置
+    OperatorQuantConfigPy bitwidth_config_;
+
     // 从 C++ 结构体转换
     void from_cpp(const GRUQuantitativeParameters &cpp_params) {
         hidden_ = cpp_params.hidden_;
@@ -280,6 +448,9 @@ struct GRUQuantitativeParametersPy {
         zp_new_contrib_ = cpp_params.zp_new_contrib_;
         exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
         zp_old_contrib_ = cpp_params.zp_old_contrib_;
+
+        // ⚠️ 关键：复制位宽配置
+        bitwidth_config_.from_cpp(cpp_params.bitwidth_config_);
     }
 
     // 转换为 C++ 结构体
@@ -318,16 +489,19 @@ struct GRUQuantitativeParametersPy {
         cpp_params.zp_new_contrib_ = zp_new_contrib_;
         cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
         cpp_params.zp_old_contrib_ = zp_old_contrib_;
+
+        // ⚠️ 关键：复制位宽配置
+        cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
+
         return cpp_params;
     }
 };
 
 // 校准 GRU 量化范围的包装函数（支持累积更新）
-void calibrate_gru_ranges_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
-    const torch::Tensor &br, const torch::Tensor &x,
-    GRUQuantizationRangesPy &quant_ranges) {
+void calibrate_gru_ranges_wrapper(int time_steps, int batch_size, int input_size, int hidden_size,
+                                  const torch::Tensor &W, const torch::Tensor &R,
+                                  const torch::Tensor &bx, const torch::Tensor &br,
+                                  const torch::Tensor &x, GRUQuantizationRangesPy &quant_ranges) {
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
@@ -350,270 +524,13 @@ void calibrate_gru_ranges_wrapper(
     GRUQuantizationRanges cpp_ranges = quant_ranges.to_cpp();
 
     // 调用 C++ 函数（累积更新范围）
-    calibrateGruRanges(time_steps, batch_size, input_size, hidden_size,
-                       W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
-                       br.data_ptr<float>(), x_contiguous.data_ptr<float>(), g_blas_handle,
-                       cpp_ranges);
+    calibrateGruRanges(time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(),
+                       R.data_ptr<float>(), bx.data_ptr<float>(), br.data_ptr<float>(),
+                       x_contiguous.data_ptr<float>(), g_blas_handle, cpp_ranges);
 
     // 更新 Python 对象
     quant_ranges.from_cpp(cpp_ranges);
 }
-
-// ============================================================================
-//                    位宽转换辅助函数
-// ============================================================================
-//
-// 设计说明：
-// - Python 端只配置位宽数量（8, 16, 32），不关心实际类型（INT/UINT）
-// - C++ 端在 to_cpp() 时决定实际类型：
-//   - 大多数操作 → INT 类型（bitwidthToQuantType）
-//   - sigmoid 输出（z_out, r_out）→ UINT 类型（bitwidthToUnsignedQuantType）
-// - 这样 Python 配置简单，类型选择由 C++ 根据语义自动决定
-//
-// ============================================================================
-
-/**
- * @brief 将位宽数值转换为有符号 QuantBitWidth 枚举
- * @param bitwidth 位宽数值（8, 16, 32）
- * @return 对应的有符号 QuantBitWidth（INT8, INT16, INT32）
- * @note 用于大多数操作（输入、权重、中间计算等）
- */
-inline QuantBitWidth bitwidthToQuantType(int8_t bitwidth) {
-    switch (bitwidth) {
-        case 8:  return QuantBitWidth::INT8;
-        case 16: return QuantBitWidth::INT16;
-        case 32: return QuantBitWidth::INT32;
-        default:
-            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
-                                        ". Supported values: 8, 16, 32");
-    }
-}
-
-/**
- * @brief 将位宽数值转换为无符号 QuantBitWidth 枚举
- * @param bitwidth 位宽数值（8, 16, 32）
- * @return 对应的无符号 QuantBitWidth（UINT8, UINT16，32位回退到 INT32）
- * @note 专用于 sigmoid 输出（z_out, r_out），因为输出范围是 [0, 1]
- */
-inline QuantBitWidth bitwidthToUnsignedQuantType(int8_t bitwidth) {
-    switch (bitwidth) {
-        case 8:  return QuantBitWidth::UINT8;
-        case 16: return QuantBitWidth::UINT16;
-        case 32: return QuantBitWidth::INT32;  // 32 位无 UINT 类型，回退到 INT32
-        default:
-            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
-                                        ". Supported values: 8, 16, 32");
-    }
-}
-
-/**
- * @brief 将 QuantBitWidth 枚举转换为位宽数值
- * @param bw QuantBitWidth 枚举
- * @return 位宽数值（8, 16, 32）
- * @note 用于 from_cpp()，将 C++ 类型转回 Python 可见的位宽数值
- */
-inline int8_t quantTypeToBitwidth(QuantBitWidth bw) {
-    switch (bw) {
-        case QuantBitWidth::INT8:
-        case QuantBitWidth::UINT8:
-            return 8;
-        case QuantBitWidth::INT16:
-        case QuantBitWidth::UINT16:
-            return 16;
-        case QuantBitWidth::INT32:
-            return 32;
-        default:
-            return 8;
-    }
-}
-
-// ============================================================================
-//                    OperatorQuantConfig Python 绑定
-// ============================================================================
-//
-// 设计说明：
-// - Python 端只配置位宽数量（8, 16, 32）和对称量化标志
-// - to_cpp() 时自动决定实际类型：大多数用 INT，sigmoid 输出用 UINT
-// - is_symmetric 只影响 zero_point 计算，与位宽类型完全解耦
-//
-// ============================================================================
-
-/**
- * @brief OperatorQuantConfig 的 Python 绑定结构体
- *
- * 与 C++ OperatorQuantConfig 的区别：
- * - 位宽字段使用 int8_t 存储数值（8, 16, 32），而非 QuantBitWidth 枚举
- * - to_cpp() 负责类型转换：z_out/r_out → UINT，其他 → INT
- */
-struct OperatorQuantConfigPy {
-    // ==================== 位宽配置 ====================
-    // 存储位宽数量（8, 16, 32），to_cpp() 时决定实际类型
-
-    // 输入
-    int8_t x_ = 8;   // 输入序列 x
-    int8_t h_ = 8;   // 隐藏状态 h
-
-    // 权重
-    int8_t W_ = 8;   // 输入权重 W
-    int8_t R_ = 8;   // 循环权重 R
-    int8_t bx_ = 8;  // 输入偏置 bx
-    int8_t br_ = 8;  // 循环偏置 br
-
-    // 矩阵乘法结果
-    int8_t Wx_ = 8;  // W @ x
-    int8_t Rh_ = 8;  // R @ h
-
-    // 门控 - 更新门
-    int8_t z_pre_ = 8;  // sigmoid 前
-    int8_t z_out_ = 8;  // sigmoid 后 [0,1]，to_cpp() 时转为 UINT
-
-    // 门控 - 重置门
-    int8_t r_pre_ = 8;  // sigmoid 前
-    int8_t r_out_ = 8;  // sigmoid 后 [0,1]，to_cpp() 时转为 UINT
-
-    // 门控 - 候选门
-    int8_t g_pre_ = 8;  // tanh 前
-    int8_t g_out_ = 8;  // tanh 后 [-1,1]
-
-    // 中间运算
-    int8_t Rh_add_br_ = 8;        // Rh + br
-    int8_t rRh_ = 8;              // r × Rh
-    int8_t old_contrib_ = 8;      // z × h[t-1]
-    int8_t new_contrib_ = 8;      // (1-z) × g
-
-    // ==================== 对称量化配置 ====================
-    // is_symmetric 只影响 zero_point 计算：
-    //   - true:  对称量化，zp = 0
-    //   - false: 非对称量化，zp ≠ 0
-
-    // 输入（通常非对称）
-    bool x_symmetric_ = false;
-    bool h_symmetric_ = false;
-
-    // 权重（通常对称）
-    bool W_symmetric_ = true;
-    bool R_symmetric_ = true;
-    bool bx_symmetric_ = true;
-    bool br_symmetric_ = true;
-
-    // 矩阵乘法结果
-    bool Wx_symmetric_ = false;
-    bool Rh_symmetric_ = false;
-
-    // 门控
-    bool z_pre_symmetric_ = false;
-    bool z_out_symmetric_ = false;  // sigmoid 输出 [0,1]
-    bool r_pre_symmetric_ = false;
-    bool r_out_symmetric_ = false;  // sigmoid 输出 [0,1]
-    bool g_pre_symmetric_ = false;
-    bool g_out_symmetric_ = false;  // tanh 输出 [-1,1]
-
-    // 中间运算
-    bool Rh_add_br_symmetric_ = false;
-    bool rRh_symmetric_ = false;
-    bool old_contrib_symmetric_ = false;
-    bool new_contrib_symmetric_ = false;
-
-    /**
-     * @brief 转换为 C++ OperatorQuantConfig
-     *
-     * 关键转换逻辑：
-     * - z_out_, r_out_ → bitwidthToUnsignedQuantType() → UINT 类型
-     * - 其他字段 → bitwidthToQuantType() → INT 类型
-     */
-    OperatorQuantConfig to_cpp() const {
-        OperatorQuantConfig cfg;
-
-        // 位宽配置：大多数操作使用 INT 类型
-        cfg.x_ = bitwidthToQuantType(x_);
-        cfg.h_ = bitwidthToQuantType(h_);
-        cfg.W_ = bitwidthToQuantType(W_);
-        cfg.R_ = bitwidthToQuantType(R_);
-        cfg.bx_ = bitwidthToQuantType(bx_);
-        cfg.br_ = bitwidthToQuantType(br_);
-        cfg.Wx_ = bitwidthToQuantType(Wx_);
-        cfg.Rh_ = bitwidthToQuantType(Rh_);
-        cfg.z_pre_ = bitwidthToQuantType(z_pre_);
-        cfg.z_out_ = bitwidthToUnsignedQuantType(z_out_);  // sigmoid → UINT
-        cfg.r_pre_ = bitwidthToQuantType(r_pre_);
-        cfg.r_out_ = bitwidthToUnsignedQuantType(r_out_);  // sigmoid → UINT
-        cfg.g_pre_ = bitwidthToQuantType(g_pre_);
-        cfg.g_out_ = bitwidthToQuantType(g_out_);
-        cfg.Rh_add_br_ = bitwidthToQuantType(Rh_add_br_);
-        cfg.rRh_ = bitwidthToQuantType(rRh_);
-        cfg.old_contrib_ = bitwidthToQuantType(old_contrib_);
-        cfg.new_contrib_ = bitwidthToQuantType(new_contrib_);
-
-        // 对称量化配置（直接复制）
-        cfg.x_symmetric_ = x_symmetric_;
-        cfg.h_symmetric_ = h_symmetric_;
-        cfg.W_symmetric_ = W_symmetric_;
-        cfg.R_symmetric_ = R_symmetric_;
-        cfg.bx_symmetric_ = bx_symmetric_;
-        cfg.br_symmetric_ = br_symmetric_;
-        cfg.Wx_symmetric_ = Wx_symmetric_;
-        cfg.Rh_symmetric_ = Rh_symmetric_;
-        cfg.z_pre_symmetric_ = z_pre_symmetric_;
-        cfg.z_out_symmetric_ = z_out_symmetric_;
-        cfg.r_pre_symmetric_ = r_pre_symmetric_;
-        cfg.r_out_symmetric_ = r_out_symmetric_;
-        cfg.g_pre_symmetric_ = g_pre_symmetric_;
-        cfg.g_out_symmetric_ = g_out_symmetric_;
-        cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
-        cfg.rRh_symmetric_ = rRh_symmetric_;
-        cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
-        cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
-
-        return cfg;
-    }
-
-    /**
-     * @brief 从 C++ OperatorQuantConfig 转换
-     *
-     * 将 QuantBitWidth 枚举转换回位宽数值（INT8/UINT8 → 8 等）
-     */
-    void from_cpp(const OperatorQuantConfig &cfg) {
-        // 位宽配置：枚举 → 数值
-        x_ = quantTypeToBitwidth(cfg.x_);
-        h_ = quantTypeToBitwidth(cfg.h_);
-        W_ = quantTypeToBitwidth(cfg.W_);
-        R_ = quantTypeToBitwidth(cfg.R_);
-        bx_ = quantTypeToBitwidth(cfg.bx_);
-        br_ = quantTypeToBitwidth(cfg.br_);
-        Wx_ = quantTypeToBitwidth(cfg.Wx_);
-        Rh_ = quantTypeToBitwidth(cfg.Rh_);
-        z_pre_ = quantTypeToBitwidth(cfg.z_pre_);
-        z_out_ = quantTypeToBitwidth(cfg.z_out_);
-        r_pre_ = quantTypeToBitwidth(cfg.r_pre_);
-        r_out_ = quantTypeToBitwidth(cfg.r_out_);
-        g_pre_ = quantTypeToBitwidth(cfg.g_pre_);
-        g_out_ = quantTypeToBitwidth(cfg.g_out_);
-        Rh_add_br_ = quantTypeToBitwidth(cfg.Rh_add_br_);
-        rRh_ = quantTypeToBitwidth(cfg.rRh_);
-        old_contrib_ = quantTypeToBitwidth(cfg.old_contrib_);
-        new_contrib_ = quantTypeToBitwidth(cfg.new_contrib_);
-
-        // 对称量化配置（直接复制）
-        x_symmetric_ = cfg.x_symmetric_;
-        h_symmetric_ = cfg.h_symmetric_;
-        W_symmetric_ = cfg.W_symmetric_;
-        R_symmetric_ = cfg.R_symmetric_;
-        bx_symmetric_ = cfg.bx_symmetric_;
-        br_symmetric_ = cfg.br_symmetric_;
-        Wx_symmetric_ = cfg.Wx_symmetric_;
-        Rh_symmetric_ = cfg.Rh_symmetric_;
-        z_pre_symmetric_ = cfg.z_pre_symmetric_;
-        z_out_symmetric_ = cfg.z_out_symmetric_;
-        r_pre_symmetric_ = cfg.r_pre_symmetric_;
-        r_out_symmetric_ = cfg.r_out_symmetric_;
-        g_pre_symmetric_ = cfg.g_pre_symmetric_;
-        g_out_symmetric_ = cfg.g_out_symmetric_;
-        Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
-        rRh_symmetric_ = cfg.rRh_symmetric_;
-        old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
-        new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
-    }
-};
 
 // 根据量化范围计算量化参数的包装函数（支持自定义位宽配置）
 GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
@@ -624,7 +541,8 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
 
     // 调用 C++ 函数
-    GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParameters(cpp_ranges, cpp_bitwidth);
+    GRUQuantitativeParameters quant_params =
+        calculateGRUQuantitativeParameters(cpp_ranges, cpp_bitwidth);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -633,9 +551,9 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
 
 // 校准 GRU 量化参数的包装函数
 GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
-    const torch::Tensor &br, const torch::Tensor &x) {
+    int time_steps, int batch_size, int input_size, int hidden_size, const torch::Tensor &W,
+    const torch::Tensor &R, const torch::Tensor &bx, const torch::Tensor &br,
+    const torch::Tensor &x) {
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
@@ -655,10 +573,9 @@ GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
     }
 
     // 调用 C++ 函数（使用默认的 INT8 位宽配置）
-    GRUQuantitativeParameters quant_params =
-        calibrateGruScales(time_steps, batch_size, input_size, hidden_size,
-                           W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
-                           br.data_ptr<float>(), x_contiguous.data_ptr<float>(), g_blas_handle);
+    GRUQuantitativeParameters quant_params = calibrateGruScales(
+        time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(), R.data_ptr<float>(),
+        bx.data_ptr<float>(), br.data_ptr<float>(), x_contiguous.data_ptr<float>(), g_blas_handle);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -667,9 +584,9 @@ GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
 
 // 校准 GRU 量化参数并初始化 LUT 表的包装函数（组合函数）
 GRUQuantitativeParametersPy calibrate_gru_scales_and_init_lut_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
-    const torch::Tensor &br, const torch::Tensor &x) {
+    int time_steps, int batch_size, int input_size, int hidden_size, const torch::Tensor &W,
+    const torch::Tensor &R, const torch::Tensor &bx, const torch::Tensor &br,
+    const torch::Tensor &x) {
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
@@ -682,10 +599,9 @@ GRUQuantitativeParametersPy calibrate_gru_scales_and_init_lut_wrapper(
     }
 
     // 调用组合函数（内部会处理 LUT 初始化，使用默认的 INT8 位宽配置）
-    GRUQuantitativeParameters quant_params =
-        calibrateGruScalesAndInitLut(time_steps, batch_size, input_size, hidden_size,
-                                     W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
-                                     br.data_ptr<float>(), x.data_ptr<float>(), g_blas_handle);
+    GRUQuantitativeParameters quant_params = calibrateGruScalesAndInitLut(
+        time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(), R.data_ptr<float>(),
+        bx.data_ptr<float>(), br.data_ptr<float>(), x.data_ptr<float>(), g_blas_handle);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -907,6 +823,7 @@ std::tuple<torch::Tensor, torch::Tensor> haste_gru_forward_wrapper(
 }
 
 // forwardInterface 的包装函数
+// 位宽配置直接从 quant_params.bitwidth_config_ 中读取（单一数据源）
 std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     bool is_training,  // 是否开启训练模式，true为训练，false为推理
     bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size,
@@ -943,10 +860,11 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
+    // 直接使用 quant_params 中的 bitwidth_config_（单一数据源）
     GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
 
-    forwardInterface(is_training, is_quant, time_steps, batch_size, input_size,
-                     hidden_size, W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
+    forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
+                     W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
                      br.data_ptr<float>(), x.data_ptr<float>(),
                      h0_ptr,  // 初始隐藏状态，可以为 nullptr
                      cpp_params, g_blas_handle, h.data_ptr<float>(),
@@ -1098,7 +1016,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("min_old_contrib_", &GRUQuantizationRangesPy::min_old_contrib_)
         .def_readwrite("max_old_contrib_", &GRUQuantizationRangesPy::max_old_contrib_)
         .def("reset", &GRUQuantizationRangesPy::reset,
-             "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize per-channel vectors.",
+             "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize "
+             "per-channel vectors.",
              py::arg("hidden") = -1);
 
     // OperatorQuantConfig 绑定（位宽配置 + 对称量化配置）
@@ -1180,7 +1099,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("exp2_inv_new_contrib_", &GRUQuantitativeParametersPy::exp2_inv_new_contrib_)
         .def_readwrite("zp_new_contrib_", &GRUQuantitativeParametersPy::zp_new_contrib_)
         .def_readwrite("exp2_inv_old_contrib_", &GRUQuantitativeParametersPy::exp2_inv_old_contrib_)
-        .def_readwrite("zp_old_contrib_", &GRUQuantitativeParametersPy::zp_old_contrib_);
+        .def_readwrite("zp_old_contrib_", &GRUQuantitativeParametersPy::zp_old_contrib_)
+        // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
+        .def_readwrite("bitwidth_config_", &GRUQuantitativeParametersPy::bitwidth_config_);
 
     // 校准量化范围（支持多次调用累积更新）
     m.def("calibrate_gru_ranges", &calibrate_gru_ranges_wrapper,
@@ -1191,8 +1112,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     // 根据量化范围计算量化参数（支持自定义位宽配置）
     m.def("calculate_gru_quantitative_parameters", &calculate_gru_quantitative_parameters_wrapper,
-          "Calculate GRU quantitative parameters from quantization ranges",
-          py::arg("quant_ranges"),
+          "Calculate GRU quantitative parameters from quantization ranges", py::arg("quant_ranges"),
           py::arg("bitwidth_config") = OperatorQuantConfigPy());
 
     // 校准量化参数（一次性完成，向后兼容）
@@ -1249,14 +1169,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
               torch::Tensor());  // 初始隐藏状态，可选；返回 (h, v) 元组，h包含初始状态，v为中间值
 
     // forwardInterface 统一接口
+    // 位宽配置直接从 quant_params.bitwidth_config_ 中读取（单一数据源）
     m.def("forward_interface", &forward_interface_wrapper,
           "Unified GRU forward interface supporting both quantized and non-quantized modes",
           py::arg("is_training"),  // 是否开启训练模式，true为训练，false为推理
-          py::arg("is_quant"), py::arg("time_steps"), py::arg("batch_size"),
-          py::arg("input_size"), py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"),
-          py::arg("br"), py::arg("x"),
+          py::arg("is_quant"), py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
+          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
+          py::arg("x"),
           py::arg("h0") = torch::Tensor(),  // 初始隐藏状态，可选
-          py::arg("quant_params"));         // 返回 (h, v) 元组，h包含初始状态，v为中间值
+          py::arg("quant_params"));
 
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",

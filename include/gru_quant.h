@@ -41,16 +41,15 @@ class ForwardPassQuant {
     // v: [N,H*4] 中间激活值（训练模式需要）
     // zoneout_prob: Zoneout 概率
     // zoneout_mask: [N,H] Zoneout mask
-    void Run(const int steps, const WT *W, const RT *R, const int32_t *bx,
-             const int32_t *br, const XT *x, HT *h, int32_t *v,
-             const float zoneout_prob, const HT *zoneout_mask);
+    void Run(const int steps, const WT *W, const RT *R, const int32_t *bx, const int32_t *br,
+             const XT *x, HT *h, int32_t *v, const float zoneout_prob, const HT *zoneout_mask);
 
    private:
     // 内部迭代函数
     // cur_Wx_: 当前时间步的 W @ x 结果（指向 tmp_Wx_ 的偏移）
-    void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h,
-                         HT *h_out, int32_t *v, const int32_t *cur_Wx_,
-                         const float zoneout_prob, const HT *zoneout_mask);
+    void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h, HT *h_out,
+                         int32_t *v, const int32_t *cur_Wx_, const float zoneout_prob,
+                         const HT *zoneout_mask);
 
     // 计算 W @ x GEMM 并 rescale（输出到 tmp_Wx_）
     void ComputeWx(const WT *W, const XT *x, int steps);
@@ -73,12 +72,12 @@ class ForwardPassQuant {
     int max_steps_ = 0;
 
     // GEMM 中间结果（int64 避免溢出）
-    dev::vector<int64_t> tmp_Wx_i64_;   // [hidden*3 * max_steps * batch]
-    dev::vector<int64_t> tmp_Rh_i64_;   // [hidden*3 * batch]
+    dev::vector<int64_t> tmp_Wx_i64_;  // [hidden*3 * max_steps * batch]
+    dev::vector<int64_t> tmp_Rh_i64_;  // [hidden*3 * batch]
 
     // GEMM rescale 后的结果（int32 供 gate 计算使用）
-    dev::vector<int32_t> tmp_Wx_;       // [hidden*3 * max_steps * batch]
-    dev::vector<int32_t> tmp_Rh_;       // [hidden*3 * batch]
+    dev::vector<int32_t> tmp_Wx_;  // [hidden*3 * max_steps * batch]
+    dev::vector<int32_t> tmp_Rh_;  // [hidden*3 * batch]
 
     // 权重和常量（预计算）
     dev::vector<int64_t> W_sum_mul_x_zp_;  // [hidden*3]

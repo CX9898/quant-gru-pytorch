@@ -59,12 +59,12 @@ __device__ __forceinline__ void PointwiseOperations(
 #ifdef DEBUG_QUANT
     // 调试输出：只在第一个时间步的第一个元素输出
     if (row == 0 && col == 0 && steps_idx == 0) {
-        printf("[FLOAT] step=%d: Wx_z=%.6f, Rh_z=%.6f, bx_z=%.6f, br_z=%.6f\n",
-               steps_idx, (float)Wx[z_idx], (float)Rh[z_idx], (float)bx[bz_idx], (float)br[bz_idx]);
+        printf("[FLOAT] step=%d: Wx_z=%.6f, Rh_z=%.6f, bx_z=%.6f, br_z=%.6f\n", steps_idx,
+               (float)Wx[z_idx], (float)Rh[z_idx], (float)bx[bz_idx], (float)br[bz_idx]);
         printf("[FLOAT]   z_pre=%.6f, z=%.6f\n", (float)z_pre, (float)z);
         printf("[FLOAT]   r_pre=%.6f, r=%.6f\n", (float)r_pre, (float)r);
-        printf("[FLOAT]   Rh_add_br_g=%.6f, g_pre=%.6f, g=%.6f\n", 
-               (float)Rh_add_br_g, (float)g_pre, (float)g);
+        printf("[FLOAT]   Rh_add_br_g=%.6f, g_pre=%.6f, g=%.6f\n", (float)Rh_add_br_g, (float)g_pre,
+               (float)g);
         printf("[FLOAT]   h_old=%.6f\n", (float)h[output_idx]);
     }
 #endif
@@ -257,7 +257,7 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
     cublasSetStream(blas_handle, stream1);
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size, hidden_size,
                   &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh, hidden_size * 3);
-    
+
 #ifdef DEBUG_QUANT
     // 调试：输出 Rh GEMM 结果前5个值 (第一和第二时间步)
     static int rh_debug_count = 0;
@@ -268,7 +268,8 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
         cudaMemcpy(tmp_Rh_host, tmp_Rh, sizeof(T) * 5, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_host, h, sizeof(T) * 5, cudaMemcpyDeviceToHost);
         printf("[FLOAT GEMM step=%d] h[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", steps_idx,
-               (float)h_host[0], (float)h_host[1], (float)h_host[2], (float)h_host[3], (float)h_host[4]);
+               (float)h_host[0], (float)h_host[1], (float)h_host[2], (float)h_host[3],
+               (float)h_host[4]);
         printf("[FLOAT GEMM step=%d] Rh[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", steps_idx,
                (float)tmp_Rh_host[0], (float)tmp_Rh_host[1], (float)tmp_Rh_host[2],
                (float)tmp_Rh_host[3], (float)tmp_Rh_host[4]);
@@ -362,8 +363,7 @@ inline void updateRangeEMA(float &min_out, float &max_out, float min_val, float 
 
 template <typename T>
 void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
-                       size_t hidden_size, size_t batch_size,
-                       GRUQuantizationRanges &quant_ranges) {
+                       size_t hidden_size, size_t batch_size, GRUQuantizationRanges &quant_ranges) {
     std::vector<T> v_host = d2h(v_dev, steps * batch_size * hidden_size * 4);
     const size_t output_size = steps * batch_size * hidden_size;
 
@@ -416,7 +416,8 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     updateRange(quant_ranges.min_g_out_, quant_ranges.max_g_out_, min_g, max_g);
 
     auto [min_Rh_add_br, max_Rh_add_br] = computeMinMax(Rh_add_br_g);
-    updateRange(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_, min_Rh_add_br, max_Rh_add_br);
+    updateRange(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_, min_Rh_add_br,
+                max_Rh_add_br);
 
     auto [min_rRh, max_rRh] = computeMinMax(rRh_g);
     updateRange(quant_ranges.min_rRh_, quant_ranges.max_rRh_, min_rRh, max_rRh);
@@ -439,8 +440,8 @@ inline std::pair<T, T> computeMinMaxDev(const T *data_dev, size_t size) {
 
 // 辅助函数：分时间步计算设备端数据的 min/max 并使用 EMA 更新范围
 template <typename T>
-inline void computeMinMaxPerStepEMA(const T *data_dev, int steps, int step_size,
-                                    float &min_out, float &max_out, float decay = 0.9f) {
+inline void computeMinMaxPerStepEMA(const T *data_dev, int steps, int step_size, float &min_out,
+                                    float &max_out, float decay = 0.9f) {
     // 一次性拷贝所有数据
     std::vector<T> data_host = d2h(data_dev, steps * step_size);
 
@@ -454,7 +455,8 @@ inline void computeMinMaxPerStepEMA(const T *data_dev, int steps, int step_size,
             min_val = std::min(min_val, step_data[i]);
             max_val = std::max(max_val, step_data[i]);
         }
-        updateRangeEMA(min_out, max_out, static_cast<float>(min_val), static_cast<float>(max_val), decay);
+        updateRangeEMA(min_out, max_out, static_cast<float>(min_val), static_cast<float>(max_val),
+                       decay);
     }
 }
 
@@ -479,11 +481,12 @@ inline void computeMinMaxPerChannel(const T *data_dev, size_t input_size, size_t
 }
 
 template <typename T>
-void updateGRUQuantizationRanges(
-    const int steps, const int batch_size, const int hidden_size, const int input_size, const T *W,
-    const T *R, const T *bx, const T *br, const T *x, const T *h, const T *v, const T *tmp_Wx,
-    const T *tmp_Rh, const dev::vector<T> &z_pres_, const dev::vector<T> &r_pres_,
-    const dev::vector<T> &g_pres_, GRUQuantizationRanges &quant_ranges_) {
+void updateGRUQuantizationRanges(const int steps, const int batch_size, const int hidden_size,
+                                 const int input_size, const T *W, const T *R, const T *bx,
+                                 const T *br, const T *x, const T *h, const T *v, const T *tmp_Wx,
+                                 const T *tmp_Rh, const dev::vector<T> &z_pres_,
+                                 const dev::vector<T> &r_pres_, const dev::vector<T> &g_pres_,
+                                 GRUQuantizationRanges &quant_ranges_) {
     const int NH = batch_size * hidden_size;
     const int NI = batch_size * input_size;
 
@@ -494,10 +497,12 @@ void updateGRUQuantizationRanges(
     computeMinMaxPerStepEMA(h + NH, steps, NH, quant_ranges_.min_h_, quant_ranges_.max_h_);
 
     // 权重 W 的范围（per-channel）
-    computeMinMaxPerChannel(W, input_size, hidden_size * 3, quant_ranges_.min_W_, quant_ranges_.max_W_);
+    computeMinMaxPerChannel(W, input_size, hidden_size * 3, quant_ranges_.min_W_,
+                            quant_ranges_.max_W_);
 
     // 权重 R 的范围（per-channel）
-    computeMinMaxPerChannel(R, hidden_size, hidden_size * 3, quant_ranges_.min_R_, quant_ranges_.max_R_);
+    computeMinMaxPerChannel(R, hidden_size, hidden_size * 3, quant_ranges_.min_R_,
+                            quant_ranges_.max_R_);
 
     // Wx 结果的范围
     auto [min_Wx, max_Wx] = computeMinMaxDev(tmp_Wx, steps * batch_size * hidden_size * 3);
@@ -570,7 +575,7 @@ void ForwardPass<T>::Run(const int steps,
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
                   input_size, &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx,
                   hidden_size * 3);
-    
+
 #ifdef DEBUG_QUANT
     // 调试：输出 Wx GEMM 结果前5个值
     static bool first_wx_debug = true;
@@ -578,13 +583,13 @@ void ForwardPass<T>::Run(const int steps,
         cudaDeviceSynchronize();
         T tmp_Wx_host[5];
         cudaMemcpy(tmp_Wx_host, tmp_Wx, sizeof(T) * 5, cudaMemcpyDeviceToHost);
-        printf("[FLOAT GEMM] Wx[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n",
-               (float)tmp_Wx_host[0], (float)tmp_Wx_host[1], (float)tmp_Wx_host[2],
-               (float)tmp_Wx_host[3], (float)tmp_Wx_host[4]);
+        printf("[FLOAT GEMM] Wx[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", (float)tmp_Wx_host[0],
+               (float)tmp_Wx_host[1], (float)tmp_Wx_host[2], (float)tmp_Wx_host[3],
+               (float)tmp_Wx_host[4]);
         first_wx_debug = false;
     }
 #endif
-    
+
     cudaEventRecord(event, stream2);
 
     const int NH = batch_size * hidden_size;
@@ -603,9 +608,9 @@ void ForwardPass<T>::Run(const int steps,
         cudaDeviceSynchronize();
         quant_ranges_.hidden_ = data_->hidden_size;
         // 更新各算子的 min/max 范围
-        updateGRUQuantizationRanges<T>(
-            steps, batch_size, hidden_size, input_size, W, R, bx, br, x, h, v, tmp_Wx, tmp_Rh,
-            z_pres_, r_pres_, g_pres_, quant_ranges_);
+        updateGRUQuantizationRanges<T>(steps, batch_size, hidden_size, input_size, W, R, bx, br, x,
+                                       h, v, tmp_Wx, tmp_Rh, z_pres_, r_pres_, g_pres_,
+                                       quant_ranges_);
     }
 }
 

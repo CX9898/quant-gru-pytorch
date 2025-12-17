@@ -282,7 +282,7 @@ class GRUFunction(torch.autograd.Function):
             h0: 初始隐藏状态 [batch_size, hidden_size] 或 None
             is_training: 是否处于训练模式
             use_quantization: 是否使用量化
-            quant_params: 量化参数（包含位宽配置）
+            quant_params: 量化参数（包含 scale, zero_point 和 bitwidth_config_）
 
         Returns:
             output: 输出序列 [time_steps, batch_size, hidden_size]
@@ -328,6 +328,7 @@ class GRUFunction(torch.autograd.Function):
             h0_tensor = torch.empty(0, device=device, dtype=torch.float32)
 
         # 准备量化参数
+        # 位宽配置已包含在 quant_params.bitwidth_config_ 中（单一数据源）
         if use_quantization:
             if quant_params is None:
                 raise RuntimeError("quant_params is required when use_quantization=True")
@@ -466,6 +467,7 @@ class GRUFunction(torch.autograd.Function):
         grad_h0 = None if ctx.h0_is_none else dh
 
         # 返回梯度（对应 forward 的 9 个参数）
+        # input, weight_ih, weight_hh, bias_ih, bias_hh, h0, is_training, use_quantization, quant_params
         return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None
 
 
@@ -790,9 +792,10 @@ class CustomGRU(nn.Module):
 
         # ===== 前向方向：计算量化参数 =====
         if self._bitwidth_config_dict is not None:
+            cpp_config = self._get_cpp_bitwidth_config()
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges,
-                bitwidth_config=self._get_cpp_bitwidth_config()
+                bitwidth_config=cpp_config
             )
         else:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
@@ -1121,6 +1124,7 @@ class CustomGRU(nn.Module):
         bias_ih = self.bias_ih_l0 if self.bias else None
         bias_hh = self.bias_hh_l0 if self.bias else None
 
+        # 位宽配置已在 finalize_calibration 时存入 quant_params.bitwidth_config_（单一数据源）
         output_forward, h_n_forward = GRUFunction.apply(
             input,
             weight_ih,

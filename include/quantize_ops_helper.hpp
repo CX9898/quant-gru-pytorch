@@ -126,7 +126,10 @@ struct QuantGRUReScale {
     dev::vector<int8_t> exp2_inv_bx_dev_;  // size = hidden * 3
     dev::vector<int8_t> exp2_inv_br_dev_;  // size = hidden * 3
 
-    // test
+    // 位宽配置（从 GRUQuantitativeParameters 中复制，用于运行时选择正确的 kernel 实例）
+    OperatorQuantConfig bitwidth_config_;
+
+    // 调试用：保存完整的量化参数
     GRUQuantitativeParameters test;
 };
 
@@ -364,15 +367,13 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_
 #include <random>
 
 // 全局随机数生成器（使用固定种子确保可复现）
-inline std::mt19937& getGlobalRng() {
+inline std::mt19937 &getGlobalRng() {
     static std::mt19937 gen(42);  // 固定种子
     return gen;
 }
 
 // 设置全局随机种子
-inline void setGlobalRandomSeed(unsigned int seed) {
-    getGlobalRng().seed(seed);
-}
+inline void setGlobalRandomSeed(unsigned int seed) { getGlobalRng().seed(seed); }
 
 /**
  * @brief Fill a vector with random values from a normal distribution, and clamp to range.
@@ -386,7 +387,7 @@ inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min
     float mean = (min_value + max_value) / 2.0f;
     float stddev = (max_value - min_value) / 6.0f;  // 3σ 刚好覆盖范围
 
-    std::mt19937& gen = getGlobalRng();
+    std::mt19937 &gen = getGlobalRng();
     std::normal_distribution<float> dist(mean, stddev);
 
     for (auto &value : data) {
