@@ -14,6 +14,9 @@
 #include "quantize_ops_helper.hpp"
 #include "quantized_unit_testing.cuh"
 
+// 调试开关：取消注释以启用调试输出
+// #define DEBUG_QUANT
+
 namespace {
 
 namespace op {
@@ -46,41 +49,25 @@ __device__ __forceinline__ void PointwiseOperations(
     const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
     const T z = sigmoid(z_pre);
 
-    //    if (weight_idx == 1 && steps_idx <= 2) {
-    //        printf("haste compute Z: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, z_pre_fp=%f, z=%f\n",
-    //               Wx[z_idx],
-    //               Rh[z_idx],
-    //               bx[bz_idx],
-    //               br[bz_idx],
-    //               z_pre,
-    //               z);
-    //    }
-
     const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
     const T r = sigmoid(r_pre);
 
-    //    if (weight_idx == 0) {
-    //        printf("haste compute R: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, r_pre_fp=%f, r=%f\n",
-    //               Wx[r_idx],
-    //               Rh[r_idx],
-    //               bx[br_idx],
-    //               br[br_idx],
-    //               r_pre,
-    //               r);
-    //    }
-
-    const T g_pre = Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx];
+    const T Rh_add_br_g = Rh[g_idx] + br[bg_idx];
+    const T g_pre = Wx[g_idx] + r * Rh_add_br_g + bx[bg_idx];
     const T g = tanh(g_pre);
 
-    //    if (weight_idx == 0) {
-    //        printf("haste compute G: Wx_fp=%f, Rh_fp=%f, bx_fp=%f, br_fp=%f, g_pre_fp=%f, g=%f\n",
-    //               Wx[g_idx],
-    //               Rh[g_idx],
-    //               bx[bg_idx],
-    //               br[bg_idx],
-    //               g_pre,
-    //               g);
-    //    }
+#ifdef DEBUG_QUANT
+    // 调试输出：只在第一个时间步的第一个元素输出
+    if (row == 0 && col == 0 && steps_idx == 0) {
+        printf("[FLOAT] step=%d: Wx_z=%.6f, Rh_z=%.6f, bx_z=%.6f, br_z=%.6f\n",
+               steps_idx, (float)Wx[z_idx], (float)Rh[z_idx], (float)bx[bz_idx], (float)br[bz_idx]);
+        printf("[FLOAT]   z_pre=%.6f, z=%.6f\n", (float)z_pre, (float)z);
+        printf("[FLOAT]   r_pre=%.6f, r=%.6f\n", (float)r_pre, (float)r);
+        printf("[FLOAT]   Rh_add_br_g=%.6f, g_pre=%.6f, g=%.6f\n", 
+               (float)Rh_add_br_g, (float)g_pre, (float)g);
+        printf("[FLOAT]   h_old=%.6f\n", (float)h[output_idx]);
+    }
+#endif
 
     // Store internal activations if we're eventually going to backprop.
     if (Training) {
@@ -91,19 +78,18 @@ __device__ __forceinline__ void PointwiseOperations(
         v[base_v_idx + 3 * hidden_dim] = Rh[g_idx] + br[bg_idx];
     }
 
-    T cur_h_value = z * h[output_idx] + (static_cast<T>(1.0) - z) * g;
+    const T old_contrib = z * h[output_idx];
+    const T one_minus_z = static_cast<T>(1.0) - z;
+    const T new_contrib = one_minus_z * g;
+    T cur_h_value = old_contrib + new_contrib;
 
-    //    if (weight_idx == 1 && steps_idx <= 2) {
-    //        printf("haste compute H: z=%f, h_old=%f, old_contrib=%f, one_minus_update=%f, g=%f,
-    //        new_contrib=%f, h=%f\n",
-    //               z,
-    //               h[output_idx],
-    //               z * h[output_idx],
-    //               (static_cast<T>(1.0) - z),
-    //               g,
-    //               (static_cast<T>(1.0) - z) * g,
-    //               cur_h_value);
-    //    }
+#ifdef DEBUG_QUANT
+    // 调试输出：只在第一个时间步的第一个元素输出
+    if (row == 0 && col == 0 && steps_idx == 0) {
+        printf("[FLOAT]   old_contrib=%.6f, one_minus_z=%.6f, new_contrib=%.6f, h_new=%.6f\n",
+               (float)old_contrib, (float)one_minus_z, (float)new_contrib, (float)cur_h_value);
+    }
+#endif
 
     if (ApplyZoneout) {
         if (Training) {
@@ -271,6 +257,24 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
     cublasSetStream(blas_handle, stream1);
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size, hidden_size,
                   &alpha, R, hidden_size * 3, h, hidden_size, &beta, tmp_Rh, hidden_size * 3);
+    
+#ifdef DEBUG_QUANT
+    // 调试：输出 Rh GEMM 结果前5个值 (第一和第二时间步)
+    static int rh_debug_count = 0;
+    if (rh_debug_count < 2) {
+        cudaDeviceSynchronize();
+        T tmp_Rh_host[5];
+        T h_host[5];
+        cudaMemcpy(tmp_Rh_host, tmp_Rh, sizeof(T) * 5, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_host, h, sizeof(T) * 5, cudaMemcpyDeviceToHost);
+        printf("[FLOAT GEMM step=%d] h[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", steps_idx,
+               (float)h_host[0], (float)h_host[1], (float)h_host[2], (float)h_host[3], (float)h_host[4]);
+        printf("[FLOAT GEMM step=%d] Rh[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", steps_idx,
+               (float)tmp_Rh_host[0], (float)tmp_Rh_host[1], (float)tmp_Rh_host[2],
+               (float)tmp_Rh_host[3], (float)tmp_Rh_host[4]);
+        rh_debug_count++;
+    }
+#endif
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -566,6 +570,21 @@ void ForwardPass<T>::Run(const int steps,
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
                   input_size, &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx,
                   hidden_size * 3);
+    
+#ifdef DEBUG_QUANT
+    // 调试：输出 Wx GEMM 结果前5个值
+    static bool first_wx_debug = true;
+    if (first_wx_debug) {
+        cudaDeviceSynchronize();
+        T tmp_Wx_host[5];
+        cudaMemcpy(tmp_Wx_host, tmp_Wx, sizeof(T) * 5, cudaMemcpyDeviceToHost);
+        printf("[FLOAT GEMM] Wx[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n",
+               (float)tmp_Wx_host[0], (float)tmp_Wx_host[1], (float)tmp_Wx_host[2],
+               (float)tmp_Wx_host[3], (float)tmp_Wx_host[4]);
+        first_wx_debug = false;
+    }
+#endif
+    
     cudaEventRecord(event, stream2);
 
     const int NH = batch_size * hidden_size;

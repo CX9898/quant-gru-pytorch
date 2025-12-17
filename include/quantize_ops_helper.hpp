@@ -122,6 +122,10 @@ struct QuantGRUReScale {
     int8_t n_old_contrib_div_h_;               // n16
     int8_t exp2_inv_old_contrib_div_h_;        // S16
 
+    // device 可访问的 bias scale (从 GRUQuantitativeParameters 拷贝)
+    dev::vector<int8_t> exp2_inv_bx_dev_;  // size = hidden * 3
+    dev::vector<int8_t> exp2_inv_br_dev_;  // size = hidden * 3
+
     // test
     GRUQuantitativeParameters test;
 };
@@ -146,10 +150,35 @@ __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     }
 }
 
+// int64_t 版本：用于处理 16 位量化时可能超出 int32 范围的乘积
+__host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
+    if (n <= 0) return x << (-n);
+
+    const int64_t offset = static_cast<int64_t>(1) << (n - 1);
+    if (x >= 0) {
+        return (x + offset) >> n;
+    } else {
+        // 对负数要改成向零舍入：
+        return -((-x + offset) >> n);
+    }
+}
+
+// int64_t 版本：用于 16 位量化，避免溢出
 template <typename T>
 void computeWeightSumMulzp(
     const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,  // [out_dim] 输出数组
+    int64_t *weight_sum,  // [out_dim] 输出数组（int64_t）
+    int32_t zp,
+    const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
+    int out_dim,                   // 输出通道数 (M)
+    int in_dim,                    // 输入通道数 (K)
+    cudaStream_t stream = 0);
+
+// int32_t 版本：用于 8 位量化，不会溢出
+template <typename T>
+void computeWeightSumMulzp(
+    const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
+    int32_t *weight_sum,  // [out_dim] 输出数组（int32_t）
     int32_t zp,
     const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
     int out_dim,                   // 输出通道数 (M)
@@ -334,6 +363,17 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_
 #include <limits>
 #include <random>
 
+// 全局随机数生成器（使用固定种子确保可复现）
+inline std::mt19937& getGlobalRng() {
+    static std::mt19937 gen(42);  // 固定种子
+    return gen;
+}
+
+// 设置全局随机种子
+inline void setGlobalRandomSeed(unsigned int seed) {
+    getGlobalRng().seed(seed);
+}
+
 /**
  * @brief Fill a vector with random values from a normal distribution, and clamp to range.
  *
@@ -346,8 +386,7 @@ inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min
     float mean = (min_value + max_value) / 2.0f;
     float stddev = (max_value - min_value) / 6.0f;  // 3σ 刚好覆盖范围
 
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
+    std::mt19937& gen = getGlobalRng();
     std::normal_distribution<float> dist(mean, stddev);
 
     for (auto &value : data) {

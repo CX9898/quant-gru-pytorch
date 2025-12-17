@@ -183,49 +183,43 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
                                            quant_params.zp_g_pre_, "scale_g_pre");
     });
 
-    // z 门输出的量化
+    // z 门输出的量化 - sigmoid 输出固定范围 [0, 1]
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        float min = quant_ranges.min_z_out_;
-        float max = quant_ranges.max_z_out_;
-        const float range = std::abs(max - min);
-        if (range < sigmoid_range_threshold) {
-            const float expand = (sigmoid_range_threshold - range) / 2.0f;
-            min -= expand;
-            max += expand;
-        }
+        // sigmoid 输出范围固定为 [0, 1]，不使用校准值
+        float min = 0.0f;
+        float max = 1.0f;
         calibrateQuantParams<float, ZOutT>(min, max,
                                            bitwidth_config.z_out_symmetric_, aligned_min,
                                            aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
     });
 
-    // r 门输出的量化
+    // r 门输出的量化 - sigmoid 输出固定范围 [0, 1]
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        float min = quant_ranges.min_r_out_;
-        float max = quant_ranges.max_r_out_;
-        const float range = std::abs(max - min);
-        if (range < sigmoid_range_threshold) {
-            const float expand = (sigmoid_range_threshold - range) / 2.0f;
-            min -= expand;
-            max += expand;
-        }
+        // sigmoid 输出范围固定为 [0, 1]，不使用校准值
+        float min = 0.0f;
+        float max = 1.0f;
         calibrateQuantParams<float, ROutT>(min, max,
                                            bitwidth_config.r_out_symmetric_, aligned_min,
                                            aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
     });
 
-    // g 门输出的量化
+    // g 门输出的量化 - tanh 输出固定范围 [-1, 1]，使用对称量化
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        calibrateQuantParams<float, GOutT>(quant_ranges.min_g_out_, quant_ranges.max_g_out_,
-                                           bitwidth_config.g_out_symmetric_, aligned_min,
-                                           aligned_max, quant_params.exp2_inv_g_out_,
+        // tanh 输出范围固定为 [-1, 1]，使用对称量化 (zp=0)
+        float min = -1.0f;
+        float max = 1.0f;
+        calibrateQuantParams<float, GOutT>(min, max,
+                                           true,  // 强制对称量化
+                                           aligned_min, aligned_max,
+                                           quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
     });
 

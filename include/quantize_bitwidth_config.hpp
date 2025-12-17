@@ -107,36 +107,36 @@ struct OperatorQuantConfig {
     // 大多数操作使用 INT 类型，z_out/r_out 使用 UINT 类型（sigmoid 输出 [0,1]）
 
     // 输入
-    QuantBitWidth x_ = QuantBitWidth::INT8;   // 输入序列 x
-    QuantBitWidth h_ = QuantBitWidth::INT8;   // 隐藏状态 h
+    QuantBitWidth x_ = QuantBitWidth::INT16;   // 输入序列 x
+    QuantBitWidth h_ = QuantBitWidth::INT16;   // 隐藏状态 h
 
     // 权重
-    QuantBitWidth W_ = QuantBitWidth::INT8;   // 输入权重 W (input -> gates)
-    QuantBitWidth R_ = QuantBitWidth::INT8;   // 循环权重 R (hidden -> gates)
-    QuantBitWidth bx_ = QuantBitWidth::INT8;  // 输入偏置 bx
-    QuantBitWidth br_ = QuantBitWidth::INT8;  // 循环偏置 br
+    QuantBitWidth W_ = QuantBitWidth::INT16;   // 输入权重 W (input -> gates)
+    QuantBitWidth R_ = QuantBitWidth::INT16;   // 循环权重 R (hidden -> gates)
+    QuantBitWidth bx_ = QuantBitWidth::INT16;  // 输入偏置 bx
+    QuantBitWidth br_ = QuantBitWidth::INT16;  // 循环偏置 br
 
     // 矩阵乘法结果
-    QuantBitWidth Wx_ = QuantBitWidth::INT8;  // W @ x 结果
-    QuantBitWidth Rh_ = QuantBitWidth::INT8;  // R @ h 结果
+    QuantBitWidth Wx_ = QuantBitWidth::INT16;  // W @ x 结果
+    QuantBitWidth Rh_ = QuantBitWidth::INT16;  // R @ h 结果
 
     // 门控 - 更新门 (update gate)
-    QuantBitWidth z_pre_ = QuantBitWidth::INT8;   // sigmoid 前
-    QuantBitWidth z_out_ = QuantBitWidth::UINT8;  // sigmoid 后 [0,1]，使用 UINT
+    QuantBitWidth z_pre_ = QuantBitWidth::INT16;   // sigmoid 前
+    QuantBitWidth z_out_ = QuantBitWidth::UINT16;  // sigmoid 后 [0,1]，使用 UINT
 
     // 门控 - 重置门 (reset gate)
-    QuantBitWidth r_pre_ = QuantBitWidth::INT8;   // sigmoid 前
-    QuantBitWidth r_out_ = QuantBitWidth::UINT8;  // sigmoid 后 [0,1]，使用 UINT
+    QuantBitWidth r_pre_ = QuantBitWidth::INT16;   // sigmoid 前
+    QuantBitWidth r_out_ = QuantBitWidth::UINT16;  // sigmoid 后 [0,1]，使用 UINT
 
     // 门控 - 候选门 (candidate gate)
-    QuantBitWidth g_pre_ = QuantBitWidth::INT8;  // tanh 前
-    QuantBitWidth g_out_ = QuantBitWidth::INT8;  // tanh 后 [-1,1]
+    QuantBitWidth g_pre_ = QuantBitWidth::INT16;  // tanh 前
+    QuantBitWidth g_out_ = QuantBitWidth::INT16;  // tanh 后 [-1,1]
 
     // 中间运算
-    QuantBitWidth Rh_add_br_ = QuantBitWidth::INT8;        // Rh + br
-    QuantBitWidth rRh_ = QuantBitWidth::INT8;              // r × Rh
-    QuantBitWidth old_contrib_ = QuantBitWidth::INT8;      // z × h[t-1]
-    QuantBitWidth new_contrib_ = QuantBitWidth::INT8;      // (1-z) × g
+    QuantBitWidth Rh_add_br_ = QuantBitWidth::INT16;        // Rh + br
+    QuantBitWidth rRh_ = QuantBitWidth::INT16;              // r × Rh
+    QuantBitWidth old_contrib_ = QuantBitWidth::INT16;      // z × h[t-1]
+    QuantBitWidth new_contrib_ = QuantBitWidth::INT16;      // (1-z) × g
 
     // ==================== 对称量化配置 ====================
     // is_symmetric 只影响 zero_point 的计算：

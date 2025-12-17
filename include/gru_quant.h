@@ -74,8 +74,8 @@ class ForwardPassQuant {
    private:
     void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h,
                          HT *h_out, int32_t *v, const int32_t *tmp_Wx, int32_t *tmp_Rh,
-                         const int *W_sum_mul_x_zp,  // hidden_size * 3
-                         const int *R_sum_mul_h_zp,  // hidden_size * 3
+                         const int64_t *W_sum_mul_x_zp,  // hidden_size * 3（int64_t 避免溢出）
+                         const int64_t *R_sum_mul_h_zp,  // hidden_size * 3（int64_t 避免溢出）
                          const float zoneout_prob, const HT *zoneout_mask);
 
     struct private_data;

@@ -12,6 +12,9 @@
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.hpp"
 
+// 调试开关：取消注释以启用调试输出
+// #define DEBUG_QUANT
+
 // 前向声明
 struct SigmoidLUT_INT16;
 struct SigmoidLUT_INT8;
@@ -173,6 +176,12 @@ void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
         float x_min_g = static_cast<float>(quant_min - params.zp_g_pre_) * scale_g_pre;
         float x_max_g = static_cast<float>(quant_max - params.zp_g_pre_) * scale_g_pre;
 
+#ifdef DEBUG_QUANT
+        printf("[DEBUG] g门 LUT初始化: params.exp2_inv_g_pre_=%d, params.zp_g_pre_=%d, params.exp2_inv_g_out_=%d, params.zp_g_out_=%d\n",
+               params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_, params.zp_g_out_);
+        printf("[DEBUG] g门范围: x_min_g=%.4f, x_max_g=%.4f\n", x_min_g, x_max_g);
+#endif
+
         // 根据 g_out_ 选择 LUT 版本（tanh 输出是有符号的）
         if (config.g_out_ == QuantBitWidth::INT16) {
             init_tanh_lut_int16(params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_,
@@ -186,8 +195,47 @@ void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
 
 namespace kernel {
 
+// ★★★ 修复：使用 int64_t 存储以避免 16 位量化时的溢出 ★★★
 template <typename T>
 __global__ void computeWeightSumMulZP(
+    const T *__restrict__ W_q,         // [out_dim, in_dim] 权重量化矩阵, 列主序储存
+    int64_t *__restrict__ weight_sum,  // [out_dim] 输出数组（改为 int64_t）
+    int x_zp,
+    const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
+    // per-channel
+    int out_dim,  // 输出通道数 (M)
+    int in_dim    // 输入通道数 (K)
+) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= out_dim) {
+        return;
+    }
+
+    // 使用 int64_t 进行整个计算，避免溢出
+    int64_t sum_i64 = 0;
+#pragma unroll
+    for (int j = 0; j < in_dim; ++j) {
+        sum_i64 += static_cast<int64_t>(W_q[row + j * out_dim]);
+    }
+    
+    // 乘以 x_zp（使用 int64_t 避免溢出）
+    sum_i64 *= static_cast<int64_t>(x_zp);
+    
+#ifdef DEBUG_QUANT
+    // 调试输出
+    if (row == 0) {
+        printf("[DEBUG] computeWeightSumMulZP: row=0, in_dim=%d, x_zp=%d, result=%lld\n", 
+               in_dim, x_zp, (long long)sum_i64);
+    }
+#endif
+    
+    // 使用 int64_t 存储完整结果
+    weight_sum[row] = sum_i64;
+}
+
+// 兼容旧版本：int32_t 输出（用于 8 位量化，不会溢出）
+template <typename T>
+__global__ void computeWeightSumMulZP_i32(
     const T *__restrict__ W_q,         // [out_dim, in_dim] 权重量化矩阵, 列主序储存
     int32_t *__restrict__ weight_sum,  // [out_dim] 输出数组
     int x_zp,
@@ -207,7 +255,6 @@ __global__ void computeWeightSumMulZP(
         sum += static_cast<int32_t>(W_q[row + j * out_dim]);
     }
     sum *= x_zp;
-    //    sum = rshift_round(sum, n[row]);
     weight_sum[row] = sum;
 }
 
@@ -315,10 +362,11 @@ __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data, si
 
 }  // namespace kernel
 
+// int64_t 版本：用于 16 位量化，避免溢出
 template <typename T>
 void computeWeightSumMulzp(
     const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,  // [out_dim] 输出数组
+    int64_t *weight_sum,  // [out_dim] 输出数组（int64_t）
     int x_zp,
     const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
     // per-channel
@@ -331,24 +379,59 @@ void computeWeightSumMulzp(
                                                                   in_dim);
 }
 
-template void computeWeightSumMulzp<int8_t>(
-    const int8_t *W_q,    // [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,  // [out_dim] 输出数组
+// int32_t 版本：用于 8 位量化，不会溢出
+template <typename T>
+void computeWeightSumMulzp(
+    const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
+    int32_t *weight_sum,  // [out_dim] 输出数组（int32_t）
     int x_zp,
     const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
     // per-channel
     int out_dim,  // 输出通道数 (M)
     int in_dim,   // 输入通道数 (K)
+    cudaStream_t stream) {
+    int threads = 256;
+    int blocks = (out_dim + threads - 1) / threads;
+    kernel::computeWeightSumMulZP_i32<<<blocks, threads, 0, stream>>>(W_q, weight_sum, x_zp, n, out_dim,
+                                                                      in_dim);
+}
+
+// int64_t 版本显式实例化
+template void computeWeightSumMulzp<int8_t>(
+    const int8_t *W_q,
+    int64_t *weight_sum,
+    int x_zp,
+    const int8_t *__restrict__ n,
+    int out_dim,
+    int in_dim,
     cudaStream_t stream);
 
 template void computeWeightSumMulzp<int16_t>(
-    const int16_t *W_q,   // [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,  // [out_dim] 输出数组
+    const int16_t *W_q,
+    int64_t *weight_sum,
     int x_zp,
-    const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n.
-    // per-channel
-    int out_dim,  // 输出通道数 (M)
-    int in_dim,   // 输入通道数 (K)
+    const int8_t *__restrict__ n,
+    int out_dim,
+    int in_dim,
+    cudaStream_t stream);
+
+// int32_t 版本显式实例化
+template void computeWeightSumMulzp<int8_t>(
+    const int8_t *W_q,
+    int32_t *weight_sum,
+    int x_zp,
+    const int8_t *__restrict__ n,
+    int out_dim,
+    int in_dim,
+    cudaStream_t stream);
+
+template void computeWeightSumMulzp<int16_t>(
+    const int16_t *W_q,
+    int32_t *weight_sum,
+    int x_zp,
+    const int8_t *__restrict__ n,
+    int out_dim,
+    int in_dim,
     cudaStream_t stream);
 
 namespace dev {
@@ -813,8 +896,18 @@ void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bi
 // 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - r 门）
 void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
                               float x_min, float x_max) {
+#ifdef DEBUG_QUANT
+    printf("[DEBUG] init_sigmoid_r_lut_int16: shift_x=%d, zp_x=%d, shift_y=%d, zp_y=%d, x_min=%.4f, x_max=%.4f\n",
+           shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
+#endif
+    
     SigmoidLUT_INT16 lut =
         generate_sigmoid_lut_int16(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
+    
+#ifdef DEBUG_QUANT
+    printf("[DEBUG] sigmoid_r LUT generated: lut.zp_x=%d, lut.zp_y=%d, lut.shift_bits_x=%d, lut.shift_bits_y=%d\n",
+           lut.zp_x, lut.zp_y, lut.shift_bits_x, lut.shift_bits_y);
+#endif
 
     cudaError_t err = cudaMemcpyToSymbol(d_sigmoid_r_lut_int16, &lut, sizeof(SigmoidLUT_INT16));
 
@@ -825,8 +918,18 @@ void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bi
 
 void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
                          float x_min, float x_max) {
+#ifdef DEBUG_QUANT
+    printf("[DEBUG] init_tanh_lut_int16: shift_x=%d, zp_x=%d, shift_y=%d, zp_y=%d, x_min=%.4f, x_max=%.4f\n",
+           shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
+#endif
+    
     SigmoidLUT_INT16 lut =
         generate_tanh_lut_int16(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
+
+#ifdef DEBUG_QUANT
+    printf("[DEBUG] tanh LUT generated: lut.zp_x=%d, lut.zp_y=%d, lut.shift_bits_x=%d, lut.shift_bits_y=%d\n",
+           lut.zp_x, lut.zp_y, lut.shift_bits_x, lut.shift_bits_y);
+#endif
 
     cudaError_t err = cudaMemcpyToSymbol(d_tanh_lut_int16, &lut, sizeof(SigmoidLUT_INT16));
 
