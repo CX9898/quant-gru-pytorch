@@ -56,6 +56,27 @@ void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidd
     quant_ranges = forward.getGRUQuantizationRanges();
 }
 
+// =====================================================================
+// 量化校准实现
+// =====================================================================
+
+// 确保范围不小于最小阈值，避免范围过窄导致量化精度问题
+inline void ensureMinRange(float &min_val, float &max_val, float min_range_threshold = 0.1f,
+                           const char *name = nullptr) {
+    float range = max_val - min_val;
+    if (range < min_range_threshold) {
+        float center = (min_val + max_val) / 2.0f;
+        float old_min = min_val, old_max = max_val;
+        min_val = center - min_range_threshold / 2.0f;
+        max_val = center + min_range_threshold / 2.0f;
+        if (name) {
+            printf(
+                "[ensureMinRange] %s: range %.4f < %.4f, expanded [%.4f, %.4f] -> [%.4f, %.4f]\n",
+                name, range, min_range_threshold, old_min, old_max, min_val, max_val);
+        }
+    }
+}
+
 GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges, const OperatorQuantConfig &bitwidth_config) {
     GRUQuantitativeParameters quant_params;
@@ -183,14 +204,27 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
                                            quant_params.zp_g_pre_, "scale_g_pre");
     });
 
+    // 激活函数输出的校准
+    // INT8: 使用实际校准范围（精度更高）
+    // INT16: 使用固定范围（LUT 精度足够，固定范围更稳定）
+    constexpr float MIN_ACTIVATION_RANGE = 0.5f;
+
     // z 门输出的量化 - sigmoid 输出固定范围 [0, 1]
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        // sigmoid 输出范围固定为 [0, 1]，不使用校准值
-        float min = 0.0f;
-        float max = 1.0f;
-        calibrateQuantParams<float, ZOutT>(min, max,
+        float min_val, max_val;
+        if constexpr (sizeof(ZOutT) == 1) {
+            // INT8: 使用实际校准范围
+            min_val = quant_ranges.min_z_out_;
+            max_val = quant_ranges.max_z_out_;
+            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "z_out");
+        } else {
+            // INT16: 使用固定范围 [0, 1]
+            min_val = 0.0f;
+            max_val = 1.0f;
+        }
+        calibrateQuantParams<float, ZOutT>(min_val, max_val,
                                            bitwidth_config.z_out_symmetric_, aligned_min,
                                            aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
@@ -200,10 +234,16 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        // sigmoid 输出范围固定为 [0, 1]，不使用校准值
-        float min = 0.0f;
-        float max = 1.0f;
-        calibrateQuantParams<float, ROutT>(min, max,
+        float min_val, max_val;
+        if constexpr (sizeof(ROutT) == 1) {
+            min_val = quant_ranges.min_r_out_;
+            max_val = quant_ranges.max_r_out_;
+            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "r_out");
+        } else {
+            min_val = 0.0f;
+            max_val = 1.0f;
+        }
+        calibrateQuantParams<float, ROutT>(min_val, max_val,
                                            bitwidth_config.r_out_symmetric_, aligned_min,
                                            aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
@@ -213,11 +253,17 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        // tanh 输出范围固定为 [-1, 1]，使用对称量化 (zp=0)
-        float min = -1.0f;
-        float max = 1.0f;
-        calibrateQuantParams<float, GOutT>(min, max,
-                                           true,  // 强制对称量化
+        float min_val, max_val;
+        if constexpr (sizeof(GOutT) == 1) {
+            min_val = quant_ranges.min_g_out_;
+            max_val = quant_ranges.max_g_out_;
+            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "g_out");
+        } else {
+            min_val = -1.0f;
+            max_val = 1.0f;
+        }
+        calibrateQuantParams<float, GOutT>(min_val, max_val,
+                                           bitwidth_config.g_out_symmetric_,
                                            aligned_min, aligned_max,
                                            quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
