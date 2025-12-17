@@ -29,6 +29,93 @@ __device__ int64_t g_max_rRh_product = 0;
 __device__ int g_overflow_count = 0;
 #endif
 
+// ============================================================================
+// 融合的 INT16 量化 GEMM kernel（边计算边减 zero-point）
+// C[m,n] = rshift_round(sum_k(A[m,k] * (B[k,n] - zp_B)), shift[m]) + zp_out
+// ============================================================================
+constexpr int TILE_SIZE = 16;  // 每个线程块处理 16x16 的输出 tile
+
+template <typename AT, typename BT>
+__global__ void quantizedGemmInt16Fused(
+    const AT* __restrict__ A,       // [M, K] 权重（W 或 R），行主序
+    const BT* __restrict__ B,       // [K, N] 输入（x 或 h），列主序（cuBLAS 风格）
+    int32_t* __restrict__ C,        // [M, N] 输出，列主序
+    int M, int N, int K,
+    int32_t zp_B,                   // 输入的 zero-point
+    const int8_t* __restrict__ shift_per_row,  // [M] per-row shift
+    int32_t zp_out                  // 输出的 zero-point
+) {
+    // 共享内存：用于 tiled 矩阵乘法
+    __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];  // +1 避免 bank conflict
+    __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
+
+    // 计算当前线程负责的输出位置
+    // 注意：cuBLAS 使用列主序，所以 A 是 [M,K] 行主序，B 是 [K,N] 列主序
+    // 这里 A 实际存储为 A[k*M + m]（列主序转置），B 存储为 B[n*K + k]
+    const int row = blockIdx.y * TILE_SIZE + threadIdx.y;  // m in [0, M)
+    const int col = blockIdx.x * TILE_SIZE + threadIdx.x;  // n in [0, N)
+
+    int64_t acc = 0;  // 使用 int64 累加，避免溢出
+
+    // 分 tile 计算
+    const int numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; t++) {
+        // 加载 A tile（A 是列主序：A[k*M + m]）
+        const int aK = t * TILE_SIZE + threadIdx.x;
+        if (row < M && aK < K) {
+            As[threadIdx.y][threadIdx.x] = static_cast<int32_t>(A[aK * M + row]);
+        } else {
+            As[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        // 加载 B tile 并减去 zp_B（B 是列主序：B[n*K + k]）
+        const int bK = t * TILE_SIZE + threadIdx.y;
+        if (col < N && bK < K) {
+            // 核心：边加载边减 zero-point
+            Bs[threadIdx.y][threadIdx.x] = static_cast<int32_t>(B[col * K + bK]) - zp_B;
+        } else {
+            Bs[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        __syncthreads();
+
+        // 计算当前 tile 的贡献
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; k++) {
+            acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    // 写回结果：rshift_round + zp_out
+    if (row < M && col < N) {
+        int8_t n = shift_per_row[row];
+        int64_t result;
+
+        // rshift_round for int64
+        if (n <= 0) {
+            result = acc << (-n);
+        } else {
+            const int64_t offset = static_cast<int64_t>(1) << (n - 1);
+            if (acc >= 0) {
+                result = (acc + offset) >> n;
+            } else {
+                result = -((-acc + offset) >> n);
+            }
+        }
+        result += zp_out;
+
+        // clamp to INT16 range
+        if (result > 32767) result = 32767;
+        if (result < -32768) result = -32768;
+
+        // 输出是列主序：C[n*M + m]
+        C[col * M + row] = static_cast<int32_t>(result);
+    }
+}
+
 // 将 int64 GEMM 结果减去补偿项并右移，存入 int32
 // output[i] = (gemm_i64[i] - compensation[i % hidden3]) >> shift[i % hidden3] + zp
 __global__ void rescaleGemmI64ToI32(
@@ -43,11 +130,11 @@ __global__ void rescaleGemmI64ToI32(
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total_size) return;
-    
+
     int channel = idx % hidden3;
     int64_t val = gemm_i64[idx] - compensation[channel];
     int8_t n = shift[channel];
-    
+
 #ifdef DEBUG_QUANT
     // 调试输出
     if (debug && idx == 0) {
@@ -55,7 +142,7 @@ __global__ void rescaleGemmI64ToI32(
                (long long)gemm_i64[idx], (long long)compensation[channel], (long long)val, (int)n, zp);
     }
 #endif
-    
+
     // rshift_round for int64
     int64_t result;
     if (n <= 0) {
@@ -69,32 +156,67 @@ __global__ void rescaleGemmI64ToI32(
         }
     }
     result += zp;
-    
+
 #ifdef DEBUG_QUANT
     if (debug && idx == 0) {
-        printf("[DEBUG]   result after shift=%lld, final output=%lld\n", 
+        printf("[DEBUG]   result after shift=%lld, final output=%lld\n",
                result - zp, result);
     }
 #endif
-    
-    // clamp to int32
-    if (result > INT32_MAX) result = INT32_MAX;
-    if (result < INT32_MIN) result = INT32_MIN;
-    
+
+    // clamp to INT16 range（因为这是 INT16 专用 kernel）
+    if (result > 32767) result = 32767;
+    if (result < -32768) result = -32768;
+
     output[idx] = static_cast<int32_t>(result);
+}
+
+// INT8 专用：将 int32 GEMM 结果原地 rescale
+// output[i] = clamp((gemm_i32[i] - compensation[i % hidden3]) >> shift[i % hidden3] + zp, INT8)
+__global__ void rescaleGemmI32(
+    int32_t* __restrict__ data,               // [hidden*3, batch*steps] GEMM 输出（原地修改）
+    const int64_t* __restrict__ compensation, // [hidden*3] W_sum_mul_x_zp
+    const int8_t* __restrict__ shift,         // [hidden*3] per-channel shift
+    int32_t zp,                               // zero point
+    int hidden3,                              // hidden_size * 3
+    int total_size                            // hidden*3 * batch*steps
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_size) return;
+
+    int channel = idx % hidden3;
+    int64_t val = static_cast<int64_t>(data[idx]) - compensation[channel];
+    int8_t n = shift[channel];
+
+    // rshift_round
+    int64_t result;
+    if (n <= 0) {
+        result = val << (-n);
+    } else {
+        const int64_t offset = static_cast<int64_t>(1) << (n - 1);
+        if (val >= 0) {
+            result = (val + offset) >> n;
+        } else {
+            result = -((-val + offset) >> n);
+        }
+    }
+    result += zp;
+
+    // clamp to INT8 range（因为这是 INT8 专用 kernel）
+    if (result > 127) result = 127;
+    if (result < -128) result = -128;
+
+    data[idx] = static_cast<int32_t>(result);
 }
 
 // computeZ: 更新门 z = sigmoid(...)
 // sigmoid 输出 ∈ [0, 1]，使用无符号类型（UINT8 或 UINT16）
 // QuantZ_Out: z 门输出的量化类型（uint8_t 或 uint16_t）
-// 注意：Wx_val 已经在 rescaleGemmI64ToI32 中完成了 rescale，可以直接使用
-//       Rh_val 仍需要在这里 rescale（因为 R@h 在每个时间步都会重新计算）
+// 注意：Wx_val 和 Rh_val 都已在 rescaleGemmI64ToI32 中完成 rescale 和补偿
 template <typename QuantZ_Out>
 __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
                                                const int32_t Wx_val,  // 已经 rescale 后的 Wx
-                                               const int32_t Rh_val,  // Rh 对应门的原始值
-                                               const int64_t W_sum_mul_x_zp,  // 不再使用（Wx 已 rescale）
-                                               const int64_t R_sum_mul_h_zp,  // Rh 的补偿项
+                                               const int32_t Rh_val,  // 已经 rescale 后的 Rh
                                                const int32_t bx_val,  // bx 对应门的bias
                                                const int32_t br_val,  // br 对应门的bias
                                                const QuantGRUReScale &rescale_params,
@@ -134,10 +256,10 @@ __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
         float bx_fp = (float)bx_val / (float)(1 << rescale_params.exp2_inv_bx_dev_[channel_idx]);
         float br_fp = (float)br_val / (float)(1 << rescale_params.exp2_inv_br_dev_[channel_idx]);
         float z_pre_fp = (float)(z_pre_i32 - rescale_params.zp_z_pre_) / (float)(1 << rescale_params.test.exp2_inv_z_pre_);
-        
+
         printf("[QUANT] computeZ: Wx_q=%d, Rh_q=%d, bx_q=%d, br_q=%d\n", Wx, Rh, bx_val, br_val);
         printf("[QUANT]   Wx_fp=%.6f, Rh_fp=%.6f, bx_fp=%.6f, br_fp=%.6f\n", Wx_fp, Rh_fp, bx_fp, br_fp);
-        printf("[QUANT]   sum=%.6f, z_pre_q=%d, z_pre_fp=%.6f\n", 
+        printf("[QUANT]   sum=%.6f, z_pre_q=%d, z_pre_fp=%.6f\n",
                Wx_fp + Rh_fp + bx_fp + br_fp, z_pre_i32, z_pre_fp);
     }
 #endif
@@ -151,7 +273,7 @@ __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
         const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);
         z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
     }
-    
+
 #ifdef DEBUG_QUANT
     // 调试输出：z 值
     if (debug_idx == 0) {
@@ -166,13 +288,11 @@ __device__ __forceinline__ QuantZ_Out computeZ(const int channel_idx,
 // computeR: 重置门 r = sigmoid(...)
 // sigmoid 输出 ∈ [0, 1]，使用无符号类型（UINT8 或 UINT16）
 // QuantR_Out: r 门输出的量化类型（uint8_t 或 uint16_t）
-// 注意：Wx_val 已经在 rescaleGemmI64ToI32 中完成了 rescale
+// 注意：Wx_val 和 Rh_val 都已在 rescaleGemmI64ToI32 中完成 rescale 和补偿
 template <typename QuantR_Out>
 __device__ __forceinline__ QuantR_Out computeR(const int channel_idx,
                                                const int32_t Wx_val,  // 已经 rescale 后的 Wx
-                                               const int32_t Rh_val,  // Rh 对应门的原始值
-                                               const int64_t W_sum_mul_x_zp,  // 不再使用
-                                               const int64_t R_sum_mul_h_zp,  // Rh 的补偿项
+                                               const int32_t Rh_val,  // 已经 rescale 后的 Rh
                                                const int32_t bx_val,  // bx 对应门的bias
                                                const int32_t br_val,  // br 对应门的bias
                                                const QuantGRUReScale &rescale_params,
@@ -210,13 +330,13 @@ __device__ __forceinline__ QuantR_Out computeR(const int channel_idx,
         const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);  // clamp: 截断到int8的范围
         r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
     }
-    
+
 #ifdef DEBUG_QUANT
     // 调试输出
     if (debug_idx == 0) {
         float r_pre_fp = (float)(r_pre_i32 - rescale_params.zp_r_pre_) / (float)(1 << rescale_params.test.exp2_inv_r_pre_);
         float r_fp = (float)(r - rescale_params.zp_r_out_) / (float)(1 << rescale_params.test.exp2_inv_r_out_);
-        printf("[QUANT] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n", 
+        printf("[QUANT] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n",
                r_pre_i32, r_pre_fp, (int)r, r_fp);
         // 输出 sigmoid r LUT 使用的参数
         if constexpr (std::is_same_v<QuantR_Out, uint16_t>) {
@@ -251,13 +371,12 @@ __device__ __forceinline__ QuantR_Out computeR(const int channel_idx,
     return r;
 }
 
-// 注意：Wx_val 已经在 rescaleGemmI64ToI32 中完成了 rescale
+// 注意：Wx_val 和 Rh_val 都已在 rescaleGemmI64ToI32 中完成 rescale 和补偿
 template <typename QuantG, typename QuantR>
 __device__ __forceinline__ QuantG computeG(  // New Gate
     const int channel_idx,
     const int32_t Wx_val,  // 已经 rescale 后的 Wx
-    const int32_t Rh_val,  // Rh 对应门的原始值
-    const int64_t W_sum_mul_x_zp, const int64_t R_sum_mul_h_zp,  // W 的不再使用，R 的仍需要
+    const int32_t Rh_val,  // 已经 rescale 后的 Rh
     const int32_t bx_val,  // bx 对应门的bias
     const int32_t br_val,  // br 对应门的bias
     const QuantR r, const QuantGRUReScale &rescale_params, int32_t &Rh_add_br_g,
@@ -267,7 +386,7 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
     // ★★★ Wx_val 和 Rh_val 都已经在 rescaleGemmI64ToI32 中完成了 rescale，直接使用 ★★★
     const int32_t Wx = Wx_val;
     const int32_t Rh = Rh_val;
-    
+
     Rh_add_br_g = rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
                   rshift_round(br_val, rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
                   rescale_params.zp_Rh_add_br_;
@@ -276,7 +395,7 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
     const int64_t r_diff = static_cast<int64_t>(r) - rescale_params.zp_r_out_;
     const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale_params.zp_Rh_add_br_;
     const int64_t rRh_mul_i64 = r_diff * Rh_add_br_diff;
-    
+
     // ★★★ 始终使用 int64_t 计算，然后右移转回 int32 ★★★
     const int32_t rRh = static_cast<int32_t>(
         rshift_round(rRh_mul_i64, rescale_params.n_r_mul_Rh_add_br_div_rRh_)) +
@@ -297,7 +416,7 @@ __device__ __forceinline__ QuantG computeG(  // New Gate
         const int16_t g_pre_i16_linear = dev::clamp<int16_t>(g_pre_i32);
         g = static_cast<QuantG>(
             dev::tanh_piecewise_linear_int16(g_pre_i16_linear, d_tanh_lut_int16));
-        
+
 #ifdef DEBUG_QUANT
         // 调试 tanh LUT
         if (debug_idx == 0) {
@@ -391,7 +510,7 @@ __device__ __forceinline__ QuantT computeH(  // 最终h
     const int64_t z_diff = static_cast<int64_t>(z) - rescale_params.zp_z_out_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - rescale_params.zp_h_;
     const int64_t old_contrib_mul_i64 = z_diff * h_diff;
-    
+
     const int32_t old_contrib = static_cast<int32_t>(
         rshift_round(old_contrib_mul_i64, rescale_params.n_z_mul_h_div_old_contrib_)) +
         rescale_params.zp_old_contrib_;
@@ -403,11 +522,11 @@ __device__ __forceinline__ QuantT computeH(  // 最终h
     const int64_t one_minus_diff = static_cast<int64_t>(one_minus_update) - rescale_params.zp_z_out_;
     const int64_t g_diff = static_cast<int64_t>(g) - rescale_params.zp_g_out_;
     const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
-    
+
     const int32_t new_contrib = static_cast<int32_t>(
         rshift_round(new_contrib_mul_i64, rescale_params.n_z_out_mul_g_div_new_contrib_)) +
         rescale_params.zp_new_contrib_;
-    
+
     const int32_t h_i32 = rshift_round(old_contrib - rescale_params.zp_old_contrib_,
                                        rescale_params.n_old_contrib_div_h_) +
                           rshift_round(new_contrib - rescale_params.zp_new_contrib_,
@@ -426,7 +545,7 @@ __device__ __forceinline__ QuantT computeH(  // 最终h
         float one_minus_z_fp = 1.0f - z_fp;
         float new_contrib_fp = one_minus_z_fp * g_fp;
         float h_fp = (float)(h - rescale_params.zp_h_) / (float)(1 << rescale_params.test.exp2_inv_h_);
-        
+
         printf("[QUANT] computeH: z_fp=%.6f, g_fp=%.6f, h_old_fp=%.6f\n", z_fp, g_fp, h_old_fp);
         printf("[QUANT]   old_contrib_fp=%.6f, one_minus_z_fp=%.6f, new_contrib_fp=%.6f, h_new_fp=%.6f\n",
                old_contrib_fp, one_minus_z_fp, new_contrib_fp, h_fp);
@@ -483,10 +602,8 @@ template <typename QuantT, typename QuantZ, typename QuantR, typename QuantG, bo
 __global__ void PointwiseOperationsQuant(
     const int batch_dim,                     // 批量大小
     const int hidden_dim,                    // 隐藏单元数
-    const int32_t *Wx,                       // 前向矩阵乘W * x, 包含Wz, Wr, Wh
-    const int32_t *Rh,                       // 前向矩阵乘R * h, 包含Rz, Rr, Rh
-    const int64_t *W_sum_mul_x_zp,           // hidden_size * 3（改为 int64_t）
-    const int64_t *R_sum_mul_h_zp,           // hidden_size * 3（改为 int64_t）
+    const int32_t *Wx,                       // 前向矩阵乘W * x, 包含Wz, Wr, Wh（已 rescale）
+    const int32_t *Rh,                       // 前向矩阵乘R * h, 包含Rz, Rr, Rh（已 rescale）
     const int32_t *bx,                       // 输入偏置, 包含bz, br, bh
     const int32_t *br,                       // 隐藏偏置, 包含bz, br, bh
     const QuantT *h,                         // 上一时间步隐藏状态
@@ -526,16 +643,17 @@ __global__ void PointwiseOperationsQuant(
 
     // z 和 r 门的 sigmoid 输出使用无符号类型（UINT8 或 UINT16），因为 sigmoid ∈ [0, 1]
     // QuantZ/QuantR 类型由 OperatorQuantConfig 配置决定
-    const QuantZ z = computeZ<QuantZ>(b_z_idx, Wx[z_idx], Rh[z_idx], W_sum_mul_x_zp[b_z_idx],
-                                      R_sum_mul_h_zp[b_z_idx], bx[b_z_idx], br[b_z_idx],
+    // 注意：Wx 和 Rh 已在 rescaleGemmI64ToI32 中完成 rescale 和补偿
+    const QuantZ z = computeZ<QuantZ>(b_z_idx, Wx[z_idx], Rh[z_idx],
+                                      bx[b_z_idx], br[b_z_idx],
                                       rescale_params, debug_idx);  // 更新门z
 
-    const QuantR r = computeR<QuantR>(b_r_idx, Wx[r_idx], Rh[r_idx], W_sum_mul_x_zp[b_r_idx],
-                                      R_sum_mul_h_zp[b_r_idx], bx[b_r_idx], br[b_r_idx],
+    const QuantR r = computeR<QuantR>(b_r_idx, Wx[r_idx], Rh[r_idx],
+                                      bx[b_r_idx], br[b_r_idx],
                                       rescale_params, debug_idx);  // 重置门r
     int32_t Rh_add_br_g;
     const QuantG g = computeG<QuantG, QuantR>(
-        b_g_idx, Wx[g_idx], Rh[g_idx], W_sum_mul_x_zp[b_g_idx], R_sum_mul_h_zp[b_g_idx],
+        b_g_idx, Wx[g_idx], Rh[g_idx],
         bx[b_g_idx], br[b_g_idx], r, rescale_params, Rh_add_br_g, debug_idx);  // New Gate
     // 候选状态~ht
 
@@ -631,53 +749,168 @@ ForwardPassQuant<XT, HT, WT, RT>::~ForwardPassQuant() {
     cudaStreamDestroy(data_->stream[1]);
     cudaStreamDestroy(data_->stream[0]);
     delete data_;
+    // dev::vector 自动管理内存，无需手动释放
 }
 
 template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuant<XT, HT, WT, RT>::Iterate(const WT *W,        // [C,H*3]
-                                               const RT *R,        // [H,H*3]
-                                               const int32_t *bx,  // [H*3]
-                                               const int32_t *br,  // [H*3]
-                                               const XT *x,        // [N,C]
-                                               const HT *h,        // [N,H]
-                                               HT *h_out,          // [N,H]
-                                               int32_t *v,         // [N,H*4]
-                                               int32_t *tmp_Wx,    // [N,H*3]
-                                               int32_t *tmp_Rh,    // [N,H*3]
-                                               const float zoneout_prob,
-                                               const HT *zoneout_mask  // Zoneout mask [N,H]
-) {
-    // TODO : 支持量化
-    //    using alpha_beta_t = std::conditional_t<
-    //        std::is_same_v<HT, int8_t> || std::is_same_v<HT, int16_t>,
-    //        int,
-    //        HT>;
-    //
-    //    static const alpha_beta_t alpha = static_cast<alpha_beta_t>(1);
-    //    static const alpha_beta_t beta = static_cast<alpha_beta_t>(0);
-    //
-    //    const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
-    //
-    //    const int batch_size = data_->batch_size;
-    //    const int input_size = data_->input_size;
-    //    const int hidden_size = data_->hidden_size;
-    //    const cublasHandle_t blas_handle = data_->blas_handle;
-    //    const cudaStream_t stream2 = data_->stream[1];
-    //    const cudaEvent_t event = data_->event;
-    //
-    //    cudaStream_t save_stream;
-    //    cublasGetStream(blas_handle, &save_stream);
-    //
-    //    cublasSetStream(blas_handle, stream2);
-    //    blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3,
-    //                  batch_size, input_size, &alpha, W, hidden_size * 3, x,
-    //                  input_size, &beta, tmp_Wx, hidden_size * 3);
-    //    cudaEventRecord(event, stream2);
-    //
-    //    IterateInternal(R, bx, br, h, h_out, v, tmp_Wx, tmp_Rh, zoneout_prob,
-    //                    zoneout_mask);
-    //
-    //    cublasSetStream(blas_handle, save_stream);
+void ForwardPassQuant<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const int hidden3 = hidden_size * 3;
+
+    // 如果已分配且足够大，直接返回
+    if (steps <= max_steps_) {
+        return;
+    }
+
+    // 使用 dev::vector::resize 自动管理内存
+    // GEMM rescale 后的结果（int32）- 两种位宽都需要
+    tmp_Wx_.resize(hidden3 * steps * batch_size);
+    tmp_Rh_.resize(hidden3 * batch_size);
+
+    if constexpr (sizeof(WT) == 1) {
+        // INT8: 需要权重和常量用于 rescaleGemmI32
+        // 注意：INT8 的 cuBLAS GEMM 直接输出 int32，不需要 int64 中间存储
+        if (W_sum_mul_x_zp_.size() == 0) {
+            W_sum_mul_x_zp_.resize(hidden3);
+            R_sum_mul_h_zp_.resize(hidden3);
+        }
+    }
+    // INT16: 使用融合 kernel，不需要权重和预计算
+
+    max_steps_ = steps;
+    weight_sums_computed_ = false;  // 需要重新计算
+}
+
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::PrecomputeWeightSums(const WT *W, const RT *R) {
+    // INT16 使用融合 kernel，不需要预计算权重和
+    if constexpr (sizeof(WT) != 1) {
+        weight_sums_computed_ = true;
+        return;
+    }
+
+    // INT8: 需要预计算 W_sum_mul_x_zp 和 R_sum_mul_h_zp
+    // 如果权重变化，需要重新计算
+    if (cached_W_ != W || cached_R_ != R) {
+        weight_sums_computed_ = false;
+        cached_W_ = W;
+        cached_R_ = R;
+    }
+
+    if (weight_sums_computed_) return;
+
+    const int hidden_size = data_->hidden_size;
+    const int input_size = data_->input_size;
+    const cudaStream_t stream = data_->stream[1];
+
+    // 计算 W_sum_mul_x_zp
+    computeWeightSumMulzp(W, W_sum_mul_x_zp_.data(), rescale_param_.zp_x_,
+                          rescale_param_.n_W_mul_x_div_Wx_.data(), hidden_size * 3,
+                          input_size, stream);
+
+    // 计算 R_sum_mul_h_zp
+    computeWeightSumMulzp(R, R_sum_mul_h_zp_.data(), rescale_param_.zp_h_,
+                          rescale_param_.n_R_mul_h_div_Rh_.data(), hidden_size * 3,
+                          hidden_size, stream);
+
+    cudaStreamSynchronize(stream);
+    weight_sums_computed_ = true;
+}
+
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int steps) {
+    const int batch_size = data_->batch_size;
+    const int input_size = data_->input_size;
+    const int hidden_size = data_->hidden_size;
+    const cublasHandle_t blas_handle = data_->blas_handle;
+    const cudaStream_t stream = data_->stream[1];
+    const int total_size = hidden_size * 3 * steps * batch_size;
+    const int threads = 256;
+    const int blocks = (total_size + threads - 1) / threads;
+
+    if constexpr (sizeof(WT) == 1) {
+        // INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
+        static const int32_t alpha32 = 1;
+        static const int32_t beta32 = 0;
+
+        // GEMM: W @ x -> tmp_Wx_ (直接输出 int32)
+        blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                       hidden_size * 3, steps * batch_size, input_size,
+                       &alpha32, W, hidden_size * 3, x, input_size,
+                       &beta32, tmp_Wx_.data(), hidden_size * 3);
+
+        // Rescale: (Wx_i32 - W_sum_mul_x_zp) >> n + zp_Wx（原地操作）
+        kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
+            tmp_Wx_.data(), W_sum_mul_x_zp_.data(),
+            rescale_param_.n_W_mul_x_div_Wx_.data(),
+            rescale_param_.zp_Wx_,
+            hidden_size * 3, total_size);
+    } else {
+        // INT16: 使用融合的量化 GEMM（边算边减 zp，避免中间 int64 存储）
+        // C[m,n] = rshift_round(sum_k(W[m,k] * (x[k,n] - zp_x)), shift[m]) + zp_Wx
+        const int M = hidden_size * 3;
+        const int N = steps * batch_size;
+        const int K = input_size;
+
+        dim3 blockDim(kernel::TILE_SIZE, kernel::TILE_SIZE);
+        dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
+                     (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
+
+        kernel::quantizedGemmInt16Fused<WT, XT><<<gridDim, blockDim, 0, stream>>>(
+            W, x, tmp_Wx_.data(),
+            M, N, K,
+            rescale_param_.zp_x_,
+            rescale_param_.n_W_mul_x_div_Wx_.data(),
+            rescale_param_.zp_Wx_);
+    }
+}
+
+template <typename XT, typename HT, typename WT, typename RT>
+void ForwardPassQuant<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+    const cublasHandle_t blas_handle = data_->blas_handle;
+    const cudaStream_t stream = data_->stream[0];
+    const int total_size = hidden_size * 3 * batch_size;
+    const int threads = 256;
+    const int blocks = (total_size + threads - 1) / threads;
+
+    if constexpr (sizeof(HT) == 1) {
+        // INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
+        static const int32_t alpha32 = 1;
+        static const int32_t beta32 = 0;
+
+        // GEMM: R @ h -> tmp_Rh_ (直接输出 int32)
+        blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                       hidden_size * 3, batch_size, hidden_size,
+                       &alpha32, R, hidden_size * 3, h, hidden_size,
+                       &beta32, tmp_Rh_.data(), hidden_size * 3);
+
+        // Rescale: (Rh_i32 - R_sum_mul_h_zp) >> n + zp_Rh（原地操作）
+        kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
+            tmp_Rh_.data(), R_sum_mul_h_zp_.data(),
+            rescale_param_.n_R_mul_h_div_Rh_.data(),
+            rescale_param_.zp_Rh_,
+            hidden_size * 3, total_size);
+    } else {
+        // INT16: 使用融合的量化 GEMM（边算边减 zp，避免中间 int64 存储）
+        // C[m,n] = rshift_round(sum_k(R[m,k] * (h[k,n] - zp_h)), shift[m]) + zp_Rh
+        const int M = hidden_size * 3;
+        const int N = batch_size;
+        const int K = hidden_size;
+
+        dim3 blockDim(kernel::TILE_SIZE, kernel::TILE_SIZE);
+        dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
+                     (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
+
+        kernel::quantizedGemmInt16Fused<RT, HT><<<gridDim, blockDim, 0, stream>>>(
+            R, h, tmp_Rh_.data(),
+            M, N, K,
+            rescale_param_.zp_h_,
+            rescale_param_.n_R_mul_h_div_Rh_.data(),
+            rescale_param_.zp_Rh_);
+    }
 }
 
 template <typename XT, typename HT, typename WT, typename RT>
@@ -690,17 +923,10 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const HT *h,                  // [N,H]
     HT *h_out,                    // [N,H]
     int32_t *v,                   // [N,H*4]
-    const int32_t *tmp_Wx,        // [N,H*3]
-    int32_t *tmp_Rh,              // [N,H*3]
-    const int64_t *W_sum_mul_x_zp,  // hidden_size * 3（改为 int64_t）
-    const int64_t *R_sum_mul_h_zp,  // hidden_size * 3（改为 int64_t）
+    const int32_t *cur_Wx_,       // [N,H*3] 当前时间步的 W @ x 结果
     const float zoneout_prob,
     const HT *zoneout_mask  // Zoneout mask [N,H]
 ) {
-    // Constants for GEMM
-    static const int32_t alpha = static_cast<int32_t>(1);
-    static const int32_t beta = static_cast<int32_t>(0);
-
     const bool training = data_->training;
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
@@ -709,62 +935,9 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const cudaEvent_t event = data_->event;
 
     cublasSetStream(blas_handle, stream1);
-    
-    // 使用 int64 GEMM 避免 16 位量化时 int32 溢出
-    static const int64_t alpha64 = 1;
-    static const int64_t beta64 = 0;
-    const int total_rh_size = hidden_size * 3 * batch_size;
-    dev::vector<int64_t> tmp_Rh_i64(total_rh_size);
-    blas<HT>::gemm_to_int64(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, 
-                            hidden_size * 3, batch_size, hidden_size,
-                            &alpha64, R, hidden_size * 3, h, hidden_size, 
-                            &beta64, tmp_Rh_i64.data(), hidden_size * 3);
-    
-    // 将 int64 GEMM 结果 rescale 为 int32：(Rh_i64 - R_sum_mul_h_zp) >> n + zp_Rh
-    {
-        int threads = 256;
-        int blocks = (total_rh_size + threads - 1) / threads;
-        static bool first_rh_call = true;
-        kernel::rescaleGemmI64ToI32<<<blocks, threads, 0, stream1>>>(
-            tmp_Rh_i64.data(), R_sum_mul_h_zp, 
-            rescale_param_.n_R_mul_h_div_Rh_.data(),
-            tmp_Rh, rescale_param_.zp_Rh_,
-            hidden_size * 3, total_rh_size, first_rh_call);
-        
-#ifdef DEBUG_QUANT
-        // 调试：输出量化 Rh GEMM 结果并反量化对比 (第一和第二时间步)
-        static int rh_quant_debug_count = 0;
-        if (rh_quant_debug_count < 2) {
-            cudaDeviceSynchronize();
-            HT h_host[5];
-            int32_t tmp_Rh_host[5];
-            cudaMemcpy(h_host, h, sizeof(HT) * 5, cudaMemcpyDeviceToHost);
-            cudaMemcpy(tmp_Rh_host, tmp_Rh, sizeof(int32_t) * 5, cudaMemcpyDeviceToHost);
-            
-            float scale_h = 1.0f / (1 << rescale_param_.test.exp2_inv_h_);
-            int32_t zp_h = rescale_param_.zp_h_;
-            float scale_Rh = 1.0f / (1 << rescale_param_.test.exp2_inv_Rh_);
-            int32_t zp_Rh = rescale_param_.zp_Rh_;
-            
-            printf("[QUANT GEMM step=%d] h_q[0..4] = %d, %d, %d, %d, %d (zp=%d)\n", rh_quant_debug_count,
-                   (int)h_host[0], (int)h_host[1], (int)h_host[2], (int)h_host[3], (int)h_host[4], zp_h);
-            printf("[QUANT GEMM step=%d] h_fp[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", rh_quant_debug_count,
-                   (h_host[0] - zp_h) * scale_h, (h_host[1] - zp_h) * scale_h,
-                   (h_host[2] - zp_h) * scale_h, (h_host[3] - zp_h) * scale_h,
-                   (h_host[4] - zp_h) * scale_h);
-            printf("[QUANT GEMM step=%d] Rh_q[0..4] = %d, %d, %d, %d, %d (zp=%d)\n", rh_quant_debug_count,
-                   tmp_Rh_host[0], tmp_Rh_host[1], tmp_Rh_host[2], tmp_Rh_host[3], tmp_Rh_host[4], zp_Rh);
-            printf("[QUANT GEMM step=%d] Rh_fp[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f\n", rh_quant_debug_count,
-                   (tmp_Rh_host[0] - zp_Rh) * scale_Rh,
-                   (tmp_Rh_host[1] - zp_Rh) * scale_Rh,
-                   (tmp_Rh_host[2] - zp_Rh) * scale_Rh,
-                   (tmp_Rh_host[3] - zp_Rh) * scale_Rh,
-                   (tmp_Rh_host[4] - zp_Rh) * scale_Rh);
-            rh_quant_debug_count++;
-        }
-#endif
-        first_rh_call = false;
-    }
+
+    // 计算 R @ h GEMM（结果存入 tmp_Rh_）
+    ComputeRh(R, h);
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -780,10 +953,11 @@ void ForwardPassQuant<XT, HT, WT, RT>::IterateInternal(
     const bool r_is_uint8 = (bw_config.r_out_ == QuantBitWidth::UINT8);
 
 // 宏简化 kernel 调用（避免重复代码）
+// 注意：使用内部缓冲区 cur_Wx_ 和 tmp_Rh_.data()
 #define LAUNCH_KERNEL(QuantZ, QuantR, Training, ApplyZoneout)                                   \
     kernel::PointwiseOperationsQuant<HT, QuantZ, QuantR, HT, Training, ApplyZoneout>            \
         <<<gridDim, blockDim, 0, stream1>>>(                                                    \
-            batch_size, hidden_size, tmp_Wx, tmp_Rh, W_sum_mul_x_zp, R_sum_mul_h_zp, bx, br, h, \
+            batch_size, hidden_size, cur_Wx_, tmp_Rh_.data(), bx, br, h,                        \
             h_out, Training ? v : nullptr, ApplyZoneout ? zoneout_prob : 0.0f,                  \
             ApplyZoneout ? zoneout_mask : nullptr, rescale_param_)
 
@@ -955,111 +1129,55 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
 template <typename XT, typename HT, typename WT, typename RT>
 void ForwardPassQuant<XT, HT, WT, RT>::Run(
     const int steps,    // 时间步数, 序列长度T
-    const WT *W,        // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）, 对应 GRU 的三个门（z、r、h）。C
-                        // 是输入特征维度，H 是隐藏状态维度, （行主序，计算 x @ W）
-    const RT *R,        // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh），对应 GRU 的三个门（z、r、h）.
-                        // （行主序，计算 h @ R）
-    const int32_t *bx,  // [H*3], 输入偏置（bias for W），对应 z、r、h 门
-    const int32_t *br,  // [H*3], 隐状态偏置（bias for R），对应 z、r、h 门
-    const XT *x,        // [N,C], 输入序列，batch_size = N，特征维度 = C
-    HT *h,              // [N,H], 输出隐藏状态，每个时间步保存的 GRU 隐状态
-    int32_t *v,         // [N,H*4], 临时存储向量/中间计算值，通常保存 z, r, h_tilde, h_new
-                        // 的中间值，用于后向传播或 zoneout (32位存储)
-    int32_t *tmp_Wx,    // [N,H*3], W * x 的临时结果
-    int32_t *tmp_Rh,    // [N,H*3], R * h 的临时结果
-    const float zoneout_prob,  // Zoneout 概率，用于随机丢弃部分隐藏状态
-    const HT
-        *zoneout_mask  // Zoneout mask，0/1 矩阵，控制哪些隐藏单元被保留,  // Zoneout mask [N,H]
+    const WT *W,        // [C,H*3], 输入到隐藏状态的权重矩阵（Wx）
+    const RT *R,        // [H,H*3], 隐状态到隐藏状态的权重矩阵（Rh）
+    const int32_t *bx,  // [H*3], 输入偏置（bias for W）
+    const int32_t *br,  // [H*3], 隐状态偏置（bias for R）
+    const XT *x,        // [N*T,C], 输入序列
+    HT *h,              // [(T+1)*N,H], 输出隐藏状态
+    int32_t *v,         // [T*N,H*4], 中间激活值（训练模式需要）
+    const float zoneout_prob,  // Zoneout 概率
+    const HT *zoneout_mask     // Zoneout mask [T*N,H]
 ) {
-    static const int32_t alpha = static_cast<int32_t>(1);
-    static const int32_t beta = static_cast<int32_t>(0);
-
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const int batch_size = data_->batch_size;
-    const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
-    const cublasHandle_t blas_handle = data_->blas_handle;
-    const cudaStream_t stream1 = data_->stream[0];
     const cudaStream_t stream2 = data_->stream[1];
     const cudaEvent_t event = data_->event;
 
+    // 预分配缓冲区（只在第一次调用或 steps 增大时分配）
+    EnsureBuffersAllocated(steps);
+
+    // 预计算权重和（权重不变时只计算一次）
+    PrecomputeWeightSums(W, R);
+
     cudaStream_t save_stream;
-    cublasGetStream(blas_handle, &save_stream);
+    cublasGetStream(data_->blas_handle, &save_stream);
 
-    cublasSetStream(blas_handle, stream2);
-    
-    // 使用 int64 GEMM 避免 16 位量化时 int32 溢出
-    static const int64_t alpha64 = 1;
-    static const int64_t beta64 = 0;
-    
-    // 分配 int64 临时缓冲区
-    const int total_wx_size = hidden_size * 3 * steps * batch_size;
-    dev::vector<int64_t> tmp_Wx_i64(total_wx_size);
-    blas<WT>::gemm_to_int64(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, 
-                            hidden_size * 3, steps * batch_size, input_size,
-                            &alpha64, W, hidden_size * 3, x, input_size, 
-                            &beta64, tmp_Wx_i64.data(), hidden_size * 3);
+    cublasSetStream(data_->blas_handle, stream2);
 
-    // 计算W_sum_mul_zp用于补偿x_zp（使用 int64_t 避免 16 位量化时溢出）
-    dev::vector<int64_t> W_sum_mul_x_zp(hidden_size * 3);
-    computeWeightSumMulzp(W, W_sum_mul_x_zp.data(), rescale_param_.zp_x_,
-                          rescale_param_.n_W_mul_x_div_Wx_.data(), W_sum_mul_x_zp.size(),
-                          input_size, stream2);
-    
-    // 将 int64 GEMM 结果 rescale 为 int32：(Wx_i64 - W_sum_mul_x_zp) >> n + zp_Wx
-    {
-        int threads = 256;
-        int blocks = (total_wx_size + threads - 1) / threads;
-        kernel::rescaleGemmI64ToI32<<<blocks, threads, 0, stream2>>>(
-            tmp_Wx_i64.data(), W_sum_mul_x_zp.data(), 
-            rescale_param_.n_W_mul_x_div_Wx_.data(),
-            tmp_Wx, rescale_param_.zp_Wx_,
-            hidden_size * 3, total_wx_size, false);
-        
-#ifdef DEBUG_QUANT
-        // 调试：输出量化 Wx GEMM 结果并反量化对比
-        static bool first_wx_quant_debug = true;
-        if (first_wx_quant_debug) {
-            cudaDeviceSynchronize();
-            int32_t tmp_Wx_host[5];
-            cudaMemcpy(tmp_Wx_host, tmp_Wx, sizeof(int32_t) * 5, cudaMemcpyDeviceToHost);
-            float scale_Wx = 1.0f / (1 << rescale_param_.test.exp2_inv_Wx_);
-            int32_t zp_Wx = rescale_param_.zp_Wx_;
-            printf("[QUANT GEMM] Wx_q[0..4] = %d, %d, %d, %d, %d (zp=%d, scale=2^-%d)\n",
-                   tmp_Wx_host[0], tmp_Wx_host[1], tmp_Wx_host[2], tmp_Wx_host[3], tmp_Wx_host[4],
-                   zp_Wx, rescale_param_.test.exp2_inv_Wx_);
-            printf("[QUANT GEMM] Wx_fp[0..4] = %.6f, %.6f, %.6f, %.6f, %.6f (反量化)\n",
-                   (tmp_Wx_host[0] - zp_Wx) * scale_Wx,
-                   (tmp_Wx_host[1] - zp_Wx) * scale_Wx,
-                   (tmp_Wx_host[2] - zp_Wx) * scale_Wx,
-                   (tmp_Wx_host[3] - zp_Wx) * scale_Wx,
-                   (tmp_Wx_host[4] - zp_Wx) * scale_Wx);
-            first_wx_quant_debug = false;
-        }
-#endif
-    }
+    // 计算 W @ x GEMM（所有时间步一次性计算，结果存入 tmp_Wx_）
+    ComputeWx(W, x, steps);
 
-    // Rh的gemm需要补偿h_zp, 所以提前计算 h_zp * R_sum * h_zp, stream1（使用 int64_t）
-    dev::vector<int64_t> R_sum_mul_h_zp(hidden_size * 3);
-    computeWeightSumMulzp(R, R_sum_mul_h_zp.data(), rescale_param_.zp_h_,
-                          rescale_param_.n_R_mul_h_div_Rh_.data(), R_sum_mul_h_zp.size(),
-                          hidden_size, stream2);
-
-    // 同步Wx计算
+    // 同步 Wx 计算
     cudaEventRecord(event, stream2);
 
     const int NH = batch_size * hidden_size;
+    const int NH3 = batch_size * hidden_size * 3;
 
     for (int i = 0; i < steps; ++i) {
-        IterateInternal(R, bx, br, h + i * NH, h + (i + 1) * NH, v + i * NH * 4,
-                        tmp_Wx + i * NH * 3, tmp_Rh, W_sum_mul_x_zp.data(), R_sum_mul_h_zp.data(),
-                        zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
-        //        if (i >= 2) { break; }
+        IterateInternal(R, bx, br,
+                        h + i * NH,           // 输入 h
+                        h + (i + 1) * NH,     // 输出 h
+                        v + i * NH * 4,       // 中间激活
+                        tmp_Wx_.data() + i * NH3,    // 当前时间步的 Wx
+                        zoneout_prob,
+                        zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
 
-    cublasSetStream(blas_handle, save_stream);
+    cublasSetStream(data_->blas_handle, save_stream);
 }
 
 // 显式实例化：四个类型参数相同的情况

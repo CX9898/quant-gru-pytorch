@@ -426,9 +426,9 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 
     dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size *
                                      4);  // v 统一使用 int32_t 存储
-    dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-                                    3);                             // 用于存放W * x的中间结果
-    dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
+    // dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
+    //                                 3);                             // 用于存放W * x的中间结果
+    // dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
 
     gru::ForwardPassQuant<QuantT, QuantT, QuantT, QuantT> forward =
         gru::ForwardPassQuant<QuantT, QuantT, QuantT, QuantT>(
@@ -438,8 +438,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     // 得到量化GRU中使用的rescale参数
     forward.setRescaleParam(quant_parms);
 
-    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), v_quant_dev.data(),
-                tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
+    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f, nullptr);
 
     dev::dequantification(h_quant.data(), h, (time_steps + 1) * batch_size * hidden_size,
                           quant_parms.exp2_inv_h_, quant_parms.zp_h_);

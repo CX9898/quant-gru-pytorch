@@ -30,58 +30,64 @@ class ForwardPassQuant {
 
     void setRescaleParam(const GRUQuantitativeParameters &parms);
 
-    // Performs one forward iteration of the GRU cell.
+    // 简化的 GRU 前向接口（内部管理临时缓冲区）
     //
-    // W: [C,H*3] the input weight matrix.
-    // R: [H,H*3] the recurrent weight matrix.
-    // bx: [H*3] the bias for the input weight matrix.
-    // br: [H*3] the bias for the recurrent weight matrix.
-    // x: [N,C] the GRU input for this iteration (N vectors, each with dimension C).
-    // h: [N,H] the t-1 iteration's `h_out` or the initial hidden state if this is the
-    //     t=0 iteration (typically zeros).
-    // h_out: [N,H] the GRU's output, and the input to the next iteration's `h`. This
-    //     pointer may be the same as `h`. Each iteration may reuse the same memory region.
-    // v: [N,H*4] if `training` is `false`, this can be a null pointer. If `training` is
-    //     `true`, this vector will contain intermediate activations for this iteration which
-    //     must be provided as-is to the corresponding backward iteration. The caller must
-    //     provide a new memory region for each iteration.
-    //     注意: v 使用 int32_t 统一存储，但内部各部分原始类型不同：
-    //       - v[0*H : 1*H]: z (QuantZ 类型，存为 int32_t)
-    //       - v[1*H : 2*H]: r (QuantR 类型，存为 int32_t)
-    //       - v[2*H : 3*H]: g (QuantG 类型，存为 int32_t)
-    //       - v[3*H : 4*H]: Rh_add_br_g (int32_t 类型)
-    //     反量化时需使用对应的量化参数 (exp2_inv_z/r/g/Rh_add_br, zp_z/r/g/Rh_add_br)。
-    // tmp_Wx: [N,H*3] additional temporary work space required for this iteration. The caller
-    //     should not use the contents of this vector, and must provide a new memory region for
-    //     each iteration.
-    // tmp_Rh: [N,H*3] additional temporary work space required for this iteration. The caller
-    //     should not use the contents of this vector. The same memory region may be provided
-    //     for each iteration.
-    // zoneout_prob: 0.0 <= zoneout_prob <= 1.0; specifies the probability of a hidden
-    //     activation being randomly zoned out. If zoneout was used during training, this
-    //     parameter must also be specified during inference with the same value.
-    // zoneout_mask: [N,H] may be null to disable zoneout. This is a random binary mask
-    //     following a Bernoulli(1-zoneout_prob) distribution. A different mask is typically
-    //     used for each iteration.
-    void Iterate(const WT *W, const RT *R, const int32_t *bx, const int32_t *br,
-                 const XT *x, const HT *h, HT *h_out, int32_t *v, int32_t *tmp_Wx,
-                 int32_t *tmp_Rh, const float zoneout_prob, const HT *zoneout_mask);
-
+    // W: [C,H*3] 输入权重矩阵（量化后）
+    // R: [H,H*3] 循环权重矩阵（量化后）
+    // bx: [H*3] 输入偏置（量化后）
+    // br: [H*3] 循环偏置（量化后）
+    // x: [N,C] 输入序列
+    // h: [N,H] 初始隐藏状态（输入）和输出隐藏状态
+    // v: [N,H*4] 中间激活值（训练模式需要）
+    // zoneout_prob: Zoneout 概率
+    // zoneout_mask: [N,H] Zoneout mask
     void Run(const int steps, const WT *W, const RT *R, const int32_t *bx,
-             const int32_t *br, const XT *x, HT *h, int32_t *v, int32_t *tmp_Wx,
-             int32_t *tmp_Rh, const float zoneout_prob, const HT *zoneout_mask);
+             const int32_t *br, const XT *x, HT *h, int32_t *v,
+             const float zoneout_prob, const HT *zoneout_mask);
 
    private:
+    // 内部迭代函数
+    // cur_Wx_: 当前时间步的 W @ x 结果（指向 tmp_Wx_ 的偏移）
     void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h,
-                         HT *h_out, int32_t *v, const int32_t *tmp_Wx, int32_t *tmp_Rh,
-                         const int64_t *W_sum_mul_x_zp,  // hidden_size * 3（int64_t 避免溢出）
-                         const int64_t *R_sum_mul_h_zp,  // hidden_size * 3（int64_t 避免溢出）
+                         HT *h_out, int32_t *v, const int32_t *cur_Wx_,
                          const float zoneout_prob, const HT *zoneout_mask);
+
+    // 计算 W @ x GEMM 并 rescale（输出到 tmp_Wx_）
+    void ComputeWx(const WT *W, const XT *x, int steps);
+
+    // 计算 R @ h GEMM 并 rescale（输出到 tmp_Rh_）
+    void ComputeRh(const RT *R, const HT *h);
+
+    // 预分配内存缓冲区
+    void EnsureBuffersAllocated(int steps);
+
+    // 预计算权重相关的常量
+    void PrecomputeWeightSums(const WT *W, const RT *R);
 
     struct private_data;
     private_data *data_;
 
     QuantGRUReScale rescale_param_;
+
+    // 预分配的内部缓冲区（使用 dev::vector 自动管理内存）
+    int max_steps_ = 0;
+
+    // GEMM 中间结果（int64 避免溢出）
+    dev::vector<int64_t> tmp_Wx_i64_;   // [hidden*3 * max_steps * batch]
+    dev::vector<int64_t> tmp_Rh_i64_;   // [hidden*3 * batch]
+
+    // GEMM rescale 后的结果（int32 供 gate 计算使用）
+    dev::vector<int32_t> tmp_Wx_;       // [hidden*3 * max_steps * batch]
+    dev::vector<int32_t> tmp_Rh_;       // [hidden*3 * batch]
+
+    // 权重和常量（预计算）
+    dev::vector<int64_t> W_sum_mul_x_zp_;  // [hidden*3]
+    dev::vector<int64_t> R_sum_mul_h_zp_;  // [hidden*3]
+    bool weight_sums_computed_ = false;
+
+    // 缓存的权重指针（用于检测权重是否变化）
+    const WT *cached_W_ = nullptr;
+    const RT *cached_R_ = nullptr;
 };
 
 }  // namespace gru
