@@ -628,6 +628,16 @@ class CustomGRU(nn.Module):
         # ===== CUDA 初始化标志（延迟初始化） =====
         self._cublas_initialized = False
 
+        # ===== 校准方法配置 =====
+        # 'minmax':    使用 MinMax 方法（速度快，适合重尾分布如 Laplace）
+        # 'histogram': 使用真正的 AIMET 风格直方图校准（多批次累积真实直方图，精度最高，推荐）
+        self.calibration_method = 'minmax'
+
+        # ===== AIMET 风格直方图收集器（仅 calibration_method='histogram' 时使用） =====
+        self.hist_collectors = None  # GRUHistogramCollectors C++ 对象
+        if bidirectional:
+            self.hist_collectors_reverse = None
+
     def _init_weights(self):
         """初始化权重，使用与 nn.GRU 相同的初始化策略"""
         stdv = 1.0 / (self.hidden_size ** 0.5)
@@ -765,12 +775,15 @@ class CustomGRU(nn.Module):
         """
         self._accumulate_calibration_ranges(calibration_data)
 
-    def finalize_calibration(self):
+    def finalize_calibration(self, verbose: bool = False):
         """
         完成校准，计算量化参数并初始化 LUT 表
 
         根据累积的量化范围和位宽配置计算各算子的 scale 和 zero_point。
         可多次调用，每次会根据当前累积的范围重新计算量化参数。
+
+        Args:
+            verbose: 是否打印详细的校准信息
 
         Raises:
             RuntimeError: 未调用过 calibrate()
@@ -783,23 +796,49 @@ class CustomGRU(nn.Module):
             如果需要自定义位宽配置，请在调用此方法前先调用 load_bitwidth_config()。
             如需完全重置范围，请调用 reset_calibration()。
             对于双向 GRU，会为正向和反向分别计算量化参数。
+            
+            校准方法由 self.calibration_method 控制：
+                - 'minmax':    使用 MinMax 方法（速度快，适合重尾分布）
+                - 'histogram': 使用 AIMET 风格直方图校准（最高精度，推荐）
         """
-        if self.quant_ranges is None:
-            raise RuntimeError(
-                "No calibration data accumulated. "
-                "Call calibrate(data) at least once before finalize_calibration()."
-            )
+        use_histogram = (self.calibration_method == 'histogram')
+
+        # 检查校准数据
+        if use_histogram:
+            if self.hist_collectors is None or not self.hist_collectors.is_valid():
+                raise RuntimeError(
+                    "No histogram data accumulated. "
+                    "Call calibrate(data) at least once before finalize_calibration()."
+                )
+        else:
+            if self.quant_ranges is None:
+                raise RuntimeError(
+                    "No calibration data accumulated. "
+                    "Call calibrate(data) at least once before finalize_calibration()."
+                )
+
+        cpp_config = self._get_cpp_bitwidth_config()
+
+        if verbose:
+            method_name = {
+                'minmax': 'MINMAX',
+                'histogram': 'AIMET-STYLE HISTOGRAM (真实直方图)'
+            }.get(self.calibration_method, self.calibration_method.upper())
+            print(f"\n[CustomGRU] 使用校准方法: {method_name}")
 
         # ===== 前向方向：计算量化参数 =====
-        if self._bitwidth_config_dict is not None:
-            cpp_config = self._get_cpp_bitwidth_config()
+        if use_histogram:
+            # AIMET 风格：从真实直方图计算 SQNR 最优参数
+            self.quant_params = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
+                hist_collectors=self.hist_collectors,
+                bitwidth_config=cpp_config,
+                verbose=verbose
+            )
+        else:
+            # MinMax 方法：传统方法
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges,
                 bitwidth_config=cpp_config
-            )
-        else:
-            self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
-                quant_ranges=self.quant_ranges
             )
 
         # 初始化查找表（前向）
@@ -807,20 +846,29 @@ class CustomGRU(nn.Module):
 
         # ===== 反向方向：计算量化参数（仅双向时） =====
         if self.bidirectional:
-            if self.quant_ranges_reverse is None:
-                raise RuntimeError(
-                    "No reverse calibration data accumulated. "
-                    "This should not happen for bidirectional GRU."
-                )
+            if use_histogram:
+                if self.hist_collectors_reverse is None or not self.hist_collectors_reverse.is_valid():
+                    raise RuntimeError(
+                        "No reverse histogram data accumulated. "
+                        "This should not happen for bidirectional GRU."
+                    )
 
-            if self._bitwidth_config_dict is not None:
-                self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
-                    quant_ranges=self.quant_ranges_reverse,
-                    bitwidth_config=self._get_cpp_bitwidth_config()
+                self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
+                    hist_collectors=self.hist_collectors_reverse,
+                    bitwidth_config=cpp_config,
+                    verbose=verbose
                 )
             else:
+                if self.quant_ranges_reverse is None:
+                    raise RuntimeError(
+                        "No reverse calibration data accumulated. "
+                        "This should not happen for bidirectional GRU."
+                    )
+
+                # MinMax 方法：传统方法
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
-                    quant_ranges=self.quant_ranges_reverse
+                    quant_ranges=self.quant_ranges_reverse,
+                    bitwidth_config=cpp_config
                 )
 
             # 初始化查找表（反向）
@@ -830,14 +878,16 @@ class CustomGRU(nn.Module):
         """
         重置校准状态
 
-        清除累积的量化范围和量化参数，允许重新开始校准流程。
+        清除累积的量化范围、直方图和量化参数，允许重新开始校准流程。
         对于双向 GRU，会同时重置正向和反向的状态。
         """
         self.quant_ranges = None
         self.quant_params = None
+        self.hist_collectors = None  # 重置直方图收集器
         if self.bidirectional:
             self.quant_ranges_reverse = None
             self.quant_params_reverse = None
+            self.hist_collectors_reverse = None
 
     # -------------------- 调试与打印 --------------------
 
@@ -988,48 +1038,80 @@ class CustomGRU(nn.Module):
         # ===== 前向方向校准 =====
         W, R, bx, br = self._convert_weights_to_haste_format(device, reverse=False)
 
-        # 初始化 quant_ranges（如果尚未初始化）
-        if self.quant_ranges is None:
-            self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
+        if self.calibration_method == 'histogram':
+            # AIMET 风格：收集真正的直方图
+            if self.hist_collectors is None:
+                self.hist_collectors = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
 
-        # 累积更新量化范围（前向）
-        gru_ops.calibrate_gru_ranges(
-            time_steps=time_steps,
-            batch_size=batch_size,
-            input_size=input_size,
-            hidden_size=hidden_size,
-            W=W,
-            R=R,
-            bx=bx,
-            br=br,
-            x=calibration_data,
-            quant_ranges=self.quant_ranges
-        )
+            gru_ops.calibrate_gru_histograms(
+                time_steps=time_steps,
+                batch_size=batch_size,
+                input_size=input_size,
+                hidden_size=hidden_size,
+                W=W,
+                R=R,
+                bx=bx,
+                br=br,
+                x=calibration_data,
+                hist_collectors=self.hist_collectors
+            )
+        else:
+            # MinMax 方法：收集 min/max 范围
+            if self.quant_ranges is None:
+                self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
 
-        # ===== 反向方向校准（仅双向时） =====
-        if self.bidirectional:
-            W_rev, R_rev, bx_rev, br_rev = self._convert_weights_to_haste_format(device, reverse=True)
-
-            # 初始化反向 quant_ranges
-            if self.quant_ranges_reverse is None:
-                self.quant_ranges_reverse = gru_ops.GRUQuantizationRanges(hidden_size)
-
-            # 反向输入：时间维度翻转
-            calibration_data_reversed = calibration_data.flip(0).contiguous()
-
-            # 累积更新量化范围（反向）
             gru_ops.calibrate_gru_ranges(
                 time_steps=time_steps,
                 batch_size=batch_size,
                 input_size=input_size,
                 hidden_size=hidden_size,
-                W=W_rev,
-                R=R_rev,
-                bx=bx_rev,
-                br=br_rev,
-                x=calibration_data_reversed,
-                quant_ranges=self.quant_ranges_reverse
+                W=W,
+                R=R,
+                bx=bx,
+                br=br,
+                x=calibration_data,
+                quant_ranges=self.quant_ranges
             )
+
+        # ===== 反向方向校准（仅双向时） =====
+        if self.bidirectional:
+            W_rev, R_rev, bx_rev, br_rev = self._convert_weights_to_haste_format(device, reverse=True)
+
+            # 反向输入：时间维度翻转
+            calibration_data_reversed = calibration_data.flip(0).contiguous()
+
+            if self.calibration_method == 'histogram':
+                if self.hist_collectors_reverse is None:
+                    self.hist_collectors_reverse = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
+
+                gru_ops.calibrate_gru_histograms(
+                    time_steps=time_steps,
+                    batch_size=batch_size,
+                    input_size=input_size,
+                    hidden_size=hidden_size,
+                    W=W_rev,
+                    R=R_rev,
+                    bx=bx_rev,
+                    br=br_rev,
+                    x=calibration_data_reversed,
+                    hist_collectors=self.hist_collectors_reverse
+                )
+            else:
+                if self.quant_ranges_reverse is None:
+                    self.quant_ranges_reverse = gru_ops.GRUQuantizationRanges(hidden_size)
+
+                gru_ops.calibrate_gru_ranges(
+                    time_steps=time_steps,
+                    batch_size=batch_size,
+                    input_size=input_size,
+                    hidden_size=hidden_size,
+                    W=W_rev,
+                    R=R_rev,
+                    bx=bx_rev,
+                    br=br_rev,
+                    x=calibration_data_reversed,
+                    quant_ranges=self.quant_ranges_reverse
+                )
 
         # 确保权重连续性
         self.weight_ih_l0.data = self.weight_ih_l0.data.contiguous()
@@ -1044,11 +1126,6 @@ class CustomGRU(nn.Module):
             if self.bias:
                 self.bias_ih_l0_reverse.data = self.bias_ih_l0_reverse.data.contiguous()
                 self.bias_hh_l0_reverse.data = self.bias_hh_l0_reverse.data.contiguous()
-
-    def _initialize_quantization(self, calibration_data: torch.Tensor):
-        """一次性完成校准（内部方法，向后兼容）"""
-        self._accumulate_calibration_ranges(calibration_data)
-        self.finalize_calibration()
 
     # -------------------- 重写方法 --------------------
 

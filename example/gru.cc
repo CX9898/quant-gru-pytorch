@@ -12,6 +12,7 @@
 #include "checkData.hpp"
 #include "devVector.h"
 #include "gru_interface.hpp"
+#include "histogram_collector.hpp"
 #include "quantized_unit_testing.cuh"
 
 // ==================== 矩阵转置工具函数 ====================
@@ -311,9 +312,19 @@ int main() {
     GRUQuantitativeParameters quant_params;
     {
         ScopeTimer t("CalibrateAndInitLut:");
-        quant_params = calibrateGruScalesAndInitLut(
+        
+        // 步骤 1: 收集直方图
+        GRUHistogramCollectors hist_collectors(hidden_size);
+        calibrateGruHistograms(
             time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(),
-            bx_dev.data(), br_dev.data(), x_dev.data(), g_blas_handle, bitwidth_config);
+            bx_dev.data(), br_dev.data(), x_dev.data(), g_blas_handle, hist_collectors);
+        
+        // 步骤 2: 从直方图计算量化参数
+        quant_params = calculateGRUQuantitativeParametersFromHistograms(
+            hist_collectors, bitwidth_config, true);
+        
+        // 步骤 3: 初始化 LUT 表
+        initialize_quantization_lut(quant_params);
     }
     printf("Calibration completed.\n");
 

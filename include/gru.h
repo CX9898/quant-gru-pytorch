@@ -64,6 +64,12 @@ class ForwardPass {
         quant_ranges_ = quant_ranges;
     }
 
+    // 获取预激活值（用于直方图收集）
+    const T* getZPres() const { return z_pres_.data(); }
+    const T* getRPres() const { return r_pres_.data(); }
+    const T* getGPres() const { return g_pres_.data(); }
+    size_t getPresSize() const { return z_pres_.size(); }
+
    private:
     void IterateInternal(int steps, const T *R, const T *bx, const T *br, const T *h, T *h_out,
                          T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob,

@@ -56,19 +56,32 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
-// 校准量化参数（组合 calibrateGruRanges + calculateGRUQuantitativeParameters）
-GRUQuantitativeParameters calibrateGruScales(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const cublasHandle_t &g_blas_handle,
-    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
+// =====================================================================
+// AIMET 风格的真正直方图校准接口（多批次累积直方图 + SQNR 优化）
+// =====================================================================
 
-// 校准量化参数并初始化 LUT 表
-GRUQuantitativeParameters calibrateGruScalesAndInitLut(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const cublasHandle_t &g_blas_handle,
-    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
+// 前向声明直方图收集器
+struct GRUHistogramCollectors;
+
+// 收集直方图数据（支持多批次累积）
+// 输入:
+//   W:  [C, H*3]   输入权重矩阵
+//   R:  [H, H*3]   循环权重矩阵
+//   bx: [H*3]      输入偏置
+//   br: [H*3]      循环偏置
+//   x:  [T, B, I]  输入序列
+// 输出:
+//   hist_collectors: 收集到的直方图（会累积更新）
+void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int hidden_size,
+                            const float *W, const float *R, const float *bx, const float *br,
+                            const float *x, const cublasHandle_t &g_blas_handle,
+                            GRUHistogramCollectors &hist_collectors);
+
+// 从直方图计算量化参数（真正的 AIMET 风格 SQNR 优化）
+GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
+    const GRUHistogramCollectors &hist_collectors,
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
+    bool verbose = false);
 
 // 初始化量化 LUT 表
 // 根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法

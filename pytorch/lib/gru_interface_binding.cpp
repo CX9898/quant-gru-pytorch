@@ -6,6 +6,7 @@
 
 #include "gru_interface.hpp"
 #include "gru_quantization_ranges.hpp"
+#include "histogram_collector.hpp"
 #include "quantize_ops_helper.hpp"
 
 // 全局 cublas handle
@@ -549,59 +550,63 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
     return py_params;
 }
 
-// 校准 GRU 量化参数的包装函数
-GRUQuantitativeParametersPy calibrate_gru_scales_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size, const torch::Tensor &W,
-    const torch::Tensor &R, const torch::Tensor &bx, const torch::Tensor &br,
-    const torch::Tensor &x) {
+// =====================================================================
+// AIMET 风格直方图校准接口（真正的多批次累积直方图）
+// =====================================================================
+
+// GRUHistogramCollectors 的 Python 绑定包装
+struct GRUHistogramCollectorsPy {
+    GRUHistogramCollectors cpp_collectors;
+
+    GRUHistogramCollectorsPy() = default;
+    explicit GRUHistogramCollectorsPy(int hidden, int num_bins = 2048) : cpp_collectors(hidden, num_bins) {}
+
+    void reset(int hidden = -1, int num_bins = -1) { cpp_collectors.reset(hidden, num_bins); }
+    bool is_valid() const { return cpp_collectors.is_valid(); }
+    int hidden() const { return cpp_collectors.hidden_; }
+    int num_bins() const { return cpp_collectors.num_bins_; }
+    void print() const { cpp_collectors.print(); }
+};
+
+// 收集直方图的包装函数
+void calibrate_gru_histograms_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
+    const torch::Tensor &br, const torch::Tensor &x,
+    GRUHistogramCollectorsPy &hist_collectors) {
+
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
 
-    // 检查 x 的形状，期望 [time_steps, batch_size, input_size]
+    // 检查 x 的形状
     TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
                 "x must have shape [time_steps, batch_size, input_size]");
 
-    // 确保 x 是连续的（Haste GRU 期望 [T, N, C] 格式，但需要连续内存布局）
     torch::Tensor x_contiguous = x.contiguous();
 
-    // 确保 cublas handle 已初始化
     if (g_blas_handle == nullptr) {
         init_gru_cublas(g_blas_handle);
     }
 
-    // 调用 C++ 函数（使用默认的 INT8 位宽配置）
-    GRUQuantitativeParameters quant_params = calibrateGruScales(
-        time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(), R.data_ptr<float>(),
-        bx.data_ptr<float>(), br.data_ptr<float>(), x_contiguous.data_ptr<float>(), g_blas_handle);
-
-    GRUQuantitativeParametersPy py_params;
-    py_params.from_cpp(quant_params);
-    return py_params;
+    calibrateGruHistograms(time_steps, batch_size, input_size, hidden_size,
+                           W.data_ptr<float>(), R.data_ptr<float>(),
+                           bx.data_ptr<float>(), br.data_ptr<float>(),
+                           x_contiguous.data_ptr<float>(), g_blas_handle,
+                           hist_collectors.cpp_collectors);
 }
 
-// 校准 GRU 量化参数并初始化 LUT 表的包装函数（组合函数）
-GRUQuantitativeParametersPy calibrate_gru_scales_and_init_lut_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size, const torch::Tensor &W,
-    const torch::Tensor &R, const torch::Tensor &bx, const torch::Tensor &br,
-    const torch::Tensor &x) {
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+// 从直方图计算量化参数的包装函数
+GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
+    const GRUHistogramCollectorsPy &hist_collectors,
+    const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy(),
+    bool verbose = false) {
 
-    // 确保 cublas handle 已初始化
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
-    }
-
-    // 调用组合函数（内部会处理 LUT 初始化，使用默认的 INT8 位宽配置）
-    GRUQuantitativeParameters quant_params = calibrateGruScalesAndInitLut(
-        time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(), R.data_ptr<float>(),
-        bx.data_ptr<float>(), br.data_ptr<float>(), x.data_ptr<float>(), g_blas_handle);
+    OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
+    GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParametersFromHistograms(
+        hist_collectors.cpp_collectors, cpp_bitwidth, verbose);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -1115,19 +1120,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Calculate GRU quantitative parameters from quantization ranges", py::arg("quant_ranges"),
           py::arg("bitwidth_config") = OperatorQuantConfigPy());
 
-    // 校准量化参数（一次性完成，向后兼容）
-    m.def("calibrate_gru_scales", &calibrate_gru_scales_wrapper,
-          "Calibrate GRU quantization scales (one-shot, for backward compatibility)",
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"));
+    // =====================================================================
+    // AIMET 风格直方图校准接口（支持多批次累积，最高精度）
+    // =====================================================================
 
-    // 校准量化参数并初始化 LUT 表（组合函数，方便使用）
-    m.def("calibrate_gru_scales_and_init_lut", &calibrate_gru_scales_and_init_lut_wrapper,
-          "Calibrate GRU quantization scales and initialize LUT tables (convenience function)",
+    // GRUHistogramCollectors 绑定
+    py::class_<GRUHistogramCollectorsPy>(m, "GRUHistogramCollectors")
+        .def(py::init<>())
+        .def(py::init<int, int>(), py::arg("hidden"), py::arg("num_bins") = 2048)
+        .def("reset", &GRUHistogramCollectorsPy::reset,
+             "Reset histogram collectors", py::arg("hidden") = -1, py::arg("num_bins") = -1)
+        .def("is_valid", &GRUHistogramCollectorsPy::is_valid, "Check if histograms have valid data")
+        .def("hidden", &GRUHistogramCollectorsPy::hidden, "Get hidden size")
+        .def("num_bins", &GRUHistogramCollectorsPy::num_bins, "Get number of histogram bins")
+        .def("print", &GRUHistogramCollectorsPy::print, "Print histogram statistics");
+
+    // 收集直方图（支持多批次累积）
+    m.def("calibrate_gru_histograms", &calibrate_gru_histograms_wrapper,
+          "Collect GRU histogram data for AIMET-style calibration (supports multi-batch accumulation)",
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"));
+          py::arg("x"), py::arg("hist_collectors"));
+
+    // 从直方图计算量化参数
+    m.def("calculate_gru_quantitative_parameters_from_histograms",
+          &calculate_gru_quantitative_parameters_from_histograms_wrapper,
+          "Calculate GRU quantitative parameters from accumulated histograms (AIMET-style SQNR)",
+          py::arg("hist_collectors"), py::arg("bitwidth_config") = OperatorQuantConfigPy(),
+          py::arg("verbose") = false);
 
     // 量化权重（int8）
     m.def("quantitative_weight_int8", &quantitative_weight_int8_wrapper,
