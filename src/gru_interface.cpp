@@ -173,8 +173,6 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         }
     });
 
-    constexpr float sigmoid_range_threshold = 0.5f;
-
     // z 门输入的量化
     dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
         using ZPreT = typename decltype(tag)::type;
