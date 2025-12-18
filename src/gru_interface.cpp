@@ -208,66 +208,44 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     });
 
     // 激活函数输出的校准
-    // INT8: 使用实际校准范围（LUT 表会自动使用相同的量化参数）
-    // INT16: 使用固定范围（精度足够，更稳定）
+    // INT8 和 INT16 统一使用实际校准范围（LUT 表会自动使用相同的量化参数）
     // 注意：LUT 表使用 exp2_inv_*_out_ 和 zp_*_out_，与此处一致
     constexpr float MIN_ACTIVATION_RANGE = 0.5f;
 
     // z 门输出的量化 - sigmoid
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        float min_val, max_val;
-        if constexpr (sizeof(ZOutT) == 1) {
-            // INT8: 使用实际校准范围
-            min_val = quant_ranges.min_z_out_;
-            max_val = quant_ranges.max_z_out_;
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "z_out");
-        } else {
-            // INT16: 使用固定范围 [0, 1]
-            min_val = 0.0f;
-            max_val = 1.0f;
-        }
+        float min_val = quant_ranges.min_z_out_;
+        float max_val = quant_ranges.max_z_out_;
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "z_out");
         calibrateQuantParams<float, ZOutT>(min_val, max_val, bitwidth_config.z_out_symmetric_,
                                            aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
                                            quant_params.zp_z_out_, "scale_z_out");
     });
 
     // r 门输出的量化 - sigmoid
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        float min_val, max_val;
-        if constexpr (sizeof(ROutT) == 1) {
-            // INT8: 使用实际校准范围
-            min_val = quant_ranges.min_r_out_;
-            max_val = quant_ranges.max_r_out_;
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "r_out");
-        } else {
-            // INT16: 使用固定范围 [0, 1]
-            min_val = 0.0f;
-            max_val = 1.0f;
-        }
+        float min_val = quant_ranges.min_r_out_;
+        float max_val = quant_ranges.max_r_out_;
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "r_out");
         calibrateQuantParams<float, ROutT>(min_val, max_val, bitwidth_config.r_out_symmetric_,
                                            aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
                                            quant_params.zp_r_out_, "scale_r_out");
     });
 
     // g 门输出的量化 - tanh
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
-        float min_val, max_val;
-        if constexpr (sizeof(GOutT) == 1) {
-            // INT8: 使用实际校准范围
-            min_val = quant_ranges.min_g_out_;
-            max_val = quant_ranges.max_g_out_;
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "g_out");
-        } else {
-            // INT16: 使用固定范围 [-1, 1]
-            min_val = -1.0f;
-            max_val = 1.0f;
-        }
+        float min_val = quant_ranges.min_g_out_;
+        float max_val = quant_ranges.max_g_out_;
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, "g_out");
         calibrateQuantParams<float, GOutT>(min_val, max_val, bitwidth_config.g_out_symmetric_,
                                            aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
                                            quant_params.zp_g_out_, "scale_g_out");
@@ -1009,31 +987,25 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     });
 
     // 激活函数输出的校准
-    // INT8: 使用直方图收集的实际范围（LUT 表会自动使用相同的量化参数）
-    // INT16: 使用固定范围（精度足够，更稳定）
+    // 使用直方图收集的实际范围（INT8 和 INT16 统一使用实际范围）
     constexpr float MIN_ACTIVATION_RANGE_HIST = 0.5f;
 
     // z 门输出 - sigmoid
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
         float min_val, max_val;
-        if constexpr (sizeof(ZOutT) == 1) {
-            // INT8: 使用直方图收集的实际范围
-            if (hist_collectors.z_out_hist.is_valid()) {
-                const Histogram &z_out_hist = hist_collectors.z_out_hist.histogram();
-                min_val = z_out_hist.min_val;
-                max_val = z_out_hist.max_val;
-            } else {
-                min_val = 0.0f;
-                max_val = 1.0f;
-            }
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "z_out");
+        if (hist_collectors.z_out_hist.is_valid()) {
+            const Histogram &z_out_hist = hist_collectors.z_out_hist.histogram();
+            min_val = z_out_hist.min_val;
+            max_val = z_out_hist.max_val;
         } else {
-            // INT16: 使用固定范围 [0, 1]
+            // 回退到固定范围
             min_val = 0.0f;
             max_val = 1.0f;
         }
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "z_out");
         calibrateQuantParams<float, ZOutT>(
             min_val, max_val, bitwidth_config.z_out_symmetric_, aligned_min, aligned_max,
             quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
@@ -1041,26 +1013,21 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     });
 
     // r 门输出 - sigmoid
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
         float min_val, max_val;
-        if constexpr (sizeof(ROutT) == 1) {
-            // INT8: 使用直方图收集的实际范围
-            if (hist_collectors.r_out_hist.is_valid()) {
-                const Histogram &r_out_hist = hist_collectors.r_out_hist.histogram();
-                min_val = r_out_hist.min_val;
-                max_val = r_out_hist.max_val;
-            } else {
-                min_val = 0.0f;
-                max_val = 1.0f;
-            }
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "r_out");
+        if (hist_collectors.r_out_hist.is_valid()) {
+            const Histogram &r_out_hist = hist_collectors.r_out_hist.histogram();
+            min_val = r_out_hist.min_val;
+            max_val = r_out_hist.max_val;
         } else {
-            // INT16: 使用固定范围 [0, 1]
+            // 回退到固定范围
             min_val = 0.0f;
             max_val = 1.0f;
         }
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "r_out");
         calibrateQuantParams<float, ROutT>(
             min_val, max_val, bitwidth_config.r_out_symmetric_, aligned_min, aligned_max,
             quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
@@ -1068,26 +1035,21 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     });
 
     // g 门输出 - tanh
+    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
         float aligned_min, aligned_max;
         float min_val, max_val;
-        if constexpr (sizeof(GOutT) == 1) {
-            // INT8: 使用直方图收集的实际范围
-            if (hist_collectors.g_out_hist.is_valid()) {
-                const Histogram &g_out_hist = hist_collectors.g_out_hist.histogram();
-                min_val = g_out_hist.min_val;
-                max_val = g_out_hist.max_val;
-            } else {
-                min_val = -1.0f;
-                max_val = 1.0f;
-            }
-            ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "g_out");
+        if (hist_collectors.g_out_hist.is_valid()) {
+            const Histogram &g_out_hist = hist_collectors.g_out_hist.histogram();
+            min_val = g_out_hist.min_val;
+            max_val = g_out_hist.max_val;
         } else {
-            // INT16: 使用固定范围 [-1, 1]
+            // 回退到固定范围
             min_val = -1.0f;
             max_val = 1.0f;
         }
+        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "g_out");
         calibrateQuantParams<float, GOutT>(
             min_val, max_val, bitwidth_config.g_out_symmetric_, aligned_min, aligned_max,
             quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
