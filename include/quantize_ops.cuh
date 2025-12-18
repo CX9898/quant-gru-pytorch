@@ -11,7 +11,7 @@
 
 // INT16 版本的段参数结构
 struct SegmentParams_INT16 {
-    int16_t q_b;                 // 量化后的系数 b (INT16)
+    int32_t q_b;                 // 量化后的系数 b (INT32，避免溢出截断)
     int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
     int32_t term_c_precomputed;  // 预计算的 term_c (INT32)
     int16_t threshold;           // 段阈值 (INT16，量化后的输入值)
@@ -37,10 +37,10 @@ struct SegmentParams_INT8 {
 // Sigmoid/Tanh 查找表结构（INT8）
 struct SigmoidLUT_INT8 {
     SegmentParams_INT8 segments[NUM_SEGMENTS];
-    int32_t zp_x;          // 输入 zero-point (INT32)
+    int32_t zp_x;         // 输入 zero-point (INT32)
     int8_t shift_bits_x;  // 输入 shift_bits (INT8)
     int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int32_t zp_y;          // 输出 zero-point (INT32)
+    int32_t zp_y;         // 输出 zero-point (INT32)
 };
 
 // 常量内存声明（CUDA设备端）
@@ -236,9 +236,11 @@ __device__ __forceinline__ uint16_t sigmoid_piecewise_linear_int16(int16_t q_x,
     int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
 
     // Step 3-4: bx = q_b * x_offset; term_bx = bx >> n_BX_total
-    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
-    int32_t term_bx = (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total)
-                                            : (bx_32 << (-seg.n_BX_total));
+    // 使用 int64_t 避免 int32 * int32 溢出
+    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
+    int32_t term_bx = (seg.n_BX_total >= 0)
+                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
+                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
 
     // Step 5-6: q_y = term_bx + term_c; q_y = clamp(q_y, 0, 65535)
     int32_t y_32 = term_bx + seg.term_c_precomputed;
@@ -261,9 +263,11 @@ __device__ __forceinline__ int16_t tanh_piecewise_linear_int16(int16_t q_x,
     int32_t x_offset = static_cast<int32_t>(q_x) - static_cast<int32_t>(lut.zp_x);
 
     // Step 3-4: bx = q_b * x_offset; term_bx = bx >> n_BX_total
-    int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
-    int32_t term_bx = (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total)
-                                            : (bx_32 << (-seg.n_BX_total));
+    // 使用 int64_t 避免 int32 * int32 溢出
+    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
+    int32_t term_bx = (seg.n_BX_total >= 0)
+                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
+                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
 
     // Step 5-6: q_y = term_bx + term_c; q_y = clamp(q_y, -32768, 32767)
     int32_t y_32 = term_bx + seg.term_c_precomputed;
@@ -287,8 +291,8 @@ __device__ __forceinline__ uint8_t sigmoid_piecewise_linear_int8(int8_t q_x,
 
     // Step 3-4: bx = q_b * x_offset; term_bx = bx >> n_BX_total
     int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
-    int32_t term_bx = (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total)
-                                            : (bx_32 << (-seg.n_BX_total));
+    int32_t term_bx =
+        (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total) : (bx_32 << (-seg.n_BX_total));
 
     // Step 5-6: q_y = term_bx + term_c; q_y = clamp(q_y, 0, 255)
     int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);
@@ -312,8 +316,8 @@ __device__ __forceinline__ int8_t tanh_piecewise_linear_int8(int8_t q_x,
 
     // Step 3-4: bx = q_b * x_offset; term_bx = bx >> n_BX_total
     int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
-    int32_t term_bx = (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total)
-                                            : (bx_32 << (-seg.n_BX_total));
+    int32_t term_bx =
+        (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total) : (bx_32 << (-seg.n_BX_total));
 
     // Step 5-6: q_y = term_bx + term_c; q_y = clamp(q_y, -128, 127)
     int32_t y_32 = term_bx + static_cast<int32_t>(seg.term_c_precomputed);

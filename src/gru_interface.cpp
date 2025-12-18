@@ -1088,9 +1088,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using NewContribT = typename decltype(tag)::type;
         if (hist_collectors.new_contrib_hist.is_valid()) {
             calibrateQuantParamsFromHistogram<NewContribT>(
-                hist_collectors.new_contrib_hist.histogram(),
-                bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
-                quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr);
+                hist_collectors.new_contrib_hist.histogram(), bitwidth_config.new_contrib_symmetric_,
+                quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_,
+                verbose ? "scale_new_contrib" : nullptr);
         } else {
             quant_params.exp2_inv_new_contrib_ = 7;
             quant_params.zp_new_contrib_ = 0;
@@ -1102,9 +1102,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using OldContribT = typename decltype(tag)::type;
         if (hist_collectors.old_contrib_hist.is_valid()) {
             calibrateQuantParamsFromHistogram<OldContribT>(
-                hist_collectors.old_contrib_hist.histogram(),
-                bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
-                quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr);
+                hist_collectors.old_contrib_hist.histogram(), bitwidth_config.old_contrib_symmetric_,
+                quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_,
+                verbose ? "scale_old_contrib" : nullptr);
         } else {
             quant_params.exp2_inv_old_contrib_ = 7;
             quant_params.zp_old_contrib_ = 0;
