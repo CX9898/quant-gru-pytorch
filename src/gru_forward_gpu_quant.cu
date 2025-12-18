@@ -35,6 +35,11 @@ namespace kernel {
 
 // 调试开关
 // #define DEBUG_QUANT           // 启用量化调试输出
+// #define DEBUG_QUANT_DETAIL    // 启用详细量化调试（含理论值对比）
+
+// 调试：浮点 sigmoid 和 tanh（用于对比）
+__device__ __forceinline__ float sigmoid_fp(float x) { return 1.0f / (1.0f + expf(-x)); }
+__device__ __forceinline__ float tanh_fp(float x) { return tanhf(x); }
 
 // ============================================================================
 // 1. GEMM Kernels - 量化矩阵乘法
@@ -115,9 +120,8 @@ __global__ void quantizedGemmInt16Fused(
         }
         result += zp_out;
 
-        // clamp to INT16 range
-        if (result > 32767) result = 32767;
-        if (result < -32768) result = -32768;
+        // 不做 clamp，保留完整精度（输出是 int32）
+        // GEMM 结果可能超出 INT16 范围，由后续操作处理
 
         // 输出是列主序：C[n*M + m]
         C[col * M + row] = static_cast<int32_t>(result);
@@ -205,6 +209,23 @@ __device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t
     }
 #endif
 
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        // 反量化 z_pre
+        float z_pre_fp = (float)(z_pre_i32 - rescale_params.zp_z_pre_) /
+                         (float)(1 << rescale_params.test.exp2_inv_z_pre_);
+        // 反量化 sigmoid 输出
+        float z_quant_fp = (float)(z - rescale_params.zp_z_out_) /
+                           (float)(1 << rescale_params.test.exp2_inv_z_out_);
+        // 理论 sigmoid 值
+        float z_theory = sigmoid_fp(z_pre_fp);
+        // 误差
+        float error = z_quant_fp - z_theory;
+        printf("[Z] idx=%d z_pre_q=%d z_pre_fp=%.4f | z_q=%d z_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, z_pre_i32, z_pre_fp, z, z_quant_fp, z_theory, error);
+    }
+#endif
+
     return z;
 }
 
@@ -244,6 +265,19 @@ __device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t
                      (float)(1 << rescale_params.test.exp2_inv_r_out_);
         printf("[QUANT_I32] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n", r_pre_i32,
                r_pre_fp, r, r_fp);
+    }
+#endif
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float r_pre_fp = (float)(r_pre_i32 - rescale_params.zp_r_pre_) /
+                         (float)(1 << rescale_params.test.exp2_inv_r_pre_);
+        float r_quant_fp = (float)(r - rescale_params.zp_r_out_) /
+                           (float)(1 << rescale_params.test.exp2_inv_r_out_);
+        float r_theory = sigmoid_fp(r_pre_fp);
+        float error = r_quant_fp - r_theory;
+        printf("[R] idx=%d r_pre_q=%d r_pre_fp=%.4f | r_q=%d r_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, r_pre_i32, r_pre_fp, r, r_quant_fp, r_theory, error);
     }
 #endif
 
@@ -304,6 +338,35 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
     }
 #endif
 
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float g_pre_fp = (float)(g_pre_i32 - rescale_params.zp_g_pre_) /
+                         (float)(1 << rescale_params.test.exp2_inv_g_pre_);
+        float g_quant_fp = (float)(g - rescale_params.zp_g_out_) /
+                           (float)(1 << rescale_params.test.exp2_inv_g_out_);
+        float g_theory = tanh_fp(g_pre_fp);
+        float error = g_quant_fp - g_theory;
+        printf("[G] idx=%d g_pre_q=%d g_pre_fp=%.4f | g_q=%d g_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, g_pre_i32, g_pre_fp, g, g_quant_fp, g_theory, error);
+
+        // 打印 tanh LUT 参数
+        if (rescale_params.bitwidth_config_.g_out_ == QuantBitWidth::INT16) {
+            printf(
+                "[G LUT] idx=%d shift_x=%d zp_x=%d shift_y=%d zp_y=%d | exp2_inv_g_pre=%d "
+                "exp2_inv_g_out=%d\n",
+                debug_idx, d_tanh_lut_int16.shift_bits_x, d_tanh_lut_int16.zp_x,
+                d_tanh_lut_int16.shift_bits_y, d_tanh_lut_int16.zp_y,
+                rescale_params.test.exp2_inv_g_pre_, rescale_params.test.exp2_inv_g_out_);
+
+            // 手动计算期望的 tanh 输出
+            const int16_t g_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
+            int seg_id = dev::find_segment_int16(g_pre_i16, d_tanh_lut_int16.segments);
+            printf("[G LUT] idx=%d seg_id=%d g_pre_i16=%d threshold[seg]=%d\n", debug_idx, seg_id,
+                   g_pre_i16, d_tanh_lut_int16.segments[seg_id].threshold);
+        }
+    }
+#endif
+
     return g;
 }
 
@@ -357,6 +420,38 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
     }
 #endif
 
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        // 反量化各变量
+        float z_fp = (float)(z - rescale_params.zp_z_out_) /
+                     (float)(1 << rescale_params.test.exp2_inv_z_out_);
+        float g_fp = (float)(g - rescale_params.zp_g_out_) /
+                     (float)(1 << rescale_params.test.exp2_inv_g_out_);
+        float h_old_fp =
+            (float)(h_old - rescale_params.zp_h_) / (float)(1 << rescale_params.test.exp2_inv_h_);
+        float h_quant_fp =
+            (float)(h - rescale_params.zp_h_) / (float)(1 << rescale_params.test.exp2_inv_h_);
+
+        // 理论计算: h_new = z * h_old + (1-z) * g
+        float h_theory = z_fp * h_old_fp + (1.0f - z_fp) * g_fp;
+        float error = h_quant_fp - h_theory;
+
+        // 中间结果分析
+        float old_contrib_fp = (float)(old_contrib - rescale_params.zp_old_contrib_) /
+                               (float)(1 << rescale_params.test.exp2_inv_old_contrib_);
+        float new_contrib_fp = (float)(new_contrib - rescale_params.zp_new_contrib_) /
+                               (float)(1 << rescale_params.test.exp2_inv_new_contrib_);
+        float old_contrib_theory = z_fp * h_old_fp;
+        float new_contrib_theory = (1.0f - z_fp) * g_fp;
+
+        printf(
+            "[H] idx=%d z=%.4f g=%.4f h_old=%.4f | old_contrib: q=%.4f th=%.4f | new_contrib: "
+            "q=%.4f th=%.4f | h: q=%.4f th=%.4f err=%.6f\n",
+            debug_idx, z_fp, g_fp, h_old_fp, old_contrib_fp, old_contrib_theory, new_contrib_fp,
+            new_contrib_theory, h_quant_fp, h_theory, error);
+    }
+#endif
+
     return h;
 }
 
@@ -385,16 +480,77 @@ __global__ void PointwiseOperationsQuantDynamic(
     const int b_r_idx = row + 1 * hidden_dim;
     const int b_g_idx = row + 2 * hidden_dim;
 
-    // GRU 门计算
-    const int32_t z =
-        computeZ(b_z_idx, Wx[z_idx], Rh[z_idx], bx[b_z_idx], br[b_z_idx], rescale_params);
+#ifdef DEBUG_QUANT_DETAIL
+    // ============ 调试：同时进行浮点计算用于对比 ============
+    const int debug_idx = (col == 0 && row < 3) ? row : -1;
 
-    const int32_t r =
-        computeR(b_r_idx, Wx[r_idx], Rh[r_idx], bx[b_r_idx], br[b_r_idx], rescale_params);
+    if (debug_idx >= 0) {
+        // 反量化 Wx, Rh (GEMM 结果是 int32, 需要用 Wx 和 Rh 的 scale)
+        const float scale_Wx = 1.0f / (float)(1 << rescale_params.test.exp2_inv_Wx_);
+        const float scale_Rh = 1.0f / (float)(1 << rescale_params.test.exp2_inv_Rh_);
+        const float scale_h = 1.0f / (float)(1 << rescale_params.test.exp2_inv_h_);
+
+        // 反量化 GEMM 结果
+        float Wx_z_fp = (float)(Wx[z_idx] - rescale_params.zp_Wx_) * scale_Wx;
+        float Wx_r_fp = (float)(Wx[r_idx] - rescale_params.zp_Wx_) * scale_Wx;
+        float Wx_g_fp = (float)(Wx[g_idx] - rescale_params.zp_Wx_) * scale_Wx;
+
+        float Rh_z_fp = (float)(Rh[z_idx] - rescale_params.zp_Rh_) * scale_Rh;
+        float Rh_r_fp = (float)(Rh[r_idx] - rescale_params.zp_Rh_) * scale_Rh;
+        float Rh_g_fp = (float)(Rh[g_idx] - rescale_params.zp_Rh_) * scale_Rh;
+
+        // 反量化 bias (bias 是 int32, 使用各自 channel 的 scale，从 device vector 获取)
+        float bx_z_fp = (float)bx[b_z_idx] / (float)(1 << rescale_params.exp2_inv_bx_dev_[b_z_idx]);
+        float bx_r_fp = (float)bx[b_r_idx] / (float)(1 << rescale_params.exp2_inv_bx_dev_[b_r_idx]);
+        float bx_g_fp = (float)bx[b_g_idx] / (float)(1 << rescale_params.exp2_inv_bx_dev_[b_g_idx]);
+
+        float br_z_fp = (float)br[b_z_idx] / (float)(1 << rescale_params.exp2_inv_br_dev_[b_z_idx]);
+        float br_r_fp = (float)br[b_r_idx] / (float)(1 << rescale_params.exp2_inv_br_dev_[b_r_idx]);
+        float br_g_fp = (float)br[b_g_idx] / (float)(1 << rescale_params.exp2_inv_br_dev_[b_g_idx]);
+
+        // 反量化 h_old
+        float h_old_fp = (float)(h[output_idx] - rescale_params.zp_h_) * scale_h;
+
+        // ========== 浮点 GRU 计算 ==========
+        float z_pre_fp = Wx_z_fp + Rh_z_fp + bx_z_fp + br_z_fp;
+        float z_fp = sigmoid_fp(z_pre_fp);
+
+        float r_pre_fp = Wx_r_fp + Rh_r_fp + bx_r_fp + br_r_fp;
+        float r_fp = sigmoid_fp(r_pre_fp);
+
+        float Rh_add_br_g_fp = Rh_g_fp + br_g_fp;
+        float g_pre_fp = Wx_g_fp + r_fp * Rh_add_br_g_fp + bx_g_fp;
+        float g_fp = tanh_fp(g_pre_fp);
+
+        float h_new_fp = z_fp * h_old_fp + (1.0f - z_fp) * g_fp;
+
+        printf("\n===== [DEBUG idx=%d batch=0] =====\n", debug_idx);
+        printf("Wx: z_q=%d r_q=%d g_q=%d | z_fp=%.4f r_fp=%.4f g_fp=%.4f\n", Wx[z_idx], Wx[r_idx],
+               Wx[g_idx], Wx_z_fp, Wx_r_fp, Wx_g_fp);
+        printf("Rh: z_q=%d r_q=%d g_q=%d | z_fp=%.4f r_fp=%.4f g_fp=%.4f\n", Rh[z_idx], Rh[r_idx],
+               Rh[g_idx], Rh_z_fp, Rh_r_fp, Rh_g_fp);
+        printf("bx: z_q=%d r_q=%d g_q=%d | z_fp=%.4f r_fp=%.4f g_fp=%.4f\n", bx[b_z_idx],
+               bx[b_r_idx], bx[b_g_idx], bx_z_fp, bx_r_fp, bx_g_fp);
+        printf("br: z_q=%d r_q=%d g_q=%d | z_fp=%.4f r_fp=%.4f g_fp=%.4f\n", br[b_z_idx],
+               br[b_r_idx], br[b_g_idx], br_z_fp, br_r_fp, br_g_fp);
+        printf("h_old: q=%d fp=%.4f\n", (int)h[output_idx], h_old_fp);
+        printf("[FLOAT] z_pre=%.4f z=%.4f | r_pre=%.4f r=%.4f | g_pre=%.4f g=%.4f | h_new=%.4f\n",
+               z_pre_fp, z_fp, r_pre_fp, r_fp, g_pre_fp, g_fp, h_new_fp);
+    }
+#else
+    const int debug_idx = -1;
+#endif
+
+    // GRU 门计算
+    const int32_t z = computeZ(b_z_idx, Wx[z_idx], Rh[z_idx], bx[b_z_idx], br[b_z_idx],
+                               rescale_params, debug_idx);
+
+    const int32_t r = computeR(b_r_idx, Wx[r_idx], Rh[r_idx], bx[b_r_idx], br[b_r_idx],
+                               rescale_params, debug_idx);
 
     int32_t Rh_add_br_g;
     const int32_t g = computeG(b_g_idx, Wx[g_idx], Rh[g_idx], bx[b_g_idx], br[b_g_idx], r,
-                               rescale_params, Rh_add_br_g);
+                               rescale_params, Rh_add_br_g, debug_idx);
 
     // Training: 保存中间值
     if (Training) {
@@ -406,7 +562,24 @@ __global__ void PointwiseOperationsQuantDynamic(
     }
 
     // 计算新的隐藏状态
-    auto cur_h = computeH<QuantT>(z, g, h[output_idx], rescale_params);
+    auto cur_h = computeH<QuantT>(z, g, h[output_idx], rescale_params, debug_idx);
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0) {
+        // 反量化最终结果与浮点对比
+        const float scale_z = 1.0f / (float)(1 << rescale_params.test.exp2_inv_z_out_);
+        const float scale_g = 1.0f / (float)(1 << rescale_params.test.exp2_inv_g_out_);
+        const float scale_h = 1.0f / (float)(1 << rescale_params.test.exp2_inv_h_);
+
+        float z_quant_fp = (float)(z - rescale_params.zp_z_out_) * scale_z;
+        float g_quant_fp = (float)(g - rescale_params.zp_g_out_) * scale_g;
+        float h_quant_fp = (float)(cur_h - rescale_params.zp_h_) * scale_h;
+
+        printf("[QUANT] z_q=%d z_fp=%.4f | g_q=%d g_fp=%.4f | h_q=%d h_fp=%.4f\n", z, z_quant_fp, g,
+               g_quant_fp, (int)cur_h, h_quant_fp);
+        printf("=====================================\n");
+    }
+#endif
 
     h_out[output_idx] = cur_h;
 }

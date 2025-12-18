@@ -409,6 +409,15 @@ inline int16_t quantize_coefficient_int16(float val_fp, int8_t shift_bits) {
     return static_cast<int16_t>(q);
 }
 
+// 辅助函数：量化浮点数为 INT32（对称量化，用于 LUT 系数避免溢出）
+inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int64_t q = static_cast<int64_t>(std::round(val_fp / scale));
+    // INT32 范围：[-2147483648, 2147483647]
+    q = std::max(static_cast<int64_t>(INT32_MIN), std::min(static_cast<int64_t>(INT32_MAX), q));
+    return static_cast<int32_t>(q);
+}
+
 // 辅助函数：量化输入为 UINT16（非对称量化）
 inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
@@ -426,10 +435,12 @@ inline int16_t quantize_input_int16(float val_fp, int8_t shift_bits, int32_t zp)
 }
 
 // 辅助函数：确定 shift_bits（根据最大值）
+// 由于 LUT 的 q_b 现在使用 INT32 存储，可以使用 ceil 获得更高精度
 inline int8_t determine_shift_bits_int16(float max_val) {
     const float max_q = 32767.0f;
     if (max_val < 1e-9f) return 0;
     float scale = max_val / max_q;
+    // 使用 ceil 获得更高精度（q_b 使用 INT32 存储不会溢出）
     int8_t shift_bits = static_cast<int8_t>(std::ceil(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
@@ -459,11 +470,13 @@ inline int8_t quantize_input_int8(float val_fp, int8_t shift_bits, int32_t zp) {
 }
 
 // 辅助函数：确定 shift_bits（根据最大值，INT8 版本）
+// 使用 floor 而非 ceil，确保量化后的值不会超出 INT8 范围
 inline int8_t determine_shift_bits_int8(float max_val) {
     const float max_q = 127.0f;
     if (max_val < 1e-9f) return 0;
     float scale = max_val / max_q;
-    int8_t shift_bits = static_cast<int8_t>(std::ceil(-std::log2(scale)));
+    // 使用 floor 确保 max_val / scale <= max_q（即量化值不会溢出）
+    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
