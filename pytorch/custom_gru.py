@@ -740,6 +740,54 @@ class CustomGRU(nn.Module):
             apply_bitwidth_config(cpp_config, config_file, verbose=True)
             print(f"  [全局]  use_quantization: {self.use_quantization}")
 
+    def set_all_bitwidth(self, bitwidth: int = 8, is_symmetric: bool = True, verbose: bool = False):
+        """
+        设置所有算子使用相同的位宽和对称量化配置
+        
+        Args:
+            bitwidth: 位宽（8, 16, 32）
+            is_symmetric: 是否使用对称量化（默认 True）
+            verbose: 是否打印详细信息
+            
+        使用示例:
+            gru.set_all_bitwidth(8)           # 全部使用 8bit 对称量化
+            gru.set_all_bitwidth(16, False)   # 全部使用 16bit 非对称量化
+        """
+        if bitwidth not in (8, 16, 32):
+            raise ValueError(f"bitwidth must be 8, 16 or 32, got {bitwidth}")
+        
+        # 初始化配置字典
+        if self._bitwidth_config_dict is None:
+            self._bitwidth_config_dict = {}
+        
+        # 位宽属性列表
+        bitwidth_attrs = [
+            'x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
+            'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
+            'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_'
+        ]
+        
+        # 对称量化属性列表
+        symmetric_attrs = [
+            'x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
+            'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
+            'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
+            'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
+            'old_contrib_symmetric_', 'new_contrib_symmetric_'
+        ]
+        
+        # 设置所有位宽
+        for attr in bitwidth_attrs:
+            self._bitwidth_config_dict[attr] = bitwidth
+        
+        # 设置所有对称量化配置
+        for attr in symmetric_attrs:
+            self._bitwidth_config_dict[attr] = is_symmetric
+        
+        if verbose:
+            sym_str = "对称" if is_symmetric else "非对称"
+            print(f"\n[CustomGRU] 设置所有算子: {bitwidth}bit {sym_str}量化")
+
     # -------------------- 校准状态查询 --------------------
 
     def is_calibrated(self) -> bool:

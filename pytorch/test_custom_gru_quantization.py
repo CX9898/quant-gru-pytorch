@@ -203,7 +203,6 @@ def print_results(results: dict, custom_gru: CustomGRU):
     print("=" * 80)
     print("nn.GRU vs CustomGRU 输出比较结果")
     print("=" * 80)
-    print(f"量化类型: {custom_gru.quant_type if custom_gru.use_quantization else '非量化'}")
     print(f"使用量化: {custom_gru.use_quantization}")
     print()
 
@@ -288,9 +287,9 @@ def test_non_quantized():
 
 
 def test_quantized_int8():
-    """测试 int8 量化版本：nn.GRU vs CustomGRU 量化版本"""
+    """测试 8bit 量化版本：nn.GRU vs CustomGRU 量化版本"""
     print("\n" + "=" * 80)
-    print("测试 2: int8 量化 CustomGRU vs nn.GRU")
+    print("测试 2: 8bit 量化 CustomGRU vs nn.GRU")
     print("=" * 80)
 
     # 使用全局配置参数
@@ -305,9 +304,6 @@ def test_quantized_int8():
 
     # 创建校准数据（使用全局配置）
     calibration_data = create_test_input()
-
-    # 保存原始校准数据的副本，用于后续测试（避免被 _initialize_quantization 修改）
-    calibration_data_backup = calibration_data.clone()
 
     # 先创建 CustomGRU（不初始化量化，避免使用随机权重初始化量化）
     custom_gru = CustomGRU(
@@ -325,28 +321,30 @@ def test_quantized_int8():
     custom_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     custom_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化并初始化（使用正确的权重）
-    custom_gru.use_quantization = True
-    custom_gru.quant_type = 'int8'
-    custom_gru._initialize_quantization(calibration_data)
+    # 设置 8bit 量化
+    custom_gru.set_all_bitwidth(8, verbose=True)
 
-    # 创建测试输入（使用备份的校准数据，确保一致性）
+    # 校准并完成量化初始化
+    custom_gru.calibrate(calibration_data)
+    custom_gru.finalize_calibration()
+    custom_gru.use_quantization = True
+
+    # 创建测试输入（使用与校准数据相同的输入，确保一致性）
     # 注意：gru.cc 中使用相同的输入进行校准和测试，这样可以更准确地评估量化误差
     x = calibration_data.clone()  # 使用相同的输入数据
 
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
-    # results2 = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
 
     # 量化版本会有误差，但应该在合理范围内
-    print(f"✅ int8 量化测试完成！MSE: {results['mse_output']:.6f}, "
+    print(f"✅ 8bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
           f"余弦相似度: {results['cos_sim_output']:.6f}")
 
 
 def test_quantized_int16():
-    """测试 int16 量化版本"""
+    """测试 16bit 量化版本"""
     print("\n" + "=" * 80)
-    print("测试 3: int16 量化 CustomGRU vs nn.GRU")
+    print("测试 3: 16bit 量化 CustomGRU vs nn.GRU")
     print("=" * 80)
 
     # 使用全局配置参数
@@ -378,10 +376,13 @@ def test_quantized_int16():
     custom_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     custom_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化并初始化（使用正确的权重）
+    # 设置 16bit 量化
+    custom_gru.set_all_bitwidth(16, verbose=True)
+
+    # 校准并完成量化初始化
+    custom_gru.calibrate(calibration_data)
+    custom_gru.finalize_calibration()
     custom_gru.use_quantization = True
-    custom_gru.quant_type = 'int16'
-    custom_gru._initialize_quantization(calibration_data)
 
     # 创建测试输入（使用全局配置）
     x = create_test_input()
@@ -389,8 +390,8 @@ def test_quantized_int16():
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, custom_gru, x, verbose=True)
 
-    # int16 量化应该比 int8 更精确
-    print(f"✅ int16 量化测试完成！MSE: {results['mse_output']:.6f}, "
+    # 16bit 量化应该比 8bit 更精确
+    print(f"✅ 16bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
           f"余弦相似度: {results['cos_sim_output']:.6f}")
 
 
@@ -440,10 +441,10 @@ def test_batch_first():
     custom_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     custom_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化并初始化（使用正确的权重）
+    # 校准并完成量化初始化
+    custom_gru.calibrate(calibration_data)
+    custom_gru.finalize_calibration()
     custom_gru.use_quantization = True
-    custom_gru.quant_type = 'int8'
-    custom_gru._initialize_quantization(calibration_data)
 
     # 创建测试输入（使用覆盖的参数）
     x = create_test_input(
@@ -578,7 +579,6 @@ def print_training_results(results: dict, custom_gru: CustomGRU):
     print("=" * 80)
     print("nn.GRU vs CustomGRU 训练比较结果")
     print("=" * 80)
-    print(f"量化类型: {custom_gru.quant_type if custom_gru.use_quantization else '非量化'}")
     print(f"使用量化: {custom_gru.use_quantization}")
     print()
 
@@ -648,13 +648,13 @@ def test_training_non_quantized():
 
 
 def test_training_quantized_int8():
-    """测试 int8 量化版本的训练比较
+    """测试 8bit 量化版本的训练比较
     
     注意：量化版本的前向传播使用量化，但反向传播仍使用浮点计算。
     因此梯度差异主要来源于前向传播的量化误差。
     """
     print("\n" + "=" * 80)
-    print("测试: int8 量化 CustomGRU vs nn.GRU 训练比较")
+    print("测试: 8bit 量化 CustomGRU vs nn.GRU 训练比较")
     print("=" * 80)
 
     # 创建 PyTorch GRU
@@ -685,10 +685,11 @@ def test_training_quantized_int8():
     custom_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     custom_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化并初始化
+    # 设置 8bit 量化并校准
+    custom_gru.set_all_bitwidth(8)
+    custom_gru.calibrate(calibration_data)
+    custom_gru.finalize_calibration()
     custom_gru.use_quantization = True
-    custom_gru.quant_type = 'int8'
-    custom_gru._initialize_quantization(calibration_data)
 
     # 创建测试输入
     x = calibration_data.clone()
@@ -696,7 +697,7 @@ def test_training_quantized_int8():
     # 比较训练
     results = compare_gru_training(pytorch_gru, custom_gru, x, verbose=True)
 
-    print(f"✅ int8 量化训练测试完成！")
+    print(f"✅ 8bit 量化训练测试完成！")
     print(f"   前向 MSE: {results['forward']['mse']:.6f}, 余弦相似度: {results['forward']['cos_sim']:.6f}")
     print(f"   输入梯度 MSE: {results['grad_input']['mse']:.6f}, 余弦相似度: {results['grad_input']['cos_sim']:.6f}")
 
@@ -786,18 +787,18 @@ def test_training_multiple_steps():
     print("✅ 多步训练测试通过！")
 
 
-def test_training_long_run(num_steps=100, use_quantization=False, quant_type='int8', print_interval=10):
+def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, print_interval=10):
     """
     长时间训练测试，观察误差累积情况
     
     Args:
         num_steps: 训练步数
         use_quantization: 是否使用量化
-        quant_type: 量化类型
+        bitwidth: 量化位宽（8 或 16）
         print_interval: 打印间隔
     """
     print("\n" + "=" * 80)
-    quant_str = f"{quant_type} 量化" if use_quantization else "非量化"
+    quant_str = f"{bitwidth}bit 量化" if use_quantization else "非量化"
     print(f"测试: 长时间训练比较（{quant_str}，{num_steps} 步）")
     print("=" * 80)
 
@@ -833,9 +834,10 @@ def test_training_long_run(num_steps=100, use_quantization=False, quant_type='in
 
     # 启用量化（如果需要）
     if use_quantization:
+        custom_gru.set_all_bitwidth(bitwidth)
+        custom_gru.calibrate(calibration_data)
+        custom_gru.finalize_calibration()
         custom_gru.use_quantization = True
-        custom_gru.quant_type = quant_type
-        custom_gru._initialize_quantization(calibration_data)
 
     # 创建优化器
     optimizer_pt = torch.optim.SGD(pytorch_gru.parameters(), lr=learning_rate)
@@ -928,14 +930,17 @@ def test_training_long_run(num_steps=100, use_quantization=False, quant_type='in
     print(f"\n✅ 长时间训练测试完成！（{quant_str}）")
 
 
-def test_quantized_vs_non_quantized_int8():
-    """测试 int8 量化版本：CustomGRU 非量化 vs CustomGRU 量化
+def test_quantized_vs_non_quantized(bitwidth=8):
+    """测试量化版本：CustomGRU 非量化 vs CustomGRU 量化
     
     这个测试比较 CustomGRU 的非量化和量化版本，两者都使用相同的 Haste 格式权重
     这样可以更准确地评估量化带来的误差（类似 example/gru.cc 中的比较）
+    
+    Args:
+        bitwidth: 量化位宽（8 或 16）
     """
     print("\n" + "=" * 80)
-    print("测试 5: CustomGRU 非量化 vs CustomGRU int8 量化")
+    print(f"测试 5: CustomGRU 非量化 vs CustomGRU {bitwidth}bit 量化")
     print("=" * 80)
 
     # 使用全局配置参数
@@ -982,25 +987,21 @@ def test_quantized_vs_non_quantized_int8():
     custom_gru_quant.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     custom_gru_quant.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化并初始化（使用正确的权重）
+    # 设置位宽并校准
+    custom_gru_quant.set_all_bitwidth(bitwidth)
+    custom_gru_quant.calibrate(calibration_data)
+    custom_gru_quant.finalize_calibration()
     custom_gru_quant.use_quantization = True
-    custom_gru_quant.quant_type = 'int8'
-    custom_gru_quant._initialize_quantization(calibration_data)
 
     # 创建测试输入（使用与校准数据相同的输入，确保一致性）
     # 注意：使用与校准数据相同的输入，确保一致性（类似 gru.cc 的做法）
     x = calibration_data.clone()  # 使用相同的输入数据
 
-    # 调试：打印权重格式信息
+    # 调试：打印量化参数信息
     print("\n" + "=" * 80)
-    print("调试信息：权重格式检查")
+    print("调试信息：量化参数检查")
     print("=" * 80)
-    weight_ih_pt = pytorch_gru.weight_ih_l0  # [3*hidden, input]
-    weight_ih_t = weight_ih_pt.t()  # [input, 3*hidden]
-    W_converted = custom_gru_quant._reorder_weights_pytorch_to_haste(weight_ih_t)
-    print(f"PyTorch weight_ih_l0 shape: {weight_ih_pt.shape}")
-    print(f"转置后 shape: {weight_ih_t.shape}")
-    print(f"重排序后 shape: {W_converted.shape}")
+    print(f"量化位宽: {bitwidth}bit")
     print(f"量化参数是否初始化: {custom_gru_quant.quant_params is not None}")
     if custom_gru_quant.quant_params is not None:
         print(f"量化参数 exp2_inv_h_: {custom_gru_quant.quant_params.exp2_inv_h_}")
@@ -1011,10 +1012,8 @@ def test_quantized_vs_non_quantized_int8():
     results = compare_gru_outputs(custom_gru_non_quant, custom_gru_quant, x, verbose=True)
 
     # 量化版本会有误差，但应该在合理范围内（参考 example/gru.cc 的结果）
-    # example 中 MSE 约 0.000007，余弦相似度约 0.999
-    print(f"✅ CustomGRU 非量化 vs 量化测试完成！MSE: {results['mse_output']:.6f}, "
+    print(f"✅ CustomGRU 非量化 vs {bitwidth}bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
           f"余弦相似度: {results['cos_sim_output']:.6f}")
-    print(f"   参考值（example/gru.cc）: MSE ~ 0.000007, 余弦相似度 ~ 0.999")
 
     # 验证结果是否在合理范围内
     if results['mse_output'] < 0.001 and results['cos_sim_output'] > 0.99:
@@ -1042,11 +1041,11 @@ def main():
         # 测试非量化版本
         test_non_quantized()
 
-        # 测试 int8 量化
+        # 测试 8bit 量化
         test_quantized_int8()
 
-        # # 测试 int16 量化
-        # test_quantized_int16()
+        # 测试 16bit 量化
+        test_quantized_int16()
 
         # # 测试 batch_first=True
         # test_batch_first()
@@ -1062,7 +1061,7 @@ def main():
         # 测试非量化版本训练
         test_training_non_quantized()
 
-        # 测试 int8 量化版本训练
+        # 测试 8bit 量化版本训练
         test_training_quantized_int8()
 
         # 测试多步训练
@@ -1076,11 +1075,11 @@ def main():
         # 非量化长时间训练（100步）
         test_training_long_run(num_steps=100, use_quantization=False, print_interval=20)
 
-        # int8 量化长时间训练（100步）
-        test_training_long_run(num_steps=100, use_quantization=True, quant_type='int8', print_interval=20)
+        # 8bit 量化长时间训练（100步）
+        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=8, print_interval=20)
 
-        # 更长时间训练（500步，更大学习率）观察误差累积
-        test_training_long_run(num_steps=500, use_quantization=True, quant_type='int8', print_interval=100)
+        # 16bit 量化长时间训练（100步）
+        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=16, print_interval=20)
 
         print("\n" + "=" * 80)
         print("所有测试完成！")
