@@ -167,11 +167,11 @@ __global__ void rescaleGemmI32(
 // 所有中间值使用 int32_t 存储，通过 bitwidth_config_ 枚举选择 8/16 位 LUT
 
 // z = sigmoid(Wx + Rh + bx + br) - 更新门
-__device__ __forceinline__ int32_t computeZ_i32(const int channel_idx, const int32_t Wx_val,
-                                                const int32_t Rh_val, const int32_t bx_val,
-                                                const int32_t br_val,
-                                                const QuantGRUReScale &rescale_params,
-                                                const int debug_idx = -1) {
+__device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t Wx_val,
+                                            const int32_t Rh_val, const int32_t bx_val,
+                                            const int32_t br_val,
+                                            const QuantGRUReScale &rescale_params,
+                                            const int debug_idx = -1) {
     const int32_t Wx = Wx_val;
     const int32_t Rh = Rh_val;
 
@@ -209,11 +209,11 @@ __device__ __forceinline__ int32_t computeZ_i32(const int channel_idx, const int
 }
 
 // r = sigmoid(Wx + Rh + bx + br) - 重置门
-__device__ __forceinline__ int32_t computeR_i32(const int channel_idx, const int32_t Wx_val,
-                                                const int32_t Rh_val, const int32_t bx_val,
-                                                const int32_t br_val,
-                                                const QuantGRUReScale &rescale_params,
-                                                const int debug_idx = -1) {
+__device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t Wx_val,
+                                            const int32_t Rh_val, const int32_t bx_val,
+                                            const int32_t br_val,
+                                            const QuantGRUReScale &rescale_params,
+                                            const int debug_idx = -1) {
     const int32_t Wx = Wx_val;
     const int32_t Rh = Rh_val;
 
@@ -251,11 +251,11 @@ __device__ __forceinline__ int32_t computeR_i32(const int channel_idx, const int
 }
 
 // g = tanh(Wx + r * (Rh + br) + bx) - 候选门
-__device__ __forceinline__ int32_t computeG_i32(const int channel_idx, const int32_t Wx_val,
-                                                const int32_t Rh_val, const int32_t bx_val,
-                                                const int32_t br_val, const int32_t r,
-                                                const QuantGRUReScale &rescale_params,
-                                                int32_t &Rh_add_br_g, const int debug_idx = -1) {
+__device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t Wx_val,
+                                            const int32_t Rh_val, const int32_t bx_val,
+                                            const int32_t br_val, const int32_t r,
+                                            const QuantGRUReScale &rescale_params,
+                                            int32_t &Rh_add_br_g, const int debug_idx = -1) {
     const int32_t Wx = Wx_val;
     const int32_t Rh = Rh_val;
 
@@ -309,9 +309,9 @@ __device__ __forceinline__ int32_t computeG_i32(const int channel_idx, const int
 
 // h = z * h_old + (1 - z) * g - 最终隐藏状态
 template <typename QuantT>
-__device__ __forceinline__ QuantT computeH_i32(const int32_t z, const int32_t g, const QuantT h_old,
-                                               const QuantGRUReScale &rescale_params,
-                                               const int debug_idx = -1) {
+__device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, const QuantT h_old,
+                                           const QuantGRUReScale &rescale_params,
+                                           const int debug_idx = -1) {
     const int64_t z_diff = static_cast<int64_t>(z) - rescale_params.zp_z_out_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - rescale_params.zp_h_;
     const int64_t old_contrib_mul_i64 = z_diff * h_diff;
@@ -384,18 +384,17 @@ __global__ void PointwiseOperationsQuantDynamic(
     const int b_z_idx = row + 0 * hidden_dim;
     const int b_r_idx = row + 1 * hidden_dim;
     const int b_g_idx = row + 2 * hidden_dim;
-    const int debug_idx = (row == 0 && col == 0) ? 0 : -1;
 
     // GRU 门计算
-    const int32_t z = computeZ_i32(b_z_idx, Wx[z_idx], Rh[z_idx], bx[b_z_idx], br[b_z_idx],
-                                   rescale_params, debug_idx);
+    const int32_t z =
+        computeZ(b_z_idx, Wx[z_idx], Rh[z_idx], bx[b_z_idx], br[b_z_idx], rescale_params);
 
-    const int32_t r = computeR_i32(b_r_idx, Wx[r_idx], Rh[r_idx], bx[b_r_idx], br[b_r_idx],
-                                   rescale_params, debug_idx);
+    const int32_t r =
+        computeR(b_r_idx, Wx[r_idx], Rh[r_idx], bx[b_r_idx], br[b_r_idx], rescale_params);
 
     int32_t Rh_add_br_g;
-    const int32_t g = computeG_i32(b_g_idx, Wx[g_idx], Rh[g_idx], bx[b_g_idx], br[b_g_idx], r,
-                                   rescale_params, Rh_add_br_g, debug_idx);
+    const int32_t g = computeG(b_g_idx, Wx[g_idx], Rh[g_idx], bx[b_g_idx], br[b_g_idx], r,
+                               rescale_params, Rh_add_br_g);
 
     // Training: 保存中间值
     if (Training) {
@@ -407,7 +406,7 @@ __global__ void PointwiseOperationsQuantDynamic(
     }
 
     // 计算新的隐藏状态
-    QuantT cur_h = computeH_i32<QuantT>(z, g, h[output_idx], rescale_params, debug_idx);
+    auto cur_h = computeH<QuantT>(z, g, h[output_idx], rescale_params);
 
     h_out[output_idx] = cur_h;
 }
