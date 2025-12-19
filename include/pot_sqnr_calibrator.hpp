@@ -290,13 +290,16 @@ inline void calibrateQuantParamsSQNR(const std::vector<T>& data, const bool is_s
  * 这是真正的 AIMET 风格校准方法
  * 
  * @param percentile_clip 百分位数裁剪 (例如 0.001 表示裁剪 0.1% 的极值)
- *                        设为 0 表示不裁剪
+ *                        设为 0 表示不裁剪（默认，使用完整 min/max 范围）
+ * 
+ * 注意：默认不裁剪 (percentile_clip=0)，因为裁剪可能导致推理时极值被 clip，
+ *       严重影响模型精度。如果需要裁剪，请显式指定 percentile_clip 值。
  */
 template <typename QuantT>
 inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_symmetric,
                                               int8_t& exp2_inv, int32_t& zp,
                                               const char* name = nullptr, int search_range = 6,
-                                              float gamma = 3.0f, float percentile_clip = 0.001f) {
+                                              float gamma = 3.0f, float percentile_clip = 0.0f) {
     // 如果需要百分位数裁剪，创建一个裁剪后的直方图副本
     if (percentile_clip > 0.0f && hist.is_valid()) {
         auto [pmin, pmax] = hist.getPercentileRange(percentile_clip);
