@@ -1,0 +1,38 @@
+# Docker Compose 配置 (兼容 V1/V2)
+# 注意: 新版 Docker Compose V2 中 version 字段已弃用，但保留以兼容旧版本
+
+services:
+  quant-gru:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: quant-gru-pytorch:cuda128
+    container_name: quant-gru-cuda128
+    
+    # GPU 支持 (新版语法)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    
+    volumes:
+      - ${HOME}:/workspace
+    
+    working_dir: /workspace/CLionProjects/quant-gru-pytorch
+    
+    # 共享内存大小 (PyTorch DataLoader 需要)
+    shm_size: '8g'
+    
+    ports:
+      - "6006:6006"  # TensorBoard
+    
+    stdin_open: true
+    tty: true
+    command: bash
