@@ -1,4 +1,4 @@
-# haste 量化 GRU
+# Haste 量化 GRU 纯定点计算流程
 
 ## 原浮点的各个门控计算
 
@@ -6,134 +6,208 @@
 
 ## 量化核心规则说明
 
-1. 对称量化：量化零点 zp = 0，仅需缩放因子（scale = 2^(-exp2_inv_xxx)），无偏移；
-2. 非对称量化：量化零点 zp ≠ 0，需同时使用缩放因子和零点，支持浮点数范围完整映射；
-3. per-channel 量化：每个输出通道（对应权重矩阵每一行）单独计算量化参数（scale/zp）；
-4. 动态更新量化范围：仅适用于输入x和隐藏状态h，按时间步滑动更新min/max以适配数据分布。
+### 量化类型
 
-各参数量化要求（按 GRU 计算流程排序）：
-- 输入 x（当前时间步输入向量）：
-  非对称量化 + 时间步动态范围更新；
-  范围更新规则：最终 min = 前一时间步 min × 0.9 + 当前时间步 min × 0.1，最终 max = 前一时间步 max × 0.9 + 当前时间步 max × 0.1；
-  缩放因子 scale_x = 2^(-exp2_inv_x_)，由最终 min/max 计算得出。
+| 类型 | 说明 |
+|------|------|
+| 对称量化 | zp = 0，仅需 scale = 2^(-exp2_inv_xxx)，无偏移 |
+| 非对称量化 | zp ≠ 0，需同时使用 scale 和 zp，支持完整范围映射 |
+| per-channel 量化 | 每个输出通道单独计算量化参数（对应权重矩阵每一行） |
+| 动态范围更新 | 按时间步 EMA 更新 min/max：`min = 0.9×min_old + 0.1×min_cur` |
 
-- 隐藏状态 h（上一时间步隐藏状态向量）：
-  非对称量化 + 时间步动态范围更新；
-  范围更新规则：与输入x一致（最终 min/max = 前序0.9 + 当前0.1加权）；
-  缩放因子 scale_h = 2^(-exp2_inv_h_)，由最终 min/max 计算得出。
+### 量化/反量化公式
 
-- 权重矩阵 W（输入x的权重，对应 Wx = W×x）：
-  对称量化 + per-channel 量化（每个输出通道/每一行1个参数）；
-  无量化零点（zp=0），仅需缩放因子 scale_W[i] = 2^(-exp2_inv_W_[i])。
+- **量化**：$q = \text{round}(x \times 2^{exp2\_inv}) + zp$
+- **反量化**：$x = (q - zp) \times 2^{-exp2\_inv}$
+- 对称量化时 zp=0，简化为 $q = \text{round}(x / scale)$
 
-- 权重矩阵 R（隐藏状态h的权重，对应 Rh = R×h）：
-  对称量化 + per-channel 量化（每个输出通道/每一行1个参数）；
-  无量化零点（zp=0），仅需缩放因子 scale_R[i] = 2^(-exp2_inv_R_[i])。
+### 各参数量化配置
 
-- 线性变换结果 Wx（W×x）：
-  非对称量化；
-  需缩放因子 scale_Wx = 2^(-exp2_inv_Wx_) 和量化零点 zp_Wx_。
-
-- 线性变换结果 Rh（R×h）：
-  非对称量化；
-  需缩放因子 scale_Rh = 2^(-exp2_inv_Rh_) 和量化零点 zp_Rh_。
-
-- 偏置项 bx（Wx 对应的偏置）：
-  对称量化 + per-channel 量化（每个输出通道1个参数）；
-  无量化零点（zp=0），仅需缩放因子 scale_bx[i] = 2^(-exp2_inv_bx_[i])。
-
-- 偏置项 br（Rh 对应的偏置）：
-  对称量化 + per-channel 量化（每个输出通道1个参数）；
-  无量化零点（zp=0），仅需缩放因子 scale_br[i] = 2^(-exp2_inv_br_[i])。
-
-- 门控预激活结果 z_pre（更新门：Wx_z + Rh_z + bx_z + br_z）：
-  非对称量化；
-  需缩放因子 scale_z_pre = 2^(-exp2_inv_z_pre_) 和量化零点 zp_z_pre_。
-
-- 门控预激活结果 r_pre（重置门：Wx_r + Rh_r + bx_r + br_r）：
-  非对称量化；
-  需缩放因子 scale_r_pre = 2^(-exp2_inv_r_pre_) 和量化零点 zp_r_pre_。
-
-- 门控预激活结果 g_pre（候选态：Wx_g + r×(Rh_g + br_g) + bx_g）：
-  非对称量化；
-  需缩放因子 scale_g_pre = 2^(-exp2_inv_g_pre_) 和量化零点 zp_g_pre_。
-
-- 门控激活结果 z_out（更新门：sigmoid(z_pre)）：
-  非对称量化；
-  需缩放因子 scale_z_out = 2^(-exp2_inv_z_out_) 和量化零点 zp_z_out_。
-
-- 门控激活结果 r_out（重置门：sigmoid(r_pre)）：
-  非对称量化；
-  需缩放因子 scale_r_out = 2^(-exp2_inv_r_out_) 和量化零点 zp_r_out_。
-
-- 门控激活结果 g_out（候选态：tanh(g_pre)）：
-  对称量化；
-  无量化零点（zp=0），仅需缩放因子 scale_g_out = 2^(-exp2_inv_g_out_)。
-
-补充说明：
-- 所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 为对应指数（scale = 2^(-exp2_inv_xxx)）；
-- 量化/反量化映射公式：量化值 q = round( (x - zp) / scale )，反量化值 x = (q - zp) × scale（对称量化时 zp=0，简化为 q=round(x/scale)、x=q×scale）。
+| 参数 | 量化类型 | scale | zp | 备注 |
+|------|----------|-------|-----|------|
+| 输入 x | 非对称 + 动态范围 | `exp2_inv_x_` | `zp_x_` | 时间步 EMA 更新 |
+| 隐藏状态 h | 非对称 + 动态范围 | `exp2_inv_h_` | `zp_h_` | 时间步 EMA 更新 |
+| 权重 W | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | size = hidden×3 |
+| 权重 R | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | size = hidden×3 |
+| Wx 结果 | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | GEMM 输出 |
+| Rh 结果 | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | GEMM 输出 |
+| 偏置 bx | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | size = hidden×3 |
+| 偏置 br | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | size = hidden×3 |
+| z_pre | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | 更新门预激活 |
+| r_pre | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | 重置门预激活 |
+| g_pre | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | 候选门预激活 |
+| z_out | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid 输出 |
+| r_out | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid 输出 |
+| g_out | 对称 | `exp2_inv_g_out_` | 0 | tanh 输出 |
 
 ---
 
-## 效验
+## 张量维度说明
 
+| 变量 | 维度 | 说明 |
+|------|------|------|
+| x | [T×N, C] | T=时间步, N=批量, C=输入维度 |
+| h | [(T+1)×N, H] | H=隐藏维度, 包含初始 h0 |
+| W | [H×3, C] | 输入权重矩阵 |
+| R | [H×3, H] | 隐藏状态权重矩阵 |
+| bx, br | [H×3] | 偏置向量 |
+| Wx | [T×N, H×3] | W @ x 结果 |
+| Rh | [N, H×3] | R @ h 结果（每时间步） |
+| v | [T×N, H×4] | 中间激活值 [z, r, g, Rh_add_br] |
 
+### H×3 维度的门控分片
+
+`H×3` 维度按以下方式切分为三个门的数据：
+
+```
+索引范围:  [0, H)      [H, 2H)     [2H, 3H)
+门控类型:  z (更新门)   r (重置门)   g (候选门)
+```
+
+代码中的索引定义：
+```cpp
+const int z_idx = weight_idx + 0 * hidden_dim;  // [0, H)
+const int r_idx = weight_idx + 1 * hidden_dim;  // [H, 2H)
+const int g_idx = weight_idx + 2 * hidden_dim;  // [2H, 3H)
+```
+
+因此：
+- `Wx[z_idx]` = Wx_z, `Wx[r_idx]` = Wx_r, `Wx[g_idx]` = Wx_g
+- `Rh[z_idx]` = Rh_z, `Rh[r_idx]` = Rh_r, `Rh[g_idx]` = Rh_g
+- `bx[b_z_idx]` = bx_z, `bx[b_r_idx]` = bx_r, `bx[b_g_idx]` = bx_g
 
 ---
 
-## 量化推理
+## 量化推理流程
 
-1. 首先调用 cuBlas::GEMM 提前计算好所有时间步的 `Wx_tmp = W * x`. 在每个时间步cell的for循环开始传入对应时间步的Wx.
-2. 因为x是非对称量化, Wx的GEMM结果每一个值需要进行零点补偿. 也就是减去`W_sum_mul_zp_x`
-$$
-S_{gi}(q_{gi} - Z_{gi}) = S_x(q_x - Z_x) \cdot S_{w_{ih}} q_{w_{ih}} + S_{b_{ih}}q_{b_{ih}}
-$$
-> 计算W的每个通道的输入维度之和乘以zp_x, 然后Wx的结果的每个通道的值要减去对应通道的零点补偿值
-3. 因为 R * h 的GEMM也是因为h是非对称量化, 所以也需要提前计算权重R的每个通道的输入维度之和乘以zp_h, 用于后续零点补偿(`R_sum_mul_h_zp`).
+### Step 1: 预计算 Wx（所有时间步一次性）
 
-4. for i in 0~steps: 循环每个时间步
-   1. 每个cell第一步先调用 cuBlas::GEMM 计算 `Rh_tmp = R * h`
-   2. 执行逐元素并行运算(CUDA Kernel)
-      1. update gate z门计算: 原始haste浮点计算: `z = sigmoid(Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx])`
-         - $q_{Wx} = \frac{S_W \cdot S_x}{S_{Wx}} (q_{Wx\_tmp} - q_{W\_sum\_mul\_x\_zp}) + Z_{Wx} $
-         > 其中 $S_W$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
-         - $q_{Rh} = \frac{S_R \cdot S_h}{S_{Rh}} (q_{Rh\_tmp} - q_{R\_sum\_mul\_h\_zp}) + Z_{Rh} $
-         > 其中 $S_R$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
-         - $q_{Wx\_shifted} = \frac{S_{Wx}}{S_{z\_pre}} (q_{Wx} - Z_{Wx})$
-         - $q_{Rh\_shifted} = \frac{S_{Rh}}{S_{z\_pre}} (q_{Rh} - Z_{Rh})$
-         - $q_{bx\_shifted} = \frac{S_{bx}}{S_{z\_pre}} (q_{bx})$
-         > 其中 $S_{bx}$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
-         - $q_{br\_shifted} = \frac{S_{br}}{S_{z\_pre}} (q_{br})$
-         > 其中 $S_{br}$ 是per-channel的. 也就是储存为数组. size = hidden * 3. 后续其他门控计算步骤也都是
-         - $q_{z\_pre\_i32} = q_{Wx\_shifted} + q_{Rh\_shifted} + q_{bx\_shifted} + q_{br\_shifted} + Z_{z\_pre}$
-         - $q_{z\_pre\_i8} = clamp<int8>(q_{z\_pre\_i32})$ 截断到int8的范围
-         - $z = sigmoid\_int8\_lut(q_{z\_pre\_i8})$
-      2. reset gate r门计算: 原始haste浮点计算: `r = sigmoid(Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx])`
-         - $q_{Wx} = \frac{S_W \cdot S_x}{S_{Wx}} (q_{Wx\_tmp} - q_{W\_sum\_mul\_x\_zp}) + Z_{Wx} $
-         - $q_{Rh} = \frac{S_R \cdot S_h}{S_{Rh}} (q_{Rh\_tmp} - q_{R\_sum\_mul\_h\_zp}) + Z_{Rh} $
-         - $q_{Wx\_shifted} = \frac{S_{Wx}}{S_{r\_pre}} (q_{Wx} - Z_{Wx})$
-         - $q_{Rh\_shifted} = \frac{S_{Rh}}{S_{r\_pre}} (q_{Rh} - Z_{Rh})$
-         - $q_{bx\_shifted} = \frac{S_{bx}}{S_{r\_pre}} (q_{bx})$
-         - $q_{br\_shifted} = \frac{S_{br}}{S_{r\_pre}} (q_{br})$
-         - $q_{r\_pre\_i32} = q_{Wx\_shifted} + q_{Rh\_shifted} + q_{bx\_shifted} + q_{br\_shifted} + Z_{r\_pre}$
-         - $q_{r\_pre\_i8} = clamp<int8>(q_{r\_pre\_i32})$ 截断到int8的范围
-         - $r = sigmoid\_int8\_lut(q_{r\_pre\_i8})$
-      3. new gate g门计算: 原始haste浮点计算: `g = tanh (Wx[g_idx] + r * (Rh[g_idx] + br[bg_idx]) + bx[bg_idx])`
-         - $q_{Wx} = \frac{S_W \cdot S_x}{S_{Wx}} (q_{Wx\_tmp} - q_{W\_sum\_mul\_x\_zp}) + Z_{Wx} $
-         - $q_{Rh} = \frac{S_R \cdot S_h}{S_{Rh}} (q_{Rh\_tmp} - q_{R\_sum\_mul\_h\_zp}) + Z_{Rh} $
-         - $q_{Rh\_add\_br} = \frac{S_{Rh}}{S_{Rh\_add\_br}} (q_{Rh} -  Z_{Rh}) + \frac{S_{br}}{S_{Rh\_add\_br}} (q_{br}) + Z_{Rh\_add\_br}$
-         - $q_{rRh} = \frac{S_{r\_out} \cdot S_{Rh\_add\_br}}{S_{rRh}} (q_{r} - Z_{r_out})(q_{Rh\_add\_br} - Z_{Rh\_add\_br})$
-         - $q_{Wx\_shifted} = \frac{S_{Wx}}{S_{g\_pre}} (q_{Wx} - Z_{Wx})$
-         - $q_{bx\_shifted} = \frac{S_{bx}}{S_{g\_pre}} (q_{bx})$
-         - $q_{rRh\_shifted} = \frac{S_{rRh}}{S_{g\_pre}} (q_{rRh} - Z_{rRh})$
-         - $q_{g\_pre\_i32} = q_{Wx\_shifted} + q_{rRh\_shifted} + q_{bx\_shifted} + Z_{g\_pre}$
-         - $q_{g\_pre\_i8} = clamp<int8>(q_{g\_pre\_i32})$ 截断到int8的范围
-         - $g = tanh\_int8\_lut(q_{g\_pre\_i8})$
-      4. 最终h: 原始haste浮点计算: `cur_h_value = z * h_old + (1.0 - z) * g`
-         - $q_{old\_contrib} = \frac{S_{z_out} \cdot S_{h\_old}}{S_{old\_contrib}}(q_{z\_out} - Z_z\_out)(q_{h\_old} - Z_{h}) + Z_{old\_contrib}$ > 相当于 z * h_old
-         - $q_{one\_minus\_update} =  \frac{1.0}{S_{one\_minus\_update}} - \frac{S_{z_out}}{S_{one\_minus\_update}}(q_{z\_out} - Z{z\_out}) + Z_{one\_minus\_update}$ > 相当于(1.0 - z)
-         - $q_{new\_contrib} = \frac{S_{one\_minus\_update} \cdot S_{g\_out}}{S_{new\_contrib}}(q_{one\_minus\_update} - Z_{one\_minus\_update})(q_{g\_out - Z_{g\_out}}) + Z_{new\_contrib} $ > 相当于(1.0 - z) * g
-         - $cur\_h\_value = \frac{S_{old\_contrib}}{S_h}(q_{old\_contrib} - Z_{old\_contrib}) + \frac{S_{new\_contrib}}{S_h}(q_{new\_contrib} - Z_{new\_contrib}) + Z_h$
+```
+Wx_tmp = cuBLAS::GEMM(W, x)  // [H×3, T×N]
+```
+
+### Step 2: 零点补偿预计算
+
+由于 x 和 h 是非对称量化，GEMM 结果需要零点补偿：
+
+$$W\_sum\_mul\_x\_zp[c] = zp_x \times \sum_{k} W[c, k]$$
+
+$$R\_sum\_mul\_h\_zp[c] = zp_h \times \sum_{k} R[c, k]$$
+
+### Step 3: 时间步循环
+
+```
+for t in 0..T:
+    1. Rh_tmp = cuBLAS::GEMM(R, h[t])
+    2. CUDA Kernel 逐元素计算：z, r, g, h_new
+```
+
+---
+
+## CUDA Kernel 逐元素计算详解
+
+### 公共步骤：GEMM 结果 rescale
+
+GEMM 输出的 `Wx_tmp` 和 `Rh_tmp` 包含三个门（z/r/g）的数据，需要按门索引分别提取并 rescale：
+
+对于门 $\gamma \in \{z, r, g\}$，使用对应索引 $\gamma\_idx$ 提取数据：
+
+$$q_{Wx_\gamma} = \frac{S_{W[\gamma\_idx]} \cdot S_x}{S_{Wx}} (q_{Wx\_tmp[\gamma\_idx]} - W\_sum\_mul\_x\_zp[\gamma\_idx]) + Z_{Wx}$$
+
+$$q_{Rh_\gamma} = \frac{S_{R[\gamma\_idx]} \cdot S_h}{S_{Rh}} (q_{Rh\_tmp[\gamma\_idx]} - R\_sum\_mul\_h\_zp[\gamma\_idx]) + Z_{Rh}$$
+
+> **per-channel 说明**：$S_W$, $S_R$, $S_{bx}$, $S_{br}$ 均为 per-channel 数组，大小 = H×3。每个门使用对应索引的 scale 值。
+
+---
+
+### 1. 更新门 z（Update Gate）
+
+**浮点公式**：`z = sigmoid(Wx_z + Rh_z + bx_z + br_z)`
+
+**量化计算**（使用 z_idx 索引）：
+
+$$q_{Wx\_z\_shifted} = \frac{S_{Wx}}{S_{z\_pre}} (q_{Wx_z} - Z_{Wx})$$
+
+$$q_{Rh\_z\_shifted} = \frac{S_{Rh}}{S_{z\_pre}} (q_{Rh_z} - Z_{Rh})$$
+
+$$q_{bx\_z\_shifted} = \frac{S_{bx[z\_idx]}}{S_{z\_pre}} q_{bx_z}$$
+
+$$q_{br\_z\_shifted} = \frac{S_{br[z\_idx]}}{S_{z\_pre}} q_{br_z}$$
+
+$$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bx\_z\_shifted} + q_{br\_z\_shifted} + Z_{z\_pre}$$
+
+**激活函数**（根据位宽配置）：
+- INT8: `z = sigmoid_int8_lut(clamp<int8>(q_z_pre))`
+- INT16: `z = sigmoid_int16_lut(clamp<int16>(q_z_pre))`
+
+---
+
+### 2. 重置门 r（Reset Gate）
+
+**浮点公式**：`r = sigmoid(Wx_r + Rh_r + bx_r + br_r)`
+
+**量化计算**（使用 r_idx 索引）：与 z 门结构相同，使用 `Wx_r`, `Rh_r`, `bx_r`, `br_r`，目标 scale 替换为 `S_{r_pre}`
+
+---
+
+### 3. 候选门 g（Candidate Gate）
+
+**浮点公式**：`g = tanh(Wx_g + r × (Rh_g + br_g) + bx_g)`
+
+**量化计算**（使用 g_idx 索引）：
+
+$$q_{Rh\_add\_br\_g} = \frac{S_{Rh}}{S_{Rh\_add\_br}} (q_{Rh_g} - Z_{Rh}) + \frac{S_{br[g\_idx]}}{S_{Rh\_add\_br}} q_{br_g} + Z_{Rh\_add\_br}$$
+
+$$q_{rRh} = \frac{S_{r\_out} \cdot S_{Rh\_add\_br}}{S_{rRh}} (q_r - Z_{r\_out})(q_{Rh\_add\_br\_g} - Z_{Rh\_add\_br}) + Z_{rRh}$$
+
+$$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bx[g\_idx]}}{S_{g\_pre}}q_{bx_g} + Z_{g\_pre}$$
+
+**激活函数**（根据位宽配置）：
+- INT8: `g = tanh_int8_lut(clamp<int8>(q_g_pre))`
+- INT16: `g = tanh_int16_lut(clamp<int16>(q_g_pre))`
+
+---
+
+### 4. 隐藏状态更新
+
+**浮点公式**：`h_new = z × h_old + (1 - z) × g`
+
+**量化计算**：
+
+#### 4.1 计算 z × h_old
+
+$$q_{old\_contrib} = \frac{S_{z\_out} \cdot S_h}{S_{old\_contrib}}(q_z - Z_{z\_out})(q_{h\_old} - Z_h) + Z_{old\_contrib}$$
+
+#### 4.2 计算 (1 - z)
+
+> **关键优化**：直接复用 z_out 的 scale，无需额外量化参数
+
+$$q_{1\_in\_z\_scale} = \text{round}(1.0 \times 2^{exp2\_inv\_z\_out}) + Z_{z\_out}$$
+
+$$q_{one\_minus\_z} = q_{1\_in\_z\_scale} - q_z + Z_{z\_out}$$
+
+#### 4.3 计算 (1 - z) × g
+
+$$q_{new\_contrib} = \frac{S_{z\_out} \cdot S_{g\_out}}{S_{new\_contrib}}(q_{one\_minus\_z} - Z_{z\_out})(q_g - Z_{g\_out}) + Z_{new\_contrib}$$
+
+#### 4.4 最终合并
+
+$$q_{h\_new} = \frac{S_{old\_contrib}}{S_h}(q_{old\_contrib} - Z_{old\_contrib}) + \frac{S_{new\_contrib}}{S_h}(q_{new\_contrib} - Z_{new\_contrib}) + Z_h$$
+
+---
+
+## 代码对应关系
+
+| 计算步骤 | 代码位置 |
+|----------|----------|
+| 浮点 GRU 前向 | `gru_forward_gpu.cu::PointwiseOperations()` |
+| 量化 GRU 前向 | `gru_forward_gpu_quant.cu::PointwiseOperationsQuantDynamic()` |
+| z 门计算 | `gru_forward_gpu_quant.cu::computeZ()` |
+| r 门计算 | `gru_forward_gpu_quant.cu::computeR()` |
+| g 门计算 | `gru_forward_gpu_quant.cu::computeG()` |
+| h 更新计算 | `gru_forward_gpu_quant.cu::computeH()` |
+| 量化参数设置 | `gru_forward_gpu_quant.cu::setRescaleParam()` |
+| 校准接口 | `gru_interface.cc::calibrateGruRanges()` |
+| 参数计算 | `gru_interface.cc::calculateGRUQuantitativeParameters()` |
 
 ---
