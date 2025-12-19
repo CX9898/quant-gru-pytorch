@@ -116,101 +116,35 @@ std::vector<int8_t> generate_tanh_int8_lut_exp2(int8_t exp2_inv_pre, int32_t zp_
 void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
     const auto &config = params.bitwidth_config_;
 
-    // 从量化参数计算 scale
-    // scale = 2^(-exp2_inv) = 1.0f / (1 << exp2_inv)
-    auto calculate_scale = [](int8_t exp2_inv) -> float {
-        if (exp2_inv >= 0) {
-            return 1.0f / static_cast<float>(1 << exp2_inv);
-        } else {
-            return static_cast<float>(1 << (-exp2_inv));
-        }
-    };
-
     // ==================== z 门 ====================
-    // 输入范围根据 z_pre_ 计算，LUT 版本根据 z_out_ 选择
-    dispatchByBitWidth(config.z_pre_, [&](auto pre_tag) {
-        using PreT = typename decltype(pre_tag)::type;
-        int32_t quant_min = static_cast<int32_t>(std::numeric_limits<PreT>::min());
-        int32_t quant_max = static_cast<int32_t>(std::numeric_limits<PreT>::max());
-        float scale_z_pre = calculate_scale(params.exp2_inv_z_pre_);
-        float x_min_z = static_cast<float>(quant_min - params.zp_z_pre_) * scale_z_pre;
-        float x_max_z = static_cast<float>(quant_max - params.zp_z_pre_) * scale_z_pre;
-
-        // 关键优化：限制 sigmoid LUT 的输入范围到有效区域 [-8, 8]
-        // sigmoid(-8) ≈ 0.0003, sigmoid(8) ≈ 0.9997，超出此范围几乎饱和
-        // 这样 16 个分段可以更精确地覆盖有效区域
-        constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
-        x_min_z = std::max(x_min_z, -SIGMOID_EFFECTIVE_RANGE);
-        x_max_z = std::min(x_max_z, SIGMOID_EFFECTIVE_RANGE);
-
-        // 根据 z_out_ 选择 LUT 版本（kernel 中根据输出类型选择 LUT）
-        if (config.z_out_ == QuantBitWidth::UINT16) {
-            init_sigmoid_z_lut_int16(params.exp2_inv_z_pre_, params.zp_z_pre_,
-                                     params.exp2_inv_z_out_, params.zp_z_out_, x_min_z, x_max_z);
-        } else {
-            init_sigmoid_z_lut_int8(params.exp2_inv_z_pre_, params.zp_z_pre_,
-                                    params.exp2_inv_z_out_, params.zp_z_out_, x_min_z, x_max_z);
-        }
-    });
+    // 根据 z_out_ 选择 LUT 版本（INT16 或 INT8）
+    if (config.z_out_ == QuantBitWidth::UINT16) {
+        init_sigmoid_z_lut_int16(params.exp2_inv_z_pre_, params.zp_z_pre_, params.exp2_inv_z_out_,
+                                 params.zp_z_out_);
+    } else {
+        init_sigmoid_z_lut_int8(params.exp2_inv_z_pre_, params.zp_z_pre_, params.exp2_inv_z_out_,
+                                params.zp_z_out_);
+    }
 
     // ==================== r 门 ====================
-    // 输入范围根据 r_pre_ 计算，LUT 版本根据 r_out_ 选择
-    dispatchByBitWidth(config.r_pre_, [&](auto pre_tag) {
-        using PreT = typename decltype(pre_tag)::type;
-        int32_t quant_min = static_cast<int32_t>(std::numeric_limits<PreT>::min());
-        int32_t quant_max = static_cast<int32_t>(std::numeric_limits<PreT>::max());
-        float scale_r_pre = calculate_scale(params.exp2_inv_r_pre_);
-        float x_min_r = static_cast<float>(quant_min - params.zp_r_pre_) * scale_r_pre;
-        float x_max_r = static_cast<float>(quant_max - params.zp_r_pre_) * scale_r_pre;
-
-        // 关键优化：限制 sigmoid LUT 的输入范围到有效区域
-        constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
-        x_min_r = std::max(x_min_r, -SIGMOID_EFFECTIVE_RANGE);
-        x_max_r = std::min(x_max_r, SIGMOID_EFFECTIVE_RANGE);
-
-        // 根据 r_out_ 选择 LUT 版本
-        if (config.r_out_ == QuantBitWidth::UINT16) {
-            init_sigmoid_r_lut_int16(params.exp2_inv_r_pre_, params.zp_r_pre_,
-                                     params.exp2_inv_r_out_, params.zp_r_out_, x_min_r, x_max_r);
-        } else {
-            init_sigmoid_r_lut_int8(params.exp2_inv_r_pre_, params.zp_r_pre_,
-                                    params.exp2_inv_r_out_, params.zp_r_out_, x_min_r, x_max_r);
-        }
-    });
+    // 根据 r_out_ 选择 LUT 版本（INT16 或 INT8）
+    if (config.r_out_ == QuantBitWidth::UINT16) {
+        init_sigmoid_r_lut_int16(params.exp2_inv_r_pre_, params.zp_r_pre_, params.exp2_inv_r_out_,
+                                 params.zp_r_out_);
+    } else {
+        init_sigmoid_r_lut_int8(params.exp2_inv_r_pre_, params.zp_r_pre_, params.exp2_inv_r_out_,
+                                params.zp_r_out_);
+    }
 
     // ==================== g 门 (tanh) ====================
-    // 输入范围根据 g_pre_ 计算，LUT 版本根据 g_out_ 选择
-    dispatchByBitWidth(config.g_pre_, [&](auto pre_tag) {
-        using PreT = typename decltype(pre_tag)::type;
-        int32_t quant_min = static_cast<int32_t>(std::numeric_limits<PreT>::min());
-        int32_t quant_max = static_cast<int32_t>(std::numeric_limits<PreT>::max());
-        float scale_g_pre = calculate_scale(params.exp2_inv_g_pre_);
-        float x_min_g = static_cast<float>(quant_min - params.zp_g_pre_) * scale_g_pre;
-        float x_max_g = static_cast<float>(quant_max - params.zp_g_pre_) * scale_g_pre;
-
-        // 关键优化：限制 tanh LUT 的输入范围到有效区域
-        // tanh(-4) ≈ -0.9993, tanh(4) ≈ 0.9993
-        constexpr float TANH_EFFECTIVE_RANGE = 4.0f;
-        x_min_g = std::max(x_min_g, -TANH_EFFECTIVE_RANGE);
-        x_max_g = std::min(x_max_g, TANH_EFFECTIVE_RANGE);
-
-#ifdef DEBUG_QUANT
-        printf(
-            "[DEBUG] g门 LUT初始化: params.exp2_inv_g_pre_=%d, params.zp_g_pre_=%d, "
-            "params.exp2_inv_g_out_=%d, params.zp_g_out_=%d\n",
-            params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_, params.zp_g_out_);
-        printf("[DEBUG] g门范围: x_min_g=%.4f, x_max_g=%.4f\n", x_min_g, x_max_g);
-#endif
-
-        // 根据 g_out_ 选择 LUT 版本（tanh 输出是有符号的）
-        if (config.g_out_ == QuantBitWidth::INT16) {
-            init_tanh_lut_int16(params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_,
-                                params.zp_g_out_, x_min_g, x_max_g);
-        } else {
-            init_tanh_lut_int8(params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_,
-                               params.zp_g_out_, x_min_g, x_max_g);
-        }
-    });
+    // 根据 g_out_ 选择 LUT 版本（INT16 或 INT8）
+    if (config.g_out_ == QuantBitWidth::INT16) {
+        init_tanh_lut_int16(params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_,
+                            params.zp_g_out_);
+    } else {
+        init_tanh_lut_int8(params.exp2_inv_g_pre_, params.zp_g_pre_, params.exp2_inv_g_out_,
+                           params.zp_g_out_);
+    }
 }
 
 namespace kernel {
@@ -919,8 +853,21 @@ SigmoidLUT_INT16 generate_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8
 }
 
 // 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - z 门）
-void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                              float x_min, float x_max) {
+void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                              int32_t zp_y) {
+    // 从函数签名推断：输入 INT16，输出 UINT16
+    constexpr int32_t quant_min = -32768;  // INT16 min
+    constexpr int32_t quant_max = 32767;   // INT16 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 sigmoid 有效范围 [-8, 8]
+    constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
+    x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
+
     SigmoidLUT_INT16 lut =
         generate_sigmoid_lut_int16(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
 
@@ -932,8 +879,21 @@ void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bi
 }
 
 // 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - r 门）
-void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                              float x_min, float x_max) {
+void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                              int32_t zp_y) {
+    // 从函数签名推断：输入 INT16，输出 UINT16
+    constexpr int32_t quant_min = -32768;  // INT16 min
+    constexpr int32_t quant_max = 32767;   // INT16 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 sigmoid 有效范围 [-8, 8]
+    constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
+    x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
+
 #ifdef DEBUG_QUANT
     printf(
         "[DEBUG] init_sigmoid_r_lut_int16: shift_x=%d, zp_x=%d, shift_y=%d, zp_y=%d, x_min=%.4f, "
@@ -958,8 +918,20 @@ void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bi
     }
 }
 
-void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                         float x_min, float x_max) {
+void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y) {
+    // 从函数签名推断：输入 INT16，输出 INT16
+    constexpr int32_t quant_min = -32768;  // INT16 min
+    constexpr int32_t quant_max = 32767;   // INT16 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 tanh 有效范围 [-4, 4]
+    constexpr float TANH_EFFECTIVE_RANGE = 4.0f;
+    x_min = std::max(x_min, -TANH_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
+
 #ifdef DEBUG_QUANT
     printf(
         "[DEBUG] init_tanh_lut_int16: shift_x=%d, zp_x=%d, shift_y=%d, zp_y=%d, x_min=%.4f, "
@@ -1202,8 +1174,21 @@ SigmoidLUT_INT8 generate_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t
 // 生成 LUT 并复制到 CUDA 常量内存
 
 /// @brief 初始化 z 门的 Sigmoid LUT（INT8 版本）
-void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                             float x_min, float x_max) {
+void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                             int32_t zp_y) {
+    // 从函数签名推断：输入 INT8，输出 UINT8
+    constexpr int32_t quant_min = -128;  // INT8 min
+    constexpr int32_t quant_max = 127;   // INT8 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 sigmoid 有效范围 [-8, 8]
+    constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
+    x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
+
     SigmoidLUT_INT8 lut =
         generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_sigmoid_z_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
@@ -1214,8 +1199,21 @@ void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
 }
 
 /// @brief 初始化 r 门的 Sigmoid LUT（INT8 版本）
-void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                             float x_min, float x_max) {
+void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                             int32_t zp_y) {
+    // 从函数签名推断：输入 INT8，输出 UINT8
+    constexpr int32_t quant_min = -128;  // INT8 min
+    constexpr int32_t quant_max = 127;   // INT8 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 sigmoid 有效范围 [-8, 8]
+    constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
+    x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
+
     SigmoidLUT_INT8 lut =
         generate_sigmoid_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_sigmoid_r_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
@@ -1226,8 +1224,20 @@ void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
 }
 
 /// @brief 初始化 g 门的 Tanh LUT（INT8 版本）
-void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                        float x_min, float x_max) {
+void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y) {
+    // 从函数签名推断：输入 INT8，输出 INT8
+    constexpr int32_t quant_min = -128;  // INT8 min
+    constexpr int32_t quant_max = 127;   // INT8 max
+
+    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
+
+    // 关键优化：限制 tanh 有效范围 [-4, 4]
+    constexpr float TANH_EFFECTIVE_RANGE = 4.0f;
+    x_min = std::max(x_min, -TANH_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
+
     SigmoidLUT_INT8 lut =
         generate_tanh_lut_int8(shift_bits_x, zp_x, shift_bits_y, zp_y, x_min, x_max);
     cudaError_t err = cudaMemcpyToSymbol(d_tanh_lut_int8, &lut, sizeof(SigmoidLUT_INT8));
