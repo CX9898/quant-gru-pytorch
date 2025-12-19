@@ -1,7 +1,7 @@
 """
-CustomGRU 量化库使用示例
+QuantGRU 量化库使用示例
 
-本示例展示如何使用 CustomGRU 进行量化推理和训练。
+本示例展示如何使用 QuantGRU 进行量化推理和训练。
 """
 
 import torch
@@ -12,7 +12,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from custom_gru import CustomGRU
+from quant_gru import QuantGRU
 
 
 def example_basic_usage():
@@ -32,7 +32,7 @@ def example_basic_usage():
     seq_len = 20
     
     # 创建模型
-    gru = CustomGRU(
+    gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True  # 输入格式 [batch, seq, feature]
@@ -67,7 +67,7 @@ def example_quantization_with_json():
     seq_len = 20
     
     # 1. 创建模型并加载配置
-    gru = CustomGRU(
+    gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
@@ -119,7 +119,7 @@ def example_quantization_manual(bitwidth=8):
     seq_len = 20
     
     # 1. 创建模型
-    gru = CustomGRU(
+    gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
@@ -167,7 +167,7 @@ def example_compare_precision(bitwidth=8):
     seq_len = 20
     
     # 创建非量化模型（基准）
-    gru_float = CustomGRU(
+    gru_float = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True,
@@ -175,7 +175,7 @@ def example_compare_precision(bitwidth=8):
     ).cuda()
     
     # 创建量化模型（复制权重）
-    gru_quant = CustomGRU(
+    gru_quant = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
@@ -236,7 +236,7 @@ def example_training(bitwidth=8):
     num_epochs = 5
     
     # 创建模型
-    gru = CustomGRU(
+    gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
@@ -282,7 +282,7 @@ def example_calibration_method():
     """
     示例 6: 校准方法选择
     
-    CustomGRU 支持两种校准方法:
+    QuantGRU 支持两种校准方法:
     - 'minmax': 快速，适合对速度要求高的场景
     - 'histogram': AIMET 风格，精度更高，适合对精度要求高的场景
     """
@@ -297,7 +297,7 @@ def example_calibration_method():
     seq_len = 20
     
     # 创建基准模型（FP32）
-    gru_base = CustomGRU(
+    gru_base = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True,
@@ -320,7 +320,7 @@ def example_calibration_method():
     
     for method in ['minmax', 'histogram']:
         # 创建量化模型（复制权重）
-        gru_quant = CustomGRU(
+        gru_quant = QuantGRU(
             input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True
@@ -382,7 +382,7 @@ def example_bidirectional():
     seq_len = 20
     
     # 创建双向模型
-    gru = CustomGRU(
+    gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True,
@@ -407,7 +407,7 @@ def example_bidirectional():
 def main():
     """运行所有示例"""
     print("=" * 60)
-    print("  CustomGRU 量化库使用示例")
+    print("  QuantGRU 量化库使用示例")
     print("=" * 60)
     
     if not torch.cuda.is_available():

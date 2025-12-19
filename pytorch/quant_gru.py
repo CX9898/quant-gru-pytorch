@@ -1,5 +1,5 @@
 """
-CustomGRU - 支持量化的自定义 GRU 实现
+QuantGRU - 支持量化的 GRU 实现
 
 功能特性:
     - 兼容 nn.GRU 接口（支持 batch_first、bidirectional 等参数）
@@ -8,7 +8,7 @@ CustomGRU - 支持量化的自定义 GRU 实现
     - 延迟初始化设计，支持 pickle/deepcopy 序列化
 
 典型用法:
-    >>> gru = CustomGRU(64, 128, batch_first=True)
+    >>> gru = QuantGRU(64, 128, batch_first=True)
     >>> gru.calibrate(calibration_data)
     >>> gru.finalize_calibration()
     >>> gru.use_quantization = True
@@ -382,10 +382,10 @@ class GRUFunction(torch.autograd.Function):
 
 
 # ============================================================
-#                      CustomGRU 模块
+#                      QuantGRU 模块
 # ============================================================
 
-class CustomGRU(nn.Module):
+class QuantGRU(nn.Module):
     """
     支持量化的自定义 GRU 实现，兼容 nn.GRU 接口
     
@@ -426,7 +426,7 @@ class CustomGRU(nn.Module):
             bidirectional: bool = False,
             use_quantization: bool = False,
     ):
-        super(CustomGRU, self).__init__()
+        super(QuantGRU, self).__init__()
 
         if num_layers != 1:
             raise NotImplementedError("仅支持 num_layers=1")
@@ -709,7 +709,7 @@ class CustomGRU(nn.Module):
         
         if verbose:
             sym_str = "对称" if is_symmetric else "非对称"
-            print(f"\n[CustomGRU] 设置所有算子: {bitwidth}bit {sym_str}量化")
+            print(f"\n[QuantGRU] 设置所有算子: {bitwidth}bit {sym_str}量化")
 
     def is_calibrated(self) -> bool:
         """检查是否已完成校准"""
@@ -755,7 +755,7 @@ class CustomGRU(nn.Module):
         if verbose:
             method_name = {'minmax': 'MINMAX', 'histogram': 'HISTOGRAM'}.get(
                 self.calibration_method, self.calibration_method.upper())
-            print(f"\n[CustomGRU] 校准方法: {method_name}")
+            print(f"\n[QuantGRU] 校准方法: {method_name}")
 
         # 前向方向
         if use_histogram:
