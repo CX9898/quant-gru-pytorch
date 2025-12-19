@@ -149,6 +149,7 @@ class POTSqnrCalibrator {
         out_zp = best_zp;
 
         // 调试输出
+#ifdef DEBUG
         if (name != nullptr && name[0] != '\0') {
             float best_scale = std::pow(2.0f, -static_cast<float>(best_exp2_inv));
             float base_scale = std::pow(2.0f, -static_cast<float>(base_exp2_inv));
@@ -158,6 +159,7 @@ class POTSqnrCalibrator {
                 name, hist.min_val, hist.max_val, base_exp2_inv, base_scale, best_exp2_inv,
                 best_scale, best_zp, best_noise);
         }
+#endif
     }
 
     /**
