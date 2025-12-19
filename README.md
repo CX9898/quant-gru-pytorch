@@ -98,8 +98,12 @@ gru = QuantGRU(
     batch_first=True
 ).cuda()
 
-# 2. 加载位宽配置
+# 2. 加载位宽配置（二选一）
+# 方式一：从配置文件加载
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
+# 方式二：直接设置统一位宽（8/16/32位，is_symmetric控制对称量化）
+# gru.set_all_bitwidth(bitwidth=8, is_symmetric=True, verbose=True)
+# gru.use_quantization = True  # 启用量化
 
 # 3. 使用校准数据进行量化校准
 for batch in calibration_loader:
