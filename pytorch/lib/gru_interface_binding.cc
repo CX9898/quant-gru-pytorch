@@ -4,10 +4,10 @@
 
 #include <iostream>
 
-#include "gru_interface.hpp"
-#include "gru_quantization_ranges.hpp"
-#include "histogram_collector.hpp"
-#include "quantize_ops_helper.hpp"
+#include "gru_interface.h"
+#include "gru_quantization_ranges.h"
+#include "histogram_collector.h"
+#include "quantize_ops_helper.h"
 
 // 全局 cublas handle
 static cublasHandle_t g_blas_handle = nullptr;
