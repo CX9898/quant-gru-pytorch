@@ -1,8 +1,40 @@
 # Haste 量化 GRU 纯定点计算流程
 
-## 原浮点的各个门控计算
+## 原浮点 GRU 门控计算
 
-![haste_GRU_formula.png](haste_GRU_formula.png)
+### 公式定义
+
+| 门控 | 公式 | 说明 |
+|------|------|------|
+| 更新门 z | $z = \sigma(W_z x + R_z h + b_{xz} + b_{rz})$ | 控制保留多少旧状态 |
+| 重置门 r | $r = \sigma(W_r x + R_r h + b_{xr} + b_{rr})$ | 控制遗忘多少旧状态 |
+| 候选门 g | $g = \tanh(W_g x + r \odot (R_g h + b_{rg}) + b_{xg})$ | 生成候选新状态 |
+| 新状态 h | $h_{new} = z \odot h_{old} + (1 - z) \odot g$ | 融合旧状态和候选状态 |
+
+### 代码对应 (`gru_forward_gpu.cu`)
+
+```cpp
+// 更新门 z
+const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
+const T z = sigmoid(z_pre);
+
+// 重置门 r
+const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
+const T r = sigmoid(r_pre);
+
+// 候选门 g（注意：r 先乘以 Rh+br，再加 Wx 和 bx）
+const T Rh_add_br_g = Rh[g_idx] + br[bg_idx];
+const T g_pre = Wx[g_idx] + r * Rh_add_br_g + bx[bg_idx];
+const T g = tanh(g_pre);
+
+// 新隐藏状态
+const T old_contrib = z * h[output_idx];
+const T one_minus_z = 1.0 - z;
+const T new_contrib = one_minus_z * g;
+T cur_h_value = old_contrib + new_contrib;
+```
+
+> **haste 实现特点**：候选门 g 的计算中，重置门 r 仅作用于 $(R_g h + b_{rg})$ 部分，而不是整个 $(W_g x + R_g h)$。这与某些标准 GRU 实现略有不同。
 
 ## 量化核心规则说明
 
