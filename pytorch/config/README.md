@@ -167,11 +167,11 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 ### Python 端
 
 ```python
-from custom_gru import CustomGRU
+from quant_gru import QuantGRU
 
 # 1. 创建 GRU 并加载配置
 #    JSON 中 disable_quantization=false 会自动设置 use_quantization=True
-gru = CustomGRU(input_size=64, hidden_size=128)
+gru = QuantGRU(input_size=64, hidden_size=128)
 gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json")
 
 # 2. 校准
@@ -185,7 +185,7 @@ output, h_n = gru(input_data)
 **不使用 JSON 配置时**：
 
 ```python
-gru = CustomGRU(input_size=64, hidden_size=128)
+gru = QuantGRU(input_size=64, hidden_size=128)
 
 # 设置位宽（可选，默认全部 8bit 对称量化）
 gru.set_all_bitwidth(8)                # 全部 8bit 对称量化

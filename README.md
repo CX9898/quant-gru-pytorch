@@ -10,7 +10,7 @@
 - **灵活的量化配置**：支持 8/16/32 位量化，可配置对称/非对称量化
 - **两种校准方法**：MinMax（快速）和 Histogram（AIMET 风格，高精度）
 - **双向 GRU**：完整支持 bidirectional 模式
-- **与 PyTorch 兼容**：接口与 `nn.GRU` 一致，可无缝替换
+- **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
 
 ## 🏗️ 项目结构
 
@@ -32,7 +32,7 @@ quant-gru-pytorch/
 │   ├── gru_interface.cpp       # 接口实现
 │   └── quantize_ops.cu         # 量化操作实现
 ├── pytorch/                    # PyTorch 绑定和 Python 接口
-│   ├── custom_gru.py           # 自定义 GRU 类（支持量化）
+│   ├── quant_gru.py            # 量化 GRU 类
 │   ├── setup.py                # Python 扩展编译配置
 │   ├── lib/                    # 编译生成的库文件
 │   ├── config/                 # 配置文件
@@ -87,11 +87,11 @@ pip install -e .
 #### Python 使用（非量化模式）
 
 ```python
-from pytorch.custom_gru import CustomGRU
+from pytorch.quant_gru import QuantGRU
 import torch
 
 # 创建模型（与 nn.GRU 接口一致）
-gru = CustomGRU(
+gru = QuantGRU(
     input_size=64,
     hidden_size=128,
     batch_first=True,
@@ -107,11 +107,11 @@ output, h_n = gru(input_data)
 #### Python 使用（量化模式）
 
 ```python
-from pytorch.custom_gru import CustomGRU
+from pytorch.quant_gru import QuantGRU
 import torch
 
 # 1. 创建模型
-gru = CustomGRU(
+gru = QuantGRU(
     input_size=64,
     hidden_size=128,
     batch_first=True
@@ -213,7 +213,7 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 ```bash
 cd pytorch
-python test_custom_gru_quantization.py
+python test_quant_gru.py
 ```
 
 ## 🔬 校准方法对比
@@ -245,10 +245,10 @@ docker-compose exec quant-gru bash
 
 ## 📝 API 参考
 
-### CustomGRU 类
+### QuantGRU 类
 
 ```python
-class CustomGRU(nn.Module):
+class QuantGRU(nn.Module):
     def __init__(
         self,
         input_size: int,           # 输入特征维度

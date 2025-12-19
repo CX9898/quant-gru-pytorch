@@ -37,7 +37,7 @@ mkdir -p "${RELEASE_DIR}/pytorch/example"
 
 # 复制核心 Python 文件
 echo "[2/6] 复制 Python 接口..."
-cp pytorch/custom_gru.py "${RELEASE_DIR}/pytorch/"
+cp pytorch/quant_gru.py "${RELEASE_DIR}/pytorch/"
 
 # 复制编译好的库文件
 echo "[3/6] 复制编译库文件..."
@@ -101,10 +101,10 @@ os.environ['LD_LIBRARY_PATH'] = '/path/to/quant-gru-pytorch/pytorch/lib'
 ### 推理
 
 ```python
-from custom_gru import CustomGRU
+from quant_gru import QuantGRU
 
 # 创建 GRU 并加载配置
-gru = CustomGRU(input_size=64, hidden_size=128)
+gru = QuantGRU(input_size=64, hidden_size=128)
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
 
 # 校准（使用真实数据效果更好）
@@ -120,7 +120,7 @@ output, h_n = gru(input_data)
 ```python
 import torch
 
-gru = CustomGRU(input_size=64, hidden_size=128)
+gru = QuantGRU(input_size=64, hidden_size=128)
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
 
 # 校准
