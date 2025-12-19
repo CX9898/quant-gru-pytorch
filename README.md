@@ -41,9 +41,6 @@ quant-gru-pytorch/
 ├── example/                    # C++ 使用示例
 │   └── gru.cc                  # 浮点/量化 GRU 对比示例
 ├── CMakeLists.txt              # CMake 构建配置
-├── gru_train.py                # PyTorch 训练示例（语音识别）
-├── Dockerfile                  # Docker 构建文件
-└── docker-compose.yml          # Docker Compose 配置
 ```
 
 ## 🔧 环境要求
