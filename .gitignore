@@ -29,3 +29,5 @@
 *.egg-info
 */*build*/
 */tmp/
+
+/release/
