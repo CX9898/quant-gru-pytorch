@@ -9,10 +9,10 @@
 #include <string>
 #include <vector>
 
-#include "checkData.hpp"
+#include "checkData.h"
 #include "devVector.h"
-#include "gru_interface.hpp"
-#include "histogram_collector.hpp"
+#include "gru_interface.h"
+#include "histogram_collector.h"
 #include "quantized_unit_testing.cuh"
 
 // ==================== 校准方式选择 ====================

@@ -9,9 +9,9 @@
 #include <vector>
 
 #include "blas.h"
-#include "checkData.hpp"
+#include "checkData.h"
 #include "gru_quant.h"
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 
 // 梯度输出结构体
 struct GRUTrainGradients {

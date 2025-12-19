@@ -11,7 +11,7 @@
 #include "device_assert.h"
 #include "gru.h"
 #include "inline_ops.h"
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 #include "quantized_unit_testing.cuh"
 
 // 调试开关：取消注释以启用调试输出

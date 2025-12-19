@@ -3,7 +3,7 @@
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 
 namespace gru {
 

@@ -20,7 +20,7 @@
 
 #include "gru.h"
 #include "gru_quant.h"
-#include "gru_quantization_ranges.hpp"
+#include "gru_quantization_ranges.h"
 
 // =====================================================================
 // cuBLAS 初始化
