@@ -465,7 +465,7 @@ class CustomGRU(nn.Module):
                 self.register_parameter('bias_ih_l0_reverse', None)
                 self.register_parameter('bias_hh_l0_reverse', None)
 
-        self._init_weights()
+        self.reset_parameters()
 
         # 量化状态（延迟创建）
         self.quant_ranges = None          # calibrate() 时创建
@@ -486,11 +486,11 @@ class CustomGRU(nn.Module):
         if bidirectional:
             self.hist_collectors_reverse = None
 
-    def _init_weights(self):
-        """使用与 nn.GRU 相同的均匀分布初始化"""
+    def reset_parameters(self):
+        """权重初始化（与 nn.GRU 相同的均匀分布）"""
         stdv = 1.0 / (self.hidden_size ** 0.5)
-        for weight in self.parameters():
-            nn.init.uniform_(weight, -stdv, stdv)
+        for param in self.parameters():
+            nn.init.uniform_(param, -stdv, stdv)
 
     # -------------------- 内部方法 --------------------
 
