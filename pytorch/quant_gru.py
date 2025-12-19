@@ -793,73 +793,6 @@ class QuantGRU(nn.Module):
             self.quant_params_reverse = None
             self.hist_collectors_reverse = None
 
-    # -------------------- 调试方法 --------------------
-
-    def print_quant_params(self):
-        """打印量化参数"""
-        if not self.is_calibrated():
-            raise RuntimeError("请先调用 finalize_calibration()")
-
-        params = self.quant_params
-        print("=" * 60)
-        print("GRUQuantitativeParameters (量化参数)")
-        print("=" * 60)
-        print(f"  hidden_ = {params.hidden_}")
-        print(f"  [x]  exp2_inv={params.exp2_inv_x_:3d}, zp={params.zp_x_}")
-        print(f"  [h]  exp2_inv={params.exp2_inv_h_:3d}, zp={params.zp_h_}")
-        print(f"  [Wx] exp2_inv={params.exp2_inv_Wx_:3d}, zp={params.zp_Wx_}")
-        print(f"  [Rh] exp2_inv={params.exp2_inv_Rh_:3d}, zp={params.zp_Rh_}")
-        print("-" * 60)
-        print(f"  [z_pre] exp2_inv={params.exp2_inv_z_pre_:3d}, zp={params.zp_z_pre_}")
-        print(f"  [r_pre] exp2_inv={params.exp2_inv_r_pre_:3d}, zp={params.zp_r_pre_}")
-        print(f"  [g_pre] exp2_inv={params.exp2_inv_g_pre_:3d}, zp={params.zp_g_pre_}")
-        print(f"  [z_out] exp2_inv={params.exp2_inv_z_out_:3d}, zp={params.zp_z_out_}")
-        print(f"  [r_out] exp2_inv={params.exp2_inv_r_out_:3d}, zp={params.zp_r_out_}")
-        print(f"  [g_out] exp2_inv={params.exp2_inv_g_out_:3d}, zp={params.zp_g_out_}")
-        print("-" * 60)
-        print(f"  [Rh_add_br_g]        exp2_inv={params.exp2_inv_Rh_add_br_:3d}, zp={params.zp_Rh_add_br_}")
-        print(f"  [rRh]              exp2_inv={params.exp2_inv_rRh_:3d}, zp={params.zp_rRh_}")
-        print(f"  [new_contrib]      exp2_inv={params.exp2_inv_new_contrib_:3d}, zp={params.zp_new_contrib_}")
-        print(f"  [old_contrib]      exp2_inv={params.exp2_inv_old_contrib_:3d}, zp={params.zp_old_contrib_}")
-        print("-" * 60)
-        if params.exp2_inv_W_:
-            print(f"  [W] exp2_inv (first 5): {list(params.exp2_inv_W_[:5])} ...")
-        if params.exp2_inv_R_:
-            print(f"  [R] exp2_inv (first 5): {list(params.exp2_inv_R_[:5])} ...")
-        if params.exp2_inv_bx_:
-            print(f"  [bx] exp2_inv (first 5): {list(params.exp2_inv_bx_[:5])} ...")
-        if params.exp2_inv_br_:
-            print(f"  [br] exp2_inv (first 5): {list(params.exp2_inv_br_[:5])} ...")
-        print("=" * 60)
-
-    def print_quant_ranges(self):
-        """打印量化范围"""
-        if self.quant_ranges is None:
-            raise RuntimeError("请先调用 calibrate()")
-
-        r = self.quant_ranges
-        print("=" * 60)
-        print("GRUQuantizationRanges (量化范围)")
-        print("=" * 60)
-        print(f"  hidden_ = {r.hidden_}")
-        print(f"  [x]  min={r.min_x_:12.6f}, max={r.max_x_:12.6f}")
-        print(f"  [h]  min={r.min_h_:12.6f}, max={r.max_h_:12.6f}")
-        print(f"  [Wx] min={r.min_Wx_:12.6f}, max={r.max_Wx_:12.6f}")
-        print(f"  [Rh] min={r.min_Rh_:12.6f}, max={r.max_Rh_:12.6f}")
-        print("-" * 60)
-        print(f"  [z_pre] min={r.min_z_pre_:12.6f}, max={r.max_z_pre_:12.6f}")
-        print(f"  [r_pre] min={r.min_r_pre_:12.6f}, max={r.max_r_pre_:12.6f}")
-        print(f"  [g_pre] min={r.min_g_pre_:12.6f}, max={r.max_g_pre_:12.6f}")
-        print(f"  [z_out] min={r.min_z_out_:12.6f}, max={r.max_z_out_:12.6f}")
-        print(f"  [r_out] min={r.min_r_out_:12.6f}, max={r.max_r_out_:12.6f}")
-        print(f"  [g_out] min={r.min_g_out_:12.6f}, max={r.max_g_out_:12.6f}")
-        print("-" * 60)
-        print(f"  [Rh_add_br_g]        min={r.min_Rh_add_br_g_:12.6f}, max={r.max_Rh_add_br_g_:12.6f}")
-        print(f"  [rRh]              min={r.min_rRh_:12.6f}, max={r.max_rRh_:12.6f}")
-        print(f"  [new_contrib]      min={r.min_new_contrib_:12.6f}, max={r.max_new_contrib_:12.6f}")
-        print(f"  [old_contrib]      min={r.min_old_contrib_:12.6f}, max={r.max_old_contrib_:12.6f}")
-        print("=" * 60)
-
     def forward(
             self,
             input: torch.Tensor,
@@ -940,3 +873,84 @@ class QuantGRU(nn.Module):
             output = output.transpose(0, 1).contiguous()
 
         return output, h_n
+
+
+# ============================================================
+#                      调试工具函数
+# ============================================================
+
+def print_quant_params(gru: QuantGRU):
+    """
+    打印 QuantGRU 的量化参数
+    
+    Args:
+        gru: 已完成校准的 QuantGRU 实例
+    """
+    if not gru.is_calibrated():
+        raise RuntimeError("请先调用 finalize_calibration()")
+
+    params = gru.quant_params
+    print("=" * 60)
+    print("GRUQuantitativeParameters (量化参数)")
+    print("=" * 60)
+    print(f"  hidden_ = {params.hidden_}")
+    print(f"  [x]  exp2_inv={params.exp2_inv_x_:3d}, zp={params.zp_x_}")
+    print(f"  [h]  exp2_inv={params.exp2_inv_h_:3d}, zp={params.zp_h_}")
+    print(f"  [Wx] exp2_inv={params.exp2_inv_Wx_:3d}, zp={params.zp_Wx_}")
+    print(f"  [Rh] exp2_inv={params.exp2_inv_Rh_:3d}, zp={params.zp_Rh_}")
+    print("-" * 60)
+    print(f"  [z_pre] exp2_inv={params.exp2_inv_z_pre_:3d}, zp={params.zp_z_pre_}")
+    print(f"  [r_pre] exp2_inv={params.exp2_inv_r_pre_:3d}, zp={params.zp_r_pre_}")
+    print(f"  [g_pre] exp2_inv={params.exp2_inv_g_pre_:3d}, zp={params.zp_g_pre_}")
+    print(f"  [z_out] exp2_inv={params.exp2_inv_z_out_:3d}, zp={params.zp_z_out_}")
+    print(f"  [r_out] exp2_inv={params.exp2_inv_r_out_:3d}, zp={params.zp_r_out_}")
+    print(f"  [g_out] exp2_inv={params.exp2_inv_g_out_:3d}, zp={params.zp_g_out_}")
+    print("-" * 60)
+    print(f"  [Rh_add_br_g]        exp2_inv={params.exp2_inv_Rh_add_br_:3d}, zp={params.zp_Rh_add_br_}")
+    print(f"  [rRh]              exp2_inv={params.exp2_inv_rRh_:3d}, zp={params.zp_rRh_}")
+    print(f"  [new_contrib]      exp2_inv={params.exp2_inv_new_contrib_:3d}, zp={params.zp_new_contrib_}")
+    print(f"  [old_contrib]      exp2_inv={params.exp2_inv_old_contrib_:3d}, zp={params.zp_old_contrib_}")
+    print("-" * 60)
+    if params.exp2_inv_W_:
+        print(f"  [W] exp2_inv (first 5): {list(params.exp2_inv_W_[:5])} ...")
+    if params.exp2_inv_R_:
+        print(f"  [R] exp2_inv (first 5): {list(params.exp2_inv_R_[:5])} ...")
+    if params.exp2_inv_bx_:
+        print(f"  [bx] exp2_inv (first 5): {list(params.exp2_inv_bx_[:5])} ...")
+    if params.exp2_inv_br_:
+        print(f"  [br] exp2_inv (first 5): {list(params.exp2_inv_br_[:5])} ...")
+    print("=" * 60)
+
+
+def print_quant_ranges(gru: QuantGRU):
+    """
+    打印 QuantGRU 的量化范围
+    
+    Args:
+        gru: 已调用 calibrate() 的 QuantGRU 实例
+    """
+    if gru.quant_ranges is None:
+        raise RuntimeError("请先调用 calibrate()")
+
+    r = gru.quant_ranges
+    print("=" * 60)
+    print("GRUQuantizationRanges (量化范围)")
+    print("=" * 60)
+    print(f"  hidden_ = {r.hidden_}")
+    print(f"  [x]  min={r.min_x_:12.6f}, max={r.max_x_:12.6f}")
+    print(f"  [h]  min={r.min_h_:12.6f}, max={r.max_h_:12.6f}")
+    print(f"  [Wx] min={r.min_Wx_:12.6f}, max={r.max_Wx_:12.6f}")
+    print(f"  [Rh] min={r.min_Rh_:12.6f}, max={r.max_Rh_:12.6f}")
+    print("-" * 60)
+    print(f"  [z_pre] min={r.min_z_pre_:12.6f}, max={r.max_z_pre_:12.6f}")
+    print(f"  [r_pre] min={r.min_r_pre_:12.6f}, max={r.max_r_pre_:12.6f}")
+    print(f"  [g_pre] min={r.min_g_pre_:12.6f}, max={r.max_g_pre_:12.6f}")
+    print(f"  [z_out] min={r.min_z_out_:12.6f}, max={r.max_z_out_:12.6f}")
+    print(f"  [r_out] min={r.min_r_out_:12.6f}, max={r.max_r_out_:12.6f}")
+    print(f"  [g_out] min={r.min_g_out_:12.6f}, max={r.max_g_out_:12.6f}")
+    print("-" * 60)
+    print(f"  [Rh_add_br_g]        min={r.min_Rh_add_br_g_:12.6f}, max={r.max_Rh_add_br_g_:12.6f}")
+    print(f"  [rRh]              min={r.min_rRh_:12.6f}, max={r.max_rRh_:12.6f}")
+    print(f"  [new_contrib]      min={r.min_new_contrib_:12.6f}, max={r.max_new_contrib_:12.6f}")
+    print(f"  [old_contrib]      min={r.min_old_contrib_:12.6f}, max={r.max_old_contrib_:12.6f}")
+    print("=" * 60)
