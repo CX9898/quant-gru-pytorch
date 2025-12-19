@@ -99,8 +99,12 @@ inline auto dispatchByBitWidth(QuantBitWidth bw, Func &&func) -> decltype(func(T
  * 2. 对称量化配置：每个算子是否使用对称量化（只影响 zero_point）
  *
  * 特殊说明：
- * - z_out_ 和 r_out_ 默认使用 UINT8，因为 sigmoid 输出范围是 [0, 1]
+ * - z_out_ 和 r_out_ 默认使用 UINT，因为 sigmoid 输出范围是 [0, 1]
  * - Python 端只配置位宽数量，C++ 的 to_cpp() 会自动为 z_out/r_out 选择 UINT 类型
+ *
+ * 使用方式：
+ * - 默认构造使用 INT8/UINT8
+ * - 调用 setAllBitWidths(bits) 设置所有位宽为指定值
  */
 struct OperatorQuantConfig {
     // ==================== 位宽配置 ====================
@@ -136,6 +140,36 @@ struct OperatorQuantConfig {
     QuantBitWidth rRh_ = QuantBitWidth::INT8;          // r × Rh
     QuantBitWidth old_contrib_ = QuantBitWidth::INT8;  // z × h[t-1]
     QuantBitWidth new_contrib_ = QuantBitWidth::INT8;  // (1-z) × g
+
+    // ==================== 位宽设置接口 ====================
+
+    /**
+     * @brief 设置所有位宽为指定值
+     *
+     * 自动将有符号类型设置为 INTn，无符号类型（z_out, r_out）设置为 UINTn
+     *
+     * @param bits 位宽数值 (8 或 16)，32 位仅用于有符号类型
+     * @return 返回自身引用，支持链式调用
+     *
+     * 使用示例：
+     * @code
+     * OperatorQuantConfig config;
+     * config.setAllBitWidths(16);  // 全部设为 16 位
+     * @endcode
+     */
+    OperatorQuantConfig& setAllBitWidths(int bits);
+
+    /**
+     * @brief 创建指定位宽的配置（静态工厂方法）
+     * @param bits 位宽数值 (8, 16, 32)
+     * @return 配置好的 OperatorQuantConfig 实例
+     *
+     * 使用示例：
+     * @code
+     * auto config = OperatorQuantConfig::create(16);
+     * @endcode
+     */
+    static OperatorQuantConfig create(int bits);
 
     // ==================== 对称量化配置 ====================
     // is_symmetric 只影响 zero_point 的计算：
@@ -174,3 +208,89 @@ struct OperatorQuantConfig {
     bool old_contrib_symmetric_ = false;  // z × h
     bool new_contrib_symmetric_ = false;  // (1-z) × g
 };
+
+// ==================== 辅助函数 ====================
+
+/**
+ * @brief 将位宽数值转换为有符号量化枚举
+ * @param bits 位宽数值 (8, 16, 32)
+ * @return 对应的有符号 QuantBitWidth 枚举
+ */
+ inline QuantBitWidth bitsToSignedQuantBitWidth(int bits) {
+    switch (bits) {
+        case 8:
+            return QuantBitWidth::INT8;
+        case 16:
+            return QuantBitWidth::INT16;
+        case 32:
+            return QuantBitWidth::INT32;
+        default:
+            throw std::invalid_argument("Unsupported bit width: " + std::to_string(bits) +
+                                        ". Supported values are 8, 16, 32.");
+    }
+}
+
+/**
+ * @brief 将位宽数值转换为无符号量化枚举
+ * @param bits 位宽数值 (8, 16)
+ * @return 对应的无符号 QuantBitWidth 枚举
+ */
+inline QuantBitWidth bitsToUnsignedQuantBitWidth(int bits) {
+    switch (bits) {
+        case 8:
+            return QuantBitWidth::UINT8;
+        case 16:
+            return QuantBitWidth::UINT16;
+        default:
+            throw std::invalid_argument("Unsupported unsigned bit width: " + std::to_string(bits) +
+                                        ". Supported values are 8, 16.");
+    }
+}
+
+// ==================== OperatorQuantConfig 方法实现 ====================
+
+inline OperatorQuantConfig& OperatorQuantConfig::setAllBitWidths(int bits) {
+    QuantBitWidth signed_bw = bitsToSignedQuantBitWidth(bits);
+    // 对于 32 位，无符号类型回退到 16 位（因为没有 UINT32）
+    QuantBitWidth unsigned_bw = (bits == 32) ? QuantBitWidth::UINT16 : bitsToUnsignedQuantBitWidth(bits);
+
+    // 输入
+    x_ = signed_bw;
+    h_ = signed_bw;
+
+    // 权重
+    W_ = signed_bw;
+    R_ = signed_bw;
+    bx_ = signed_bw;
+    br_ = signed_bw;
+
+    // 矩阵乘法结果
+    Wx_ = signed_bw;
+    Rh_ = signed_bw;
+
+    // 门控 - 更新门
+    z_pre_ = signed_bw;
+    z_out_ = unsigned_bw;  // sigmoid 输出使用无符号
+
+    // 门控 - 重置门
+    r_pre_ = signed_bw;
+    r_out_ = unsigned_bw;  // sigmoid 输出使用无符号
+
+    // 门控 - 候选门
+    g_pre_ = signed_bw;
+    g_out_ = signed_bw;
+
+    // 中间运算
+    Rh_add_br_ = signed_bw;
+    rRh_ = signed_bw;
+    old_contrib_ = signed_bw;
+    new_contrib_ = signed_bw;
+
+    return *this;
+}
+
+inline OperatorQuantConfig OperatorQuantConfig::create(int bits) {
+    OperatorQuantConfig config;
+    config.setAllBitWidths(bits);
+    return config;
+}
