@@ -15,6 +15,15 @@
 #include "histogram_collector.hpp"
 #include "quantized_unit_testing.cuh"
 
+// ==================== 校准方式选择 ====================
+enum class CalibrationMethod {
+    MIN_MAX,   // 使用 min/max 范围校准（简单快速）
+    HISTOGRAM  // 使用直方图校准（SQNR 优化，更精确）
+};
+
+// 全局配置：选择校准方式
+constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MIN_MAX;
+
 // ==================== 矩阵转置工具函数 ====================
 
 // 使用 cuBLAS 进行 2D 矩阵转置: [rows, cols] -> [cols, rows]
@@ -25,10 +34,10 @@ void transpose2D(cublasHandle_t handle, const float *A, float *A_t, int rows, in
     const float beta = 0.0f;
     // cublasSgeam: C = alpha * op(A) + beta * op(B)
     // 将 A [cols, rows] 转置为 A_t [rows, cols]
-    // 
+    //
     // 输入 A: 原始矩阵形状 [cols, rows]（列优先存储，lda = cols）
     // 输出 A_t: 转置后矩阵形状 [rows, cols]（列优先存储，ldc = rows）
-    // 
+    //
     // cublasSgeam 参数说明:
     //   transa = CUBLAS_OP_T: 对 A 进行转置
     //   transb = CUBLAS_OP_N: B 不转置（但 beta=0 所以 B 不会被使用）
@@ -37,11 +46,11 @@ void transpose2D(cublasHandle_t handle, const float *A, float *A_t, int rows, in
     //   lda = cols: A 的 leading dimension（A 的行数）
     //   ldb = rows: B 的 leading dimension（需要 >= m，即使 beta=0 也要有效）
     //   ldc = rows: C 的 leading dimension
-    cublasStatus_t status = cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, 
-                                         rows, cols, 
-                                         &alpha, A, cols,    // A: [cols, rows], lda = cols
-                                         &beta, A_t, rows,   // B: 使用 A_t 作为占位符, ldb = rows (>= m)
-                                         A_t, rows);         // C: [rows, cols], ldc = rows
+    cublasStatus_t status =
+        cublasSgeam(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, cols, &alpha, A,
+                    cols,              // A: [cols, rows], lda = cols
+                    &beta, A_t, rows,  // B: 使用 A_t 作为占位符, ldb = rows (>= m)
+                    A_t, rows);        // C: [rows, cols], ldc = rows
     if (status != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "cublasSgeam failed with status %d\n", status);
     }
@@ -265,7 +274,7 @@ int main() {
 
     // ========== 1. 初始化 cuBLAS ==========
     init_gru_cublas(g_blas_handle);
-    
+
     // 设置 cuBLAS 为确定性模式
     cublasSetMathMode(g_blas_handle, CUBLAS_DEFAULT_MATH);
 
@@ -278,10 +287,10 @@ int main() {
     std::vector<float> dh((SEQUENCE_LEN + 1) * BATCH_SIZE * HIDDEN_DIMS);
 
     // W: 输入权重矩阵
-    fillVectorWithNormalDistribution(W, -0.001f,  0.001f);
+    fillVectorWithNormalDistribution(W, -0.001f, 0.001f);
 
     // R: 循环权重矩阵
-    fillVectorWithNormalDistribution(R, -0.005f,  0.005f);
+    fillVectorWithNormalDistribution(R, -0.005f, 0.005f);
 
     // bx, br: 偏置
     fillVectorWithNormalDistribution(bx, -0.15, 0.15);
@@ -308,22 +317,45 @@ int main() {
 
     // ========== 4. 校准量化参数并初始化 LUT（只做一次）==========
     printf("\n========== Calibrating Quantization Parameters ==========\n");
-    OperatorQuantConfig bitwidth_config;
+    printf("Calibration method: %s\n", CALIBRATION_METHOD == CalibrationMethod::HISTOGRAM
+                                           ? "HISTOGRAM (SQNR优化)"
+                                           : "MIN_MAX (简单快速)");
+
+    OperatorQuantConfig bitwidth_config = OperatorQuantConfig::create(8);
     GRUQuantitativeParameters quant_params;
     {
         ScopeTimer t("CalibrateAndInitLut:");
-        
-        // 步骤 1: 收集直方图
-        GRUHistogramCollectors hist_collectors(hidden_size);
-        calibrateGruHistograms(
-            time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(),
-            bx_dev.data(), br_dev.data(), x_dev.data(), g_blas_handle, hist_collectors);
-        
-        // 步骤 2: 从直方图计算量化参数
-        quant_params = calculateGRUQuantitativeParametersFromHistograms(
-            hist_collectors, bitwidth_config, true);
-        
-        // 步骤 3: 初始化 LUT 表
+
+        if constexpr (CALIBRATION_METHOD == CalibrationMethod::HISTOGRAM) {
+            // ==================== 方式一：直方图校准（SQNR 优化）====================
+            // 优点：更精确，使用 SQNR 优化选择最佳量化范围
+            // 缺点：计算开销稍大
+
+            // 步骤 1: 收集直方图
+            GRUHistogramCollectors hist_collectors(hidden_size);
+            calibrateGruHistograms(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
+                                   R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                                   g_blas_handle, hist_collectors);
+
+            // 步骤 2: 从直方图计算量化参数
+            quant_params = calculateGRUQuantitativeParametersFromHistograms(hist_collectors,
+                                                                            bitwidth_config, true);
+        } else {
+            // ==================== 方式二：Min/Max 范围校准 ====================
+            // 优点：简单快速
+            // 缺点：对异常值敏感，量化范围可能不够紧凑
+
+            // 步骤 1: 收集 min/max 范围
+            GRUQuantizationRanges quant_ranges(hidden_size);
+            calibrateGruRanges(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
+                               R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                               g_blas_handle, quant_ranges);
+
+            // 步骤 2: 从 min/max 范围计算量化参数
+            quant_params = calculateGRUQuantitativeParameters(quant_ranges, bitwidth_config);
+        }
+
+        // 步骤 3: 初始化 LUT 表（两种方式共用）
         initialize_quantization_lut(quant_params);
     }
     printf("Calibration completed.\n");
