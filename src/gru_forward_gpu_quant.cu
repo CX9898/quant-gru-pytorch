@@ -176,13 +176,10 @@ __device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t
                                             const int32_t br_val,
                                             const QuantGRUReScale &rescale_params,
                                             const int debug_idx = -1) {
-    const int32_t Wx = Wx_val;
-    const int32_t Rh = Rh_val;
-
     const int32_t Wx_shifted =
-        rshift_round(Wx - rescale_params.zp_Wx_, rescale_params.exp2_inv_Wx_div_z_pre_);
+        rshift_round(Wx_val - rescale_params.zp_Wx_, rescale_params.exp2_inv_Wx_div_z_pre_);
     const int32_t Rh_shifted =
-        rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.exp2_inv_Rh_div_z_pre_);
+        rshift_round(Rh_val - rescale_params.zp_Rh_, rescale_params.exp2_inv_Rh_div_z_pre_);
     const int32_t bx_shifted = rshift_round(bx_val, rescale_params.n_bx_div_z_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale_params.n_br_div_z_[channel_idx]);
 
@@ -235,13 +232,10 @@ __device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t
                                             const int32_t br_val,
                                             const QuantGRUReScale &rescale_params,
                                             const int debug_idx = -1) {
-    const int32_t Wx = Wx_val;
-    const int32_t Rh = Rh_val;
-
     const int32_t Wx_shifted =
-        rshift_round(Wx - rescale_params.zp_Wx_, rescale_params.exp2_inv_Wx_div_r_pre_);
+        rshift_round(Wx_val - rescale_params.zp_Wx_, rescale_params.exp2_inv_Wx_div_r_pre_);
     const int32_t Rh_shifted =
-        rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.exp2_inv_Rh_div_r_pre_);
+        rshift_round(Rh_val - rescale_params.zp_Rh_, rescale_params.exp2_inv_Rh_div_r_pre_);
     const int32_t bx_shifted = rshift_round(bx_val, rescale_params.n_bx_div_r_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale_params.n_br_div_r_[channel_idx]);
 
@@ -290,10 +284,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
                                             const int32_t br_val, const int32_t r,
                                             const QuantGRUReScale &rescale_params,
                                             int32_t &Rh_add_br_g, const int debug_idx = -1) {
-    const int32_t Wx = Wx_val;
-    const int32_t Rh = Rh_val;
-
-    Rh_add_br_g = rshift_round(Rh - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
+    Rh_add_br_g = rshift_round(Rh_val - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
                   rshift_round(br_val, rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
                   rescale_params.zp_Rh_add_br_;
 
@@ -306,7 +297,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
         rescale_params.zp_rRh_;
 
     const int32_t Wx_shifted =
-        rshift_round(Wx - rescale_params.zp_Wx_, rescale_params.n_Wx_div_g_pre_);
+        rshift_round(Wx_val - rescale_params.zp_Wx_, rescale_params.n_Wx_div_g_pre_);
     const int32_t rRh_shifted =
         rshift_round(rRh - rescale_params.zp_rRh_, rescale_params.n_rRh_div_g_pre_);
     const int32_t bx_shifted =
@@ -384,11 +375,15 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
             rshift_round(old_contrib_mul_i64, rescale_params.n_z_mul_h_div_old_contrib_)) +
         rescale_params.zp_old_contrib_;
 
-    // 1-z 在 z_out 的量化空间计算
-    const int32_t one_minus_update = rescale_params.one_in_z_scale_ - z + rescale_params.zp_z_out_;
-
-    const int64_t one_minus_diff =
-        static_cast<int64_t>(one_minus_update) - rescale_params.zp_z_out_;
+    // 计算 (1-z) 在量化空间的差值表示
+    // 【公式推导】
+    //   设 one_minus_update = q(1-z) = one_in_z_scale_ - z + zp_z_out_
+    //   其中 one_in_z_scale_ = round(1.0 / scale_z_out) + zp_z_out_ 是常数 1 在 z_out
+    //   量化空间的表示 则 one_minus_diff = one_minus_update - zp_z_out_
+    //                     = (one_in_z_scale_ - z + zp_z_out_) - zp_z_out_
+    //                     = one_in_z_scale_ - z
+    // 【优化】省去中间变量 one_minus_update，直接计算 one_minus_diff
+    const int64_t one_minus_diff = static_cast<int64_t>(rescale_params.one_in_z_scale_) - z;
     const int64_t g_diff = static_cast<int64_t>(g) - rescale_params.zp_g_out_;
     const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
 
@@ -939,15 +934,16 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
     rescale_param_.n_new_contrib_div_h_ = parms.exp2_inv_new_contrib_ - parms.exp2_inv_h_;
     rescale_param_.n_old_contrib_div_h_ = parms.exp2_inv_old_contrib_ - parms.exp2_inv_h_;
 
-    // 将 bias 的 scale 拷贝到 device 可访问的 vector
-    rescale_param_.exp2_inv_bx_dev_ = dev::vector<int8_t>(parms.exp2_inv_bx_);
-    rescale_param_.exp2_inv_br_dev_ = dev::vector<int8_t>(parms.exp2_inv_br_);
-
     // 保存位宽配置（用于运行时选择正确的 kernel 实例）
     rescale_param_.bitwidth_config_ = parms.bitwidth_config_;
 
+#ifdef DEBUG
     // 调试用：保存完整的量化参数
     rescale_param_.test = parms;
+    // 将 bias 的 scale 拷贝到 device 可访问的 vector
+    rescale_param_.exp2_inv_bx_dev_ = dev::vector<int8_t>(parms.exp2_inv_bx_);
+    rescale_param_.exp2_inv_br_dev_ = dev::vector<int8_t>(parms.exp2_inv_br_);
+#endif
 }
 
 // C = input_size(输入维度), H = hidden_size(隐藏层维度),

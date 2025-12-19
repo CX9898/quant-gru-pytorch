@@ -122,15 +122,16 @@ struct QuantGRUReScale {
     int8_t n_old_contrib_div_h_;               // n16
     int8_t exp2_inv_old_contrib_div_h_;        // S16
 
-    // device 可访问的 bias scale (从 GRUQuantitativeParameters 拷贝)
-    dev::vector<int8_t> exp2_inv_bx_dev_;  // size = hidden * 3
-    dev::vector<int8_t> exp2_inv_br_dev_;  // size = hidden * 3
-
     // 位宽配置（从 GRUQuantitativeParameters 中复制，用于运行时选择正确的 kernel 实例）
     OperatorQuantConfig bitwidth_config_;
 
     // 调试用：保存完整的量化参数
+#ifdef DEBUG
     GRUQuantitativeParameters test;
+    // device 可访问的 bias scale (从 GRUQuantitativeParameters 拷贝)
+    dev::vector<int8_t> exp2_inv_bx_dev_;  // size = hidden * 3
+    dev::vector<int8_t> exp2_inv_br_dev_;  // size = hidden * 3
+#endif
 };
 
 // 生成分段线性量化表（基于exp2_inv参数，支持模板类型）
