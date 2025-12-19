@@ -69,7 +69,7 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 └─ g = tanh(g_pre)                     → gate.g_out (g_out_)
 
 步骤5: 最终输出
-├─ one_minus_z = 1 - z                 → op.one_minus_update (one_minus_update_)
+├─ one_minus_z = 1 - z                 → 复用 gate.z_out 的 scale
 ├─ old = z * h[t-1]                    → op.old_contrib (old_contrib_)
 ├─ new = one_minus_z * g               → op.new_contrib (new_contrib_)
 └─ h[t] = old + new
@@ -84,20 +84,24 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
   "description": "配置文件描述",
   "comment": "注释说明",
   
-  "default_bitwidth": { ... },
-  "operator_config": { ... },
-  "default_config": { ... }
+  "GRU_config": {
+    "default_config": { ... },
+    "operator_config": { ... }
+  }
 }
 ```
 
-### 1. default_bitwidth（默认位宽）
+### 1. default_config（全局配置）
 
 ```json
-"default_bitwidth": {
-  "weight": 8,
-  "activation": 8
+"default_config": {
+  "disable_quantization": false
 }
 ```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `disable_quantization` | bool | `false` | 是否禁用量化。设为 `true` 时忽略所有量化配置，使用浮点计算 |
 
 ### 2. operator_config（算子配置）
 
@@ -153,7 +157,6 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 |--------|------|-------------------|
 | `op.Rh_add_br` | Rh + br 加法 | `false` |
 | `op.rRh` | r * Rh 元素乘法 | `false` |
-| `op.one_minus_update` | 1 - z 减法 | `false` |
 | `op.old_contrib` | z * h 旧状态贡献 | `false` |
 | `op.new_contrib` | (1-z) * g 新状态贡献 | `false` |
 
@@ -164,23 +167,38 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 ### Python 端
 
 ```python
-from custom_gru import CustomGRU, load_bitwidth_config, apply_bitwidth_config
+from custom_gru import CustomGRU
 
-# 方式 1: 创建 GRU 后加载配置
-gru = CustomGRU(input_size=64, hidden_size=128, use_quantization=True)
-gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json", verbose=True)
+# 1. 创建 GRU 并加载配置
+#    JSON 中 disable_quantization=false 会自动设置 use_quantization=True
+gru = CustomGRU(input_size=64, hidden_size=128)
+gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json")
 
-# 方式 2: 直接加载配置对象
-import gru_interface_binding as gru_ops
-config = gru_ops.OperatorQuantConfig()
-apply_bitwidth_config(config, "config/gru_quant_bitwidth_config.json", verbose=True)
-
-# 校准流程
+# 2. 校准流程
 for batch in calibration_loader:
     gru.calibrate(batch)
-gru.finalize_calibration()  # 使用已加载的位宽配置
+gru.finalize_calibration()
 
-# 正常推理
+# 3. 正常推理（是否量化已从Json配置）
+output, h_n = gru(input_data)
+```
+
+**不使用 JSON 配置时**：
+
+```python
+gru = CustomGRU(input_size=64, hidden_size=128)
+
+# 设置位宽（可选，默认全部 8bit 对称量化）
+gru.set_all_bitwidth(8)                # 全部 8bit 对称量化
+# gru.set_all_bitwidth(16, False)      # 全部 16bit 非对称量化
+
+# 校准
+for batch in calibration_loader:
+    gru.calibrate(batch)
+gru.finalize_calibration()
+
+# 手动开启量化
+gru.use_quantization = True
 output, h_n = gru(input_data)
 ```
 
