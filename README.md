@@ -12,45 +12,13 @@
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
 
-## 🏗️ 项目结构
-
-```
-quant-gru-pytorch/
-├── include/                    # C++/CUDA 头文件
-│   ├── gru.h                   # 浮点 GRU 前向/反向传播类
-│   ├── gru_quant.h             # 量化 GRU 前向传播类
-│   ├── gru_interface.hpp       # 统一接口层（校准、量化、前向传播）
-│   ├── quantize_bitwidth_config.hpp  # 量化位宽配置
-│   ├── quantize_ops.cuh        # 量化操作 CUDA 内核
-│   ├── histogram_collector.hpp # 直方图收集器（AIMET 风格校准）
-│   ├── pot_sqnr_calibrator.hpp # SQNR 校准器
-│   └── ...
-├── src/                        # C++/CUDA 源文件
-│   ├── gru_forward_gpu.cu      # 浮点前向传播 GPU 实现
-│   ├── gru_forward_gpu_quant.cu # 量化前向传播 GPU 实现
-│   ├── gru_backward_gpu.cu     # 反向传播 GPU 实现
-│   ├── gru_interface.cpp       # 接口实现
-│   └── quantize_ops.cu         # 量化操作实现
-├── pytorch/                    # PyTorch 绑定和 Python 接口
-│   ├── quant_gru.py            # 量化 GRU 类
-│   ├── setup.py                # Python 扩展编译配置
-│   ├── lib/                    # 编译生成的库文件
-│   ├── config/                 # 配置文件
-│   │   └── gru_quant_bitwidth_config.json  # 量化位宽配置
-│   └── test_*.py               # 测试脚本
-├── example/                    # C++ 使用示例
-│   └── gru.cc                  # 浮点/量化 GRU 对比示例
-├── CMakeLists.txt              # CMake 构建配置
-```
-
 ## 🔧 环境要求
 
-- **CUDA Toolkit** >= 11.0
-- **cuBLAS**
-- **C++17** 编译器
+- **Python** >= 3.10
+- **PyTorch** >= 2.0（支持 CUDA）
+- **CUDA Toolkit** >= 11.0（含 cuBLAS）
+- **C++17** 编译器（GCC 7+ 或 Clang 5+）
 - **CMake** >= 3.18
-- **Python** >= 3.8
-- **PyTorch** >= 1.10（支持 CUDA）
 - **OpenMP**
 
 ## 🚀 快速开始
@@ -78,16 +46,29 @@ make -j$(nproc)
 ```bash
 cd pytorch
 
-# 安装 Python 扩展
+# 安装 Python 扩展（开发模式）
 pip install -e .
 ```
 
-### 3. 使用示例
+### 3. 验证安装
 
-#### Python 使用（非量化模式）
+```bash
+# C++ 测试
+./build/gru_example
+
+# Python 测试
+cd pytorch
+python test_quant_gru.py
+```
+
+---
+
+## 📖 使用示例
+
+### 基础使用（浮点模式）
 
 ```python
-from pytorch.quant_gru import QuantGRU
+from quant_gru import QuantGRU
 import torch
 
 # 创建模型（与 nn.GRU 接口一致）
@@ -104,10 +85,10 @@ output, h_n = gru(input_data)
 # output: [32, 50, 128], h_n: [1, 32, 128]
 ```
 
-#### Python 使用（量化模式）
+### 量化推理
 
 ```python
-from pytorch.quant_gru import QuantGRU
+from quant_gru import QuantGRU
 import torch
 
 # 1. 创建模型
@@ -117,30 +98,59 @@ gru = QuantGRU(
     batch_first=True
 ).cuda()
 
-# 2. (可选) 加载自定义位宽配置
-gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json", verbose=True)
+# 2. 加载位宽配置
+gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
 
 # 3. 使用校准数据进行量化校准
 for batch in calibration_loader:
     gru.calibrate(batch.cuda())
 
-# 4. 完成校准，计算量化参数
-gru.finalize_calibration(verbose=True)
-
-# 5. 开启量化模式进行推理
-gru.use_quantization = True
+# 4. 推理（首次前向时会自动完成校准）
 output, h_n = gru(input_data)
 ```
 
-#### 设置校准方法
+> 💡 **量化开关**：配置文件中的 `disable_quantization` 控制是否启用量化：
+> - `false`（默认）：启用量化推理
+> - `true`：使用浮点推理
+
+### 量化感知训练 (QAT)
+
+```python
+from quant_gru import QuantGRU
+import torch
+
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
+
+# 校准
+for batch in calibration_loader:
+    gru.calibrate(batch.cuda())
+
+# 训练循环（前向使用量化，反向使用浮点）
+optimizer = torch.optim.Adam(gru.parameters(), lr=0.001)
+criterion = torch.nn.MSELoss()
+gru.train()
+
+for epoch in range(num_epochs):
+    for x, target in train_loader:
+        optimizer.zero_grad()
+        output, _ = gru(x.cuda())
+        loss = criterion(output, target.cuda())
+        loss.backward()
+        optimizer.step()
+```
+
+### 校准方法选择
 
 ```python
 # MinMax 校准（默认，速度快）
 gru.calibration_method = 'minmax'
 
-# AIMET 风格直方图校准（精度高，推荐）
+# AIMET 风格直方图校准（精度高，推荐用于生产部署）
 gru.calibration_method = 'histogram'
 ```
+
+> 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
 ## ⚙️ 量化配置
 
@@ -201,47 +211,12 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 - `σ` 表示 Sigmoid 激活函数
 - `⊙` 表示逐元素乘法
 
-## 🧪 运行测试
-
-### C++ 测试
-
-```bash
-./build/gru_example
-```
-
-### Python 测试
-
-```bash
-cd pytorch
-python test_quant_gru.py
-```
-
 ## 🔬 校准方法对比
 
 | 方法 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
 | **MinMax** | 速度快，实现简单 | 对异常值敏感 | 快速原型验证 |
 | **Histogram (AIMET)** | 精度高，SQNR 优化 | 计算开销稍大 | 生产部署 |
-
-## 📊 性能
-
-量化后的 GRU 相比浮点版本：
-- **内存占用**：减少约 75%（8-bit 量化）
-- **计算速度**：提升约 2-4x（取决于硬件）
-- **精度损失**：< 1%（使用 Histogram 校准）
-
-## 🐳 Docker 使用
-
-```bash
-# 构建镜像
-docker-compose build
-
-# 运行容器
-docker-compose up -d
-
-# 进入容器
-docker-compose exec quant-gru bash
-```
 
 ## 📝 API 参考
 
@@ -265,9 +240,9 @@ class QuantGRU(nn.Module):
 
 | 方法 | 说明 |
 |------|------|
-| `forward(input, hx=None)` | 前向传播 |
+| `forward(input, hx=None)` | 前向传播（量化模式下会自动完成校准） |
 | `calibrate(data)` | 累积校准数据 |
-| `finalize_calibration(verbose=False)` | 完成校准，计算量化参数 |
+| `finalize_calibration(verbose=False)` | 手动完成校准（通常无需调用，forward 会自动处理） |
 | `reset_calibration()` | 重置校准状态 |
 | `load_bitwidth_config(path, verbose=False)` | 加载位宽配置 |
 | `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置统一位宽 |
@@ -282,6 +257,37 @@ class QuantGRU(nn.Module):
 ## 📄 许可证
 
 MIT License
+
+## 🏗️ 项目结构
+
+```
+quant-gru-pytorch/
+├── include/                    # C++/CUDA 头文件
+│   ├── gru.h                   # 浮点 GRU 前向/反向传播类
+│   ├── gru_quant.h             # 量化 GRU 前向传播类
+│   ├── gru_interface.hpp       # 统一接口层（校准、量化、前向传播）
+│   ├── quantize_bitwidth_config.hpp  # 量化位宽配置
+│   ├── quantize_ops.cuh        # 量化操作 CUDA 内核
+│   ├── histogram_collector.hpp # 直方图收集器（AIMET 风格校准）
+│   ├── pot_sqnr_calibrator.hpp # SQNR 校准器
+│   └── ...
+├── src/                        # C++/CUDA 源文件
+│   ├── gru_forward_gpu.cu      # 浮点前向传播 GPU 实现
+│   ├── gru_forward_gpu_quant.cu # 量化前向传播 GPU 实现
+│   ├── gru_backward_gpu.cu     # 反向传播 GPU 实现
+│   ├── gru_interface.cpp       # 接口实现
+│   └── quantize_ops.cu         # 量化操作实现
+├── pytorch/                    # PyTorch 绑定和 Python 接口
+│   ├── quant_gru.py            # 量化 GRU 类
+│   ├── setup.py                # Python 扩展编译配置
+│   ├── lib/                    # 编译生成的库文件
+│   ├── config/                 # 配置文件
+│   │   └── gru_quant_bitwidth_config.json  # 量化位宽配置
+│   └── test_*.py               # 测试脚本
+├── example/                    # C++ 使用示例
+│   └── gru.cc                  # 浮点/量化 GRU 对比示例
+├── CMakeLists.txt              # CMake 构建配置
+```
 
 ## 📚 参考
 
