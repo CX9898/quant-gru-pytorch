@@ -622,6 +622,9 @@ class CustomGRU(nn.Module):
             self.quant_ranges_reverse = None  # 反向 C++ 对象
             self.quant_params_reverse = None  # 反向 C++ 对象
 
+        # ===== 校准脏标志（跟踪校准数据是否比量化参数更新） =====
+        self._calibration_dirty = False  # calibrate() 设为 True，finalize_calibration() 设为 False
+
         # ===== 位宽配置（延迟初始化，使用 Python 字典以支持序列化） =====
         self._bitwidth_config_dict = None  # 延迟初始化，首次访问时创建默认配置
 
@@ -822,6 +825,7 @@ class CustomGRU(nn.Module):
             - 校准完成后，通过设置 use_quantization = True 开启量化推理
         """
         self._accumulate_calibration_ranges(calibration_data)
+        self._calibration_dirty = True  # 标记校准数据已更新，需要重新 finalize
 
     def finalize_calibration(self, verbose: bool = False):
         """
@@ -922,6 +926,9 @@ class CustomGRU(nn.Module):
             # 初始化查找表（反向）
             gru_ops.initialize_quantization_lut(quant_params=self.quant_params_reverse)
 
+        # 标记校准已完成，量化参数已更新
+        self._calibration_dirty = False
+
     def reset_calibration(self):
         """
         重置校准状态
@@ -932,6 +939,7 @@ class CustomGRU(nn.Module):
         self.quant_ranges = None
         self.quant_params = None
         self.hist_collectors = None  # 重置直方图收集器
+        self._calibration_dirty = False  # 重置脏标志
         if self.bidirectional:
             self.quant_ranges_reverse = None
             self.quant_params_reverse = None
@@ -1206,16 +1214,20 @@ class CustomGRU(nn.Module):
         self._ensure_cublas_initialized()
 
         # 检查量化是否已校准完成
-        if self.use_quantization and not self.is_calibrated():
-            if self.quant_ranges is not None:
-                # 已累积范围但未完成校准，自动调用 finalize
+        if self.use_quantization:
+            if self._calibration_dirty:
+                # 校准数据已更新，需要重新计算量化参数
                 self.finalize_calibration()
-            else:
-                # 未进行任何校准
-                raise RuntimeError(
-                    "Quantization is enabled but not calibrated. "
-                    "Please call calibrate(data) then finalize_calibration() before forward pass."
-                )
+            elif not self.is_calibrated():
+                if self.quant_ranges is not None:
+                    # 已累积范围但未完成校准，自动调用 finalize
+                    self.finalize_calibration()
+                else:
+                    # 未进行任何校准
+                    raise RuntimeError(
+                        "Quantization is enabled but not calibrated. "
+                        "Please call calibrate(data) then finalize_calibration() before forward pass."
+                    )
 
         # 处理 batch_first
         if self.batch_first:
