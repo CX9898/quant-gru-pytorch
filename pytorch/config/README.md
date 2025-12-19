@@ -174,12 +174,11 @@ from custom_gru import CustomGRU
 gru = CustomGRU(input_size=64, hidden_size=128)
 gru.load_bitwidth_config("config/gru_quant_bitwidth_config.json")
 
-# 2. 校准流程
+# 2. 校准
 for batch in calibration_loader:
     gru.calibrate(batch)
-gru.finalize_calibration()
 
-# 3. 正常推理（是否量化已从Json配置）
+# 3. 推理
 output, h_n = gru(input_data)
 ```
 
@@ -195,9 +194,8 @@ gru.set_all_bitwidth(8)                # 全部 8bit 对称量化
 # 校准
 for batch in calibration_loader:
     gru.calibrate(batch)
-gru.finalize_calibration()
 
-# 手动开启量化
+# 开启量化并推理
 gru.use_quantization = True
 output, h_n = gru(input_data)
 ```
@@ -268,18 +266,8 @@ output, h_n = gru(input_data)
    - 建议 `is_symmetric: true`
    - 权重分布通常接近对称，无需存储零点
 
-4. **位宽配置需在 `finalize_calibration()` 之前加载**
+4. **位宽配置需在校准前或校准过程中加载**
+
+5. **高级用法**：可手动调用 `finalize_calibration(verbose=True)` 查看校准详情
 
 ---
-
-## 代码结构
-
-```
-量化配置相关文件：
-├── include/quantize_bitwidth_config.hpp  # C++ 枚举和配置结构定义
-├── pytorch/lib/gru_interface_binding.cpp # Python-C++ 绑定（类型转换逻辑）
-├── pytorch/custom_gru.py                 # Python 配置加载函数
-└── pytorch/config/
-    ├── gru_quant_bitwidth_config.json    # JSON 配置文件
-    └── README.md                         # 本文档
-```
