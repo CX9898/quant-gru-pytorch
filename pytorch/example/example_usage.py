@@ -1,0 +1,452 @@
+"""
+CustomGRU 量化库使用示例
+
+本示例展示如何使用 CustomGRU 进行量化推理和训练。
+"""
+
+import torch
+import torch.nn as nn
+
+# 添加库路径（根据实际安装位置修改）
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from custom_gru import CustomGRU
+
+
+def example_basic_usage():
+    """
+    示例 1: 基本使用（非量化）
+    
+    与 nn.GRU 用法完全一致
+    """
+    print("\n" + "=" * 60)
+    print("示例 1: 基本使用（非量化）")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建模型
+    gru = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True  # 输入格式 [batch, seq, feature]
+    ).cuda()
+    
+    # 创建输入数据
+    x = torch.randn(batch_size, seq_len, input_size).cuda()
+    
+    # 前向传播
+    output, h_n = gru(x)
+    
+    print(f"输入形状:   {x.shape}")
+    print(f"输出形状:   {output.shape}")
+    print(f"隐藏状态:   {h_n.shape}")
+    print("✅ 基本使用完成！")
+
+
+def example_quantization_with_json():
+    """
+    示例 2: 使用 JSON 配置进行量化
+    
+    推荐方式：通过 JSON 文件配置量化参数
+    """
+    print("\n" + "=" * 60)
+    print("示例 2: 使用 JSON 配置进行量化")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 1. 创建模型并加载配置
+    gru = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    # 加载 JSON 配置（自动设置 use_quantization）
+    config_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "config/gru_quant_bitwidth_config.json"
+    )
+    gru.load_bitwidth_config(config_path)
+    print(f"✅ 加载配置: {config_path}")
+    print(f"   量化开关: use_quantization = {gru.use_quantization}")
+    
+    # 2. 校准（使用代表性数据）
+    print("\n📊 开始校准...")
+    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru.calibrate(calibration_data)
+    print("✅ 校准完成！")
+    
+    # 3. 推理
+    print("\n🚀 开始推理...")
+    x = torch.randn(batch_size, seq_len, input_size).cuda()
+    output, h_n = gru(x)
+    
+    print(f"输入形状:   {x.shape}")
+    print(f"输出形状:   {output.shape}")
+    print(f"隐藏状态:   {h_n.shape}")
+    print("✅ 量化推理完成！")
+
+
+def example_quantization_manual(bitwidth=8):
+    """
+    示例 3: 手动配置量化参数
+    
+    不使用 JSON 文件，直接在代码中设置
+    
+    Args:
+        bitwidth: 量化位宽（8 或 16）
+    """
+    print("\n" + "=" * 60)
+    print(f"示例 3: 手动配置量化参数 ({bitwidth}bit)")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 1. 创建模型
+    gru = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    # 2. 设置位宽
+    gru.set_all_bitwidth(bitwidth)
+    print(f"✅ 设置位宽: {bitwidth}bit 对称量化")
+    
+    # 3. 校准
+    print("\n📊 开始校准...")
+    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru.calibrate(calibration_data)
+    print("✅ 校准完成！")
+    
+    # 4. 开启量化并推理
+    gru.use_quantization = True
+    print(f"   量化开关: use_quantization = {gru.use_quantization}")
+    
+    print("\n🚀 开始推理...")
+    x = torch.randn(batch_size, seq_len, input_size).cuda()
+    output, h_n = gru(x)
+    
+    print(f"输入形状:   {x.shape}")
+    print(f"输出形状:   {output.shape}")
+    print(f"隐藏状态:   {h_n.shape}")
+    print(f"✅ {bitwidth}bit 量化推理完成！")
+
+
+def example_compare_precision(bitwidth=8):
+    """
+    示例 4: 比较量化前后的精度差异
+    
+    Args:
+        bitwidth: 量化位宽（8 或 16）
+    """
+    print("\n" + "=" * 60)
+    print(f"示例 4: 比较量化前后的精度差异 ({bitwidth}bit)")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建非量化模型（基准）
+    gru_float = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True,
+        use_quantization=False
+    ).cuda()
+    
+    # 创建量化模型（复制权重）
+    gru_quant = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    # 复制权重
+    gru_quant.weight_ih_l0.data.copy_(gru_float.weight_ih_l0.data)
+    gru_quant.weight_hh_l0.data.copy_(gru_float.weight_hh_l0.data)
+    gru_quant.bias_ih_l0.data.copy_(gru_float.bias_ih_l0.data)
+    gru_quant.bias_hh_l0.data.copy_(gru_float.bias_hh_l0.data)
+    
+    # 校准并开启量化
+    x = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru_quant.set_all_bitwidth(bitwidth)
+    gru_quant.calibrate(x)
+    gru_quant.use_quantization = True
+    
+    # 比较输出
+    gru_float.eval()
+    gru_quant.eval()
+    
+    with torch.no_grad():
+        output_float, _ = gru_float(x)
+        output_quant, _ = gru_quant(x)
+    
+    # 计算误差
+    mse = torch.mean((output_float - output_quant) ** 2).item()
+    cos_sim = torch.nn.functional.cosine_similarity(
+        output_float.flatten().unsqueeze(0),
+        output_quant.flatten().unsqueeze(0)
+    ).item()
+    
+    print(f"📊 {bitwidth}bit 精度比较结果:")
+    print(f"   MSE (均方误差):     {mse:.6f}")
+    print(f"   余弦相似度:         {cos_sim:.6f}")
+    print(f"✅ {bitwidth}bit 精度比较完成！")
+
+
+def example_training(bitwidth=8):
+    """
+    示例 5: 量化感知训练（QAT）
+    
+    任务：学习输入序列的简单变换（输入乘以固定系数）
+    注意：前向传播使用量化，反向传播使用浮点
+    
+    Args:
+        bitwidth: 量化位宽（8 或 16）
+    """
+    print("\n" + "=" * 60)
+    print(f"示例 5: 量化感知训练 ({bitwidth}bit)")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 64  # 与 input_size 相同，便于构造目标
+    batch_size = 8
+    seq_len = 20
+    num_epochs = 5
+    
+    # 创建模型
+    gru = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    # 固定随机种子，确保每次运行结果一致
+    torch.manual_seed(42)
+    
+    # 生成固定的训练数据（学习输入的 0.5 倍变换）
+    x_train = torch.randn(batch_size, seq_len, input_size).cuda() * 0.5
+    target_train = x_train * 0.5  # 简单的线性变换作为目标
+    
+    # 校准
+    gru.set_all_bitwidth(bitwidth)
+    gru.calibrate(x_train)
+    gru.use_quantization = True
+    
+    # 创建优化器
+    optimizer = torch.optim.Adam(gru.parameters(), lr=0.01)
+    
+    # 训练循环
+    gru.train()
+    print(f"\n🏋️ 开始 {bitwidth}bit 量化训练...")
+    
+    for epoch in range(num_epochs):
+        # 前向传播
+        optimizer.zero_grad()
+        output, _ = gru(x_train)
+        
+        # 计算损失
+        loss = torch.mean((output - target_train) ** 2)
+        
+        # 反向传播
+        loss.backward()
+        optimizer.step()
+        
+        print(f"   Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.6f}")
+    
+    print(f"✅ {bitwidth}bit 训练完成！（Loss 应持续下降）")
+
+
+def example_calibration_method():
+    """
+    示例 6: 校准方法选择
+    
+    CustomGRU 支持两种校准方法:
+    - 'minmax': 快速，适合对速度要求高的场景
+    - 'histogram': AIMET 风格，精度更高，适合对精度要求高的场景
+    """
+    print("\n" + "=" * 60)
+    print("示例 6: 校准方法选择")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建基准模型（FP32）
+    gru_base = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True,
+        use_quantization=False
+    ).cuda()
+    
+    # 生成测试数据
+    torch.manual_seed(42)
+    test_input = torch.randn(batch_size, seq_len, input_size).cuda()
+    
+    # FP32 基准输出
+    gru_base.eval()
+    with torch.no_grad():
+        fp32_output, _ = gru_base(test_input)
+    
+    print("\n📊 对比两种校准方法:")
+    print("-" * 50)
+    
+    results = {}
+    
+    for method in ['minmax', 'histogram']:
+        # 创建量化模型（复制权重）
+        gru_quant = CustomGRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            batch_first=True
+        ).cuda()
+        
+        # 复制权重
+        gru_quant.weight_ih_l0.data.copy_(gru_base.weight_ih_l0.data)
+        gru_quant.weight_hh_l0.data.copy_(gru_base.weight_hh_l0.data)
+        gru_quant.bias_ih_l0.data.copy_(gru_base.bias_ih_l0.data)
+        gru_quant.bias_hh_l0.data.copy_(gru_base.bias_hh_l0.data)
+        
+        # 设置校准方法
+        gru_quant.calibration_method = method
+        
+        # 设置位宽并校准
+        gru_quant.set_all_bitwidth(16)
+        
+        # 多批次校准（histogram 方法在多批次下效果更好）
+        for _ in range(3):
+            calib_data = torch.randn(batch_size, seq_len, input_size).cuda()
+            gru_quant.calibrate(calib_data)
+        
+        # 开启量化并推理
+        gru_quant.use_quantization = True
+        gru_quant.eval()
+        
+        with torch.no_grad():
+            quant_output, _ = gru_quant(test_input)
+        
+        # 计算余弦相似度
+        cos_sim = torch.nn.functional.cosine_similarity(
+            fp32_output.flatten().unsqueeze(0),
+            quant_output.flatten().unsqueeze(0)
+        ).item()
+        
+        results[method] = cos_sim
+        method_desc = "MinMax (快速)" if method == 'minmax' else "Histogram (高精度)"
+        print(f"   {method_desc:<20} 余弦相似度: {cos_sim:.6f}")
+    
+    print("-" * 50)
+    print("\n💡 选择建议:")
+    print("   • minmax:    校准速度快，适合快速迭代和调试")
+    print("   • histogram: 精度更高，适合最终部署（推荐）")
+    print(f"\n   默认使用 'histogram' 方法")
+    print("✅ 校准方法对比完成！")
+
+def example_bidirectional():
+    """
+    示例 7: 双向 GRU
+    """
+    print("\n" + "=" * 60)
+    print("示例 7: 双向 GRU")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建双向模型
+    gru = CustomGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True,
+        bidirectional=True  # 双向
+    ).cuda()
+    
+    # 校准并开启量化
+    x = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru.set_all_bitwidth(8)
+    gru.calibrate(x)
+    gru.use_quantization = True
+    
+    # 推理
+    output, h_n = gru(x)
+    
+    print(f"输入形状:   {x.shape}")
+    print(f"输出形状:   {output.shape}  (hidden_size * 2 = {hidden_size * 2})")
+    print(f"隐藏状态:   {h_n.shape}  (num_directions = 2)")
+    print("✅ 双向 GRU 完成！")
+
+
+def main():
+    """运行所有示例"""
+    print("=" * 60)
+    print("  CustomGRU 量化库使用示例")
+    print("=" * 60)
+    
+    if not torch.cuda.is_available():
+        print("❌ 错误: 需要 CUDA 支持")
+        return
+    
+    try:
+        # 运行所有示例
+        example_basic_usage()
+        example_quantization_with_json()
+        
+        # 示例 3: 手动配置量化参数（8bit 和 16bit）
+        example_quantization_manual(bitwidth=8)
+        example_quantization_manual(bitwidth=16)
+        
+        # 示例 4: 比较量化前后的精度差异（8bit 和 16bit）
+        example_compare_precision(bitwidth=8)
+        example_compare_precision(bitwidth=16)
+        
+        # 示例 5: 量化感知训练（8bit 和 16bit）
+        example_training(bitwidth=8)
+        example_training(bitwidth=16)
+        
+        # 示例 6: 校准方法选择
+        example_calibration_method()
+        
+        # 示例 7: 双向 GRU
+        example_bidirectional()
+        
+        print("\n" + "=" * 60)
+        print("  所有示例运行完成！")
+        print("=" * 60)
+        
+    except Exception as e:
+        print(f"\n❌ 错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
+
