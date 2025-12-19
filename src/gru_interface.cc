@@ -2,7 +2,7 @@
 // GRU 接口层实现 (gru_interface.cpp)
 // =====================================================================
 
-#include "gru_interface.hpp"
+#include "gru_interface.h"
 
 #include <cuda_runtime.h>
 
@@ -10,10 +10,10 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "histogram_collector.hpp"
+#include "histogram_collector.h"
 #include "parallelAlgorithm.h"
-#include "pot_sqnr_calibrator.hpp"
-#include "quantize_ops_helper.hpp"
+#include "pot_sqnr_calibrator.h"
+#include "quantize_ops_helper.h"
 
 // =====================================================================
 // 量化校准实现

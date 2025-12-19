@@ -21,7 +21,7 @@
 #include <numeric>
 #include <vector>
 
-#include "histogram_collector.hpp"
+#include "histogram_collector.h"
 
 /**
  * POT-SQNR 校准器类

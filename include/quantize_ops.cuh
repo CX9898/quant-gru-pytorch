@@ -4,7 +4,7 @@
 
 #include <cstdint>
 
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16

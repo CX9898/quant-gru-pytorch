@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "devVector.h"
-#include "gru_quantization_ranges.hpp"
-#include "quantize_bitwidth_config.hpp"
+#include "gru_quantization_ranges.h"
+#include "quantize_bitwidth_config.h"
 
 // #define DEBUG
 

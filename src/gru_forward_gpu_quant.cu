@@ -29,7 +29,7 @@
 #include "devVector.h"
 #include "gru_quant.h"
 #include "quantize_ops.cuh"
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 
 namespace kernel {
 

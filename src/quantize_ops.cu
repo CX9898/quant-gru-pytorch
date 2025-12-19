@@ -10,7 +10,7 @@
 
 #include "devVector.h"
 #include "quantize_ops.cuh"
-#include "quantize_ops_helper.hpp"
+#include "quantize_ops_helper.h"
 
 // 调试开关：取消注释以启用调试输出
 // #define DEBUG_QUANT
