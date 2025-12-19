@@ -9,7 +9,7 @@ setup(
         CUDAExtension(
             name='gru_interface_binding',
             sources=[
-                'lib/gru_interface_binding.cpp',  # GRU 接口 Python 绑定
+                'lib/gru_interface_binding.cc',  # GRU 接口 Python 绑定
             ],
             include_dirs=[os.path.join(here,'../include')],
             libraries=['gru_quant_shared'],           # 已经编译好的库名，不带 lib 前缀
