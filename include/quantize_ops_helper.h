@@ -481,130 +481,15 @@ inline int8_t determine_shift_bits_int8(float max_val) {
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
-void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                             float x_min = -6.0f, float x_max = 6.0f);
+// INT8 版本：输入 INT8，输出 UINT8（sigmoid）或 INT8（tanh）
+void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
 
-void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                             float x_min = -6.0f, float x_max = 6.0f);
-
-void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                        float x_min = -6.0f, float x_max = 6.0f);
-
-void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                         float x_min = -6.0f, float x_max = 6.0f);
-
-// 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - r 门）
-void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                              float x_min = -6.0f, float x_max = 6.0f);
-
-// 初始化 LUT（将数据复制到 CUDA 常量内存，INT16 版本 - z 门）
-void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
-                              float x_min = -6.0f, float x_max = 6.0f);
-
-/**
- * 通用(仅host)scale/zp 计算函数
- * @param x_dev  -- 设备端输入数据指针
- * @param size_per_step -- 每步输入长度
- * @param steps -- 步数
- * @param use_symmetric -- 是否对称量化
- * @param name -- 调试信息
- */
-template <typename T, typename QuantT>
-inline void calculateScalePerSteps(const T *x_dev, const int size_per_step, const int steps,
-                                   const bool use_symmetric, int8_t &exp2_inv, int32_t &zp,
-                                   const std::string &name = "") {
-    if (size_per_step == 0 || steps == 0) {
-        printf("Warning! %s input size = 0\n", name.c_str());
-        return;
-    }
-    std::vector<T> x_host = d2h(x_dev, steps * size_per_step);
-    std::vector<T> min(steps);
-    std::vector<T> max(steps);
-
-#pragma omp parallel for
-    for (int t = 0; t < steps; ++t) {
-        const int offset = t * size_per_step;
-        min[t] = x_host[offset];
-        max[t] = x_host[offset];
-        for (int i = 1; i < size_per_step; ++i) {
-            min[t] = std::min(min[t], x_host[offset + i]);
-            max[t] = std::max(max[t], x_host[offset + i]);
-        }
-    }
-
-    T res_min = min[0];
-    T res_max = max[0];
-    for (int t = 1; t < steps; ++t) {
-        //        // TODO: 修改为原来的方法
-        //        res_min = 0.9 * res_min + 0.1 * min[t];
-        //        res_max = 0.9 * res_max + 0.1 * max[t];
-        res_min = std::min(res_min, min[t]);
-        res_max = std::max(res_max, max[t]);
-    }
-
-    calibrateQuantParams<T, QuantT>(res_min, res_max, use_symmetric, res_min, res_max, exp2_inv, zp,
-                                    name);
-}
-
-template <typename T, typename QuantT>
-inline std::vector<int8_t> calculateScalesPerChannels(const T *W_dev, int channel_size,
-                                                      int input_size,
-                                                      const std::string &name = "") {
-    // 列主序排列
-
-    std::vector<T> W_host = d2h(W_dev, channel_size * input_size);
-
-    std::vector<int8_t> exp2_inv_per_channels(channel_size);
-    std::vector<T> min(channel_size);
-    std::vector<T> max(channel_size);
-
-#pragma omp parallel for
-    for (int i = 0; i < channel_size; ++i) {
-        min[i] = W_host[i];
-        max[i] = W_host[i];
-        for (int j = 1; j < input_size; ++j) {
-            min[i] = std::min(min[i], W_host[j * channel_size + i]);
-            max[i] = std::max(max[i], W_host[j * channel_size + i]);
-        }
-    }
-
-    std::vector<int32_t> zp_tmp(channel_size);
-#pragma omp parallel for
-    for (int i = 0; i < channel_size; ++i) {
-        if (min[i] == max[i]) {
-            const float half = std::abs(min[i]);
-            min[i] = -half;
-            max[i] = half;
-        }
-        calibrateQuantParams<T, QuantT>(min[i], max[i], true, min[i], max[i],
-                                        exp2_inv_per_channels[i], zp_tmp[i], name);
-    }
-    return exp2_inv_per_channels;
-}
-
-template <typename T, typename QuantT>
-inline void calculateScale(const std::vector<T> &data_host, const bool use_symmetric,
-                           int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
-    T min_val = data_host[0];
-    T max_val = data_host[0];
-#pragma omp parallel for reduction(min : min_val) reduction(max : max_val)
-    for (int i = 1; i < data_host.size(); ++i) {
-        const T val = data_host[i];
-        min_val = std::min(min_val, val);
-        max_val = std::max(max_val, val);
-    }
-    T min_new = min_val;
-    T max_new = max_val;
-    calibrateQuantParams<T, QuantT>(min_val, max_val, use_symmetric, min_new, max_new, exp2_inv, zp,
-                                    name);
-}
-
-template <typename T, typename QuantT>
-inline void calculateScale(const T *data_dev, const size_t size, const bool use_symmetric,
-                           int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
-    std::vector<T> data_host = d2h(data_dev, size);
-    calculateScale<T, QuantT>(data_host, use_symmetric, exp2_inv, zp, name);
-}
+// INT16 版本：输入 INT16，输出 UINT16（sigmoid）或 INT16（tanh）
+void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
 
 inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("GRUQuantitativeParameters (量化参数):\n");
