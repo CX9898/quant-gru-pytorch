@@ -25,10 +25,40 @@ enum class CalibrationMethod {
 // 全局配置：选择校准方式
 constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MIN_MAX;
 
-constexpr int BATCH_SIZE = 64;    // 批大小
-constexpr int SEQUENCE_LEN = 50;  // 序列长度(T), 每个样本有T个时间步
-constexpr int HIDDEN_DIMS = 256;  // 隐藏层维度(H), h_t的维度
-constexpr int INPUT_DIMS = 256;   // 输入维度(I), x_t的维度
+// 默认配置（可通过命令行参数覆盖）
+int g_batch_size = 64;     // 批大小 (B)
+int g_sequence_len = 50;   // 序列长度 (T), 每个样本有T个时间步
+int g_hidden_dims = 256;   // 隐藏层维度 (H), h_t的维度
+int g_input_dims = 256;    // 输入维度 (C), x_t的维度
+
+void printUsage(const char* program_name) {
+    printf("Usage: %s [options]\n", program_name);
+    printf("Options:\n");
+    printf("  -T <value>  Sequence length (time steps), default: %d\n", g_sequence_len);
+    printf("  -C <value>  Input dimension, default: %d\n", g_input_dims);
+    printf("  -B <value>  Batch size, default: %d\n", g_batch_size);
+    printf("  -H <value>  Hidden dimension, default: %d\n", g_hidden_dims);
+    printf("  -h          Show this help message\n");
+    printf("\nExample: %s -T 10 -C 128 -B 32 -H 64\n", program_name);
+}
+
+void parseArgs(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-h" || arg == "--help") {
+            printUsage(argv[0]);
+            exit(0);
+        } else if (arg == "-T" && i + 1 < argc) {
+            g_sequence_len = std::atoi(argv[++i]);
+        } else if (arg == "-C" && i + 1 < argc) {
+            g_input_dims = std::atoi(argv[++i]);
+        } else if (arg == "-B" && i + 1 < argc) {
+            g_batch_size = std::atoi(argv[++i]);
+        } else if (arg == "-H" && i + 1 < argc) {
+            g_hidden_dims = std::atoi(argv[++i]);
+        }
+    }
+}
 
 cublasHandle_t g_blas_handle = nullptr;
 
@@ -217,7 +247,23 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
 
 // ==================== 主函数 ====================
 
-int main() {
+int main(int argc, char* argv[]) {
+    // 解析命令行参数
+    parseArgs(argc, argv);
+
+    // 使用解析后的参数
+    const int BATCH_SIZE = g_batch_size;
+    const int SEQUENCE_LEN = g_sequence_len;
+    const int HIDDEN_DIMS = g_hidden_dims;
+    const int INPUT_DIMS = g_input_dims;
+
+    printf("\n========== Configuration ==========\n");
+    printf("T (Sequence Length): %d\n", SEQUENCE_LEN);
+    printf("C (Input Dims):      %d\n", INPUT_DIMS);
+    printf("B (Batch Size):      %d\n", BATCH_SIZE);
+    printf("H (Hidden Dims):     %d\n", HIDDEN_DIMS);
+    printf("====================================\n");
+
     // 使用固定随机种子，确保结果可复现
     srand(42);
     setGlobalRandomSeed(42);  // C++ 随机数引擎的种子
