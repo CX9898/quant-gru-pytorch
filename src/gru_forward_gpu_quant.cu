@@ -186,14 +186,9 @@ __device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t
     const int32_t z_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
 
-    int32_t z;
-    if (rescale_params.bitwidth_config_.z_out_ == QuantBitWidth::UINT16) {
-        const int16_t z_pre_i16 = dev::clamp<int16_t>(z_pre_i32);
-        z = dev::sigmoid_piecewise_linear_int16(z_pre_i16, d_sigmoid_z_lut_int16);
-    } else {
-        const int8_t z_pre_i8 = dev::clamp<int8_t>(z_pre_i32);
-        z = dev::sigmoid_piecewise_linear_int8(z_pre_i8, d_sigmoid_z_lut_int8);
-    }
+    // 调用门专用函数，自动选择 LUT
+    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const int32_t z = dev::sigmoid_z(z_pre_i32, bw_cfg.z_pre_, bw_cfg.z_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -242,14 +237,9 @@ __device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t
     const int32_t r_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
 
-    int32_t r;
-    if (rescale_params.bitwidth_config_.r_out_ == QuantBitWidth::UINT16) {
-        const int16_t r_pre_i16 = dev::clamp<int16_t>(r_pre_i32);
-        r = dev::sigmoid_piecewise_linear_int16(r_pre_i16, d_sigmoid_r_lut_int16);
-    } else {
-        const int8_t r_pre_i8 = dev::clamp<int8_t>(r_pre_i32);
-        r = dev::sigmoid_piecewise_linear_int8(r_pre_i8, d_sigmoid_r_lut_int8);
-    }
+    // 调用门专用函数，自动选择 LUT
+    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const int32_t r = dev::sigmoid_r(r_pre_i32, bw_cfg.r_pre_, bw_cfg.r_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -305,14 +295,9 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
 
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
 
-    int32_t g;
-    if (rescale_params.bitwidth_config_.g_out_ == QuantBitWidth::INT16) {
-        const int16_t g_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
-        g = dev::tanh_piecewise_linear_int16(g_pre_i16, d_tanh_lut_int16);
-    } else {
-        const int8_t g_pre_i8 = dev::clamp<int8_t>(g_pre_i32);
-        g = dev::tanh_piecewise_linear_int8(g_pre_i8, d_tanh_lut_int8);
-    }
+    // 调用门专用函数，自动选择 LUT
+    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const int32_t g = dev::tanh_g(g_pre_i32, bw_cfg.g_pre_, bw_cfg.g_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -351,7 +336,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
 
             // 手动计算期望的 tanh 输出
             const int16_t g_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
-            int seg_id = dev::find_segment_int16(g_pre_i16, d_tanh_lut_int16.segments);
+            int seg_id = dev::find_segment(static_cast<int32_t>(g_pre_i16), d_tanh_lut_int16.segments);
             printf("[G LUT] idx=%d seg_id=%d g_pre_i16=%d threshold[seg]=%d\n", debug_idx, seg_id,
                    g_pre_i16, d_tanh_lut_int16.segments[seg_id].threshold);
         }
