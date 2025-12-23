@@ -1,10 +1,10 @@
-#include <thrust/sort.h>
-#include <thrust/execution_policy.h>
-#include <thrust/iterator/zip_iterator.h>
-#include <thrust/functional.h>
 #include <thrust/count.h>
+#include <thrust/execution_policy.h>
+#include <thrust/functional.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/sort.h>
 
-#include "parallelAlgorithm.h"
+#include "parallel_algorithm.h"
 
 struct IsPositive {
   __host__ __device__

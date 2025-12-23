@@ -26,7 +26,7 @@
 #include <vector>
 
 #include "blas.h"
-#include "devVector.h"
+#include "dev_vector.h"
 #include "gru_quant.h"
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.h"

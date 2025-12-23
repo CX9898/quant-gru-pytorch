@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include "checkData.h"
-#include "devVector.h"
+#include "check_data.h"
+#include "dev_vector.h"
 #include "gru_interface.h"
 #include "histogram_collector.h"
 #include "quantized_unit_testing.cuh"
