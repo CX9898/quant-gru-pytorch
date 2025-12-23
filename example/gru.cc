@@ -320,7 +320,8 @@ int main(int argc, char* argv[]) {
                                            ? "HISTOGRAM (SQNR优化)"
                                            : "MIN_MAX (简单快速)");
 
-    OperatorQuantConfig bitwidth_config = OperatorQuantConfig::create(8);
+    OperatorQuantConfig bitwidth_config;
+    bitwidth_config.setAllBitWidths(8);
     GRUQuantitativeParameters quant_params;
     {
         ScopeTimer t("CalibrateAndInitLut:");
