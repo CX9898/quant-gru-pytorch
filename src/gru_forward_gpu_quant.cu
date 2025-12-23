@@ -634,9 +634,22 @@ ForwardPassQuant<XT, HT, WT, RT>::~ForwardPassQuant() {
     // dev::vector 自动管理内存，无需手动释放
 }
 
+// cuBLAS INT8 GEMM N 维度对齐常量
+constexpr int CUBLAS_INT8_N_ALIGNMENT = 32;
+constexpr int CUBLAS_INT8_N_THRESHOLD = 16;
+
+// 计算填充后的 N 值
+inline int computePaddedN(int N) {
+    if (N > CUBLAS_INT8_N_THRESHOLD && N % CUBLAS_INT8_N_ALIGNMENT != 0) {
+        return ((N + CUBLAS_INT8_N_ALIGNMENT - 1) / CUBLAS_INT8_N_ALIGNMENT) * CUBLAS_INT8_N_ALIGNMENT;
+    }
+    return N;
+}
+
 template <typename XT, typename HT, typename WT, typename RT>
 void ForwardPassQuant<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
     const int batch_size = data_->batch_size;
+    const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
     const int hidden3 = hidden_size * 3;
 
@@ -645,18 +658,37 @@ void ForwardPassQuant<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
         return;
     }
 
-    // 使用 dev::vector::resize 自动管理内存
-    // GEMM rescale 后的结果（int32）- 两种位宽都需要
-    tmp_Wx_.resize(hidden3 * steps * batch_size);
-    tmp_Rh_.resize(hidden3 * batch_size);
-
     if constexpr (sizeof(WT) == 1) {
-        // INT8: 需要权重和常量用于 rescaleGemmI32
-        // 注意：INT8 的 cuBLAS GEMM 直接输出 int32，不需要 int64 中间存储
+        // INT8: cuBLAS GEMM 要求 N 维度对齐，直接分配填充后的大小
+        const int N_Wx = steps * batch_size;
+        const int N_Wx_padded = computePaddedN(N_Wx);
+        tmp_Wx_.resize(hidden3 * N_Wx_padded);  // 分配填充后大小，GEMM 直接输出到这里
+        
+        // ComputeRh: N = batch_size（固定，只需分配一次）
+        if (N_padded_Rh_ == 0) {
+            N_padded_Rh_ = computePaddedN(batch_size);
+            tmp_Rh_.resize(hidden3 * N_padded_Rh_);  // 分配填充后大小
+            if (N_padded_Rh_ != batch_size) {
+                h_padded_.resize(hidden_size * N_padded_Rh_);
+                h_padded_.zero();  // 初始化填充部分为零
+            }
+        }
+        
+        // ComputeWx: 预分配输入填充缓冲区
+        if (N_Wx_padded != N_Wx) {
+            x_padded_.resize(input_size * N_Wx_padded);
+            x_padded_.zero();  // 初始化填充部分为零
+        }
+        
+        // 权重和常量
         if (W_sum_mul_x_zp_.size() == 0) {
             W_sum_mul_x_zp_.resize(hidden3);
             R_sum_mul_h_zp_.resize(hidden3);
         }
+    } else {
+        // INT16: 不需要填充
+        tmp_Wx_.resize(hidden3 * steps * batch_size);
+        tmp_Rh_.resize(hidden3 * batch_size);
     }
     // INT16: 使用融合 kernel，不需要权重和预计算
 
@@ -716,12 +748,27 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int s
         static const int32_t alpha32 = 1;
         static const int32_t beta32 = 0;
 
-        // GEMM: W @ x -> tmp_Wx_ (直接输出 int32)
-        blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, steps * batch_size,
-                       input_size, &alpha32, W, hidden_size * 3, x, input_size, &beta32,
-                       tmp_Wx_.data(), hidden_size * 3);
+        const int N = steps * batch_size;
+        const int M = hidden_size * 3;
+        const int K = input_size;
 
-        // Rescale: (Wx_i32 - W_sum_mul_x_zp) >> n + zp_Wx（原地操作）
+        // cuBLAS INT8 GEMM 要求 N 维度是 32 的倍数才能保证正确性
+        // tmp_Wx_ 已分配填充后的大小，可以直接输出
+        const int N_padded = computePaddedN(N);
+
+        if (N_padded != N) {
+            // 复制输入到填充缓冲区（填充部分已在 EnsureBuffersAllocated 中初始化为零）
+            d2d(x_padded_.data(), x, K * N);
+            // GEMM 直接输出到 tmp_Wx_（已分配足够大小）
+            blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N_padded, K, &alpha32, W, M,
+                           x_padded_.data(), K, &beta32, tmp_Wx_.data(), M);
+        } else {
+            // 不需要填充：直接 GEMM
+            blas<WT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha32, W, M, x, K,
+                           &beta32, tmp_Wx_.data(), M);
+        }
+
+        // Rescale: 只处理实际的 N 列（total_size = M * N）
         kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
             tmp_Wx_.data(), W_sum_mul_x_zp_.data(), rescale_param_.n_W_mul_x_div_Wx_.data(),
             rescale_param_.zp_Wx_, hidden_size * 3, total_size);
@@ -757,12 +804,25 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
         static const int32_t alpha32 = 1;
         static const int32_t beta32 = 0;
 
-        // GEMM: R @ h -> tmp_Rh_ (直接输出 int32)
-        blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, batch_size,
-                       hidden_size, &alpha32, R, hidden_size * 3, h, hidden_size, &beta32,
-                       tmp_Rh_.data(), hidden_size * 3);
+        const int N = batch_size;
+        const int M = hidden_size * 3;
+        const int K = hidden_size;
 
-        // Rescale: (Rh_i32 - R_sum_mul_h_zp) >> n + zp_Rh（原地操作）
+        // cuBLAS INT8 GEMM 要求 N 维度是 32 的倍数才能保证正确性
+        // tmp_Rh_ 已分配填充后的大小，可以直接输出
+        if (N_padded_Rh_ != N) {
+            // 复制输入到填充缓冲区（填充部分已在 EnsureBuffersAllocated 中初始化为零）
+            d2d(h_padded_.data(), h, K * N);
+            // GEMM 直接输出到 tmp_Rh_（已分配足够大小）
+            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N_padded_Rh_, K,
+                           &alpha32, R, M, h_padded_.data(), K, &beta32, tmp_Rh_.data(), M);
+        } else {
+            // 不需要填充：直接 GEMM
+            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
+                           &alpha32, R, M, h, K, &beta32, tmp_Rh_.data(), M);
+        }
+
+        // Rescale: 只处理实际的 N 列（total_size = M * N）
         kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
             tmp_Rh_.data(), R_sum_mul_h_zp_.data(), rescale_param_.n_R_mul_h_div_Rh_.data(),
             rescale_param_.zp_Rh_, hidden_size * 3, total_size);

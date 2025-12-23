@@ -71,13 +71,11 @@ class ForwardPassQuant {
     // 预分配的内部缓冲区（使用 dev::vector 自动管理内存）
     int max_steps_ = 0;
 
-    // GEMM 中间结果（int64 避免溢出）
-    dev::vector<int64_t> tmp_Wx_i64_;  // [hidden*3 * max_steps * batch]
-    dev::vector<int64_t> tmp_Rh_i64_;  // [hidden*3 * batch]
-
-    // GEMM rescale 后的结果（int32 供 gate 计算使用）
-    dev::vector<int32_t> tmp_Wx_;  // [hidden*3 * max_steps * batch]
-    dev::vector<int32_t> tmp_Rh_;  // [hidden*3 * batch]
+    // GEMM 结果（int32，rescale 后供 gate 计算使用）
+    // INT8: cuBLAS GEMM 直接输出 int32（不会溢出）
+    // INT16: 融合 kernel 边算边 rescale
+    dev::vector<int32_t> tmp_Wx_;  // [hidden*3 * max_steps * batch] (INT8 时分配填充后大小)
+    dev::vector<int32_t> tmp_Rh_;  // [hidden*3 * batch] (INT8 时分配填充后大小)
 
     // 权重和常量（预计算）
     dev::vector<int64_t> W_sum_mul_x_zp_;  // [hidden*3]
@@ -87,6 +85,14 @@ class ForwardPassQuant {
     // 缓存的权重指针（用于检测权重是否变化）
     const WT *cached_W_ = nullptr;
     const RT *cached_R_ = nullptr;
+
+    // cuBLAS INT8 GEMM N 维度填充（预分配避免每次调用时分配）
+    // ComputeRh: N = batch_size（固定）
+    int N_padded_Rh_ = 0;                  // 填充后的 N 值
+    dev::vector<HT> h_padded_;             // [hidden, N_padded_Rh]
+    
+    // ComputeWx: N = steps * batch_size（可变）
+    dev::vector<XT> x_padded_;             // [input, N_padded_Wx]
 };
 
 }  // namespace gru
