@@ -11,7 +11,7 @@
 #include <stdexcept>
 
 #include "histogram_collector.h"
-#include "parallelAlgorithm.h"
+#include "parallel_algorithm.h"
 #include "pot_sqnr_calibrator.h"
 #include "quantize_ops_helper.h"
 

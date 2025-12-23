@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "blas.h"
-#include "checkData.h"
+#include "check_data.h"
 #include "gru_quant.h"
 #include "quantize_ops_helper.h"
 

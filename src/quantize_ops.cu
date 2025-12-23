@@ -8,7 +8,7 @@
 #include <limits>
 #include <type_traits>
 
-#include "devVector.h"
+#include "dev_vector.h"
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.h"
 

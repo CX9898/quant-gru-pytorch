@@ -7,7 +7,7 @@
 #include <iostream>
 #include <vector>
 
-#include "devVector.h"
+#include "dev_vector.h"
 #include "gru_quantization_ranges.h"
 #include "quantize_bitwidth_config.h"
 
