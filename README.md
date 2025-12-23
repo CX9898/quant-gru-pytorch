@@ -8,9 +8,10 @@
 
 - **浮点和量化两种模式**：可在训练和推理时自由切换
 - **灵活的量化配置**：支持 8/16 位量化，可配置对称/非对称量化
-- **两种校准方法**：MinMax（快速）和 Histogram（AIMET 风格，高精度）
+- **两种校准方法**：Histogram（AIMET 风格，默认，高精度）和 MinMax（快速）
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
+- **ONNX 导出**：支持 QDQ 格式导出，便于部署到各类推理引擎
 
 ## 🔧 环境要求
 
@@ -147,12 +148,49 @@ for epoch in range(num_epochs):
 ### 校准方法选择
 
 ```python
-# MinMax 校准（默认，速度快）
-gru.calibration_method = 'minmax'
-
-# AIMET 风格直方图校准（精度高，推荐用于生产部署）
+# AIMET 风格直方图校准（默认，精度高，推荐用于生产部署）
 gru.calibration_method = 'histogram'
+
+# MinMax 校准（速度快，适合快速原型验证）
+gru.calibration_method = 'minmax'
 ```
+
+### ONNX 导出
+
+```python
+from quant_gru import QuantGRU
+import torch
+
+# 1. 创建并校准模型
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
+
+for batch in calibration_loader:
+    gru.calibrate(batch.cuda())
+gru.finalize_calibration()
+
+# 2. 启用导出模式
+gru.export_mode = True
+gru.eval()
+
+# 3. 导出 ONNX
+dummy_input = torch.randn(1, 50, 64).cuda()
+torch.onnx.export(
+    gru, dummy_input, "gru_quantized.onnx",
+    input_names=['input'],
+    output_names=['output', 'hidden'],
+    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
+                  'output': {0: 'batch', 1: 'seq_len'}},
+    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
+)
+
+# 4. 恢复 CUDA 模式（可选）
+gru.export_mode = False
+```
+
+> 💡 **导出模式说明**：
+> - `export_mode=True` 时使用纯 PyTorch 实现，可被 ONNX 追踪
+> - 量化模式下默认使用 QDQ（Quantize-Dequantize）格式，推理引擎会自动优化
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
@@ -219,8 +257,36 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 | 方法 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
+| **Histogram (AIMET)** ⭐ 默认 | 精度高，SQNR 优化 | 计算开销稍大 | 生产部署 |
 | **MinMax** | 速度快，实现简单 | 对异常值敏感 | 快速原型验证 |
-| **Histogram (AIMET)** | 精度高，SQNR 优化 | 计算开销稍大 | 生产部署 |
+
+## 📦 ONNX 导出
+
+### 导出模式
+
+`QuantGRU` 支持通过 `export_mode` 属性切换到纯 PyTorch 实现，以便 ONNX 追踪：
+
+| 属性 | 说明 |
+|------|------|
+| `export_mode=False` | **默认**，使用 CUDA C++ 实现（高性能推理） |
+| `export_mode=True` | 使用纯 PyTorch 实现（可被 ONNX 追踪） |
+
+### ONNX 导出子模式
+
+量化模式下，可通过 `set_onnx_export_mode()` 设置具体的导出格式：
+
+| 模式 | 说明 | 适用场景 |
+|------|------|----------|
+| `'qdq'` | **默认**，QDQ（Quantize-Dequantize）格式 | 通用推理引擎（TensorRT、ONNX Runtime） |
+| `'fixedpoint'` | 纯定点计算，与 CUDA 实现完全一致 | 精度验证、自定义硬件 |
+| `'float'` | 标准浮点计算（无量化） | 调试、基准测试 |
+
+```python
+# 设置 ONNX 导出子模式
+gru.set_onnx_export_mode('qdq')      # 默认，推荐
+gru.set_onnx_export_mode('fixedpoint')  # 精度验证
+gru.set_onnx_export_mode('float')    # 无量化
+```
 
 ## 📝 API 参考
 
@@ -230,15 +296,27 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 class QuantGRU(nn.Module):
     def __init__(
         self,
-        input_size: int,           # 输入特征维度
-        hidden_size: int,          # 隐藏状态维度
-        num_layers: int = 1,       # 层数（目前仅支持 1）
-        bias: bool = True,         # 是否使用偏置
-        batch_first: bool = False, # 输入格式
+        input_size: int,              # 输入特征维度
+        hidden_size: int,             # 隐藏状态维度
+        num_layers: int = 1,          # 层数（目前仅支持 1）
+        bias: bool = True,            # 是否使用偏置
+        batch_first: bool = False,    # 输入格式
         bidirectional: bool = False,  # 是否双向
         use_quantization: bool = False  # 是否启用量化
     )
+    
+    # 重要属性（可在创建后设置）
+    gru.export_mode = True           # ONNX 导出模式
+    gru.calibration_method = 'histogram'  # 校准方法（默认）
 ```
+
+### 主要属性
+
+| 属性 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `use_quantization` | bool | False | 是否启用量化推理 |
+| `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
+| `calibration_method` | str | 'histogram' | 校准方法：'histogram'（高精度）或 'minmax'（快速） |
 
 ### 主要方法
 
@@ -251,16 +329,8 @@ class QuantGRU(nn.Module):
 | `load_bitwidth_config(path, verbose=False)` | 加载位宽配置 |
 | `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置统一位宽 |
 | `is_calibrated()` | 检查是否已校准 |
-| `print_quant_params()` | 打印量化参数 |
-| `print_quant_ranges()` | 打印量化范围 |
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-MIT License
+| `set_onnx_export_mode(mode)` | 设置 ONNX 导出模式：'qdq'（默认）、'fixedpoint'、'float' |
+| `get_onnx_export_mode()` | 获取当前 ONNX 导出模式 |
 
 ## 🏗️ 项目结构
 
@@ -282,7 +352,7 @@ quant-gru-pytorch/
 │   ├── gru_interface.cpp       # 接口实现
 │   └── quantize_ops.cu         # 量化操作实现
 ├── pytorch/                    # PyTorch 绑定和 Python 接口
-│   ├── quant_gru.py            # 量化 GRU 类
+│   ├── quant_gru.py            # 量化 GRU 类（含 CUDA 和纯 PyTorch 双实现）
 │   ├── setup.py                # Python 扩展编译配置
 │   ├── lib/                    # 编译生成的库文件
 │   ├── config/                 # 配置文件
