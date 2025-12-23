@@ -6,39 +6,29 @@ QuantGRU - 支持量化的 GRU 实现
     - 支持 INT8/INT16/INT32 量化推理
     - 支持 MinMax 和 AIMET 风格直方图校准
     - 延迟初始化设计，支持 pickle/deepcopy 序列化
-    - 支持 ONNX 导出（export_mode=True 时使用纯 PyTorch 实现）
+    - 支持 ONNX 导出（使用纯 PyTorch 实现）
     - 量化模式下使用纯定点计算，与 CUDA 实现完全一致
 
-典型用法:
-    >>> gru = QuantGRU(64, 128, batch_first=True)
-    >>> gru.calibrate(calibration_data)
-    >>> gru.finalize_calibration()
-    >>> gru.use_quantization = True
-    >>> output, h_n = gru(input_data)
+关键属性:
+    - use_quantization: 是否启用量化（默认 False）
+    - export_mode: 是否使用 ONNX 导出模式（默认 False）
 
-ONNX 导出用法:
-    >>> from quant_gru import set_export_mode, verify_export_mode
+典型用法:
+    >>> from quant_gru import QuantGRU
     >>>
-    >>> # 方式 1: 使用辅助函数
-    >>> set_export_mode(model, True)   # 切换到 PyTorch 模式
-    >>> torch.onnx.export(model, dummy_input, "model.onnx")
-    >>> set_export_mode(model, False)  # 恢复 CUDA 模式
-    >>>
-    >>> # 方式 2: 直接设置属性
-    >>> gru.export_mode = True
-    >>> torch.onnx.export(model, dummy_input, "model.onnx")
-    >>> gru.export_mode = False
-    >>>
-    >>> # 验证输出一致性
-    >>> verify_export_mode(model, dummy_input)
-    
-量化 ONNX 导出:
-    >>> # 启用量化后导出（纯定点计算，与 CUDA 完全一致）
-    >>> gru.calibrate(data)
-    >>> gru.finalize_calibration()
+    >>> # 创建并校准模型
+    >>> gru = QuantGRU(64, 128, batch_first=True).cuda()
+    >>> gru.calibrate(calibration_data)
     >>> gru.use_quantization = True
+    >>>
+    >>> # 正常推理（CUDA 量化模式）
+    >>> output = gru(x)
+    
+ONNX 导出:
+    >>> # 启用导出模式（内部默认使用 QDQ 格式）
     >>> gru.export_mode = True
-    >>> torch.onnx.export(model, dummy_input, "model_quant.onnx")
+    >>> torch.onnx.export(gru, x, "model.onnx")
+    >>> gru.export_mode = False  # 恢复
 """
 
 import json
@@ -198,80 +188,6 @@ def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
 # ============================================================
 #                      权重格式转换
 # ============================================================
-
-def set_export_mode(model: nn.Module, mode: bool = True) -> int:
-    """
-    设置模型中所有 QuantGRU 的导出模式
-
-    Args:
-        model: 包含 QuantGRU 的模型
-        mode: True 启用导出模式（纯 PyTorch），False 使用 CUDA
-
-    Returns:
-        设置的 QuantGRU 数量
-
-    Example:
-        >>> set_export_mode(model, True)
-        >>> torch.onnx.export(model, dummy_input, "model.onnx")
-        >>> set_export_mode(model, False)  # 恢复 CUDA 模式
-    """
-    count = 0
-    for m in model.modules():
-        if isinstance(m, QuantGRU):
-            m.export_mode = mode
-            count += 1
-    return count
-
-
-def verify_export_mode(model: nn.Module, dummy_input: torch.Tensor,
-                       rtol: float = 1e-3, atol: float = 1e-5) -> bool:
-    """
-    验证 CUDA 和 Python 实现的输出一致性
-
-    Args:
-        model: 包含 QuantGRU 的模型
-        dummy_input: 测试输入
-        rtol: 相对误差容忍度
-        atol: 绝对误差容忍度
-
-    Returns:
-        True 如果输出一致，否则 False
-    """
-    model.eval()
-
-    with torch.no_grad():
-        # CUDA 模式
-        set_export_mode(model, False)
-        output_cuda = model(dummy_input)
-        if isinstance(output_cuda, tuple):
-            output_cuda = output_cuda[0]
-
-        # Python 模式
-        set_export_mode(model, True)
-        output_python = model(dummy_input)
-        if isinstance(output_python, tuple):
-            output_python = output_python[0]
-
-        # 恢复 CUDA 模式
-        set_export_mode(model, False)
-
-    # 比较
-    if output_cuda.shape != output_python.shape:
-        print(f"❌ 形状不匹配: CUDA {output_cuda.shape} vs Python {output_python.shape}")
-        return False
-
-    max_diff = (output_cuda - output_python).abs().max().item()
-    mean_diff = (output_cuda - output_python).abs().mean().item()
-
-    is_close = torch.allclose(output_cuda, output_python, rtol=rtol, atol=atol)
-
-    if is_close:
-        print(f"✅ 输出一致: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
-    else:
-        print(f"❌ 输出不一致: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
-
-    return is_close
-
 
 def reorder_weights_pytorch_to_haste(w: torch.Tensor) -> torch.Tensor:
     """
@@ -1478,29 +1394,24 @@ class QuantGRU(nn.Module):
             return self._bitwidth_config_dict.get(f'{op_name}_symmetric_', True)
         return True
 
-    def set_onnx_export_mode(self, mode: str = 'qdq'):
-        """
-        设置 ONNX 导出模式
-        
-        Args:
-            mode: 导出模式
-                - 'qdq': QDQ 格式（推荐）- 使用标准算子 + 伪量化，推理引擎友好
-                - 'fixedpoint': 纯定点格式 - 与 CUDA 完全一致，用于精度验证
-                - 'float': 浮点格式 - 无量化
-        
-        Note:
-            调用此方法会自动设置 export_mode=True，使用纯 PyTorch 实现而非 CUDA 扩展。
-            这是 ONNX 导出所必需的，因为 CUDA C++ 扩展无法被 torch.export 追踪。
-        """
-        if mode not in ('qdq', 'fixedpoint', 'float'):
-            raise ValueError(f"Invalid ONNX export mode: {mode}. Use 'qdq', 'fixedpoint', or 'float'")
-        self._onnx_export_mode = mode
-        # 自动启用纯 PyTorch 路径，这是 ONNX 导出必需的
-        self.export_mode = True
-    
     def get_onnx_export_mode(self) -> str:
         """获取当前 ONNX 导出模式"""
         return getattr(self, '_onnx_export_mode', 'qdq')
+
+    def set_onnx_export_mode(self, mode: str):
+        """
+        设置 ONNX 导出模式（高级用法，一般不需要调用）
+        
+        Args:
+            mode: 导出模式
+                - 'qdq': QDQ 伪量化格式（默认，推荐）
+                - 'fixedpoint': 纯定点格式
+                - 'float': 浮点格式（无量化）
+        """
+        valid_modes = ('qdq', 'fixedpoint', 'float')
+        if mode not in valid_modes:
+            raise ValueError(f"Invalid mode: '{mode}'. Use one of {valid_modes}")
+        self._onnx_export_mode = mode
 
     def _forward_python_single_direction(
             self,
