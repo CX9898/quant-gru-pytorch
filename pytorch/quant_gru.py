@@ -12,6 +12,7 @@ QuantGRU - 支持量化的 GRU 实现
 关键属性:
     - use_quantization: 是否启用量化（默认 False）
     - export_mode: 是否使用 ONNX 导出模式（默认 False）
+    - export_format: 导出格式 'float'|'qdq'|'fixedpoint'（高级选项，默认 'float'）
 
 典型用法:
     >>> from quant_gru import QuantGRU
@@ -975,7 +976,12 @@ class QuantGRU(nn.Module):
     ONNX 导出流程:
         1. gru.export_mode = True
         2. torch.onnx.export(model, ...)
-        3. gru.export_mode = False  # 可选，恢复 CUDA 模式
+        3. gru.export_mode = False  # 恢复 CUDA 模式
+    
+    高级：指定导出格式:
+        gru.export_format = 'float'      # 浮点（默认，与 Haste 一致）
+        gru.export_format = 'qdq'        # QDQ 伪量化（量化模型推荐）
+        gru.export_format = 'fixedpoint' # 纯定点（与 CUDA 量化一致）
 
     Args:
         input_size: 输入特征维度
@@ -1021,9 +1027,13 @@ class QuantGRU(nn.Module):
         self.use_quantization = use_quantization
         self.num_directions = 2 if bidirectional else 1
 
-        # ONNX 导出模式：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
-        # 量化模式下使用纯定点实现（与 CUDA 完全一致）
+        # ONNX 导出开关：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
         self.export_mode = False
+        # 导出格式（高级选项，仅在 export_mode=True 时有效）
+        # 'float': 浮点（默认，与 Haste GRU 行为一致）
+        # 'qdq': QDQ 伪量化（推荐用于量化模型）
+        # 'fixedpoint': 纯定点（与 CUDA 量化一致，用于验证）
+        self._export_format = 'float'
 
         # 权重参数（命名与 nn.GRU 一致）
         self.weight_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size, input_size))
@@ -1394,24 +1404,30 @@ class QuantGRU(nn.Module):
             return self._bitwidth_config_dict.get(f'{op_name}_symmetric_', True)
         return True
 
-    def get_onnx_export_mode(self) -> str:
-        """获取当前 ONNX 导出模式"""
-        return getattr(self, '_onnx_export_mode', 'qdq')
-
-    def set_onnx_export_mode(self, mode: str):
+    @property
+    def export_format(self) -> str:
         """
-        设置 ONNX 导出模式（高级用法，一般不需要调用）
+        获取导出格式（高级选项，仅在 export_mode=True 时有效）
+        
+        Returns:
+            'float': 浮点格式（默认，与 Haste GRU 行为一致）
+            'qdq': QDQ 伪量化格式（推荐用于量化模型 ONNX 导出）
+            'fixedpoint': 纯定点格式（与 CUDA 量化完全一致，用于精度验证）
+        """
+        return self._export_format
+    
+    @export_format.setter
+    def export_format(self, mode: str):
+        """
+        设置导出格式（高级用法，大多数用户不需要修改）
         
         Args:
-            mode: 导出模式
-                - 'qdq': QDQ 伪量化格式（默认，推荐）
-                - 'fixedpoint': 纯定点格式
-                - 'float': 浮点格式（无量化）
+            mode: 'qdq' | 'fixedpoint' | 'float'
         """
         valid_modes = ('qdq', 'fixedpoint', 'float')
         if mode not in valid_modes:
-            raise ValueError(f"Invalid mode: '{mode}'. Use one of {valid_modes}")
-        self._onnx_export_mode = mode
+            raise ValueError(f"Invalid export_format: '{mode}'. Use one of {valid_modes}")
+        self._export_format = mode
 
     def _forward_python_single_direction(
             self,
@@ -1426,50 +1442,52 @@ class QuantGRU(nn.Module):
         """
         纯 PyTorch 实现的单向 GRU 前向传播（可被 ONNX 追踪）
 
-        GRU 公式（PyTorch 格式，门顺序为 r, z, n）：
-            r = sigmoid(W_ir @ x + b_ir + W_hr @ h + b_hr)  # reset gate
-            z = sigmoid(W_iz @ x + b_iz + W_hz @ h + b_hz)  # update gate
-            n = tanh(W_in @ x + b_in + r * (W_hn @ h + b_hn))  # new gate
-            h' = (1 - z) * n + z * h
+        GRU 公式（Haste 格式，门顺序为 z, r, g）：
+            z = sigmoid(W_z @ x + R_z @ h + bx_z + br_z)  # update gate
+            r = sigmoid(W_r @ x + R_r @ h + bx_r + br_r)  # reset gate
+            g = tanh(W_g @ x + r * (R_g @ h + br_g) + bx_g)  # candidate gate
+            h' = z * h + (1 - z) * g
 
         量化模式下根据 ONNX 导出模式选择实现：
             - 'qdq': QDQ 格式，使用标准算子 + 伪量化
             - 'fixedpoint': 纯定点，与 CUDA 完全一致
-            - 'float': 标准浮点计算
+            - 'float': 标准浮点计算（Haste 格式）
 
         Args:
             input: [T, B, I] 输入序列
             h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重
-            weight_hh: [3*H, H] 循环权重
-            bias_ih: [3*H] 输入偏置 或 None
-            bias_hh: [3*H] 循环偏置 或 None
+            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部自动转换)
+            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部自动转换)
+            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部自动转换)
+            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部自动转换)
             quant_params: 量化参数（来自 finalize_calibration）
 
         Returns:
             output: [T, B, H] 输出序列
             h_n: [1, B, H] 最终隐藏状态
         """
-        # 量化模式
-        if self.use_quantization and quant_params is not None:
-            export_mode = self.get_onnx_export_mode()
-            
-            if export_mode == 'qdq':
-                # QDQ 格式：推荐用于 ONNX 导出
-                return self._forward_onnx_qdq_single_direction(
-                    input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
-                )
-            elif export_mode == 'fixedpoint':
-                # 纯定点：与 CUDA 完全一致，用于精度验证
-                return self._forward_python_fixedpoint_single_direction(
-                    input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
-                )
-            # else: fall through to float mode
-
-        # 浮点模式：标准 GRU 计算
-        return self._forward_python_float_single_direction(
-            input, h0, weight_ih, weight_hh, bias_ih, bias_hh
-        )
+        # 根据 export_format 选择实现
+        if self._export_format == 'float':
+            # 浮点模式：直接使用浮点实现
+            return self._forward_python_float_single_direction(
+                input, h0, weight_ih, weight_hh, bias_ih, bias_hh
+            )
+        
+        # qdq/fixedpoint 需要量化参数
+        if quant_params is None:
+            raise RuntimeError(
+                f"export_format='{self._export_format}' 需要量化参数，"
+                f"请先调用 calibrate() 和 finalize_calibration()"
+            )
+        
+        if self._export_format == 'qdq':
+            return self._forward_onnx_qdq_single_direction(
+                input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
+            )
+        else:  # 'fixedpoint'
+            return self._forward_python_fixedpoint_single_direction(
+                input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
+            )
 
     def _forward_python_float_single_direction(
             self,
@@ -1481,18 +1499,24 @@ class QuantGRU(nn.Module):
             bias_hh: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        浮点实现的单向 GRU 前向传播（PyTorch 标准格式）
+        浮点实现的单向 GRU 前向传播（Haste 格式）
         
-        用于非量化 ONNX 导出，与 PyTorch 官方 GRU 实现兼容
-        门控顺序：PyTorch 格式 (r, z, n)
+        与 HasteGRU CUDA 浮点推理行为一致
+        门控顺序：Haste 格式 (z, r, g)
+        
+        公式（与 gru_forward_gpu.cu 一致）：
+            z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
+            r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
+            g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
+            h_new = z * h_old + (1 - z) * g
         
         Args:
             input: [T, B, I] 输入序列
             h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重
-            weight_hh: [3*H, H] 循环权重
-            bias_ih: [3*H] 输入偏置 或 None
-            bias_hh: [3*H] 循环偏置 或 None
+            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部转换)
+            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部转换)
+            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部转换)
+            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部转换)
             
         Returns:
             output: [T, B, H] 输出序列
@@ -1509,39 +1533,57 @@ class QuantGRU(nn.Module):
         else:
             h = h0
 
-        # 处理偏置
+        # 权重格式转换：PyTorch (r,z,n) -> Haste (z,r,g)
+        W = reorder_weights_pytorch_to_haste(weight_ih)  # [3*H, I]
+        R = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
+
+        # 处理偏置并转换格式
         if bias_ih is None:
-            bias_ih = torch.zeros(3 * H, device=device, dtype=dtype)
+            bx = torch.zeros(3 * H, device=device, dtype=dtype)
+        else:
+            bx = reorder_weights_pytorch_to_haste(bias_ih)
         if bias_hh is None:
-            bias_hh = torch.zeros(3 * H, device=device, dtype=dtype)
+            br = torch.zeros(3 * H, device=device, dtype=dtype)
+        else:
+            br = reorder_weights_pytorch_to_haste(bias_hh)
+
+        # ========== 循环外一次性计算 Wx GEMM（与 CUDA 一致）==========
+        # input: [T, B, I] -> x_flat: [T*B, I]
+        # W: [3*H, I] -> W.t(): [I, 3*H]
+        # Wx_all: [T*B, 3*H] -> reshape: [T, B, 3*H]
+        x_flat = input.reshape(T * B, I)
+        Wx_all = torch.mm(x_flat, W.t())  # [T*B, 3*H]
+        Wx_all = Wx_all.reshape(T, B, 3 * H)  # [T, B, 3*H]
+
+        # 预分割偏置（循环外完成）
+        bx_z, bx_r, bx_g = bx.chunk(3)
+        br_z, br_r, br_g = br.chunk(3)
 
         outputs = []
 
         for t in range(T):
-            x_t = input[t]  # [B, I]
+            # 获取当前时间步的 Wx（已在循环外计算好）
+            Wx = Wx_all[t]  # [B, 3*H]
             
-            # Wx = x @ weight_ih.T, shape [B, 3H]
-            Wx = torch.mm(x_t, weight_ih.t())
-            # Rh = h @ weight_hh.T, shape [B, 3H]
-            Rh = torch.mm(h, weight_hh.t())
+            # Rh = h @ R.T, shape [B, 3H]（依赖上一步的 h，必须在循环内）
+            Rh = torch.mm(h, R.t())
 
-            # 分割门控（PyTorch 格式：r, z, n）
-            Wx_r, Wx_z, Wx_n = Wx.chunk(3, dim=1)
-            Rh_r, Rh_z, Rh_n = Rh.chunk(3, dim=1)
-            b_ir, b_iz, b_in = bias_ih.chunk(3)
-            b_hr, b_hz, b_hn = bias_hh.chunk(3)
+            # 分割门控（Haste 格式：z, r, g）
+            Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)
+            Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)
 
-            # Reset gate
-            r = torch.sigmoid(Wx_r + Rh_r + b_ir + b_hr)
+            # Update gate (z)
+            z = torch.sigmoid(Wx_z + Rh_z + bx_z + br_z)
 
-            # Update gate
-            z = torch.sigmoid(Wx_z + Rh_z + b_iz + b_hz)
+            # Reset gate (r)
+            r = torch.sigmoid(Wx_r + Rh_r + bx_r + br_r)
 
-            # New gate
-            n = torch.tanh(Wx_n + b_in + r * (Rh_n + b_hn))
+            # Candidate gate (g): r 只乘以 (Rh_g + br_g)
+            Rh_add_br_g = Rh_g + br_g
+            g = torch.tanh(Wx_g + r * Rh_add_br_g + bx_g)
 
-            # 新隐藏状态
-            h = (1 - z) * n + z * h
+            # 新隐藏状态: h_new = z * h_old + (1 - z) * g
+            h = z * h + (1 - z) * g
 
             outputs.append(h)
 
