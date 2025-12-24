@@ -26,10 +26,13 @@ QuantGRU - 支持量化的 GRU 实现
     >>> output = gru(x)
     
 ONNX 导出:
-    >>> # 启用导出模式（内部默认使用 QDQ 格式）
+    >>> # 启用导出模式（默认使用浮点格式）
     >>> gru.export_mode = True
     >>> torch.onnx.export(gru, x, "model.onnx")
     >>> gru.export_mode = False  # 恢复
+    >>> 
+    >>> # 量化模型导出需指定格式
+    >>> gru.export_format = 'qdq'  # 'float' | 'qdq' | 'fixedpoint'
 """
 
 import json
