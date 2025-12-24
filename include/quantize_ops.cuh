@@ -330,6 +330,6 @@ __device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, Qua
 
 // ==================== 主机端 LUT 生成函数声明 ====================
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                                 int32_t zp_y, QuantBitWidth input_bw);
+                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
 SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                              int32_t zp_y, QuantBitWidth input_bw);
+                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
