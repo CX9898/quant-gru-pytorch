@@ -17,99 +17,14 @@
 
 // 统一的 LUT 生成函数（前向声明）
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, 
-                                 int32_t zp_y, QuantBitWidth input_bw);
+                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
 SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, 
-                              int32_t zp_y, QuantBitWidth input_bw);
+                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
 
 // 分段线性量化常量内存（统一结构）
 __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
 __constant__ SigmoidLUT d_sigmoid_r_lut;  // r 门的 Sigmoid LUT
 __constant__ SigmoidLUT d_tanh_lut;       // g 门的 Tanh LUT
-
-// sigmoid 输出使用 uint8_t，因为 sigmoid ∈ [0, 1] 没有负数
-std::vector<uint8_t> generate_sigmoid_int8_lut(float scale_z_pre, int32_t zp_z_pre, float scale_z,
-                                               int32_t zp_z) {
-    std::vector<uint8_t> lut(256);
-
-    for (int i = 0; i < 256; i++) {
-        int x_i8 = i - 128;
-
-        const float x_fp = static_cast<float>(x_i8 - zp_z_pre) * scale_z_pre;
-        const float y_fp = 1.f / (1.f + std::exp(-x_fp));
-
-        // 输出使用 uint8_t 范围 [0, 255]
-        int y_u8 = static_cast<int>(std::round(y_fp / scale_z + zp_z));
-        if (y_u8 < 0) y_u8 = 0;
-        if (y_u8 > 255) y_u8 = 255;
-
-        lut[i] = static_cast<uint8_t>(y_u8);
-    }
-    return lut;
-}
-
-std::vector<int8_t> generate_tanh_int8_lut(float scale_pre, int32_t zp_pre, float scale_out,
-                                           int32_t zp_out) {
-    std::vector<int8_t> lut(256);
-
-    for (int i = 0; i < 256; i++) {
-        int x_i8 = i - 128;
-
-        float x_fp = (x_i8 - zp_pre) * scale_pre;
-        float y_fp = std::tanh(x_fp);
-
-        int y_i8 = static_cast<int>(std::round(y_fp / scale_out + zp_out));
-        if (y_i8 < -128) y_i8 = -128;
-        if (y_i8 > 127) y_i8 = 127;
-
-        lut[i] = static_cast<int8_t>(y_i8);
-    }
-    return lut;
-}
-
-// sigmoid 输出使用 uint8_t，因为 sigmoid ∈ [0, 1] 没有负数
-std::vector<uint8_t> generate_sigmoid_int8_lut_exp2(int8_t exp2_inv_z_pre, int32_t zp_z_pre,
-                                                    int8_t exp2_inv_z, int32_t zp_z) {
-    std::vector<uint8_t> lut(256);
-
-    for (int i = 0; i < 256; i++) {
-        int x_i8 = i - 128;
-
-        // （1）反量化 x
-        float x_fp = dequantize(x_i8, exp2_inv_z_pre, zp_z_pre);
-
-        // （2）计算 sigmoid
-        float y_fp = 1.f / (1.f + std::exp(-x_fp));
-
-        // （3）量化 y 到 uint8_t 范围 [0, 255]
-        int y_u8 = quantize<uint8_t>(y_fp, exp2_inv_z, zp_z);
-
-        lut[i] = static_cast<uint8_t>(y_u8);
-    }
-
-    return lut;
-}
-
-std::vector<int8_t> generate_tanh_int8_lut_exp2(int8_t exp2_inv_pre, int32_t zp_pre,
-                                                int8_t exp2_inv_out, int32_t zp_out) {
-    std::vector<int8_t> lut(256);
-
-    for (int i = 0; i < 256; i++) {
-        int x_i8 = i - 128;
-
-        // （1）反量化 x
-        float x_fp = dequantize(x_i8, exp2_inv_pre, zp_pre);
-
-        // （2）tanh
-        float y_fp = std::tanh(x_fp);
-
-        // （3）量化 y
-        int y_i8 = quantize<int8_t>(y_fp, exp2_inv_out, zp_out);
-
-        lut[i] = static_cast<int8_t>(y_i8);
-    }
-
-    return lut;
-}
 
 // 生成分段线性量化表（基于GRUQuantitativeParameters，根据bitwidth_config_中的实际位宽配置）
 // 统一的 LUT 生成与初始化函数
@@ -120,21 +35,21 @@ void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
     SigmoidLUT z_lut = generate_sigmoid_lut(
         params.exp2_inv_z_pre_, params.zp_z_pre_,
         params.exp2_inv_z_out_, params.zp_z_out_,
-        config.z_pre_);
+        config.z_pre_, config.z_out_);  // 传入输入和输出位宽
     cudaMemcpyToSymbol(d_sigmoid_z_lut, &z_lut, sizeof(SigmoidLUT));
 
     // r 门 Sigmoid
     SigmoidLUT r_lut = generate_sigmoid_lut(
         params.exp2_inv_r_pre_, params.zp_r_pre_,
         params.exp2_inv_r_out_, params.zp_r_out_,
-        config.r_pre_);
+        config.r_pre_, config.r_out_);  // 传入输入和输出位宽
     cudaMemcpyToSymbol(d_sigmoid_r_lut, &r_lut, sizeof(SigmoidLUT));
 
     // g 门 Tanh
     SigmoidLUT g_lut = generate_tanh_lut(
         params.exp2_inv_g_pre_, params.zp_g_pre_,
         params.exp2_inv_g_out_, params.zp_g_out_,
-        config.g_pre_);
+        config.g_pre_, config.g_out_);  // 传入输入和输出位宽
     cudaMemcpyToSymbol(d_tanh_lut, &g_lut, sizeof(SigmoidLUT));
 
 #ifdef DEBUG_QUANT
@@ -617,9 +532,10 @@ std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int n
  * @param shift_bits_y 输出量化 shift bits
  * @param zp_y 输出 zero-point
  * @param input_bw 输入位宽（决定输入范围）
+ * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                                 int32_t zp_y, QuantBitWidth input_bw) {
+                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围
     int32_t quant_min, quant_max;
     if (input_bw == QuantBitWidth::INT16) {
@@ -689,10 +605,22 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
-    // 使用 INT16 精度的 shift_bits_b，避免 n_BX_total 过大导致精度损失
-    // q_b 用 INT32 存储不会溢出，但 shift_bits_b 要控制在合理范围
-    int8_t shift_bits_b = determine_shift_bits_int16(b_abs_max);
-    int8_t shift_bits_c = determine_shift_bits_int16(c_abs_max);
+    // 根据输出位宽选择正确的 shift_bits 精度
+    // 8bit 输出用 INT8 精度，16bit 输出用 INT16 精度
+    int8_t shift_bits_b, shift_bits_c;
+    bool is_8bit_output = (output_bw == QuantBitWidth::INT8 || output_bw == QuantBitWidth::UINT8);
+    if (is_8bit_output) {
+        shift_bits_b = determine_shift_bits_int8(b_abs_max);
+        shift_bits_c = determine_shift_bits_int8(c_abs_max);
+    } else {
+        shift_bits_b = determine_shift_bits_int16(b_abs_max);
+        shift_bits_c = determine_shift_bits_int16(c_abs_max);
+    }
+
+#ifdef DEBUG_QUANT
+    printf("[DEBUG] generate_sigmoid_lut: output_bw=%d, is_8bit=%d, shift_bits_b=%d, shift_bits_c=%d\n",
+           static_cast<int>(output_bw), is_8bit_output, shift_bits_b, shift_bits_c);
+#endif
 
     // 第三遍扫描：量化每段
     for (int i = 0; i < NUM_SEGMENTS; i++) {
@@ -727,9 +655,15 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
 
 /**
  * @brief 统一的 Tanh LUT 生成函数
+ * @param shift_bits_x 输入量化 shift bits
+ * @param zp_x 输入 zero-point
+ * @param shift_bits_y 输出量化 shift bits
+ * @param zp_y 输出 zero-point
+ * @param input_bw 输入位宽（决定输入范围）
+ * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
 SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                              int32_t zp_y, QuantBitWidth input_bw) {
+                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围
     int32_t quant_min, quant_max;
     if (input_bw == QuantBitWidth::INT16) {
@@ -796,13 +730,21 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
-    // 使用 INT16 精度的 shift_bits_b，避免 n_BX_total 过大
-    // tanh 斜率最大 1.0，用 INT16 精度足够（ceil 后 shift_bits_b = 15）
-    int8_t shift_bits_b = determine_shift_bits_int16(b_abs_max);
-    int8_t shift_bits_c = determine_shift_bits_int16(c_abs_max);
+    // 根据输出位宽选择正确的 shift_bits 精度
+    // 8bit 输出用 INT8 精度，16bit 输出用 INT16 精度
+    int8_t shift_bits_b, shift_bits_c;
+    bool is_8bit_output = (output_bw == QuantBitWidth::INT8 || output_bw == QuantBitWidth::UINT8);
+    if (is_8bit_output) {
+        shift_bits_b = determine_shift_bits_int8(b_abs_max);
+        shift_bits_c = determine_shift_bits_int8(c_abs_max);
+    } else {
+        shift_bits_b = determine_shift_bits_int16(b_abs_max);
+        shift_bits_c = determine_shift_bits_int16(c_abs_max);
+    }
 
 #ifdef DEBUG_QUANT
-    printf("[DEBUG] generate_tanh_lut: b_abs_max=%.6f, shift_bits_b=%d\n", b_abs_max, shift_bits_b);
+    printf("[DEBUG] generate_tanh_lut: output_bw=%d, is_8bit=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
+           static_cast<int>(output_bw), is_8bit_output, b_abs_max, shift_bits_b, shift_bits_c);
 #endif
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
