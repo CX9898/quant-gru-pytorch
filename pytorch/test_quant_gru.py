@@ -30,6 +30,26 @@ INPUT_HIGH = 0.8
 INPUT_DEVICE = 'cuda'
 INPUT_DTYPE = torch.float32
 
+# ============================================================================
+# 测试阈值配置
+# 当余弦相似度低于下限或MSE高于上限时，测试将立即报错
+# ============================================================================
+# 非量化版本阈值（应该非常精确）
+NON_QUANT_MSE_THRESHOLD = 1e-5
+NON_QUANT_COS_SIM_THRESHOLD = 0.9999
+
+# 8bit 量化版本阈值
+INT8_MSE_THRESHOLD = 0.01
+INT8_COS_SIM_THRESHOLD = 0.99
+
+# 16bit 量化版本阈值（比8bit更精确）
+INT16_MSE_THRESHOLD = 0.001
+INT16_COS_SIM_THRESHOLD = 0.999
+
+# 训练测试阈值
+TRAINING_MSE_THRESHOLD = 1e-4
+TRAINING_COS_SIM_THRESHOLD = 0.999
+
 
 # ============================================================================
 
@@ -336,9 +356,14 @@ def test_quantized_int8():
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
-    # 量化版本会有误差，但应该在合理范围内
-    print(f"✅ 8bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
-          f"余弦相似度: {results['cos_sim_output']:.6f}")
+    # 检查阈值
+    assert results['mse_output'] < INT8_MSE_THRESHOLD, \
+        f"8bit 量化版本 MSE 过大: {results['mse_output']:.6f} >= {INT8_MSE_THRESHOLD}"
+    assert results['cos_sim_output'] > INT8_COS_SIM_THRESHOLD, \
+        f"8bit 量化版本余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+
+    print(f"✅ 8bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
 
 
 def test_quantized_int16():
@@ -390,9 +415,14 @@ def test_quantized_int16():
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
-    # 16bit 量化应该比 8bit 更精确
-    print(f"✅ 16bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
-          f"余弦相似度: {results['cos_sim_output']:.6f}")
+    # 检查阈值（16bit 量化应该比 8bit 更精确）
+    assert results['mse_output'] < INT16_MSE_THRESHOLD, \
+        f"16bit 量化版本 MSE 过大: {results['mse_output']:.6f} >= {INT16_MSE_THRESHOLD}"
+    assert results['cos_sim_output'] > INT16_COS_SIM_THRESHOLD, \
+        f"16bit 量化版本余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT16_COS_SIM_THRESHOLD}"
+
+    print(f"✅ 16bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT16_MSE_THRESHOLD}), "
+          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT16_COS_SIM_THRESHOLD})")
 
 
 def test_batch_first():
@@ -457,7 +487,13 @@ def test_batch_first():
     # 比较输出
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
-    print(f"✅ batch_first=True 测试完成！")
+    # 检查阈值（使用 8bit 阈值）
+    assert results['mse_output'] < INT8_MSE_THRESHOLD, \
+        f"batch_first=True 测试 MSE 过大: {results['mse_output']:.6f} >= {INT8_MSE_THRESHOLD}"
+    assert results['cos_sim_output'] > INT8_COS_SIM_THRESHOLD, \
+        f"batch_first=True 测试余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+
+    print(f"✅ batch_first=True 测试通过！")
 
 
 def compare_gru_training(
@@ -697,8 +733,15 @@ def test_training_quantized_int8():
     # 比较训练
     results = compare_gru_training(pytorch_gru, quant_gru, x, verbose=True)
 
-    print(f"✅ 8bit 量化训练测试完成！")
-    print(f"   前向 MSE: {results['forward']['mse']:.6f}, 余弦相似度: {results['forward']['cos_sim']:.6f}")
+    # 检查阈值
+    assert results['forward']['mse'] < INT8_MSE_THRESHOLD, \
+        f"8bit 量化训练前向 MSE 过大: {results['forward']['mse']:.6f} >= {INT8_MSE_THRESHOLD}"
+    assert results['forward']['cos_sim'] > INT8_COS_SIM_THRESHOLD, \
+        f"8bit 量化训练前向余弦相似度过低: {results['forward']['cos_sim']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+
+    print(f"✅ 8bit 量化训练测试通过！")
+    print(f"   前向 MSE: {results['forward']['mse']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+          f"余弦相似度: {results['forward']['cos_sim']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
     print(f"   输入梯度 MSE: {results['grad_input']['mse']:.6f}, 余弦相似度: {results['grad_input']['cos_sim']:.6f}")
 
 
@@ -787,7 +830,8 @@ def test_training_multiple_steps():
     print("✅ 多步训练测试通过！")
 
 
-def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, print_interval=10):
+def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, print_interval=10,
+                          mse_threshold=None, cos_sim_threshold=None):
     """
     长时间训练测试，观察误差累积情况
     
@@ -796,10 +840,29 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         use_quantization: 是否使用量化
         bitwidth: 量化位宽（8 或 16）
         print_interval: 打印间隔
+        mse_threshold: MSE 阈值（超过则报错），None 时使用默认值
+        cos_sim_threshold: 余弦相似度阈值（低于则报错），None 时使用默认值
     """
+    # 设置默认阈值
+    if mse_threshold is None:
+        if not use_quantization:
+            mse_threshold = NON_QUANT_MSE_THRESHOLD
+        elif bitwidth == 8:
+            mse_threshold = INT8_MSE_THRESHOLD
+        else:
+            mse_threshold = INT16_MSE_THRESHOLD
+    
+    if cos_sim_threshold is None:
+        if not use_quantization:
+            cos_sim_threshold = NON_QUANT_COS_SIM_THRESHOLD
+        elif bitwidth == 8:
+            cos_sim_threshold = INT8_COS_SIM_THRESHOLD
+        else:
+            cos_sim_threshold = INT16_COS_SIM_THRESHOLD
     print("\n" + "=" * 80)
     quant_str = f"{bitwidth}bit 量化" if use_quantization else "非量化"
     print(f"测试: 长时间训练比较（{quant_str}，{num_steps} 步）")
+    print(f"阈值: MSE < {mse_threshold}, 余弦相似度 > {cos_sim_threshold}")
     print("=" * 80)
 
     learning_rate = 0.01
@@ -897,6 +960,11 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         if step % print_interval == 0 or step == num_steps - 1:
             print(f"{step:<8} {loss_pt.item():<12.6f} {loss_custom.item():<12.6f} "
                   f"{loss_diff:<15.10f} {weight_mse:<15.10f} {cos_sim:<12.8f}")
+
+        # 检查阈值（每步都检查，超过立即报错）
+        # 注意：这里检查的是输出的余弦相似度，而不是权重MSE
+        assert cos_sim > cos_sim_threshold, \
+            f"步骤 {step}: 输出余弦相似度过低: {cos_sim:.8f} <= {cos_sim_threshold} ({quant_str})"
 
     # 最终统计
     print("\n" + "-" * 85)
@@ -1011,15 +1079,23 @@ def test_quantized_vs_non_quantized(bitwidth=8):
     # 比较输出（非量化 vs 量化，两者都使用相同的 Haste 格式）
     results = compare_gru_outputs(quant_gru_non_quant, quant_gru_quant, x, verbose=True)
 
-    # 量化版本会有误差，但应该在合理范围内（参考 example/gru.cc 的结果）
-    print(f"✅ QuantGRU 非量化 vs {bitwidth}bit 量化测试完成！MSE: {results['mse_output']:.6f}, "
-          f"余弦相似度: {results['cos_sim_output']:.6f}")
-
-    # 验证结果是否在合理范围内
-    if results['mse_output'] < 0.001 and results['cos_sim_output'] > 0.99:
-        print("   ✅ 量化误差在合理范围内")
+    # 根据位宽选择阈值
+    if bitwidth == 8:
+        mse_threshold = INT8_MSE_THRESHOLD
+        cos_sim_threshold = INT8_COS_SIM_THRESHOLD
     else:
-        print("   ⚠️  量化误差较大，可能需要检查量化实现")
+        mse_threshold = INT16_MSE_THRESHOLD
+        cos_sim_threshold = INT16_COS_SIM_THRESHOLD
+
+    # 检查阈值
+    assert results['mse_output'] < mse_threshold, \
+        f"QuantGRU {bitwidth}bit 量化 MSE 过大: {results['mse_output']:.6f} >= {mse_threshold}"
+    assert results['cos_sim_output'] > cos_sim_threshold, \
+        f"QuantGRU {bitwidth}bit 量化余弦相似度过低: {results['cos_sim_output']:.6f} <= {cos_sim_threshold}"
+
+    print(f"✅ QuantGRU 非量化 vs {bitwidth}bit 量化测试通过！"
+          f"MSE: {results['mse_output']:.6f} (阈值: {mse_threshold}), "
+          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {cos_sim_threshold})")
 
 
 def main():
