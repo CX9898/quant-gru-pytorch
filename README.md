@@ -102,7 +102,7 @@ gru = QuantGRU(
 # 2. 加载位宽配置（二选一）
 # 方式一：从配置文件加载
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
-# 方式二：直接设置统一位宽（8/16/32位，is_symmetric控制对称量化）
+# 方式二：直接设置统一位宽（8/16位，is_symmetric控制对称量化）
 # gru.set_all_bitwidth(bitwidth=8, is_symmetric=True, verbose=True)
 # gru.use_quantization = True  # 启用量化
 
@@ -157,10 +157,35 @@ gru.calibration_method = 'minmax'
 
 ### ONNX 导出
 
+#### 浮点模型导出（默认）
+
 ```python
 from quant_gru import QuantGRU
 import torch
 
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru.eval()
+
+# 启用导出模式（默认使用浮点格式）
+gru.export_mode = True
+
+# 导出 ONNX
+dummy_input = torch.randn(1, 50, 64).cuda()
+torch.onnx.export(
+    gru, dummy_input, "gru_float.onnx",
+    input_names=['input'],
+    output_names=['output', 'hidden'],
+    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
+                  'output': {0: 'batch', 1: 'seq_len'}},
+    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
+)
+
+gru.export_mode = False  # 恢复 CUDA 模式
+```
+
+#### 量化模型导出（QDQ 格式）
+
+```python
 # 1. 创建并校准模型
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
@@ -169,28 +194,30 @@ for batch in calibration_loader:
     gru.calibrate(batch.cuda())
 gru.finalize_calibration()
 
-# 2. 启用导出模式
+# 2. 启用导出模式，指定 QDQ 格式
 gru.export_mode = True
+gru.export_format = 'qdq'  # 使用 QDQ 伪量化格式
 gru.eval()
 
 # 3. 导出 ONNX
-dummy_input = torch.randn(1, 50, 64).cuda()
 torch.onnx.export(
     gru, dummy_input, "gru_quantized.onnx",
     input_names=['input'],
     output_names=['output', 'hidden'],
     dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
                   'output': {0: 'batch', 1: 'seq_len'}},
-    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
+    dynamo=False
 )
 
-# 4. 恢复 CUDA 模式（可选）
-gru.export_mode = False
+gru.export_mode = False  # 恢复 CUDA 模式
 ```
 
-> 💡 **导出模式说明**：
-> - `export_mode=True` 时使用纯 PyTorch 实现，可被 ONNX 追踪
-> - 量化模式下默认使用 QDQ（Quantize-Dequantize）格式，推理引擎会自动优化
+> 💡 **导出格式说明**：
+> | `export_format` | 说明 | 适用场景 |
+> |-----------------|------|----------|
+> | `'float'` | 浮点格式（默认） | 非量化模型部署 |
+> | `'qdq'` | QDQ 伪量化格式 | 量化模型部署，推理引擎自动优化 |
+> | `'fixedpoint'` | 纯定点格式 | 精度验证，与 CUDA 量化一致 |
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
@@ -271,21 +298,21 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 | `export_mode=False` | **默认**，使用 CUDA C++ 实现（高性能推理） |
 | `export_mode=True` | 使用纯 PyTorch 实现（可被 ONNX 追踪） |
 
-### ONNX 导出子模式
+### 导出格式选择
 
-量化模式下，可通过 `set_onnx_export_mode()` 设置具体的导出格式：
+通过 `export_format` 属性设置具体的导出格式：
 
-| 模式 | 说明 | 适用场景 |
+| 格式 | 说明 | 适用场景 |
 |------|------|----------|
-| `'qdq'` | **默认**，QDQ（Quantize-Dequantize）格式 | 通用推理引擎（TensorRT、ONNX Runtime） |
-| `'fixedpoint'` | 纯定点计算，与 CUDA 实现完全一致 | 精度验证、自定义硬件 |
-| `'float'` | 标准浮点计算（无量化） | 调试、基准测试 |
+| `'float'` | **默认**，浮点格式 | 非量化模型部署、与 Haste GRU 行为一致 |
+| `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） |
+| `'fixedpoint'` | 纯定点计算，与 CUDA 量化完全一致 | 精度验证、自定义硬件 |
 
 ```python
-# 设置 ONNX 导出子模式
-gru.set_onnx_export_mode('qdq')      # 默认，推荐
-gru.set_onnx_export_mode('fixedpoint')  # 精度验证
-gru.set_onnx_export_mode('float')    # 无量化
+# 设置导出格式
+gru.export_format = 'float'      # 默认，浮点
+gru.export_format = 'qdq'        # 量化模型推荐
+gru.export_format = 'fixedpoint' # 精度验证
 ```
 
 ## 📝 API 参考
@@ -316,6 +343,7 @@ class QuantGRU(nn.Module):
 |------|------|--------|------|
 | `use_quantization` | bool | False | 是否启用量化推理 |
 | `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
+| `export_format` | str | 'float' | 导出格式：'float'、'qdq'、'fixedpoint' |
 | `calibration_method` | str | 'histogram' | 校准方法：'histogram'（高精度）或 'minmax'（快速） |
 
 ### 主要方法
@@ -329,8 +357,6 @@ class QuantGRU(nn.Module):
 | `load_bitwidth_config(path, verbose=False)` | 加载位宽配置 |
 | `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置统一位宽 |
 | `is_calibrated()` | 检查是否已校准 |
-| `set_onnx_export_mode(mode)` | 设置 ONNX 导出模式：'qdq'（默认）、'fixedpoint'、'float' |
-| `get_onnx_export_mode()` | 获取当前 ONNX 导出模式 |
 
 ## 🏗️ 项目结构
 
