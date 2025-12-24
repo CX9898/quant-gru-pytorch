@@ -419,10 +419,10 @@ def example_onnx_export():
     - export_mode=False (默认): 使用 CUDA C++ 实现（高性能推理）
     - export_mode=True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
     
-    ONNX 导出子模式（量化模式下有效）:
-    - 'qdq': QDQ 格式，推理引擎自动优化（默认，推荐）
-    - 'fixedpoint': 纯定点，与 CUDA 完全一致（精度验证）
-    - 'float': 无量化（调试用）
+    导出格式 (export_format):
+    - 'float': 浮点格式（默认，与 Haste GRU 行为一致）
+    - 'qdq': QDQ 格式，量化模型推荐（需要先校准）
+    - 'fixedpoint': 纯定点，与 CUDA 量化完全一致（精度验证）
     """
     print("\n" + "=" * 60)
     print("示例 8: ONNX 导出")
@@ -458,7 +458,7 @@ def example_onnx_export():
     gru.export_mode = True
     gru.eval()
     print(f"   export_mode = {gru.export_mode}")
-    print(f"   ONNX 导出子模式: {gru.get_onnx_export_mode()}")
+    print(f"   导出格式: {gru.export_format}")
     
     # 4. 导出 ONNX
     print("\n📤 步骤 4: 导出 ONNX 模型")
@@ -517,12 +517,12 @@ def example_onnx_export():
 
 def example_onnx_export_modes():
     """
-    示例 9: ONNX 导出子模式对比
+    示例 9: ONNX 导出格式对比
     
-    演示三种 ONNX 导出子模式的区别和使用场景
+    演示三种 ONNX 导出格式的区别和使用场景
     """
     print("\n" + "=" * 60)
-    print("示例 9: ONNX 导出子模式对比")
+    print("示例 9: ONNX 导出格式对比")
     print("=" * 60)
     
     # 模型参数
@@ -551,19 +551,19 @@ def example_onnx_export_modes():
     with torch.no_grad():
         cuda_output, _ = gru_base(test_input)
     
-    print("\n📊 对比三种 ONNX 导出子模式:")
+    print("\n📊 对比三种 ONNX 导出格式:")
     print("-" * 50)
     
     modes = [
-        ('qdq', 'QDQ 格式（推荐）'),
+        ('qdq', 'QDQ 格式（量化推荐）'),
         ('fixedpoint', '纯定点格式'),
-        ('float', '浮点格式')
+        ('float', '浮点格式（默认）')
     ]
     
     gru_base.export_mode = True
     
     for mode, desc in modes:
-        gru_base.set_onnx_export_mode(mode)
+        gru_base.export_format = mode
         
         with torch.no_grad():
             export_output, _ = gru_base(test_input)
