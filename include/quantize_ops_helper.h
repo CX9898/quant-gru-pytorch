@@ -11,7 +11,7 @@
 #include "gru_quantization_ranges.h"
 #include "quantize_bitwidth_config.h"
 
-// #define DEBUG
+#define DEBUG
 
 // GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
 // 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale =
@@ -245,10 +245,10 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
         T range = orig_max - orig_min;
         range = std::max(range, static_cast<T>(1e-9));
 
-        // 使用浮点数计算避免 int32_t 溢出（当 QuantT=int32_t 时，quant_max - quant_min 会溢出）
+        // 使用浮点数计算避免 int32_t 溢出
         T raw_scale = range / (static_cast<T>(quant_max) - static_cast<T>(quant_min));
 
-        // scale >= raw_scale 对齐到 2^-n
+        // scale >= raw_scale 对齐到 2^-n（使用 floor 保证不溢出）
         exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));
         scale = std::pow(2.0, -exp2_inv);  // 取2的负exp2_inv次方
 
@@ -441,8 +441,9 @@ inline int8_t determine_shift_bits_int16(float max_val) {
     const float max_q = 32767.0f;
     if (max_val < 1e-9f) return 0;
     float scale = max_val / max_q;
-    // 使用 ceil 获得更高精度（q_b 使用 INT32 存储不会溢出）
-    int8_t shift_bits = static_cast<int8_t>(std::ceil(-std::log2(scale)));
+    // 使用 floor 来最小化 n_BX_total，提高精度
+    // q_b 使用 INT32 存储，允许超过 32767
+    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
@@ -481,15 +482,20 @@ inline int8_t determine_shift_bits_int8(float max_val) {
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
-// INT8 版本：输入 INT8，输出 UINT8（sigmoid）或 INT8（tanh）
-void init_sigmoid_z_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
-void init_sigmoid_r_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
-void init_tanh_lut_int8(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+// 辅助函数：确定 shift_bits（根据最大值，INT32 版本）
+// 使用 floor 确保量化后不会溢出 INT32 范围
+// 对于 tanh 斜率 1.0: floor(31) = 31, 量化后 q_b = round(1.0 * 2^31) = 2^31
+//   但由于 rounding，实际可能得到 2147483648 > INT32_MAX
+// 因此使用稍微保守的目标值
+inline int8_t determine_shift_bits_int32(float max_val) {
+    const float max_q = 2147483520.0f;  // 略小于 INT32_MAX，留出 rounding 余量
+    if (max_val < 1e-9f) return 0;
+    float scale = max_val / max_q;
+    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
+    return std::max(static_cast<int8_t>(0), shift_bits);
+}
 
-// INT16 版本：输入 INT16，输出 UINT16（sigmoid）或 INT16（tanh）
-void init_tanh_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
-void init_sigmoid_r_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
-void init_sigmoid_z_lut_int16(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y);
+// 统一的 LUT 生成函数声明（在 quantize_ops.cuh 中）
 
 inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("GRUQuantitativeParameters (量化参数):\n");

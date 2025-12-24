@@ -10,73 +10,49 @@
 // ==================== 分段线性量化数据结构 ====================
 #define NUM_SEGMENTS 16
 
-// INT16 版本的段参数结构
-struct SegmentParams_INT16 {
+// ==================== 统一的 LUT 结构 ====================
+// 
+// 设计原则：使用统一的最大精度类型，避免任何溢出截断问题
+// 
+// 优点：
+//   1. 代码简化，消除重复的结构体定义
+//   2. 避免 INT8 版本的 q_b 截断 bug（tanh 斜率 1.0 → q_b=128 > INT8_MAX）
+//   3. 维护更容易，所有版本共用同一套代码
+//
+// 内存占用：每个 LUT 约 220 bytes（16 segments * 13 bytes + header）
+//           对于 GPU 常量内存（64KB）来说完全可以接受
+//
+
+/// @brief 统一的段参数结构（使用最大精度类型）
+struct SegmentParams {
     int32_t q_b;                 // 量化后的系数 b (INT32，避免溢出截断)
     int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
     int32_t term_c_precomputed;  // 预计算的 term_c (INT32)
-    int16_t threshold;           // 段阈值 (INT16，量化后的输入值)
+    int16_t threshold;           // 段阈值 (INT16，可容纳 INT8 和 INT16 输入)
 };
 
-// Sigmoid/Tanh 查找表结构（INT16）
-struct SigmoidLUT_INT16 {
-    SegmentParams_INT16 segments[NUM_SEGMENTS];
+/// @brief 统一的查找表结构
+struct SigmoidLUT {
+    SegmentParams segments[NUM_SEGMENTS];
     int32_t zp_x;         // 输入 zero-point (INT32)
     int8_t shift_bits_x;  // 输入 shift_bits (INT8)
     int8_t shift_bits_y;  // 输出 shift_bits (INT8)
     int32_t zp_y;         // 输出 zero-point (INT32)
 };
 
-// INT8 版本的段参数结构
-struct SegmentParams_INT8 {
-    int8_t q_b;                  // 量化后的系数 b (INT8)
-    int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
-    int16_t term_c_precomputed;  // 预计算的 term_c (INT16)
-    int8_t threshold;            // 段阈值 (INT8，量化后的输入值)
-};
-
-// Sigmoid/Tanh 查找表结构（INT8）
-struct SigmoidLUT_INT8 {
-    SegmentParams_INT8 segments[NUM_SEGMENTS];
-    int32_t zp_x;         // 输入 zero-point (INT32)
-    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
-    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int32_t zp_y;         // 输出 zero-point (INT32)
-};
-
-// ==================== INT8→INT16 混合版本 ====================
-// 输入: INT8 (低存储开销)
-// 输出: INT16/UINT16 (高精度输出)
-// 适用场景: 需要高精度激活函数输出，但输入可以用低位宽表示
-
-// INT8→INT16 混合版本的段参数结构
-struct SegmentParams_INT8_to_INT16 {
-    int16_t q_b;                 // 量化后的系数 b (INT16，支持更高精度斜率)
-    int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
-    int32_t term_c_precomputed;  // 预计算的 term_c (INT32，支持INT16输出范围)
-    int8_t threshold;            // 段阈值 (INT8，量化后的输入值)
-};
-
-// Sigmoid/Tanh 查找表结构（INT8→INT16）
-struct SigmoidLUT_INT8_to_INT16 {
-    SegmentParams_INT8_to_INT16 segments[NUM_SEGMENTS];
-    int32_t zp_x;         // 输入 zero-point (INT32)
-    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
-    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int32_t zp_y;         // 输出 zero-point (INT32)
-};
+// 为了兼容性，保留旧类型名作为别名
+using SegmentParams_INT8 = SegmentParams;
+using SegmentParams_INT16 = SegmentParams;
+using SegmentParams_INT8_to_INT16 = SegmentParams;
+using SigmoidLUT_INT8 = SigmoidLUT;
+using SigmoidLUT_INT16 = SigmoidLUT;
+using SigmoidLUT_INT8_to_INT16 = SigmoidLUT;
 
 // 常量内存声明（CUDA设备端）
-extern __constant__ SigmoidLUT_INT16 d_sigmoid_z_lut_int16;  // z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT16 d_sigmoid_r_lut_int16;  // r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT16 d_tanh_lut_int16;
-extern __constant__ SigmoidLUT_INT8 d_sigmoid_z_lut_int8;  // z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT8 d_sigmoid_r_lut_int8;  // r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT_INT8 d_tanh_lut_int8;
-// INT8→INT16 混合版本
-extern __constant__ SigmoidLUT_INT8_to_INT16 d_sigmoid_z_lut_int8_to_int16;
-extern __constant__ SigmoidLUT_INT8_to_INT16 d_sigmoid_r_lut_int8_to_int16;
-extern __constant__ SigmoidLUT_INT8_to_INT16 d_tanh_lut_int8_to_int16;
+// 每个门独立的 LUT，支持不同的量化参数
+extern __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT d_sigmoid_r_lut;  // r 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT d_tanh_lut;       // g 门的 Tanh LUT
 
 namespace dev {
 
@@ -290,96 +266,70 @@ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth 
 // ==================== 核心函数：返回 int32_t，不做 clamp ====================
 
 /**
- * @brief 分段线性近似核心
- * @tparam LutT LUT 类型 (SigmoidLUT_INT8, SigmoidLUT_INT16, SigmoidLUT_INT8_to_INT16)
+ * @brief 分段线性近似核心（统一版本）
  * @param q_x 量化输入（int32_t，应已 clamp 到正确范围）
  * @param lut 分段线性查找表
  * @return int32_t 原始结果，未 clamp
  *
- * 【自动适配 q_b 类型】
- *   - q_b 是 int8_t 时，使用 int32 乘法
- *   - q_b 是 int16_t/int32_t 时，使用 int64 乘法（避免溢出）
+ * 统一使用 int64 乘法确保精度，q_b 现在始终是 int32_t
  */
-template <typename LutT>
-__device__ __forceinline__ int32_t piecewise_linear_raw(int32_t q_x, const LutT& lut) {
+__device__ __forceinline__ int32_t piecewise_linear_raw(int32_t q_x, const SigmoidLUT& lut) {
     int seg_id = find_segment(q_x, lut.segments);
     const auto& seg = lut.segments[seg_id];
 
     int32_t x_offset = q_x - static_cast<int32_t>(lut.zp_x);
 
-    // 根据 q_b 类型选择乘法精度
-    int32_t term_bx;
-    if constexpr (sizeof(decltype(seg.q_b)) > 1) {
-        // q_b 是 int16_t 或 int32_t，需要 int64 避免溢出
-        int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
-        term_bx = (seg.n_BX_total >= 0)
-                      ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
-                      : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
-    } else {
-        // q_b 是 int8_t，int32 就够了
-        int32_t bx_32 = static_cast<int32_t>(seg.q_b) * x_offset;
-        term_bx = (seg.n_BX_total >= 0) ? rshift_round(bx_32, seg.n_BX_total)
-                                        : (bx_32 << (-seg.n_BX_total));
-    }
+    // q_b 是 int32_t，使用 int64 避免溢出
+    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
+    int32_t term_bx = (seg.n_BX_total >= 0)
+                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
+                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
 
-    return term_bx + static_cast<int32_t>(seg.term_c_precomputed);
+    return term_bx + seg.term_c_precomputed;
 }
 
 // ==================== 包装函数：核心函数 + clamp_by_bitwidth ====================
 
 /**
- * @brief 通用分段线性近似（int32 输入，双位宽 clamp，需外部指定 LUT）
+ * @brief 通用分段线性近似（int32 输入，双位宽 clamp）
  */
-template <typename LutT>
-__device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const LutT& lut,
+__device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const SigmoidLUT& lut,
                                                     QuantBitWidth pre_bw, QuantBitWidth out_bw) {
     int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
     int32_t result = piecewise_linear_raw(q_x_clamped, lut);
     return clamp_by_bitwidth(result, out_bw);
 }
 
-// ==================== 门专用函数：自动选择 LUT ====================
+// ==================== 门专用函数：使用统一 LUT ====================
 
 /**
- * @brief Z 门 Sigmoid（自动选择 LUT）
+ * @brief Z 门 Sigmoid
  * @param q_x 量化输入（int32_t）
- * @param pre_bw 输入位宽
- * @param out_bw 输出位宽
+ * @param pre_bw 输入位宽（用于 clamp）
+ * @param out_bw 输出位宽（用于 clamp）
  */
 __device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    if (pre_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_sigmoid_z_lut_int16, pre_bw, out_bw);
-    } else if (out_bw == QuantBitWidth::UINT16 || out_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_sigmoid_z_lut_int8_to_int16, pre_bw, out_bw);
-    } else {
-        return piecewise_linear(q_x, d_sigmoid_z_lut_int8, pre_bw, out_bw);
-    }
+    return piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
 }
 
 /**
- * @brief R 门 Sigmoid（自动选择 LUT）
+ * @brief R 门 Sigmoid
  */
 __device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    if (pre_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_sigmoid_r_lut_int16, pre_bw, out_bw);
-    } else if (out_bw == QuantBitWidth::UINT16 || out_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_sigmoid_r_lut_int8_to_int16, pre_bw, out_bw);
-    } else {
-        return piecewise_linear(q_x, d_sigmoid_r_lut_int8, pre_bw, out_bw);
-    }
+    return piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
 }
 
 /**
- * @brief G 门 Tanh（自动选择 LUT）
+ * @brief G 门 Tanh
  */
 __device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    if (pre_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_tanh_lut_int16, pre_bw, out_bw);
-    } else if (out_bw == QuantBitWidth::INT16) {
-        return piecewise_linear(q_x, d_tanh_lut_int8_to_int16, pre_bw, out_bw);
-    } else {
-        return piecewise_linear(q_x, d_tanh_lut_int8, pre_bw, out_bw);
-    }
+    return piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
 }
 
 }  // namespace dev
+
+// ==================== 主机端 LUT 生成函数声明 ====================
+SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                                 int32_t zp_y, QuantBitWidth input_bw);
+SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                              int32_t zp_y, QuantBitWidth input_bw);
