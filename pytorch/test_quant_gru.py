@@ -51,6 +51,7 @@ TRAINING_MSE_THRESHOLD = 1e-4
 TRAINING_COS_SIM_THRESHOLD = 0.999
 
 
+
 # ============================================================================
 
 
@@ -148,25 +149,25 @@ def compare_gru_outputs(
     mse_output = torch.mean((output_pt_cpu - output_custom_cpu) ** 2).item()
     mse_h_n = torch.mean((h_n_pt_cpu - h_n_custom_cpu) ** 2).item()
 
-    # 计算相对误差
-    abs_output_pt = torch.abs(output_pt_cpu)
-    rel_error_output = torch.mean(
-        torch.abs(output_pt_cpu - output_custom_cpu) / (abs_output_pt + 1e-8)
-    ).item()
+    # 计算相对误差（使用整体范数，避免接近0的值导致虚高）
+    # 公式: ||a - b||_2 / ||a||_2
+    diff_norm_output = torch.norm(output_pt_cpu - output_custom_cpu).item()
+    ref_norm_output = torch.norm(output_pt_cpu).item()
+    rel_error_output = diff_norm_output / (ref_norm_output + 1e-8)
 
-    abs_h_n_pt = torch.abs(h_n_pt_cpu)
-    rel_error_h_n = torch.mean(
-        torch.abs(h_n_pt_cpu - h_n_custom_cpu) / (abs_h_n_pt + 1e-8)
-    ).item()
+    diff_norm_h_n = torch.norm(h_n_pt_cpu - h_n_custom_cpu).item()
+    ref_norm_h_n = torch.norm(h_n_pt_cpu).item()
+    rel_error_h_n = diff_norm_h_n / (ref_norm_h_n + 1e-8)
 
-    # 计算余弦相似度
+    # 计算余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
     def cosine_similarity(a, b):
         a_flat = a.flatten()
         b_flat = b.flatten()
         dot_product = torch.sum(a_flat * b_flat).item()
         norm_a = torch.norm(a_flat).item()
         norm_b = torch.norm(b_flat).item()
-        return dot_product / (norm_a * norm_b + 1e-8)
+        cos_sim = dot_product / (norm_a * norm_b + 1e-8)
+        return max(-1.0, min(1.0, cos_sim))
 
     cos_sim_output = cosine_similarity(output_pt_cpu, output_custom_cpu)
     cos_sim_h_n = cosine_similarity(h_n_pt_cpu, h_n_custom_cpu)
@@ -568,17 +569,18 @@ def compare_gru_training(
         mse = torch.mean((a - b) ** 2).item()
         max_diff = torch.max(torch.abs(a - b)).item()
         
-        # 相对误差
-        abs_a = torch.abs(a)
-        rel_error = torch.mean(torch.abs(a - b) / (abs_a + 1e-8)).item()
+        # 相对误差（使用整体范数，避免接近0的值导致虚高）
+        diff_norm = torch.norm(a - b).item()
+        ref_norm = torch.norm(a).item()
+        rel_error = diff_norm / (ref_norm + 1e-8)
         
-        # 余弦相似度
+        # 余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
         a_flat = a.flatten()
         b_flat = b.flatten()
         dot_product = torch.sum(a_flat * b_flat).item()
         norm_a = torch.norm(a_flat).item()
         norm_b = torch.norm(b_flat).item()
-        cos_sim = dot_product / (norm_a * norm_b + 1e-8)
+        cos_sim = max(-1.0, min(1.0, dot_product / (norm_a * norm_b + 1e-8)))
         
         return {
             'name': name,
@@ -611,7 +613,7 @@ def compare_gru_training(
 
 
 def print_training_results(results: dict, quant_gru: QuantGRU):
-    """打印训练比较结果"""
+    """打印训练比较结果（只显示前向传播，梯度不是量化关键指标）"""
     print("=" * 80)
     print("nn.GRU vs QuantGRU 训练比较结果")
     print("=" * 80)
@@ -620,21 +622,17 @@ def print_training_results(results: dict, quant_gru: QuantGRU):
 
     print(f"损失值比较:")
     print(f"  PyTorch GRU Loss:  {results['loss_pt']:.10f}")
-    print(f"  QuantGRU Loss:    {results['loss_custom']:.10f}")
+    print(f"  QuantGRU Loss:     {results['loss_custom']:.10f}")
     print(f"  Loss 差异:         {abs(results['loss_pt'] - results['loss_custom']):.10f}")
     print()
 
-    print("梯度比较:")
-    print(f"{'名称':<20} {'MSE':<20} {'最大差异':<20} {'相对误差%':<15} {'余弦相似度':<15}")
-    print("-" * 90)
-
-    for key in ['forward', 'grad_input', 'grad_weight_ih', 'grad_weight_hh', 'grad_bias_ih', 'grad_bias_hh']:
-        m = results[key]
-        if m['available']:
-            print(f"{m['name']:<20} {m['mse']:<20.10f} {m['max_diff']:<20.10f} "
-                  f"{m['rel_error']*100:<15.6f} {m['cos_sim']:<15.10f}")
-        else:
-            print(f"{m['name']:<20} {'N/A':<20} {'N/A':<20} {'N/A':<15} {'N/A':<15}")
+    # 只显示前向传播结果（量化主要用于推理，梯度不是关键指标）
+    m = results['forward']
+    print(f"前向传播比较:")
+    print(f"  MSE:          {m['mse']:.10f}")
+    print(f"  最大差异:     {m['max_diff']:.10f}")
+    print(f"  相对误差:     {m['rel_error']*100:.6f}%")
+    print(f"  余弦相似度:   {m['cos_sim']:.10f}")
 
     print("=" * 80)
 
@@ -742,7 +740,6 @@ def test_training_quantized_int8():
     print(f"✅ 8bit 量化训练测试通过！")
     print(f"   前向 MSE: {results['forward']['mse']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
           f"余弦相似度: {results['forward']['cos_sim']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
-    print(f"   输入梯度 MSE: {results['grad_input']['mse']:.6f}, 余弦相似度: {results['grad_input']['cos_sim']:.6f}")
 
 
 def test_training_multiple_steps():
@@ -946,11 +943,12 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         loss_diff = abs(loss_pt.item() - loss_custom.item())
         weight_mse = torch.mean((pytorch_gru.weight_ih_l0 - quant_gru.weight_ih_l0) ** 2).item()
         
-        # 计算输出余弦相似度
+        # 计算输出余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
         output_pt_flat = output_pt.detach().flatten()
         output_custom_flat = output_custom.detach().flatten()
         cos_sim = (torch.dot(output_pt_flat, output_custom_flat) / 
                    (torch.norm(output_pt_flat) * torch.norm(output_custom_flat) + 1e-8)).item()
+        cos_sim = max(-1.0, min(1.0, cos_sim))
 
         loss_diff_history.append(loss_diff)
         weight_mse_history.append(weight_mse)
@@ -985,11 +983,12 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
     print(f"  bias_ih MSE:   {bias_ih_mse:.10f}")
     print(f"  bias_hh MSE:   {bias_hh_mse:.10f}")
 
-    # 计算权重余弦相似度
+    # 计算权重余弦相似度（clamp 防止浮点误差导致超出 [-1, 1]）
     def weight_cos_sim(a, b):
         a_flat = a.flatten()
         b_flat = b.flatten()
-        return (torch.dot(a_flat, b_flat) / (torch.norm(a_flat) * torch.norm(b_flat) + 1e-8)).item()
+        cos_sim = (torch.dot(a_flat, b_flat) / (torch.norm(a_flat) * torch.norm(b_flat) + 1e-8)).item()
+        return max(-1.0, min(1.0, cos_sim))
 
     print("\n最终权重余弦相似度:")
     print(f"  weight_ih: {weight_cos_sim(pytorch_gru.weight_ih_l0, quant_gru.weight_ih_l0):.10f}")
