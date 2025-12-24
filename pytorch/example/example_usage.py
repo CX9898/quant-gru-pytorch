@@ -422,7 +422,6 @@ def example_onnx_export():
     导出格式 (export_format):
     - 'float': 浮点格式（默认，与 Haste GRU 行为一致）
     - 'qdq': QDQ 格式，量化模型推荐（需要先校准）
-    - 'fixedpoint': 纯定点，与 CUDA 量化完全一致（精度验证）
     """
     print("\n" + "=" * 60)
     print("示例 8: ONNX 导出")
@@ -556,7 +555,6 @@ def example_onnx_export_modes():
     
     modes = [
         ('qdq', 'QDQ 格式（量化推荐）'),
-        ('fixedpoint', '纯定点格式'),
         ('float', '浮点格式（默认）')
     ]
     
@@ -585,9 +583,8 @@ def example_onnx_export_modes():
     
     print("\n" + "-" * 50)
     print("\n💡 模式选择建议:")
-    print("   • 'qdq':        生产部署，推理引擎自动优化")
-    print("   • 'fixedpoint': 精度验证，与 CUDA 完全一致")
-    print("   • 'float':      调试和基准测试")
+    print("   • 'qdq':   生产部署，推理引擎自动优化")
+    print("   • 'float': 调试和基准测试")
     
     print("\n✅ 导出模式对比完成！")
 

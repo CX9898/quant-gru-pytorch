@@ -217,7 +217,6 @@ gru.export_mode = False  # 恢复 CUDA 模式
 > |-----------------|------|----------|
 > | `'float'` | 浮点格式（默认） | 非量化模型部署 |
 > | `'qdq'` | QDQ 伪量化格式 | 量化模型部署，推理引擎自动优化 |
-> | `'fixedpoint'` | 纯定点格式 | 精度验证，与 CUDA 量化一致 |
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
@@ -306,13 +305,11 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 |------|------|----------|
 | `'float'` | **默认**，浮点格式 | 非量化模型部署、与 Haste GRU 行为一致 |
 | `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） |
-| `'fixedpoint'` | 纯定点计算，与 CUDA 量化完全一致 | 精度验证、自定义硬件 |
 
 ```python
 # 设置导出格式
 gru.export_format = 'float'      # 默认，浮点
 gru.export_format = 'qdq'        # 量化模型推荐
-gru.export_format = 'fixedpoint' # 精度验证
 ```
 
 ## 📝 API 参考
@@ -343,7 +340,7 @@ class QuantGRU(nn.Module):
 |------|------|--------|------|
 | `use_quantization` | bool | False | 是否启用量化推理 |
 | `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
-| `export_format` | str | 'float' | 导出格式：'float'、'qdq'、'fixedpoint' |
+| `export_format` | str | 'float' | 导出格式：'float'、'qdq' |
 | `calibration_method` | str | 'histogram' | 校准方法：'histogram'（高精度）或 'minmax'（快速） |
 
 ### 主要方法
