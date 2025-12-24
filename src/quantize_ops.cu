@@ -12,9 +12,6 @@
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.h"
 
-// 调试开关：取消注释以启用调试输出
-#define DEBUG_QUANT
-
 // 统一的 LUT 生成函数（前向声明）
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, 
                                  int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
@@ -52,7 +49,7 @@ void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
         config.g_pre_, config.g_out_);  // 传入输入和输出位宽
     cudaMemcpyToSymbol(d_tanh_lut, &g_lut, sizeof(SigmoidLUT));
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     printf("[DEBUG] generate_piecewise_linear_lut: z/r/g LUTs initialized\n");
 #endif
 }
@@ -85,7 +82,7 @@ __global__ void computeWeightSumMulZP(
     // 乘以 x_zp（使用 int64_t 避免溢出）
     sum_i64 *= static_cast<int64_t>(x_zp);
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     // 调试输出
     if (row == 0) {
         printf("[DEBUG] computeWeightSumMulZP: row=0, in_dim=%d, x_zp=%d, result=%lld\n", in_dim,
@@ -555,7 +552,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
     x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     printf("[DEBUG] generate_sigmoid_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
            static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
 #endif
@@ -617,7 +614,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
         shift_bits_c = determine_shift_bits_int16(c_abs_max);
     }
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     printf("[DEBUG] generate_sigmoid_lut: output_bw=%d, is_8bit=%d, shift_bits_b=%d, shift_bits_c=%d\n",
            static_cast<int>(output_bw), is_8bit_output, shift_bits_b, shift_bits_c);
 #endif
@@ -683,7 +680,7 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     x_min = std::max(x_min, -TANH_EFFECTIVE_RANGE);
     x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     printf("[DEBUG] generate_tanh_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
            static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
 #endif
@@ -742,7 +739,7 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
         shift_bits_c = determine_shift_bits_int16(c_abs_max);
     }
 
-#ifdef DEBUG_QUANT
+#ifdef DEBUG
     printf("[DEBUG] generate_tanh_lut: output_bw=%d, is_8bit=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
            static_cast<int>(output_bw), is_8bit_output, b_abs_max, shift_bits_b, shift_bits_c);
 #endif
