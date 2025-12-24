@@ -11,7 +11,7 @@
 #include "gru_quantization_ranges.h"
 #include "quantize_bitwidth_config.h"
 
-#define DEBUG
+// #define DEBUG
 
 // GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
 // 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale =
