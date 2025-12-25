@@ -780,7 +780,7 @@ class QuantGRU(nn.Module):
         
         Args:
             bitwidth: 位宽 (8/16/32)
-            is_symmetric: 是否对称量化
+            is_symmetric: 是否对称量化（仅对激活值生效，权重/偏置始终对称）
             verbose: 是否打印信息
         """
         if bitwidth not in (8, 16, 32):
@@ -797,10 +797,14 @@ class QuantGRU(nn.Module):
             'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_'
         ]
 
-        # 对称量化属性列表
-        symmetric_attrs = [
-            'x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
-            'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
+        # 权重/偏置对称量化属性（始终为 True，不可配置）
+        weight_symmetric_attrs = [
+            'W_symmetric_', 'R_symmetric_', 'bx_symmetric_', 'br_symmetric_'
+        ]
+
+        # 激活值对称量化属性（可配置）
+        activation_symmetric_attrs = [
+            'x_symmetric_', 'h_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
             'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
             'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
             'old_contrib_symmetric_', 'new_contrib_symmetric_'
@@ -810,13 +814,17 @@ class QuantGRU(nn.Module):
         for attr in bitwidth_attrs:
             self._bitwidth_config_dict[attr] = bitwidth
 
-        # 设置所有对称量化配置
-        for attr in symmetric_attrs:
+        # 权重/偏置始终使用对称量化
+        for attr in weight_symmetric_attrs:
+            self._bitwidth_config_dict[attr] = True
+
+        # 激活值对称量化配置由参数控制
+        for attr in activation_symmetric_attrs:
             self._bitwidth_config_dict[attr] = is_symmetric
 
         if verbose:
             sym_str = "对称" if is_symmetric else "非对称"
-            print(f"\n[QuantGRU] 设置所有算子: {bitwidth}bit {sym_str}量化")
+            print(f"\n[QuantGRU] 设置所有算子: {bitwidth}bit, 激活值{sym_str}量化, 权重/偏置对称量化")
 
     def is_calibrated(self) -> bool:
         """检查是否已完成校准"""
