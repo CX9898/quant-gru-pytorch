@@ -63,6 +63,9 @@ struct GRUQuantitativeParameters {
     int32_t zp_new_contrib_;
     int8_t exp2_inv_old_contrib_;
     int32_t zp_old_contrib_;
+
+    // 是否为反向方向（双向 GRU 的反向方向使用反向 LUT）
+    bool is_reverse_ = false;
 };
 
 struct QuantGRUReScale {
@@ -125,6 +128,9 @@ struct QuantGRUReScale {
     // 位宽配置（从 GRUQuantitativeParameters 中复制，用于运行时选择正确的 kernel 实例）
     OperatorQuantConfig bitwidth_config_;
 
+    // 是否为反向方向（双向 GRU 的反向方向使用反向 LUT）
+    bool is_reverse_ = false;
+
     // 调试用：保存完整的量化参数
 #ifdef DEBUG
     GRUQuantitativeParameters test;
@@ -140,6 +146,7 @@ struct QuantGRUReScale {
 //   - x_min = (quant_min - zp_pre) * scale
 //   - x_max = (quant_max - zp_pre) * scale
 // 生成分段线性量化表（根据 GRUQuantitativeParameters 中的 bitwidth_config_ 决定各门的位宽）
+// 根据 params.is_reverse_ 自动选择初始化前向或反向 LUT
 void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params);
 
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {

@@ -50,9 +50,16 @@ using SigmoidLUT_INT8_to_INT16 = SigmoidLUT;
 
 // 常量内存声明（CUDA设备端）
 // 每个门独立的 LUT，支持不同的量化参数
+
+// 前向方向 LUT（单向 GRU 或双向 GRU 的前向）
 extern __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
 extern __constant__ SigmoidLUT d_sigmoid_r_lut;  // r 门的 Sigmoid LUT
 extern __constant__ SigmoidLUT d_tanh_lut;       // g 门的 Tanh LUT
+
+// 反向方向 LUT（双向 GRU 的反向）
+extern __constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  // 反向 z 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  // 反向 r 门的 Sigmoid LUT
+extern __constant__ SigmoidLUT d_tanh_lut_reverse;       // 反向 g 门的 Tanh LUT
 
 namespace dev {
 
@@ -307,23 +314,30 @@ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const SigmoidLU
  * @param q_x 量化输入（int32_t）
  * @param pre_bw 输入位宽（用于 clamp）
  * @param out_bw 输出位宽（用于 clamp）
+ * @param is_reverse 是否为反向方向（双向 GRU 使用反向 LUT）
  */
-__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    return piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw, 
+                                              bool is_reverse = false) {
+    return is_reverse ? piecewise_linear(q_x, d_sigmoid_z_lut_reverse, pre_bw, out_bw)
+                      : piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
 }
 
 /**
  * @brief R 门 Sigmoid
  */
-__device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    return piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
+                                              bool is_reverse = false) {
+    return is_reverse ? piecewise_linear(q_x, d_sigmoid_r_lut_reverse, pre_bw, out_bw)
+                      : piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
 }
 
 /**
  * @brief G 门 Tanh
  */
-__device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    return piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
+                                           bool is_reverse = false) {
+    return is_reverse ? piecewise_linear(q_x, d_tanh_lut_reverse, pre_bw, out_bw)
+                      : piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
 }
 
 }  // namespace dev
