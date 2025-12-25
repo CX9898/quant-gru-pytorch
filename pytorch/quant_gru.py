@@ -1308,17 +1308,19 @@ class QuantGRU(nn.Module):
             # [与 CUDA 一致] g = tanh(Wx_n + r * (Rh_n + br_n) + bx_n)
             Rh_add_br = Rh_n + br_n.unsqueeze(0)
             
-            # [与 CUDA 一致] 中间结果量化
+            # [与 CUDA 一致] 中间结果量化（从配置读取位宽）
             Rh_add_br = fake_quantize(Rh_add_br, quant_params.exp2_inv_Rh_add_br_,
                                       quant_params.zp_Rh_add_br_,
-                                      bitwidth=16, symmetric=True)
+                                      bitwidth=self._get_bitwidth('Rh_add_br'),
+                                      symmetric=self._get_symmetric('Rh_add_br'))
             
             rRh = r * Rh_add_br
             
-            # [与 CUDA 一致] 乘积量化
+            # [与 CUDA 一致] 乘积量化（从配置读取位宽）
             rRh = fake_quantize(rRh, quant_params.exp2_inv_rRh_,
                                 quant_params.zp_rRh_,
-                                bitwidth=16, symmetric=True)
+                                bitwidth=self._get_bitwidth('rRh'),
+                                symmetric=self._get_symmetric('rRh'))
             
             g_pre = Wx_n + rRh + bx_n.unsqueeze(0)
             
@@ -1337,17 +1339,19 @@ class QuantGRU(nn.Module):
             # [与 CUDA 一致] h_new = z * h + (1 - z) * g
             # CUDA computeH 分别计算并量化 old_contrib 和 new_contrib
             
-            # old_contrib = z * h
+            # old_contrib = z * h（从配置读取位宽）
             old_contrib = z * h
             old_contrib = fake_quantize(old_contrib, quant_params.exp2_inv_old_contrib_,
                                         quant_params.zp_old_contrib_,
-                                        bitwidth=16, symmetric=True)
+                                        bitwidth=self._get_bitwidth('old_contrib'),
+                                        symmetric=self._get_symmetric('old_contrib'))
             
-            # new_contrib = (1 - z) * g
+            # new_contrib = (1 - z) * g（从配置读取位宽）
             new_contrib = (1 - z) * g
             new_contrib = fake_quantize(new_contrib, quant_params.exp2_inv_new_contrib_,
                                         quant_params.zp_new_contrib_,
-                                        bitwidth=16, symmetric=True)
+                                        bitwidth=self._get_bitwidth('new_contrib'),
+                                        symmetric=self._get_symmetric('new_contrib'))
             
             # h_new = old_contrib + new_contrib
             h_new = old_contrib + new_contrib
