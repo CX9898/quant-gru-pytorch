@@ -45,36 +45,52 @@ __device__ __forceinline__ float tanh_fp(float x) { return tanhf(x); }
 // 1. GEMM Kernels - 量化矩阵乘法
 // ============================================================================
 
-// INT16 融合 GEMM: C = rshift(A * (B - zp_B), shift) + zp_out
+// ============================================================================
+// 统一融合 GEMM: C = rshift(A * (B - zp_B), shift) + zp_out
+// 支持所有整数类型组合，编译时自动选择最优累加器
+// ============================================================================
 constexpr int TILE_SIZE = 16;
 
+// 编译时选择累加器类型：
+// - INT8×INT8:   使用 int32（8+8=16 位，累加 K<65536 次安全）
+// - INT8×INT16:  需要 int64（8+16=24 位，累加 K>256 次可能溢出 int32）
+// - INT16×INT8:  需要 int64（16+8=24 位，累加 K>256 次可能溢出 int32）
+// - INT16×INT16: 需要 int64（16+16=32 位，累加必定溢出 int32）
 template <typename AT, typename BT>
-__global__ void quantizedGemmInt16Fused(
-    const AT *__restrict__ A,  // [M, K] 权重（W 或 R），行主序
-    const BT *__restrict__ B,  // [K, N] 输入（x 或 h），列主序（cuBLAS 风格）
-    int32_t *__restrict__ C,   // [M, N] 输出，列主序
-    int M, int N, int K,
-    int32_t zp_B,                              // 输入的 zero-point
-    const int8_t *__restrict__ shift_per_row,  // [M] per-row shift
-    int32_t zp_out                             // 输出的 zero-point
+struct AccumulatorSelector {
+    // 只有 INT8×INT8 可以安全使用 int32，其他情况都需要 int64
+    static constexpr bool needs_int64 = (sizeof(AT) == 2 || sizeof(BT) == 2);
+    using type = std::conditional_t<needs_int64, int64_t, int32_t>;
+};
+
+template <typename AT, typename BT>
+__global__ void quantizedGemmFused(const AT *__restrict__ A,  // [M, K] 权重，列主序：A[k*M + m]
+                                   const BT *__restrict__ B,  // [K, N] 输入，列主序：B[n*K + k]
+                                   int32_t *__restrict__ C,   // [M, N] 输出，列主序：C[n*M + m]
+                                   int M, int N, int K,
+                                   int32_t zp_B,                              // 输入的 zero-point
+                                   const int8_t *__restrict__ shift_per_row,  // [M] per-row shift
+                                   int32_t zp_out,                            // 输出的 zero-point
+                                   QuantBitWidth output_bw                    // 输出位宽配置
 ) {
+    // 编译时选择最优累加器类型
+    using AccType = typename AccumulatorSelector<AT, BT>::type;
+
     // 共享内存：用于 tiled 矩阵乘法
     __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];  // +1 避免 bank conflict
     __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
 
     // 计算当前线程负责的输出位置
-    // 注意：cuBLAS 使用列主序，所以 A 是 [M,K] 行主序，B 是 [K,N] 列主序
-    // 这里 A 实际存储为 A[k*M + m]（列主序转置），B 存储为 B[n*K + k]
     const int row = blockIdx.y * TILE_SIZE + threadIdx.y;  // m in [0, M)
     const int col = blockIdx.x * TILE_SIZE + threadIdx.x;  // n in [0, N)
 
-    int64_t acc = 0;  // 使用 int64 累加，避免溢出
+    AccType acc = 0;
 
     // 分 tile 计算
     const int numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
 
     for (int t = 0; t < numTiles; t++) {
-        // 加载 A tile（A 是列主序：A[k*M + m]）
+        // 加载 A tile（列主序：A[k*M + m]）
         const int aK = t * TILE_SIZE + threadIdx.x;
         if (row < M && aK < K) {
             As[threadIdx.y][threadIdx.x] = static_cast<int32_t>(A[aK * M + row]);
@@ -82,7 +98,7 @@ __global__ void quantizedGemmInt16Fused(
             As[threadIdx.y][threadIdx.x] = 0;
         }
 
-        // 加载 B tile 并减去 zp_B（B 是列主序：B[n*K + k]）
+        // 加载 B tile 并减去 zp_B（列主序：B[n*K + k]）
         const int bK = t * TILE_SIZE + threadIdx.y;
         if (col < N && bK < K) {
             // 核心：边加载边减 zero-point
@@ -96,22 +112,28 @@ __global__ void quantizedGemmInt16Fused(
 // 计算当前 tile 的贡献
 #pragma unroll
         for (int k = 0; k < TILE_SIZE; k++) {
-            acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
+            if constexpr (std::is_same_v<AccType, int64_t>) {
+                // 涉及 INT16 的运算（INT8×INT16, INT16×INT8, INT16×INT16）：需要 int64 避免溢出
+                acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
+            } else {
+                // INT8×INT8: int32 累加足够
+                acc += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+            }
         }
 
         __syncthreads();
     }
 
-    // 写回结果：rshift_round + zp_out
+    // 写回结果：rshift_round + zp_out + clamp
     if (row < M && col < N) {
-        int8_t n = shift_per_row[row];
-        int64_t result;
+        const int8_t n = shift_per_row[row];
+        AccType result;
 
-        // rshift_round for int64
+        // rshift_round
         if (n <= 0) {
             result = acc << (-n);
         } else {
-            const int64_t offset = static_cast<int64_t>(1) << (n - 1);
+            const AccType offset = static_cast<AccType>(1) << (n - 1);
             if (acc >= 0) {
                 result = (acc + offset) >> n;
             } else {
@@ -120,22 +142,20 @@ __global__ void quantizedGemmInt16Fused(
         }
         result += zp_out;
 
-        // 不做 clamp，保留完整精度（输出是 int32）
-        // GEMM 结果可能超出 INT16 范围，由后续操作处理
-
-        // 输出是列主序：C[n*M + m]
-        C[col * M + row] = static_cast<int32_t>(result);
+        // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
+        C[col * M + row] = dev::clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
     }
 }
 
-// INT8: 将 int32 GEMM 结果原地 rescale
+// 将 int32 GEMM 结果原地 rescale（根据位宽配置自动 clamp）
 __global__ void rescaleGemmI32(
     int32_t *__restrict__ data,                // [hidden*3, batch*steps] GEMM 输出（原地修改）
     const int64_t *__restrict__ compensation,  // [hidden*3] W_sum_mul_x_zp
     const int8_t *__restrict__ shift,          // [hidden*3] per-channel shift
     int32_t zp,                                // zero point
     int hidden3,                               // hidden_size * 3
-    int total_size                             // hidden*3 * batch*steps
+    int total_size,                            // hidden*3 * batch*steps
+    QuantBitWidth output_bw                    // 输出位宽配置
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total_size) return;
@@ -158,11 +178,8 @@ __global__ void rescaleGemmI32(
     }
     result += zp;
 
-    // clamp to INT8 range（因为这是 INT8 专用 kernel）
-    if (result > 127) result = 127;
-    if (result < -128) result = -128;
-
-    data[idx] = static_cast<int32_t>(result);
+    // 根据位宽配置 clamp
+    data[idx] = dev::clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
 }
 
 // ============================================================================
@@ -187,7 +204,7 @@ __device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
 
     // 调用门专用函数，自动选择 LUT
-    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const auto &bw_cfg = rescale_params.bitwidth_config_;
     const int32_t z = dev::sigmoid_z(z_pre_i32, bw_cfg.z_pre_, bw_cfg.z_out_);
 
 #ifdef DEBUG_QUANT
@@ -238,7 +255,7 @@ __device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
 
     // 调用门专用函数，自动选择 LUT
-    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const auto &bw_cfg = rescale_params.bitwidth_config_;
     const int32_t r = dev::sigmoid_r(r_pre_i32, bw_cfg.r_pre_, bw_cfg.r_out_);
 
 #ifdef DEBUG_QUANT
@@ -296,7 +313,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
 
     // 调用门专用函数，自动选择 LUT
-    const auto& bw_cfg = rescale_params.bitwidth_config_;
+    const auto &bw_cfg = rescale_params.bitwidth_config_;
     const int32_t g = dev::tanh_g(g_pre_i32, bw_cfg.g_pre_, bw_cfg.g_out_);
 
 #ifdef DEBUG_QUANT
@@ -336,7 +353,8 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
 
             // 手动计算期望的 tanh 输出
             const int16_t g_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
-            int seg_id = dev::find_segment(static_cast<int32_t>(g_pre_i16), d_tanh_lut_int16.segments);
+            int seg_id =
+                dev::find_segment(static_cast<int32_t>(g_pre_i16), d_tanh_lut_int16.segments);
             printf("[G LUT] idx=%d seg_id=%d g_pre_i16=%d threshold[seg]=%d\n", debug_idx, seg_id,
                    g_pre_i16, d_tanh_lut_int16.segments[seg_id].threshold);
         }
@@ -626,7 +644,8 @@ constexpr int CUBLAS_INT8_N_THRESHOLD = 16;
 // 计算填充后的 N 值
 inline int computePaddedN(int N) {
     if (N > CUBLAS_INT8_N_THRESHOLD && N % CUBLAS_INT8_N_ALIGNMENT != 0) {
-        return ((N + CUBLAS_INT8_N_ALIGNMENT - 1) / CUBLAS_INT8_N_ALIGNMENT) * CUBLAS_INT8_N_ALIGNMENT;
+        return ((N + CUBLAS_INT8_N_ALIGNMENT - 1) / CUBLAS_INT8_N_ALIGNMENT) *
+               CUBLAS_INT8_N_ALIGNMENT;
     }
     return N;
 }
@@ -648,7 +667,7 @@ void ForwardPassQuant<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
         const int N_Wx = steps * batch_size;
         const int N_Wx_padded = computePaddedN(N_Wx);
         tmp_Wx_.resize(hidden3 * N_Wx_padded);  // 分配填充后大小，GEMM 直接输出到这里
-        
+
         // ComputeRh: N = batch_size（固定，只需分配一次）
         if (N_padded_Rh_ == 0) {
             N_padded_Rh_ = computePaddedN(batch_size);
@@ -658,13 +677,13 @@ void ForwardPassQuant<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
                 h_padded_.zero();  // 初始化填充部分为零
             }
         }
-        
+
         // ComputeWx: 预分配输入填充缓冲区
         if (N_Wx_padded != N_Wx) {
             x_padded_.resize(input_size * N_Wx_padded);
             x_padded_.zero();  // 初始化填充部分为零
         }
-        
+
         // 权重和常量
         if (W_sum_mul_x_zp_.size() == 0) {
             W_sum_mul_x_zp_.resize(hidden3);
@@ -728,8 +747,8 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int s
     const int threads = 256;
     const int blocks = (total_size + threads - 1) / threads;
 
-    if constexpr (sizeof(WT) == 1) {
-        // INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
+    if constexpr (sizeof(WT) == 1 && sizeof(XT) == 1) {
+        // INT8×INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
         static const int32_t alpha32 = 1;
         static const int32_t beta32 = 0;
 
@@ -756,9 +775,11 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int s
         // Rescale: 只处理实际的 N 列（total_size = M * N）
         kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
             tmp_Wx_.data(), W_sum_mul_x_zp_.data(), rescale_param_.n_W_mul_x_div_Wx_.data(),
-            rescale_param_.zp_Wx_, hidden_size * 3, total_size);
+            rescale_param_.zp_Wx_, hidden_size * 3, total_size,
+            rescale_param_.bitwidth_config_.Wx_);
     } else {
-        // INT16: 使用融合的量化 GEMM（边算边减 zp，避免中间 int64 存储）
+        // 非 INT8×INT8: 使用统一的融合 GEMM（自动选择累加器类型）
+        // 支持 INT8×INT16, INT16×INT8, INT16×INT16
         // C[m,n] = rshift_round(sum_k(W[m,k] * (x[k,n] - zp_x)), shift[m]) + zp_Wx
         const int M = hidden_size * 3;
         const int N = steps * batch_size;
@@ -768,9 +789,10 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int s
         dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                      (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-        kernel::quantizedGemmInt16Fused<WT, XT><<<gridDim, blockDim, 0, stream>>>(
+        kernel::quantizedGemmFused<WT, XT><<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_Wx_.data(), M, N, K, rescale_param_.zp_x_,
-            rescale_param_.n_W_mul_x_div_Wx_.data(), rescale_param_.zp_Wx_);
+            rescale_param_.n_W_mul_x_div_Wx_.data(), rescale_param_.zp_Wx_,
+            rescale_param_.bitwidth_config_.Wx_);
     }
 }
 
@@ -784,8 +806,8 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
     const int threads = 256;
     const int blocks = (total_size + threads - 1) / threads;
 
-    if constexpr (sizeof(HT) == 1) {
-        // INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
+    if constexpr (sizeof(RT) == 1 && sizeof(HT) == 1) {
+        // INT8×INT8: 直接调用 cuBLAS GEMM 输出 INT32（不会溢出）
         static const int32_t alpha32 = 1;
         static const int32_t beta32 = 0;
 
@@ -799,20 +821,22 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
             // 复制输入到填充缓冲区（填充部分已在 EnsureBuffersAllocated 中初始化为零）
             d2d(h_padded_.data(), h, K * N);
             // GEMM 直接输出到 tmp_Rh_（已分配足够大小）
-            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N_padded_Rh_, K,
-                           &alpha32, R, M, h_padded_.data(), K, &beta32, tmp_Rh_.data(), M);
+            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N_padded_Rh_, K, &alpha32, R,
+                           M, h_padded_.data(), K, &beta32, tmp_Rh_.data(), M);
         } else {
             // 不需要填充：直接 GEMM
-            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
-                           &alpha32, R, M, h, K, &beta32, tmp_Rh_.data(), M);
+            blas<HT>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha32, R, M, h, K,
+                           &beta32, tmp_Rh_.data(), M);
         }
 
         // Rescale: 只处理实际的 N 列（total_size = M * N）
         kernel::rescaleGemmI32<<<blocks, threads, 0, stream>>>(
             tmp_Rh_.data(), R_sum_mul_h_zp_.data(), rescale_param_.n_R_mul_h_div_Rh_.data(),
-            rescale_param_.zp_Rh_, hidden_size * 3, total_size);
+            rescale_param_.zp_Rh_, hidden_size * 3, total_size,
+            rescale_param_.bitwidth_config_.Rh_);
     } else {
-        // INT16: 使用融合的量化 GEMM（边算边减 zp，避免中间 int64 存储）
+        // 非 INT8×INT8: 使用统一的融合 GEMM（自动选择累加器类型）
+        // 支持 INT8×INT16, INT16×INT8, INT16×INT16
         // C[m,n] = rshift_round(sum_k(R[m,k] * (h[k,n] - zp_h)), shift[m]) + zp_Rh
         const int M = hidden_size * 3;
         const int N = batch_size;
@@ -822,9 +846,10 @@ void ForwardPassQuant<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
         dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                      (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-        kernel::quantizedGemmInt16Fused<RT, HT><<<gridDim, blockDim, 0, stream>>>(
+        kernel::quantizedGemmFused<RT, HT><<<gridDim, blockDim, 0, stream>>>(
             R, h, tmp_Rh_.data(), M, N, K, rescale_param_.zp_h_,
-            rescale_param_.n_R_mul_h_div_Rh_.data(), rescale_param_.zp_Rh_);
+            rescale_param_.n_R_mul_h_div_Rh_.data(), rescale_param_.zp_Rh_,
+            rescale_param_.bitwidth_config_.Rh_);
     }
 }
 
@@ -1046,8 +1071,19 @@ void ForwardPassQuant<XT, HT, WT, RT>::Run(
     cublasSetStream(data_->blas_handle, save_stream);
 }
 
-// 显式实例化：四个类型参数相同的情况
+// 显式实例化
+// ForwardPassQuant<XT, HT, WT, RT>: XT=x类型, HT=h类型, WT=W类型, RT=R类型
+
+// W8A8: 权重 int8, 激活 int8
 template struct ForwardPassQuant<int8_t, int8_t, int8_t, int8_t>;
+
+// W8A16: 权重 int8, 激活 int16 (混合精度)
+template struct ForwardPassQuant<int16_t, int16_t, int8_t, int8_t>;
+
+// W16A8: 权重 int16, 激活 int8
+template struct ForwardPassQuant<int8_t, int8_t, int16_t, int16_t>;
+
+// W16A16: 权重 int16, 激活 int16
 template struct ForwardPassQuant<int16_t, int16_t, int16_t, int16_t>;
 
 }  // namespace gru

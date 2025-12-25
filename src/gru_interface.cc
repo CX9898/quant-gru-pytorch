@@ -400,18 +400,21 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 }
 
 // 量化 GRU 前向传播
-template <typename QuantT>
+// WeightT: 权重类型 (W, R 共享)
+// ActivationT: 激活类型 (x, h 共享)
+template <typename WeightT, typename ActivationT>
 void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
-                     const int input_size, const int hidden_size, const QuantT *W, const QuantT *R,
-                     const int32_t *bx, const int32_t *br, const float *x, const float *h0,
-                     const GRUQuantitativeParameters &quant_parms,
+                     const int input_size, const int hidden_size, const WeightT *W,
+                     const WeightT *R, const int32_t *bx, const int32_t *br, const float *x,
+                     const float *h0, const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
 
-    dev::vector<QuantT> x_quant(x_size);
+    // 激活值使用 ActivationT 类型
+    dev::vector<ActivationT> x_quant(x_size);
     dev::quantification(x, x_quant.data(), x_size, quant_parms.exp2_inv_x_, quant_parms.zp_x_);
 
-    dev::vector<QuantT> h_quant((time_steps + 1) * batch_size * hidden_size);
+    dev::vector<ActivationT> h_quant((time_steps + 1) * batch_size * hidden_size);
     // 初始化 h0 区域（第一个时间步的隐藏状态）为零点值
     dev::fill_n(h_quant.data(), batch_size * hidden_size, quant_parms.zp_h_);
 
@@ -424,12 +427,11 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 
     dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size *
                                      4);  // v 统一使用 int32_t 存储
-    // dev::vector<int32_t> tmp_Wx_dev(time_steps * batch_size * hidden_size *
-    //                                 3);                             // 用于存放W * x的中间结果
-    // dev::vector<int32_t> tmp_Rh_dev(batch_size * hidden_size * 3);  // 用于存放R * h的中间结果
 
-    gru::ForwardPassQuant<QuantT, QuantT, QuantT, QuantT> forward =
-        gru::ForwardPassQuant<QuantT, QuantT, QuantT, QuantT>(
+    // 使用独立的权重类型和激活类型
+    // ForwardPassQuant<XT, HT, WT, RT>: XT=x类型, HT=h类型, WT=W类型, RT=R类型
+    gru::ForwardPassQuant<ActivationT, ActivationT, WeightT, WeightT> forward =
+        gru::ForwardPassQuant<ActivationT, ActivationT, WeightT, WeightT>(
             is_training,  // training: true为训练，false为推理
             batch_size, input_size, hidden_size, g_blas_handle);
 
@@ -464,34 +466,110 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 }
 
 // 统一前向传播接口
+// 支持的量化模式：
+//   - W8A8:   权重 int8,  激活 int8  (默认)
+//   - W8A16:  权重 int8,  激活 int16 (混合精度)
+//   - W16A16: 权重 int16, 激活 int16
 void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
                       int input_size, int hidden_size, const float *W, const float *R,
                       const float *bx, const float *br, const float *x, const float *h0,
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle, float *h, float *v) {
     if (is_quant) {
-        // 根据 bitwidth_config_.W_ 决定权重量化位宽
+        dev::vector<int32_t> bx_quant(hidden_size * 3);
+        dev::vector<int32_t> br_quant(hidden_size * 3);
+
         const auto &config = quant_gru_scales.bitwidth_config_;
-        if (config.W_ == QuantBitWidth::INT16) {
+
+        // 一致性检查：W 和 R 必须相同位宽，x 和 h 必须相同位宽
+        if (config.W_ != config.R_) {
+            throw std::invalid_argument(
+                "W_ and R_ must have the same bitwidth. "
+                "Current: W_=" +
+                std::to_string(static_cast<int>(config.W_)) +
+                ", R_=" + std::to_string(static_cast<int>(config.R_)));
+        }
+        if (config.x_ != config.h_) {
+            throw std::invalid_argument(
+                "x_ and h_ must have the same bitwidth. "
+                "Current: x_=" +
+                std::to_string(static_cast<int>(config.x_)) +
+                ", h_=" + std::to_string(static_cast<int>(config.h_)));
+        }
+
+        const bool weight_is_8bit = (config.W_ == QuantBitWidth::INT8);
+        const bool weight_is_16bit = (config.W_ == QuantBitWidth::INT16);
+        const bool activation_is_8bit = (config.x_ == QuantBitWidth::INT8);
+        const bool activation_is_16bit = (config.x_ == QuantBitWidth::INT16);
+
+        if (weight_is_16bit && activation_is_16bit) {
+            // W16A16: 权重 int16, 激活 int16
             dev::vector<int16_t> W_quant(hidden_size * 3 * input_size);
             dev::vector<int16_t> R_quant(hidden_size * 3 * hidden_size);
-            dev::vector<int32_t> bx_quant(hidden_size * 3);
-            dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales,
                                W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, h0,
-                            quant_gru_scales, g_blas_handle, h, v);
-        } else {
+            quantGRUForward<int16_t, int16_t>(is_training, time_steps, batch_size, input_size,
+                                              hidden_size, W_quant.data(), R_quant.data(),
+                                              bx_quant.data(), br_quant.data(), x, h0,
+                                              quant_gru_scales, g_blas_handle, h, v);
+        } else if (weight_is_8bit && activation_is_16bit) {
+            // W8A16: 权重 int8, 激活 int16 (混合精度)
             dev::vector<int8_t> W_quant(hidden_size * 3 * input_size);
             dev::vector<int8_t> R_quant(hidden_size * 3 * hidden_size);
-            dev::vector<int32_t> bx_quant(hidden_size * 3);
-            dev::vector<int32_t> br_quant(hidden_size * 3);
             quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales,
                                W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
-            quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
-                            W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, h0,
-                            quant_gru_scales, g_blas_handle, h, v);
+            quantGRUForward<int8_t, int16_t>(is_training, time_steps, batch_size, input_size,
+                                             hidden_size, W_quant.data(), R_quant.data(),
+                                             bx_quant.data(), br_quant.data(), x, h0,
+                                             quant_gru_scales, g_blas_handle, h, v);
+        } else if (weight_is_8bit && activation_is_8bit) {
+            // W8A8: 权重 int8, 激活 int8 (默认)
+            dev::vector<int8_t> W_quant(hidden_size * 3 * input_size);
+            dev::vector<int8_t> R_quant(hidden_size * 3 * hidden_size);
+            quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales,
+                               W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
+            quantGRUForward<int8_t, int8_t>(is_training, time_steps, batch_size, input_size,
+                                            hidden_size, W_quant.data(), R_quant.data(),
+                                            bx_quant.data(), br_quant.data(), x, h0,
+                                            quant_gru_scales, g_blas_handle, h, v);
+        } else if (weight_is_16bit && activation_is_8bit) {
+            // W16A8: 权重 int16, 激活 int8
+            dev::vector<int16_t> W_quant(hidden_size * 3 * input_size);
+            dev::vector<int16_t> R_quant(hidden_size * 3 * hidden_size);
+            quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales,
+                               W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
+            quantGRUForward<int16_t, int8_t>(is_training, time_steps, batch_size, input_size,
+                                             hidden_size, W_quant.data(), R_quant.data(),
+                                             bx_quant.data(), br_quant.data(), x, h0,
+                                             quant_gru_scales, g_blas_handle, h, v);
+        } else {
+            // 不支持的位宽组合 - 生成详细错误信息
+            auto bitwidthToString = [](QuantBitWidth bw) -> const char * {
+                switch (bw) {
+                    case QuantBitWidth::INT8:
+                        return "INT8";
+                    case QuantBitWidth::INT16:
+                        return "INT16";
+                    case QuantBitWidth::INT32:
+                        return "INT32";
+                    case QuantBitWidth::UINT8:
+                        return "UINT8";
+                    case QuantBitWidth::UINT16:
+                        return "UINT16";
+                    default:
+                        return "UNKNOWN";
+                }
+            };
+            std::string error_msg = "Unsupported quantization mode: W_=";
+            error_msg += bitwidthToString(config.W_);
+            error_msg += ", R_=";
+            error_msg += bitwidthToString(config.R_);
+            error_msg += ", x_=";
+            error_msg += bitwidthToString(config.x_);
+            error_msg += ", h_=";
+            error_msg += bitwidthToString(config.h_);
+            error_msg += ". Supported modes: W8A8, W8A16, W16A8, W16A16";
+            throw std::invalid_argument(error_msg);
         }
     } else {
         hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bx, br,
@@ -517,20 +595,36 @@ template void quantitativeWeight<int16_t>(const int input_size, const int hidden
                                           int16_t *W_quant, int16_t *R_quant, int32_t *bx_quant,
                                           int32_t *br_quant);
 
-template void quantGRUForward<int8_t>(bool is_training, const int time_steps, const int batch_size,
-                                      const int input_size, const int hidden_size, const int8_t *W,
-                                      const int8_t *R, const int32_t *bx, const int32_t *br,
-                                      const float *x,
-                                      const float *h0,  // 初始隐藏状态，可以为 nullptr
-                                      const GRUQuantitativeParameters &quant_parms,
-                                      const cublasHandle_t &g_blas_handle, float *h, float *v);
+// quantGRUForward 显式实例化
+// 支持的模式: W8A8, W8A16, W16A8, W16A16
 
-template void quantGRUForward<int16_t>(bool is_training, const int time_steps, const int batch_size,
-                                       const int input_size, const int hidden_size,
-                                       const int16_t *W, const int16_t *R, const int32_t *bx,
-                                       const int32_t *br, const float *x, const float *h0,
-                                       const GRUQuantitativeParameters &quant_parms,
-                                       const cublasHandle_t &g_blas_handle, float *h, float *v);
+// W8A8: 权重 int8, 激活 int8
+template void quantGRUForward<int8_t, int8_t>(
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v);
+
+// W8A16: 权重 int8, 激活 int16 (混合精度)
+template void quantGRUForward<int8_t, int16_t>(
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int8_t *W, const int8_t *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v);
+
+// W16A8: 权重 int16, 激活 int8
+template void quantGRUForward<int16_t, int8_t>(
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v);
+
+// W16A16: 权重 int16, 激活 int16
+template void quantGRUForward<int16_t, int16_t>(
+    bool is_training, const int time_steps, const int batch_size, const int input_size,
+    const int hidden_size, const int16_t *W, const int16_t *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0, const GRUQuantitativeParameters &quant_parms,
+    const cublasHandle_t &g_blas_handle, float *h, float *v);
 
 // =====================================================================
 // LUT 初始化实现
@@ -1006,10 +1100,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             max_val = 1.0f;
         }
         ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "z_out");
-        calibrateQuantParams<float, ZOutT>(
-            min_val, max_val, bitwidth_config.z_out_symmetric_, aligned_min, aligned_max,
-            quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
-            verbose ? "scale_z_out" : "");
+        calibrateQuantParams<float, ZOutT>(min_val, max_val, bitwidth_config.z_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
+                                           quant_params.zp_z_out_, verbose ? "scale_z_out" : "");
     });
 
     // r 门输出 - sigmoid
@@ -1028,10 +1121,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             max_val = 1.0f;
         }
         ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "r_out");
-        calibrateQuantParams<float, ROutT>(
-            min_val, max_val, bitwidth_config.r_out_symmetric_, aligned_min, aligned_max,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
-            verbose ? "scale_r_out" : "");
+        calibrateQuantParams<float, ROutT>(min_val, max_val, bitwidth_config.r_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
+                                           quant_params.zp_r_out_, verbose ? "scale_r_out" : "");
     });
 
     // g 门输出 - tanh
@@ -1050,10 +1142,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             max_val = 1.0f;
         }
         ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "g_out");
-        calibrateQuantParams<float, GOutT>(
-            min_val, max_val, bitwidth_config.g_out_symmetric_, aligned_min, aligned_max,
-            quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
-            verbose ? "scale_g_out" : "");
+        calibrateQuantParams<float, GOutT>(min_val, max_val, bitwidth_config.g_out_symmetric_,
+                                           aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
+                                           quant_params.zp_g_out_, verbose ? "scale_g_out" : "");
     });
 
     // Rh + br 的量化
@@ -1088,9 +1179,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using NewContribT = typename decltype(tag)::type;
         if (hist_collectors.new_contrib_hist.is_valid()) {
             calibrateQuantParamsFromHistogram<NewContribT>(
-                hist_collectors.new_contrib_hist.histogram(), bitwidth_config.new_contrib_symmetric_,
-                quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_,
-                verbose ? "scale_new_contrib" : nullptr);
+                hist_collectors.new_contrib_hist.histogram(),
+                bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
+                quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr);
         } else {
             quant_params.exp2_inv_new_contrib_ = 7;
             quant_params.zp_new_contrib_ = 0;
@@ -1102,9 +1193,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using OldContribT = typename decltype(tag)::type;
         if (hist_collectors.old_contrib_hist.is_valid()) {
             calibrateQuantParamsFromHistogram<OldContribT>(
-                hist_collectors.old_contrib_hist.histogram(), bitwidth_config.old_contrib_symmetric_,
-                quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_,
-                verbose ? "scale_old_contrib" : nullptr);
+                hist_collectors.old_contrib_hist.histogram(),
+                bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
+                quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr);
         } else {
             quant_params.exp2_inv_old_contrib_ = 7;
             quant_params.zp_old_contrib_ = 0;
