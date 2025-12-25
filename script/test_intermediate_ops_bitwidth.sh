@@ -41,6 +41,10 @@ TOTAL_TESTS=0
 PASS_COUNT=0
 FAIL_COUNT=0
 
+# 阈值设置（必须同时满足才算通过）
+COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
+MSE_THRESHOLD=1e-4        # MSE <= 此值
+
 # 函数：修改 GEMM 结果位宽 (Wx_, Rh_)
 modify_gemm_bitwidth() {
     local Wx_bits=$1
@@ -187,8 +191,40 @@ run_test() {
     if [ -z "$mse" ]; then mse="N/A"; fi
     if [ -z "$cos" ]; then cos="N/A"; fi
     
-    echo "  ✓ MSE: $mse, Cosine: $cos"
-    PASS_COUNT=$((PASS_COUNT + 1))
+    # 判断是否同时满足 MSE 和余弦相似度阈值
+    local cos_ok=false
+    local mse_ok=false
+    local fail_reason=""
+    
+    if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
+        # 检查余弦相似度
+        if awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+            cos_ok=true
+        fi
+        # 检查 MSE
+        if awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+            mse_ok=true
+        fi
+        
+        if $cos_ok && $mse_ok; then
+            echo "  ✓ MSE: $mse (<= $MSE_THRESHOLD), Cosine: $cos (>= $COSINE_THRESHOLD)"
+            PASS_COUNT=$((PASS_COUNT + 1))
+        else
+            # 构建失败原因
+            if ! $cos_ok; then
+                fail_reason="Cosine < $COSINE_THRESHOLD"
+            fi
+            if ! $mse_ok; then
+                [ -n "$fail_reason" ] && fail_reason="$fail_reason, "
+                fail_reason="${fail_reason}MSE > $MSE_THRESHOLD"
+            fi
+            echo "  ✗ MSE: $mse, Cosine: $cos ($fail_reason)"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+    else
+        echo "  ✗ MSE: $mse, Cosine: $cos (无法提取结果)"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
     
     # 记录到结果文件
     echo "配置: $config_name" >> "$RESULT_FILE"
@@ -480,6 +516,12 @@ done | head -5 | tee -a "$RESULT_FILE"
 echo ""
 echo "===== 测试完成 ====="
 echo "总测试数: $TEST_COUNT"
-echo "通过: $PASS_COUNT, 失败: $FAIL_COUNT"
+echo "通过 (Cosine >= $COSINE_THRESHOLD 且 MSE <= $MSE_THRESHOLD): $PASS_COUNT"
+echo "失败: $FAIL_COUNT"
 echo "详细结果: $RESULT_FILE"
 echo "CSV 数据: $CSV_FILE"
+
+# 如果有失败的测试，返回非零退出码
+if [ $FAIL_COUNT -gt 0 ]; then
+    exit 1
+fi
