@@ -157,6 +157,18 @@ gru.calibration_method = 'minmax'
 
 ### ONNX 导出
 
+`QuantGRU` 通过 `export_mode` 属性切换到纯 PyTorch 实现，使模型可被 ONNX 追踪导出。
+
+#### 导出模式工作原理
+
+```
+forward()
+  ├─ export_mode=False (默认) → CUDA C++ 实现（高性能推理）
+  └─ export_mode=True         → 纯 PyTorch 实现（可 ONNX 追踪）
+                                   ├─ export_format='float' → 浮点计算
+                                   └─ export_format='qdq'   → QDQ 伪量化
+```
+
 #### 浮点模型导出（默认）
 
 ```python
@@ -185,7 +197,12 @@ gru.export_mode = False  # 恢复 CUDA 模式
 
 #### 量化模型导出（QDQ 格式）
 
+QDQ（Quantize-Dequantize）格式在关键计算点插入伪量化操作，推理引擎（如 TensorRT、ONNX Runtime）会自动识别并优化为真正的量化算子。
+
 ```python
+from quant_gru import QuantGRU
+import torch
+
 # 1. 创建并校准模型
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
@@ -200,6 +217,7 @@ gru.export_format = 'qdq'  # 使用 QDQ 伪量化格式
 gru.eval()
 
 # 3. 导出 ONNX
+dummy_input = torch.randn(1, 50, 64).cuda()
 torch.onnx.export(
     gru, dummy_input, "gru_quantized.onnx",
     input_names=['input'],
@@ -212,11 +230,19 @@ torch.onnx.export(
 gru.export_mode = False  # 恢复 CUDA 模式
 ```
 
-> 💡 **导出格式说明**：
-> | `export_format` | 说明 | 适用场景 |
-> |-----------------|------|----------|
-> | `'float'` | 浮点格式（默认） | 非量化模型部署 |
-> | `'qdq'` | QDQ 伪量化格式 | 量化模型部署，推理引擎自动优化 |
+#### 导出格式对比
+
+| `export_format` | 说明 | 适用场景 | 量化参数要求 |
+|-----------------|------|----------|--------------|
+| `'float'` | 浮点格式（默认） | 非量化模型、通用部署 | 无 |
+| `'qdq'` | QDQ 伪量化格式 | 量化模型部署（TensorRT、ONNX Runtime） | 需先校准 |
+
+#### 注意事项
+
+1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
+2. **QDQ 格式需要先完成校准**：必须调用 `calibrate()` 和 `finalize_calibration()`
+3. **导出后恢复 CUDA 模式**：设置 `export_mode = False` 以恢复高性能推理
+4. **PyTorch 2.x 兼容**：使用 `dynamo=False` 参数以使用传统 TorchScript 导出
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
@@ -290,7 +316,7 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 ### 导出模式
 
-`QuantGRU` 支持通过 `export_mode` 属性切换到纯 PyTorch 实现，以便 ONNX 追踪：
+`QuantGRU` 通过 `export_mode` 属性切换到纯 PyTorch 实现，使模型可被 ONNX 追踪：
 
 | 属性 | 说明 |
 |------|------|
@@ -301,16 +327,23 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 通过 `export_format` 属性设置具体的导出格式：
 
-| 格式 | 说明 | 适用场景 |
-|------|------|----------|
-| `'float'` | **默认**，浮点格式 | 非量化模型部署、与 Haste GRU 行为一致 |
-| `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） |
+| 格式 | 说明 | 适用场景 | 量化参数要求 |
+|------|------|----------|--------------|
+| `'float'` | **默认**，浮点格式 | 非量化模型部署 | 无 |
+| `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） | 需先校准 |
 
 ```python
 # 设置导出格式
 gru.export_format = 'float'      # 默认，浮点
-gru.export_format = 'qdq'        # 量化模型推荐
+gru.export_format = 'qdq'        # 量化模型推荐（需先校准）
 ```
+
+### QDQ 格式说明
+
+QDQ 格式通过在关键计算点插入伪量化（Fake Quantize）操作实现：
+- **与 CUDA 一致**：量化参数（scale/zero_point）与 CUDA 端完全一致
+- **ONNX 兼容**：使用标准 PyTorch 算子，推理引擎会自动识别并优化
+- **Per-channel 量化**：权重支持 per-channel 量化以保持精度
 
 ## 📝 API 参考
 
@@ -340,7 +373,7 @@ class QuantGRU(nn.Module):
 |------|------|--------|------|
 | `use_quantization` | bool | False | 是否启用量化推理 |
 | `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
-| `export_format` | str | 'float' | 导出格式：'float'、'qdq' |
+| `export_format` | str | 'float' | 导出格式：'float'（浮点）或 'qdq'（伪量化，需先校准） |
 | `calibration_method` | str | 'histogram' | 校准方法：'histogram'（高精度）或 'minmax'（快速） |
 
 ### 主要方法
