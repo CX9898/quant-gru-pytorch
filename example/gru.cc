@@ -26,12 +26,12 @@ enum class CalibrationMethod {
 constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MIN_MAX;
 
 // 默认配置（可通过命令行参数覆盖）
-int g_batch_size = 64;     // 批大小 (B)
-int g_sequence_len = 50;   // 序列长度 (T), 每个样本有T个时间步
-int g_hidden_dims = 256;   // 隐藏层维度 (H), h_t的维度
-int g_input_dims = 256;    // 输入维度 (C), x_t的维度
+int g_batch_size = 64;    // 批大小 (B)
+int g_sequence_len = 50;  // 序列长度 (T), 每个样本有T个时间步
+int g_hidden_dims = 256;  // 隐藏层维度 (H), h_t的维度
+int g_input_dims = 256;   // 输入维度 (C), x_t的维度
 
-void printUsage(const char* program_name) {
+void printUsage(const char *program_name) {
     printf("Usage: %s [options]\n", program_name);
     printf("Options:\n");
     printf("  -T <value>  Sequence length (time steps), default: %d\n", g_sequence_len);
@@ -42,7 +42,7 @@ void printUsage(const char* program_name) {
     printf("\nExample: %s -T 10 -C 128 -B 32 -H 64\n", program_name);
 }
 
-void parseArgs(int argc, char* argv[]) {
+void parseArgs(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -247,7 +247,7 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
 
 // ==================== 主函数 ====================
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     // 解析命令行参数
     parseArgs(argc, argv);
 
@@ -321,7 +321,7 @@ int main(int argc, char* argv[]) {
                                            : "MIN_MAX (简单快速)");
 
     OperatorQuantConfig bitwidth_config;
-    bitwidth_config.setAllBitWidths(8);
+    // bitwidth_config.setAllBitWidths(16);
     GRUQuantitativeParameters quant_params;
     {
         ScopeTimer t("CalibrateAndInitLut:");
