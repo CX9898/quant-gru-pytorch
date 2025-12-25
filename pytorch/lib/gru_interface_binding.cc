@@ -410,6 +410,9 @@ struct GRUQuantitativeParametersPy {
     int8_t exp2_inv_old_contrib_;
     int32_t zp_old_contrib_;
 
+    // 是否为反向方向（双向 GRU 的反向方向使用反向 LUT）
+    bool is_reverse_ = false;
+
     // ⚠️ 关键字段：位宽配置必须在 Python 和 C++ 之间正确传递
     // 否则 forwardInterface 会使用默认的 8 位配置
     OperatorQuantConfigPy bitwidth_config_;
@@ -449,6 +452,7 @@ struct GRUQuantitativeParametersPy {
         zp_new_contrib_ = cpp_params.zp_new_contrib_;
         exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
         zp_old_contrib_ = cpp_params.zp_old_contrib_;
+        is_reverse_ = cpp_params.is_reverse_;
 
         // ⚠️ 关键：复制位宽配置
         bitwidth_config_.from_cpp(cpp_params.bitwidth_config_);
@@ -490,6 +494,7 @@ struct GRUQuantitativeParametersPy {
         cpp_params.zp_new_contrib_ = zp_new_contrib_;
         cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
         cpp_params.zp_old_contrib_ = zp_old_contrib_;
+        cpp_params.is_reverse_ = is_reverse_;
 
         // ⚠️ 关键：复制位宽配置
         cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
@@ -939,6 +944,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_new_contrib_", &GRUQuantitativeParametersPy::zp_new_contrib_)
         .def_readwrite("exp2_inv_old_contrib_", &GRUQuantitativeParametersPy::exp2_inv_old_contrib_)
         .def_readwrite("zp_old_contrib_", &GRUQuantitativeParametersPy::zp_old_contrib_)
+        .def_readwrite("is_reverse_", &GRUQuantitativeParametersPy::is_reverse_)
         // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
         .def_readwrite("bitwidth_config_", &GRUQuantitativeParametersPy::bitwidth_config_);
 
@@ -1010,10 +1016,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("x"), py::arg("dh_new"), py::arg("h"),
           py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbx, dbr, dh) 元组
 
-    // 初始化量化 LUT 表（仅在初始化时调用一次）
+    // 初始化量化 LUT 表
     // 接收量化参数对象，内部根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
     m.def("initialize_quantization_lut", &initialize_quantization_lut_wrapper,
-          "Initialize quantization LUT tables from quantization parameters (should be called only "
-          "once during initialization)",
+          "Initialize quantization LUT tables from quantization parameters. "
+          "Uses is_reverse_ flag to select forward or reverse LUT slot.",
           py::arg("quant_params"));
 }

@@ -19,38 +19,49 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
                               int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
 
 // 分段线性量化常量内存（统一结构）
+// 前向方向 LUT（单向 GRU 或双向 GRU 的前向）
 __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
 __constant__ SigmoidLUT d_sigmoid_r_lut;  // r 门的 Sigmoid LUT
 __constant__ SigmoidLUT d_tanh_lut;       // g 门的 Tanh LUT
 
+// 反向方向 LUT（双向 GRU 的反向）
+__constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  // 反向 z 门的 Sigmoid LUT
+__constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  // 反向 r 门的 Sigmoid LUT
+__constant__ SigmoidLUT d_tanh_lut_reverse;       // 反向 g 门的 Tanh LUT
+
 // 生成分段线性量化表（基于GRUQuantitativeParameters，根据bitwidth_config_中的实际位宽配置）
-// 统一的 LUT 生成与初始化函数
+// 根据 params.is_reverse_ 自动选择初始化前向或反向 LUT
 void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params) {
     const auto &config = params.bitwidth_config_;
+    const bool is_reverse = params.is_reverse_;
 
     // z 门 Sigmoid
     SigmoidLUT z_lut = generate_sigmoid_lut(
         params.exp2_inv_z_pre_, params.zp_z_pre_,
         params.exp2_inv_z_out_, params.zp_z_out_,
-        config.z_pre_, config.z_out_);  // 传入输入和输出位宽
-    cudaMemcpyToSymbol(d_sigmoid_z_lut, &z_lut, sizeof(SigmoidLUT));
+        config.z_pre_, config.z_out_);
+    cudaMemcpyToSymbol(is_reverse ? d_sigmoid_z_lut_reverse : d_sigmoid_z_lut, 
+                       &z_lut, sizeof(SigmoidLUT));
 
     // r 门 Sigmoid
     SigmoidLUT r_lut = generate_sigmoid_lut(
         params.exp2_inv_r_pre_, params.zp_r_pre_,
         params.exp2_inv_r_out_, params.zp_r_out_,
-        config.r_pre_, config.r_out_);  // 传入输入和输出位宽
-    cudaMemcpyToSymbol(d_sigmoid_r_lut, &r_lut, sizeof(SigmoidLUT));
+        config.r_pre_, config.r_out_);
+    cudaMemcpyToSymbol(is_reverse ? d_sigmoid_r_lut_reverse : d_sigmoid_r_lut, 
+                       &r_lut, sizeof(SigmoidLUT));
 
     // g 门 Tanh
     SigmoidLUT g_lut = generate_tanh_lut(
         params.exp2_inv_g_pre_, params.zp_g_pre_,
         params.exp2_inv_g_out_, params.zp_g_out_,
-        config.g_pre_, config.g_out_);  // 传入输入和输出位宽
-    cudaMemcpyToSymbol(d_tanh_lut, &g_lut, sizeof(SigmoidLUT));
+        config.g_pre_, config.g_out_);
+    cudaMemcpyToSymbol(is_reverse ? d_tanh_lut_reverse : d_tanh_lut, 
+                       &g_lut, sizeof(SigmoidLUT));
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_piecewise_linear_lut: z/r/g LUTs initialized\n");
+    printf("[DEBUG] generate_piecewise_linear_lut: %s z/r/g LUTs initialized\n",
+           is_reverse ? "reverse" : "forward");
 #endif
 }
 
