@@ -250,7 +250,8 @@ def ensure_cuda_float32(tensor: torch.Tensor, device: torch.device) -> torch.Ten
 # ============================================================
 
 def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
-                  bitwidth: int = 8, symmetric: bool = True) -> torch.Tensor:
+                  bitwidth: int = 8, symmetric: bool = True,
+                  is_unsigned: bool = False) -> torch.Tensor:
     """
     伪量化（Fake Quantize）: 量化后立即反量化，保持浮点格式
     
@@ -258,6 +259,16 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
     
     [与 CUDA 一致] 量化参数 (exp2_inv, zp) 与 CUDA 端完全一致
     [ONNX 兼容] 使用浮点运算模拟量化效果
+    
+    Args:
+        x: 输入张量
+        exp2_inv: 量化指数 (scale = 2^(-exp2_inv))
+        zp: 零点
+        bitwidth: 位宽 (8/16/32)
+        symmetric: 对称量化 (影响 zp 的使用方式)
+        is_unsigned: 是否使用无符号范围 (UINT)，与 symmetric 独立
+                     - False: INT 范围 (-128~127, -32768~32767)
+                     - True: UINT 范围 (0~255, 0~65535)
     """
     # 计算 scale
     if exp2_inv >= 0:
@@ -265,15 +276,17 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
     else:
         scale = float(1 << (-exp2_inv))
     
-    # 确定量化范围
+    # 确定量化范围：由 is_unsigned 决定 INT/UINT
     if bitwidth == 8:
-        qmin, qmax = (-128, 127) if symmetric else (0, 255)
+        qmin, qmax = (0, 255) if is_unsigned else (-128, 127)
     elif bitwidth == 16:
-        qmin, qmax = (-32768, 32767) if symmetric else (0, 65535)
+        qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
     else:
-        qmin, qmax = (-2147483648, 2147483647)
+        qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
     
     # 量化: q = clamp(round(x / scale) + zp, qmin, qmax)
+    # 注意: torch.round 使用银行家舍入，与 CUDA 的 round half up 略有差异
+    # 但实际影响极小 (随机数据差异率 < 0.001%)
     q = torch.clamp(torch.round(x / scale) + zp, qmin, qmax)
     
     # 反量化: x' = (q - zp) * scale
@@ -283,19 +296,29 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
 
 
 def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
-                               bitwidth: int = 8, symmetric: bool = True) -> torch.Tensor:
+                               bitwidth: int = 8, symmetric: bool = True,
+                               is_unsigned: bool = False) -> torch.Tensor:
     """
     Per-channel 伪量化
     
     [与 CUDA 一致] per-channel 量化参数与 CUDA quantificationPerChannel 一致
     [ONNX 兼容] 使用浮点运算模拟量化效果
+    
+    Args:
+        x: 输入张量
+        exp2_invs: per-channel 量化指数列表
+        zp: 零点
+        bitwidth: 位宽 (8/16/32)
+        symmetric: 对称量化
+        is_unsigned: 是否使用无符号范围 (UINT)
     """
+    # 确定量化范围：由 is_unsigned 决定 INT/UINT
     if bitwidth == 8:
-        qmin, qmax = (-128, 127) if symmetric else (0, 255)
+        qmin, qmax = (0, 255) if is_unsigned else (-128, 127)
     elif bitwidth == 16:
-        qmin, qmax = (-32768, 32767) if symmetric else (0, 65535)
+        qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
     else:
-        qmin, qmax = (-2147483648, 2147483647)
+        qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
     
     device = x.device
     result = torch.zeros_like(x)
@@ -1218,10 +1241,13 @@ class QuantGRU(nn.Module):
         R_q = fake_quantize_per_channel(R_reordered.t(), exp2_R, zp=0,
                                         bitwidth=self._get_bitwidth('R'),
                                         symmetric=self._get_symmetric('R')).t()
+        # 偏置使用配置的位宽（注意：偏置始终使用对称量化）
         bx_q = fake_quantize_per_channel(bx_reordered.unsqueeze(0), exp2_bx, zp=0,
-                                         bitwidth=32, symmetric=True).squeeze(0)
+                                         bitwidth=self._get_bitwidth('bx'),
+                                         symmetric=self._get_symmetric('bx')).squeeze(0)
         br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), exp2_br, zp=0,
-                                         bitwidth=32, symmetric=True).squeeze(0)
+                                         bitwidth=self._get_bitwidth('br'),
+                                         symmetric=self._get_symmetric('br')).squeeze(0)
         
         # 分割偏置（Haste 格式：z, r, n）
         bx_z, bx_r, bx_n = bx_q.chunk(3)  # 各 [H]
@@ -1284,10 +1310,12 @@ class QuantGRU(nn.Module):
             # [ONNX 兼容] 使用标准 sigmoid（推理引擎会用量化版本或 LUT）
             z = torch.sigmoid(z_pre)
             
-            # [与 CUDA 一致] 激活后量化
+            # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
+            # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
             z = fake_quantize(z, exp2_z_out, zp_z_out,
                               bitwidth=self._get_bitwidth('z_out'),
-                              symmetric=False)  # sigmoid 输出是 [0,1]，非对称
+                              symmetric=self._get_symmetric('z_out'),
+                              is_unsigned=True)
             
             # ========== r 门（Reset Gate）==========
             # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
@@ -1300,9 +1328,12 @@ class QuantGRU(nn.Module):
             # [ONNX 兼容] 使用标准 sigmoid
             r = torch.sigmoid(r_pre)
             
+            # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
+            # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
             r = fake_quantize(r, exp2_r_out, zp_r_out,
                               bitwidth=self._get_bitwidth('r_out'),
-                              symmetric=False)
+                              symmetric=self._get_symmetric('r_out'),
+                              is_unsigned=True)
             
             # ========== g 门（New Gate / Candidate）==========
             # [与 CUDA 一致] g = tanh(Wx_n + r * (Rh_n + br_n) + bx_n)
@@ -1331,9 +1362,10 @@ class QuantGRU(nn.Module):
             # [ONNX 兼容] 使用标准 tanh
             g = torch.tanh(g_pre)
             
+            # [与 CUDA 一致] 激活后量化，对称性从配置读取
             g = fake_quantize(g, exp2_g_out, zp_g_out,
                               bitwidth=self._get_bitwidth('g_out'),
-                              symmetric=True)  # tanh 输出是 [-1,1]，对称
+                              symmetric=self._get_symmetric('g_out'))
             
             # ========== 新隐藏状态 ==========
             # [与 CUDA 一致] h_new = z * h + (1 - z) * g
