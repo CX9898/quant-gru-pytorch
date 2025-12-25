@@ -296,14 +296,18 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
     Rh_add_br_g = rshift_round(Rh_val - rescale_params.zp_Rh_, rescale_params.n_Rh_div_Rh_add_br_) +
                   rshift_round(br_val, rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
                   rescale_params.zp_Rh_add_br_;
+    // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
+    Rh_add_br_g = dev::clamp_by_bitwidth(Rh_add_br_g, rescale_params.bitwidth_config_.Rh_add_br_);
 
     const int64_t r_diff = static_cast<int64_t>(r) - rescale_params.zp_r_out_;
     const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale_params.zp_Rh_add_br_;
     const int64_t rRh_mul_i64 = r_diff * Rh_add_br_diff;
 
-    const int32_t rRh =
+    int32_t rRh =
         static_cast<int32_t>(rshift_round(rRh_mul_i64, rescale_params.n_r_mul_Rh_add_br_div_rRh_)) +
         rescale_params.zp_rRh_;
+    // 添加 clamp 到配置的位宽范围
+    rRh = dev::clamp_by_bitwidth(rRh, rescale_params.bitwidth_config_.rRh_);
 
     const int32_t Wx_shifted =
         rshift_round(Wx_val - rescale_params.zp_Wx_, rescale_params.n_Wx_div_g_pre_);
@@ -376,10 +380,12 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
     const int64_t h_diff = static_cast<int64_t>(h_old) - rescale_params.zp_h_;
     const int64_t old_contrib_mul_i64 = z_diff * h_diff;
 
-    const int32_t old_contrib =
+    int32_t old_contrib =
         static_cast<int32_t>(
             rshift_round(old_contrib_mul_i64, rescale_params.n_z_mul_h_div_old_contrib_)) +
         rescale_params.zp_old_contrib_;
+    // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
+    old_contrib = dev::clamp_by_bitwidth(old_contrib, rescale_params.bitwidth_config_.old_contrib_);
 
     // 计算 (1-z) 在量化空间的差值表示
     // 【公式推导】
@@ -393,10 +399,12 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
     const int64_t g_diff = static_cast<int64_t>(g) - rescale_params.zp_g_out_;
     const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
 
-    const int32_t new_contrib =
+    int32_t new_contrib =
         static_cast<int32_t>(
             rshift_round(new_contrib_mul_i64, rescale_params.n_z_out_mul_g_div_new_contrib_)) +
         rescale_params.zp_new_contrib_;
+    // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
+    new_contrib = dev::clamp_by_bitwidth(new_contrib, rescale_params.bitwidth_config_.new_contrib_);
 
     const int32_t h_i32 = rshift_round(old_contrib - rescale_params.zp_old_contrib_,
                                        rescale_params.n_old_contrib_div_h_) +
