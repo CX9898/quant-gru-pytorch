@@ -6,7 +6,7 @@ QuantGRU 量化库使用示例
 - 量化感知训练（QAT）
 - 校准方法选择（MinMax / Histogram）
 - 双向 GRU
-- ONNX 导出（QDQ / 定点 / 浮点模式）
+- ONNX 导出（float 浮点 / qdq 伪量化）
 """
 
 import torch
@@ -415,13 +415,18 @@ def example_onnx_export():
     
     QuantGRU 支持导出为 ONNX 格式，便于部署到各类推理引擎。
     
-    导出模式说明:
-    - export_mode=False (默认): 使用 CUDA C++ 实现（高性能推理）
-    - export_mode=True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
+    导出模式 (export_mode):
+    - False (默认): 使用 CUDA C++ 实现（高性能推理）
+    - True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
     
     导出格式 (export_format):
-    - 'float': 浮点格式（默认，与 Haste GRU 行为一致）
-    - 'qdq': QDQ 格式，量化模型推荐（需要先校准）
+    - 'float': 浮点格式（默认）
+    - 'qdq': QDQ 伪量化格式（量化模型推荐，需先校准）
+    
+    注意事项:
+    - 导出前必须设置 export_mode = True
+    - QDQ 格式需要先调用 calibrate() 和 finalize_calibration()
+    - 导出后应恢复 export_mode = False 以使用 CUDA 推理
     """
     print("\n" + "=" * 60)
     print("示例 8: ONNX 导出")
@@ -518,7 +523,9 @@ def example_onnx_export_modes():
     """
     示例 9: ONNX 导出格式对比
     
-    演示三种 ONNX 导出格式的区别和使用场景
+    演示两种 ONNX 导出格式的区别和使用场景:
+    - 'float': 浮点格式（默认）
+    - 'qdq': QDQ 伪量化格式（量化模型推荐，需先校准）
     """
     print("\n" + "=" * 60)
     print("示例 9: ONNX 导出格式对比")
@@ -550,12 +557,12 @@ def example_onnx_export_modes():
     with torch.no_grad():
         cuda_output, _ = gru_base(test_input)
     
-    print("\n📊 对比三种 ONNX 导出格式:")
+    print("\n📊 对比两种 ONNX 导出格式:")
     print("-" * 50)
     
     modes = [
-        ('qdq', 'QDQ 格式（量化推荐）'),
-        ('float', '浮点格式（默认）')
+        ('float', '浮点格式（默认）'),
+        ('qdq', 'QDQ 伪量化格式（量化推荐，需先校准）')
     ]
     
     gru_base.export_mode = True
@@ -582,11 +589,11 @@ def example_onnx_export_modes():
     gru_base.export_mode = False
     
     print("\n" + "-" * 50)
-    print("\n💡 模式选择建议:")
-    print("   • 'qdq':   生产部署，推理引擎自动优化")
-    print("   • 'float': 调试和基准测试")
+    print("\n💡 导出格式选择建议:")
+    print("   • 'float': 非量化模型、通用部署（默认）")
+    print("   • 'qdq':   量化模型部署，推理引擎自动优化（需先校准）")
     
-    print("\n✅ 导出模式对比完成！")
+    print("\n✅ 导出格式对比完成！")
 
 
 def main():
@@ -625,7 +632,7 @@ def main():
         # 示例 8: ONNX 导出
         example_onnx_export()
         
-        # 示例 9: ONNX 导出子模式对比
+        # 示例 9: ONNX 导出格式对比
         example_onnx_export_modes()
         
         print("\n" + "=" * 60)
