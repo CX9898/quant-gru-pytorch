@@ -50,7 +50,62 @@ INT16_COS_SIM_THRESHOLD = 0.999
 TRAINING_MSE_THRESHOLD = 1e-4
 TRAINING_COS_SIM_THRESHOLD = 0.999
 
+# ============================================================================
+# 全局失败收集器
+# ============================================================================
+# 用于收集所有测试失败信息，运行完所有测试后再总结
+TEST_FAILURES = []
 
+def record_failure(test_name: str, message: str):
+    """记录测试失败信息"""
+    TEST_FAILURES.append({
+        'test_name': test_name,
+        'message': message
+    })
+    print(f"❌ 测试失败: {message}")
+
+def check_threshold(value, threshold, comparison: str, test_name: str, metric_name: str) -> bool:
+    """
+    检查阈值，失败时记录到全局列表
+    
+    Args:
+        value: 实际值
+        threshold: 阈值
+        comparison: 比较方式 ('<' 或 '>')
+        test_name: 测试名称
+        metric_name: 指标名称
+    
+    Returns:
+        True 如果通过，False 如果失败
+    """
+    if comparison == '<':
+        passed = value < threshold
+        if not passed:
+            record_failure(test_name, f"{metric_name}: {value:.6f} >= {threshold} (期望 < {threshold})")
+    else:  # '>'
+        passed = value > threshold
+        if not passed:
+            record_failure(test_name, f"{metric_name}: {value:.6f} <= {threshold} (期望 > {threshold})")
+    return passed
+
+def print_test_summary():
+    """打印测试总结"""
+    print("\n" + "=" * 80)
+    print("测试总结")
+    print("=" * 80)
+    
+    total_failures = len(TEST_FAILURES)
+    if total_failures == 0:
+        print("✅ 所有测试通过！")
+    else:
+        print(f"❌ 共有 {total_failures} 个测试失败：")
+        print("-" * 80)
+        for i, failure in enumerate(TEST_FAILURES, 1):
+            print(f"{i}. [{failure['test_name']}] {failure['message']}")
+        print("-" * 80)
+    
+    print("=" * 80)
+    return total_failures == 0
 
 # ============================================================================
 
@@ -302,9 +357,11 @@ def test_non_quantized():
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
     # 验证结果（非量化应该非常接近）
-    assert results['mse_output'] < 1e-5, f"非量化版本 MSE 过大: {results['mse_output']}"
-    assert results['cos_sim_output'] > 0.9999, f"非量化版本余弦相似度过低: {results['cos_sim_output']}"
-    print("✅ 非量化测试通过！")
+    test_name = "test_non_quantized"
+    mse_ok = check_threshold(results['mse_output'], 1e-5, '<', test_name, "MSE")
+    cos_ok = check_threshold(results['cos_sim_output'], 0.9999, '>', test_name, "余弦相似度")
+    if mse_ok and cos_ok:
+        print("✅ 非量化测试通过！")
 
 
 def test_quantized_int8():
@@ -358,13 +415,13 @@ def test_quantized_int8():
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
     # 检查阈值
-    assert results['mse_output'] < INT8_MSE_THRESHOLD, \
-        f"8bit 量化版本 MSE 过大: {results['mse_output']:.6f} >= {INT8_MSE_THRESHOLD}"
-    assert results['cos_sim_output'] > INT8_COS_SIM_THRESHOLD, \
-        f"8bit 量化版本余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+    test_name = "test_quantized_int8"
+    mse_ok = check_threshold(results['mse_output'], INT8_MSE_THRESHOLD, '<', test_name, "MSE")
+    cos_ok = check_threshold(results['cos_sim_output'], INT8_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    print(f"✅ 8bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
-          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
+    if mse_ok and cos_ok:
+        print(f"✅ 8bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+              f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
 
 
 def test_quantized_int16():
@@ -417,13 +474,13 @@ def test_quantized_int16():
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
     # 检查阈值（16bit 量化应该比 8bit 更精确）
-    assert results['mse_output'] < INT16_MSE_THRESHOLD, \
-        f"16bit 量化版本 MSE 过大: {results['mse_output']:.6f} >= {INT16_MSE_THRESHOLD}"
-    assert results['cos_sim_output'] > INT16_COS_SIM_THRESHOLD, \
-        f"16bit 量化版本余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT16_COS_SIM_THRESHOLD}"
+    test_name = "test_quantized_int16"
+    mse_ok = check_threshold(results['mse_output'], INT16_MSE_THRESHOLD, '<', test_name, "MSE")
+    cos_ok = check_threshold(results['cos_sim_output'], INT16_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    print(f"✅ 16bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT16_MSE_THRESHOLD}), "
-          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT16_COS_SIM_THRESHOLD})")
+    if mse_ok and cos_ok:
+        print(f"✅ 16bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT16_MSE_THRESHOLD}), "
+              f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT16_COS_SIM_THRESHOLD})")
 
 
 def test_batch_first():
@@ -489,12 +546,12 @@ def test_batch_first():
     results = compare_gru_outputs(pytorch_gru, quant_gru, x, verbose=True)
 
     # 检查阈值（使用 8bit 阈值）
-    assert results['mse_output'] < INT8_MSE_THRESHOLD, \
-        f"batch_first=True 测试 MSE 过大: {results['mse_output']:.6f} >= {INT8_MSE_THRESHOLD}"
-    assert results['cos_sim_output'] > INT8_COS_SIM_THRESHOLD, \
-        f"batch_first=True 测试余弦相似度过低: {results['cos_sim_output']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+    test_name = "test_batch_first"
+    mse_ok = check_threshold(results['mse_output'], INT8_MSE_THRESHOLD, '<', test_name, "MSE")
+    cos_ok = check_threshold(results['cos_sim_output'], INT8_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    print(f"✅ batch_first=True 测试通过！")
+    if mse_ok and cos_ok:
+        print(f"✅ batch_first=True 测试通过！")
 
 
 def compare_gru_training(
@@ -675,10 +732,12 @@ def test_training_non_quantized():
     results = compare_gru_training(pytorch_gru, quant_gru, x, verbose=True)
 
     # 验证结果（非量化应该非常接近）
-    assert results['forward']['mse'] < 1e-5, f"非量化版本前向 MSE 过大: {results['forward']['mse']}"
-    assert results['grad_input']['mse'] < 1e-5, f"非量化版本输入梯度 MSE 过大: {results['grad_input']['mse']}"
-    assert results['grad_weight_ih']['mse'] < 1e-4, f"非量化版本权重梯度 MSE 过大: {results['grad_weight_ih']['mse']}"
-    print("✅ 非量化训练测试通过！")
+    test_name = "test_training_non_quantized"
+    fwd_ok = check_threshold(results['forward']['mse'], 1e-5, '<', test_name, "前向MSE")
+    grad_input_ok = check_threshold(results['grad_input']['mse'], 1e-5, '<', test_name, "输入梯度MSE")
+    grad_weight_ok = check_threshold(results['grad_weight_ih']['mse'], 1e-4, '<', test_name, "权重梯度MSE")
+    if fwd_ok and grad_input_ok and grad_weight_ok:
+        print("✅ 非量化训练测试通过！")
 
 
 def test_training_quantized_int8():
@@ -732,14 +791,14 @@ def test_training_quantized_int8():
     results = compare_gru_training(pytorch_gru, quant_gru, x, verbose=True)
 
     # 检查阈值
-    assert results['forward']['mse'] < INT8_MSE_THRESHOLD, \
-        f"8bit 量化训练前向 MSE 过大: {results['forward']['mse']:.6f} >= {INT8_MSE_THRESHOLD}"
-    assert results['forward']['cos_sim'] > INT8_COS_SIM_THRESHOLD, \
-        f"8bit 量化训练前向余弦相似度过低: {results['forward']['cos_sim']:.6f} <= {INT8_COS_SIM_THRESHOLD}"
+    test_name = "test_training_quantized_int8"
+    mse_ok = check_threshold(results['forward']['mse'], INT8_MSE_THRESHOLD, '<', test_name, "前向MSE")
+    cos_ok = check_threshold(results['forward']['cos_sim'], INT8_COS_SIM_THRESHOLD, '>', test_name, "前向余弦相似度")
 
-    print(f"✅ 8bit 量化训练测试通过！")
-    print(f"   前向 MSE: {results['forward']['mse']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
-          f"余弦相似度: {results['forward']['cos_sim']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
+    if mse_ok and cos_ok:
+        print(f"✅ 8bit 量化训练测试通过！")
+        print(f"   前向 MSE: {results['forward']['mse']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+              f"余弦相似度: {results['forward']['cos_sim']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
 
 
 def test_training_multiple_steps():
@@ -823,8 +882,9 @@ def test_training_multiple_steps():
     print(f"  weight_ih MSE: {weight_ih_mse:.10f}")
     print(f"  weight_hh MSE: {weight_hh_mse:.10f}")
 
-    assert weight_ih_mse < 1e-4, f"多步训练后权重差异过大: {weight_ih_mse}"
-    print("✅ 多步训练测试通过！")
+    test_name = "test_training_multiple_steps"
+    if check_threshold(weight_ih_mse, 1e-4, '<', test_name, "权重差异MSE"):
+        print("✅ 多步训练测试通过！")
 
 
 def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, print_interval=10,
@@ -959,10 +1019,11 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
             print(f"{step:<8} {loss_pt.item():<12.6f} {loss_custom.item():<12.6f} "
                   f"{loss_diff:<15.10f} {weight_mse:<15.10f} {cos_sim:<12.8f}")
 
-        # 检查阈值（每步都检查，超过立即报错）
+        # 检查阈值（每步都检查，失败时记录）
         # 注意：这里检查的是输出的余弦相似度，而不是权重MSE
-        assert cos_sim > cos_sim_threshold, \
-            f"步骤 {step}: 输出余弦相似度过低: {cos_sim:.8f} <= {cos_sim_threshold} ({quant_str})"
+        if cos_sim <= cos_sim_threshold:
+            record_failure(f"test_training_long_run ({quant_str})", 
+                          f"步骤 {step}: 输出余弦相似度过低: {cos_sim:.8f} <= {cos_sim_threshold}")
 
     # 最终统计
     print("\n" + "-" * 85)
@@ -1087,14 +1148,14 @@ def test_quantized_vs_non_quantized(bitwidth=8):
         cos_sim_threshold = INT16_COS_SIM_THRESHOLD
 
     # 检查阈值
-    assert results['mse_output'] < mse_threshold, \
-        f"QuantGRU {bitwidth}bit 量化 MSE 过大: {results['mse_output']:.6f} >= {mse_threshold}"
-    assert results['cos_sim_output'] > cos_sim_threshold, \
-        f"QuantGRU {bitwidth}bit 量化余弦相似度过低: {results['cos_sim_output']:.6f} <= {cos_sim_threshold}"
+    test_name = f"test_quantized_vs_non_quantized ({bitwidth}bit)"
+    mse_ok = check_threshold(results['mse_output'], mse_threshold, '<', test_name, "MSE")
+    cos_ok = check_threshold(results['cos_sim_output'], cos_sim_threshold, '>', test_name, "余弦相似度")
 
-    print(f"✅ QuantGRU 非量化 vs {bitwidth}bit 量化测试通过！"
-          f"MSE: {results['mse_output']:.6f} (阈值: {mse_threshold}), "
-          f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {cos_sim_threshold})")
+    if mse_ok and cos_ok:
+        print(f"✅ QuantGRU 非量化 vs {bitwidth}bit 量化测试通过！"
+              f"MSE: {results['mse_output']:.6f} (阈值: {mse_threshold}), "
+              f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {cos_sim_threshold})")
 
 
 def main():
@@ -1105,66 +1166,100 @@ def main():
 
     if not torch.cuda.is_available():
         print("错误: 需要 CUDA 支持")
-        return
+        return 1
 
+    # 清空之前的失败记录
+    TEST_FAILURES.clear()
+
+    # ==================== 前向传播测试 ====================
+    print("\n" + "#" * 80)
+    print("# 前向传播测试")
+    print("#" * 80)
+
+    # 测试非量化版本
     try:
-        # ==================== 前向传播测试 ====================
-        print("\n" + "#" * 80)
-        print("# 前向传播测试")
-        print("#" * 80)
-
-        # 测试非量化版本
         test_non_quantized()
-
-        # 测试 8bit 量化
-        test_quantized_int8()
-
-        # 测试 16bit 量化
-        test_quantized_int16()
-
-        # # 测试 batch_first=True
-        # test_batch_first()
-
-        # 测试 QuantGRU 非量化 vs 量化（更准确的量化误差评估）
-        # test_quantized_vs_non_quantized_int8()
-
-        # ==================== 训练测试 ====================
-        print("\n" + "#" * 80)
-        print("# 训练测试（前向 + 反向传播）")
-        print("#" * 80)
-
-        # 测试非量化版本训练
-        test_training_non_quantized()
-
-        # 测试 8bit 量化版本训练
-        test_training_quantized_int8()
-
-        # 测试多步训练
-        test_training_multiple_steps()
-
-        # ==================== 长时间训练测试 ====================
-        print("\n" + "#" * 80)
-        print("# 长时间训练测试（观察误差累积）")
-        print("#" * 80)
-
-        # 非量化长时间训练（100步）
-        test_training_long_run(num_steps=100, use_quantization=False, print_interval=20)
-
-        # 8bit 量化长时间训练（100步）
-        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=8, print_interval=20)
-
-        # 16bit 量化长时间训练（100步）
-        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=16, print_interval=20)
-
-        print("\n" + "=" * 80)
-        print("所有测试完成！")
-        print("=" * 80)
-
     except Exception as e:
-        print(f"\n❌ 测试失败: {e}")
-        import traceback
-        traceback.print_exc()
+        record_failure("test_non_quantized", f"异常: {e}")
+
+    # 测试 8bit 量化
+    try:
+        test_quantized_int8()
+    except Exception as e:
+        record_failure("test_quantized_int8", f"异常: {e}")
+
+    # 测试 16bit 量化
+    try:
+        test_quantized_int16()
+    except Exception as e:
+        record_failure("test_quantized_int16", f"异常: {e}")
+
+    # # 测试 batch_first=True
+    # try:
+    #     test_batch_first()
+    # except Exception as e:
+    #     record_failure("test_batch_first", f"异常: {e}")
+
+    # 测试 QuantGRU 非量化 vs 量化（更准确的量化误差评估）
+    # test_quantized_vs_non_quantized_int8()
+
+    # ==================== 训练测试 ====================
+    print("\n" + "#" * 80)
+    print("# 训练测试（前向 + 反向传播）")
+    print("#" * 80)
+
+    # 测试非量化版本训练
+    try:
+        test_training_non_quantized()
+    except Exception as e:
+        record_failure("test_training_non_quantized", f"异常: {e}")
+
+    # 测试 8bit 量化版本训练
+    try:
+        test_training_quantized_int8()
+    except Exception as e:
+        record_failure("test_training_quantized_int8", f"异常: {e}")
+
+    # 测试多步训练
+    try:
+        test_training_multiple_steps()
+    except Exception as e:
+        record_failure("test_training_multiple_steps", f"异常: {e}")
+
+    # ==================== 长时间训练测试 ====================
+    print("\n" + "#" * 80)
+    print("# 长时间训练测试（观察误差累积）")
+    print("#" * 80)
+
+    # 非量化长时间训练（100步）
+    try:
+        test_training_long_run(num_steps=100, use_quantization=False, print_interval=20)
+    except Exception as e:
+        record_failure("test_training_long_run (非量化)", f"异常: {e}")
+
+    # 8bit 量化长时间训练（100步）
+    try:
+        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=8, print_interval=20)
+    except Exception as e:
+        record_failure("test_training_long_run (8bit)", f"异常: {e}")
+
+    # 16bit 量化长时间训练（100步）
+    try:
+        test_training_long_run(num_steps=100, use_quantization=True, bitwidth=16, print_interval=20)
+    except Exception as e:
+        record_failure("test_training_long_run (16bit)", f"异常: {e}")
+
+    print("\n" + "=" * 80)
+    print("所有测试运行完成！")
+    print("=" * 80)
+
+    # 打印测试总结
+    all_passed = print_test_summary()
+    
+    # 返回退出码
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main() or 0)

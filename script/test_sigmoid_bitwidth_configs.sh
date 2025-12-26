@@ -101,10 +101,35 @@ run_test() {
     
     # 重新编译（静默模式）
     cd "$BUILD_DIR"
-    make -j$(nproc) gru_example > /dev/null 2>&1
+    if ! make -j$(nproc) gru_example > /dev/null 2>&1; then
+        echo "  ❌ 编译失败"
+        echo "配置: $config_name" >> "$RESULT_FILE"
+        echo "  状态: 编译失败" >> "$RESULT_FILE"
+        echo "" >> "$RESULT_FILE"
+        echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        return
+    fi
     
     # 运行测试并提取结果
-    local output=$(./gru_example 2>&1)
+    local output
+    local exit_code=0
+    output=$(./gru_example 2>&1) || exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        local error_msg=$(echo "$output" | grep -i "unsupported\|error\|exception" | head -1 | tr ',' ';')
+        if [ -z "$error_msg" ]; then
+            error_msg="Runtime error (exit code: $exit_code)"
+        fi
+        echo "  ❌ 运行失败: $error_msg"
+        echo "配置: $config_name" >> "$RESULT_FILE"
+        echo "  状态: 运行失败 - $error_msg" >> "$RESULT_FILE"
+        echo "" >> "$RESULT_FILE"
+        echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        return
+    fi
+    
     local mse=$(echo "$output" | grep "Overall H: MSE" | sed 's/.*MSE = \([0-9.e+-]*\),.*/\1/')
     local cos=$(echo "$output" | grep "Overall H: MSE" | sed 's/.*Cosine Similarity = \([0-9.]*\)/\1/')
     
@@ -311,6 +336,33 @@ tail -n +2 "$CSV_FILE" | sort -t',' -k15 -n | head -5 | nl -w2 | while read rank
     cos=$(echo "$line" | cut -d',' -f15)
     printf "%s | %s | %s | %s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
 done
+
+# 显示失败测试列表
+if [ $FAIL_COUNT -gt 0 ]; then
+    echo "" | tee -a "$RESULT_FILE"
+    echo "==================== 失败测试列表 ====================" | tee -a "$RESULT_FILE"
+    echo "" | tee -a "$RESULT_FILE"
+    printf "%-4s | %-40s | %-15s | %-12s\n" "序号" "配置名称" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
+    printf "%-4s-+-%-40s-+-%-15s-+-%-12s\n" "----" "----------------------------------------" "---------------" "------------" | tee -a "$RESULT_FILE"
+    tail -n +2 "$CSV_FILE" | grep -E "ERROR|N/A" | nl -w2 | while IFS= read -r line; do
+        rank=$(echo "$line" | awk '{print $1}')
+        data=$(echo "$line" | cut -f2-)
+        name=$(echo "$data" | cut -d',' -f1)
+        mse=$(echo "$data" | cut -d',' -f14)
+        cos=$(echo "$data" | cut -d',' -f15)
+        printf "%-4s | %-40s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
+    done
+    # 还要显示精度不达标的配置
+    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name z_pre z_out r_pre r_out g_pre g_out z_pre_sym z_out_sym r_pre_sym r_out_sym g_pre_sym g_out_sym mse cos; do
+        if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
+            # 检查是否不满足阈值
+            if ! awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}" || ! awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+                printf "     | %-40s | %-15s | %-12s\n" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
+            fi
+        fi
+    done
+    echo "" | tee -a "$RESULT_FILE"
+fi
 
 echo ""
 echo "===== 测试完成 ====="

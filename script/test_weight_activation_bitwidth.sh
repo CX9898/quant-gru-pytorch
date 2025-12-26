@@ -258,6 +258,20 @@ grep ",PASS," "$CSV_FILE" | while IFS=',' read -r name w a g W R x h Wx Rh statu
     printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-12s\n" "$name" "${w}-bit" "${a}-bit" "${g}-bit" "$mse" "$cos" | tee -a "$RESULT_FILE"
 done
 
+# 显示失败测试列表
+if [ $FAIL_COUNT -gt 0 ]; then
+    echo "" | tee -a "$RESULT_FILE"
+    echo "失败测试列表:" | tee -a "$RESULT_FILE"
+    echo "" | tee -a "$RESULT_FILE"
+    printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-20s\n" "配置" "权重" "激活" "Wx/Rh" "状态" "错误信息" | tee -a "$RESULT_FILE"
+    printf "%-14s-+-%-6s-+-%-6s-+-%-6s-+-%-15s-+-%-20s\n" "--------------" "------" "------" "------" "---------------" "--------------------" | tee -a "$RESULT_FILE"
+    # 显示非 PASS 的配置
+    grep -v ",PASS," "$CSV_FILE" | tail -n +2 | while IFS=',' read -r name w a g W R x h Wx Rh status mse cos err; do
+        printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-20s\n" "$name" "${w}-bit" "${a}-bit" "${g}-bit" "$status" "$err" | tee -a "$RESULT_FILE"
+    done
+    echo "" | tee -a "$RESULT_FILE"
+fi
+
 echo ""
 echo "===== 测试完成 ====="
 echo "详细结果: $RESULT_FILE"

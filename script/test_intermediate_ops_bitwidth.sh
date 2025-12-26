@@ -513,6 +513,44 @@ tail -n +2 "$CSV_FILE" | grep "^BASELINE_INT16\|^COMBO_FULL16" | grep -v "ERROR"
     echo "  $rest" | cut -d',' -f1,16,17
 done | head -5 | tee -a "$RESULT_FILE"
 
+# 显示失败测试列表
+if [ $FAIL_COUNT -gt 0 ]; then
+    echo "" | tee -a "$RESULT_FILE"
+    echo "==================== 失败测试列表 ====================" | tee -a "$RESULT_FILE"
+    echo "" | tee -a "$RESULT_FILE"
+    printf "%-4s | %-35s | %-15s | %-12s\n" "序号" "配置名称" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
+    printf "%-4s-+-%-35s-+-%-15s-+-%-12s\n" "----" "-----------------------------------" "---------------" "------------" | tee -a "$RESULT_FILE"
+    # 显示编译或运行错误的配置
+    tail -n +2 "$CSV_FILE" | grep -E "ERROR" | nl -w2 | while IFS= read -r line; do
+        rank=$(echo "$line" | awk '{print $1}')
+        data=$(echo "$line" | cut -f2-)
+        name=$(echo "$data" | cut -d',' -f1)
+        mse=$(echo "$data" | cut -d',' -f16)
+        cos=$(echo "$data" | cut -d',' -f17)
+        printf "%-4s | %-35s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
+    done
+    # 显示精度不达标的配置
+    FAIL_IDX=0
+    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym mse cos; do
+        if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
+            # 检查是否不满足阈值
+            cos_fail=false
+            mse_fail=false
+            if ! awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+                cos_fail=true
+            fi
+            if ! awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+                mse_fail=true
+            fi
+            if $cos_fail || $mse_fail; then
+                FAIL_IDX=$((FAIL_IDX + 1))
+                printf "%-4s | %-35s | %-15s | %-12s\n" "$FAIL_IDX" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
+            fi
+        fi
+    done
+    echo "" | tee -a "$RESULT_FILE"
+fi
+
 echo ""
 echo "===== 测试完成 ====="
 echo "总测试数: $TEST_COUNT"
