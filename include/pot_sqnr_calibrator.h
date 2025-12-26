@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #include "histogram_collector.h"
@@ -105,9 +106,7 @@ class AimetPotSqnrCalibrator {
                                                   const char* name = nullptr,
                                                   const AimetSqnrConfig& config = AimetSqnrConfig()) {
         if (!hist.is_valid()) {
-            out_exp2_inv = 7;
-            out_zp = 0;
-            return;
+            throw std::runtime_error("Histogram is invalid in computeOptimalParamsFromHistogram");
         }
 
         const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
@@ -172,7 +171,9 @@ class AimetPotSqnrCalibrator {
      *   new_scale = 2^(-n_rounded)
      */
     static std::pair<float, int8_t> roundToPowerOfTwo(float scale) {
-        if (scale <= 0) return {1.0f / 128.0f, 7};
+        if (scale <= 0) {
+            throw std::runtime_error("Invalid scale <= 0 in roundToPowerOfTwo");
+        }
         float n = -std::log2(scale);
         // AIMET 使用 round，四舍五入到最近的 POT
         int8_t n_rounded = static_cast<int8_t>(std::round(n));
@@ -206,6 +207,10 @@ class AimetPotSqnrCalibrator {
                 result.optimal_min = offset * delta;
                 result.optimal_max = result.optimal_min + num_steps * delta;
             }
+        }
+        
+        if (result.best_noise == std::numeric_limits<float>::max()) {
+            throw std::runtime_error("searchSymmetric failed to find valid scale");
         }
         return result;
     }
@@ -251,6 +256,10 @@ class AimetPotSqnrCalibrator {
                     result.optimal_max = result.optimal_min + num_steps * clamped_delta;
                 }
             }
+        }
+        
+        if (result.best_noise == std::numeric_limits<float>::max()) {
+            throw std::runtime_error("searchAsymmetric failed to find valid scale");
         }
         return result;
     }

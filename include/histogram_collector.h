@@ -82,28 +82,27 @@ struct Histogram {
             return {min_val, max_val};
         }
 
-        float lower_threshold = total * percentile;
-        float upper_threshold = total * (1.0f - percentile);
+        float threshold = total * percentile;  // 两端各裁剪 percentile 比例
 
         float bw = bin_width();
         float pmin = min_val;
         float pmax = max_val;
 
-        // 找下限
+        // 找下限：从左边累积到 threshold
         cumsum = 0.0f;
         for (int i = 0; i < num_bins; ++i) {
             cumsum += counts[i];
-            if (cumsum >= lower_threshold) {
+            if (cumsum >= threshold) {
                 pmin = min_val + i * bw;
                 break;
             }
         }
 
-        // 找上限
+        // 找上限：从右边累积到 threshold
         cumsum = 0.0f;
         for (int i = num_bins - 1; i >= 0; --i) {
             cumsum += counts[i];
-            if (cumsum >= total * percentile) {
+            if (cumsum >= threshold) {
                 pmax = min_val + (i + 1) * bw;
                 break;
             }
