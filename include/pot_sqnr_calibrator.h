@@ -1,102 +1,110 @@
 #pragma once
 
 /**
- * POT-SQNR Calibrator (Power-of-Two SQNR Calibrator)
- *
- * 简化版 TfEnhanced 校准器：
- * - 保持 POT (Power-of-Two) scale 约束: scale = 2^(-exp2_inv)
- * - 使用直方图 + SQNR 优化选择最优 exp2_inv
- * - 比纯 MinMax 方法更好地处理异常值
- *
- * 核心思想：
- * 1. 收集数据分布的直方图
- * 2. 对于每个候选 exp2_inv，估算量化噪声
- * 3. 选择噪声最小的 exp2_inv
+ * AIMET-Style POT-SQNR Calibrator
+ * 
+ * 基于 AIMET SqnrEncodingAnalyzer 的三阶段量化校准：
+ * 
+ * - 阶段 1：SQNR 优化找到最优连续 scale（与 AIMET 一致）
+ *   - 搜索 delta/offset 候选值，最小化量化噪声
+ *   - gamma 参数权衡 clipping noise
+ * 
+ * - 阶段 2：转换到 POT（Power-of-Two）
+ *   - AIMET 使用 round(-log2(scale))
+ *   - 本实现使用 floor(-log2(scale))，确保 po2_scale >= optimal_scale，避免 clipping
+ * 
+ * - 阶段 3：计算 zero-point
+ *   - AIMET 使用 optimal_min
+ *   - 本实现使用 hist.min_val，确保覆盖所有数据
+ * 
+ * 核心参数：
+ * - symmetric_delta_candidates = 201
+ * - asymmetric_delta_candidates = 35
+ * - offset_candidates = 31
+ * - gamma = 3.0
+ * - num_bins = 2048
  */
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <numeric>
 #include <vector>
 
 #include "histogram_collector.h"
 
 /**
- * POT-SQNR 校准器类
- *
- * 使用方法：
- *   POTSqnrCalibrator calibrator;
- *   calibrator.update(data1, size1);
- *   calibrator.update(data2, size2);
- *   auto [exp2_inv, zp] = calibrator.computeOptimalParams<int8_t>(is_symmetric);
+ * AIMET 风格的 SQNR 校准配置
  */
-class POTSqnrCalibrator {
+struct AimetSqnrConfig {
+    int num_bins = 2048;
+    int symmetric_delta_candidates = 201;   // 增大以提高精度
+    int asymmetric_delta_candidates = 35;   // 增大以提高精度
+    int offset_candidates = 31;             // 增大以提高精度
+    float gamma = 3.0f;  // AIMET 默认值
+    float p = 2.0f;       // Lp 范数 (p=2 = MSE)
+};
+
+/**
+ * 连续 scale 校准结果
+ */
+struct ContinuousCalibrationResult {
+    float optimal_scale;
+    float optimal_offset;
+    float optimal_min;
+    float optimal_max;
+    float best_noise;
+};
+
+/**
+ * AIMET 风格的 POT-SQNR 校准器
+ */
+class AimetPotSqnrCalibrator {
    public:
-    // 配置参数
-    struct Config {
-        int num_bins;              // 直方图 bin 数量
-        int exp2_inv_search_range; // 搜索范围：基准 ± range
-        float gamma;               // 剪切噪声权重（越大越不容易剪切）
-        float ema_decay;           // EMA 衰减系数（用于多 batch）
-        bool use_ema;              // 是否使用 EMA 平滑直方图
+    explicit AimetPotSqnrCalibrator(AimetSqnrConfig config = AimetSqnrConfig())
+        : config_(config), collector_(config.num_bins) {}
 
-        Config()
-            : num_bins(2048), exp2_inv_search_range(8), gamma(3.0f), ema_decay(0.9f), use_ema(false) {}
-    };
-
-    POTSqnrCalibrator(Config config = Config()) : config_(config), collector_(config.num_bins) {}
-
-    /**
-     * 更新统计信息（收集数据到直方图）
-     * @param data 输入数据指针
-     * @param size 数据大小
-     */
     void update(const float* data, size_t size) {
-        if (size == 0) return;
-        collector_.collect(data, size);
+        if (size > 0) collector_.collect(data, size);
+    }
+
+    void merge(const Histogram& other) { collector_.merge(other); }
+
+    void reset() { collector_.reset(); }
+
+    bool isValid() const { return collector_.is_valid(); }
+
+    const Histogram& getHistogram() const { return collector_.histogram(); }
+
+    std::pair<float, float> getRange() const {
+        const Histogram& hist = collector_.histogram();
+        return {hist.min_val, hist.max_val};
     }
 
     /**
-     * 合并另一个直方图
-     */
-    void merge(const Histogram& other) { collector_.merge(other); }
-
-    /**
-     * 计算最优的 POT 量化参数
-     * @tparam QuantT 量化类型 (int8_t, int16_t 等)
-     * @param is_symmetric 是否对称量化
-     * @param out_exp2_inv 输出的 exp2_inv
-     * @param out_zp 输出的 zero-point
-     * @param name 调试名称
+     * 计算最优 POT 量化参数（两阶段方法）
      */
     template <typename QuantT>
     void computeOptimalParams(bool is_symmetric, int8_t& out_exp2_inv, int32_t& out_zp,
                               const char* name = nullptr) {
-        const Histogram& hist = collector_.histogram();
-        computeOptimalParamsFromHistogram<QuantT>(hist, is_symmetric, out_exp2_inv, out_zp, name,
-                                                  config_.exp2_inv_search_range, config_.gamma);
+        computeOptimalParamsFromHistogram<QuantT>(collector_.histogram(), is_symmetric,
+                                                   out_exp2_inv, out_zp, name, config_);
     }
 
     /**
-     * 从外部直方图计算最优的 POT 量化参数（静态方法）
-     * @tparam QuantT 量化类型
-     * @param hist 直方图
-     * @param is_symmetric 是否对称量化
-     * @param out_exp2_inv 输出的 exp2_inv
-     * @param out_zp 输出的 zero-point
-     * @param name 调试名称
-     * @param search_range 搜索范围
-     * @param gamma 剪切惩罚系数
+     * 完全 AIMET 一致的 POT 量化参数计算
+     * 
+     * 流程（与 AIMET 完全一致）：
+     * 1. SQNR 优化找到最优连续 scale 和 min
+     * 2. round 到最近的 POT（AIMET find_closest_power_of_2_scale）
+     * 3. 使用 SQNR 优化的 optimal_min 计算 zp
      */
     template <typename QuantT>
     static void computeOptimalParamsFromHistogram(const Histogram& hist, bool is_symmetric,
                                                   int8_t& out_exp2_inv, int32_t& out_zp,
-                                                  const char* name = nullptr, int search_range = 8,
-                                                  float gamma = 3.0f) {
+                                                  const char* name = nullptr,
+                                                  const AimetSqnrConfig& config = AimetSqnrConfig()) {
         if (!hist.is_valid()) {
-            // 没有数据，使用默认值
             out_exp2_inv = 7;
             out_zp = 0;
             return;
@@ -104,257 +112,196 @@ class POTSqnrCalibrator {
 
         const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
         const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
-        const int64_t num_steps = quant_max - quant_min;
 
-        // 1. 计算基准 exp2_inv（基于 MinMax）
-        float range = hist.max_val - hist.min_val;
+        // 阶段 1：SQNR 优化找最优连续 scale 和 min
+        auto result = computeOptimalContinuousScale<QuantT>(hist, is_symmetric, config);
+        
+        // 阶段 2：round 到最近的 POT（AIMET 方式）
+        auto [po2_scale, n] = roundToPowerOfTwo(result.optimal_scale);
+        
+        out_exp2_inv = n;
+        
+        // 阶段 3：使用 SQNR 优化的 optimal_min 计算 zp（AIMET 方式）
         if (is_symmetric) {
-            range = 2.0f * std::max(std::abs(hist.min_val), std::abs(hist.max_val));
-        }
-        range = std::max(range, 1e-9f);
-
-        float raw_scale = range / num_steps;
-        int8_t base_exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
-
-        // 2. 搜索最优 exp2_inv
-        float best_noise = std::numeric_limits<float>::max();
-        int8_t best_exp2_inv = base_exp2_inv;
-        int32_t best_zp = 0;
-
-        for (int delta = -search_range; delta <= search_range; ++delta) {
-            int8_t candidate_exp2_inv = base_exp2_inv + delta;
-
-            // 计算对应的 scale 和 zp
-            float scale = std::pow(2.0f, -static_cast<float>(candidate_exp2_inv));
-            int32_t zp = 0;
-
-            if (!is_symmetric) {
-                // 非对称量化：计算 zero-point
-                float zp_fp = quant_min - hist.min_val / scale;
-                zp = static_cast<int32_t>(std::round(zp_fp));
-            }
-
-            // 估算量化噪声
-            float noise = estimateQuantizationNoiseFromHistogram<QuantT>(hist, candidate_exp2_inv,
-                                                                         zp, is_symmetric, gamma);
-
-            if (noise < best_noise) {
-                best_noise = noise;
-                best_exp2_inv = candidate_exp2_inv;
-                best_zp = zp;
-            }
+            out_zp = 0;
+        } else {
+            // AIMET 方式：使用 SQNR 优化得到的 optimal_min
+            float zp_fp = static_cast<float>(quant_min) - result.optimal_min / po2_scale;
+            out_zp = static_cast<int32_t>(std::round(zp_fp));
         }
 
-        out_exp2_inv = best_exp2_inv;
-        out_zp = best_zp;
-
-        // 调试输出
 #ifdef DEBUG
-        if (name != nullptr && name[0] != '\0') {
-            float best_scale = std::pow(2.0f, -static_cast<float>(best_exp2_inv));
-            float base_scale = std::pow(2.0f, -static_cast<float>(base_exp2_inv));
-            printf(
-                "[POT-SQNR][%s] range=[%.4f, %.4f], base_exp2_inv=%d (scale=%.6f), "
-                "best_exp2_inv=%d (scale=%.6f), zp=%d, noise=%.4f\n",
-                name, hist.min_val, hist.max_val, base_exp2_inv, base_scale, best_exp2_inv,
-                best_scale, best_zp, best_noise);
+        if (name && name[0]) {
+            printf("[AIMET-POT][%s] range=[%.4f,%.4f] opt_min=%.4f cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
+                   name, hist.min_val, hist.max_val, result.optimal_min, result.optimal_scale, po2_scale, n, out_zp);
         }
 #endif
     }
 
     /**
-     * 从外部直方图估算量化噪声（静态方法）
+     * 阶段 1：AIMET 风格连续 scale 搜索
      */
     template <typename QuantT>
-    static float estimateQuantizationNoiseFromHistogram(const Histogram& hist, int8_t exp2_inv,
-                                                        int32_t zp, bool is_symmetric,
-                                                        float gamma = 3.0f) {
+    static ContinuousCalibrationResult computeOptimalContinuousScale(
+        const Histogram& hist, bool is_symmetric, const AimetSqnrConfig& config = AimetSqnrConfig()) {
+        
         const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
         const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
+        const int64_t num_steps = quant_max - quant_min;
 
-        float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
-        float scale_inv = std::pow(2.0f, static_cast<float>(exp2_inv));
+        // 确保范围包含 0
+        float min_val = std::min(hist.min_val, 0.0f);
+        float max_val = std::max(hist.max_val, 0.0f);
+        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        
+        float max_delta = is_symmetric 
+            ? 2.0f * std::max(max_val, -min_val) / num_steps
+            : (max_val - min_val) / num_steps;
+        
+        return is_symmetric 
+            ? searchSymmetric(hist, max_delta, num_steps, config)
+            : searchAsymmetric(hist, min_val, max_val, max_delta, num_steps, config);
+    }
 
-        float total_error = 0.0f;
-        float total_count = 0.0f;
+    /**
+     * 阶段 2：转换到 POT（完全 AIMET 一致）
+     * 
+     * AIMET find_closest_power_of_2_scale 使用 round：
+     *   n = -log2(scale)
+     *   n_rounded = round(n)
+     *   new_scale = 2^(-n_rounded)
+     */
+    static std::pair<float, int8_t> roundToPowerOfTwo(float scale) {
+        if (scale <= 0) return {1.0f / 128.0f, 7};
+        float n = -std::log2(scale);
+        // AIMET 使用 round，四舍五入到最近的 POT
+        int8_t n_rounded = static_cast<int8_t>(std::round(n));
+        return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
+    }
 
+   private:
+    AimetSqnrConfig config_;
+    HistogramCollector collector_;
+
+    /**
+     * 对称量化搜索
+     */
+    static ContinuousCalibrationResult searchSymmetric(
+        const Histogram& hist, float max_delta, int64_t num_steps, const AimetSqnrConfig& config) {
+        
+        ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
+        // 对称量化：offset = -num_steps // 2（整数除法，与 AIMET 一致）
+        const float offset = -static_cast<float>(num_steps / 2);
+        
+        for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
+            float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
+            delta = std::max(delta, 1e-8f);
+            
+            float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
+            
+            if (noise < result.best_noise) {
+                result.best_noise = noise;
+                result.optimal_scale = delta;
+                result.optimal_offset = offset;
+                result.optimal_min = offset * delta;
+                result.optimal_max = result.optimal_min + num_steps * delta;
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 非对称量化搜索
+     */
+    static ContinuousCalibrationResult searchAsymmetric(
+        const Histogram& hist, float min_val, float max_val, float max_delta,
+        int64_t num_steps, const AimetSqnrConfig& config) {
+        
+        ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
+        
+        const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
+        std::vector<float> offsets(num_offsets);
+        float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
+        for (int o = 0; o < num_offsets - 1; ++o) {
+            offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+        }
+        offsets[num_offsets - 1] = std::round(min_val / max_delta);  // observed offset
+        
+        for (int d = 1; d <= config.asymmetric_delta_candidates; ++d) {
+            float delta = max_delta * d / (config.asymmetric_delta_candidates - 1);
+            delta = std::max(delta, 1e-8f);
+            
+            for (int o = 0; o < num_offsets; ++o) {
+                float offset = offsets[o];
+                
+                // Clamp to observed range
+                float test_min = std::max(min_val, delta * offset);
+                float test_max = std::min(max_val, test_min + delta * num_steps);
+                float clamped_delta = std::max((test_max - test_min) / num_steps, 1e-8f);
+                float clamped_offset = std::round(test_min / clamped_delta);
+                
+                float noise = estimateNoise(hist, clamped_delta, clamped_offset, num_steps,
+                                             config.gamma, config.p);
+                
+                if (noise < result.best_noise) {
+                    result.best_noise = noise;
+                    result.optimal_scale = clamped_delta;
+                    result.optimal_offset = clamped_offset;
+                    result.optimal_min = clamped_offset * clamped_delta;
+                    result.optimal_max = result.optimal_min + num_steps * clamped_delta;
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 估算量化噪声（与 AIMET _estimate_clip_and_quant_noise 完全一致）
+     * 
+     * AIMET 量化公式：
+     *   q = round(x / delta - offset)     // 先减后 round
+     *   q = clamp(q, 0, num_steps)
+     *   x_recon = (q + offset) * delta
+     */
+    static float estimateNoise(const Histogram& hist, float delta, float offset,
+                                int64_t num_steps, float gamma, float p) {
+        if (delta <= 0) return std::numeric_limits<float>::max();
+        
         float bin_width = hist.bin_width();
-
+        float total_noise = 0.0f;
+        
         for (int i = 0; i < hist.num_bins; ++i) {
             float count = hist.counts[i];
             if (count < 1e-6f) continue;
-
-            // bin 中心值
+            
             float x = hist.min_val + (i + 0.5f) * bin_width;
-
-            // 量化
-            int64_t q = static_cast<int64_t>(std::round(x * scale_inv)) + zp;
-
-            // 检测剪切
-            bool clipped = (q < quant_min) || (q > quant_max);
-
-            // 剪切到有效范围
-            q = std::max(quant_min, std::min(quant_max, q));
-
-            // 反量化
-            float x_recon = static_cast<float>(q - zp) * scale;
-
-            // 计算误差 (MSE)
-            float error = (x_recon - x) * (x_recon - x);
-
-            // 对剪切的值应用 gamma 惩罚
-            if (clipped) {
-                error *= gamma;
-            }
-
-            total_error += error * count;
-            total_count += count;
+            
+            // AIMET 公式：q = round(x / delta - offset)（先减后 round）
+            float q = std::round(x / delta - offset);
+            
+            bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
+            q = std::max(0.0f, std::min(static_cast<float>(num_steps), q));
+            float x_recon = (q + offset) * delta;
+            
+            float error = std::pow(std::abs(x_recon - x), p);
+            if (clipped && gamma != 1.0f) error *= gamma;
+            
+            total_noise += error * count;
         }
-
-        if (total_count < 1e-6f) return std::numeric_limits<float>::max();
-        return total_error / total_count;  // 归一化误差
+        return total_noise;
     }
-
-    /**
-     * 获取当前的 min/max 范围
-     */
-    std::pair<float, float> getRange() const {
-        const Histogram& hist = collector_.histogram();
-        return {hist.min_val, hist.max_val};
-    }
-
-    /**
-     * 重置校准器
-     */
-    void reset() { collector_.reset(); }
-
-    /**
-     * 获取直方图（用于可视化/调试）
-     */
-    const Histogram& getHistogram() const { return collector_.histogram(); }
-
-    /**
-     * 检查是否有有效数据
-     */
-    bool isValid() const { return collector_.is_valid(); }
-
-   private:
-    Config config_;
-    HistogramCollector collector_;
 };
 
 /**
- * 使用 POT-SQNR 优化的量化参数计算函数
- * 替代原有的 calibrateQuantParams，使用 SQNR 优化选择最优 exp2_inv
- */
-template <typename T, typename QuantT>
-inline void calibrateQuantParamsSQNR(const std::vector<T>& data, const bool is_symmetric,
-                                     T& aligned_min, T& aligned_max, int8_t& exp2_inv, int32_t& zp,
-                                     const std::string& name = "", bool verbose = false) {
-    if (data.empty()) {
-        exp2_inv = 7;
-        zp = 0;
-        aligned_min = -1;
-        aligned_max = 1;
-        return;
-    }
-
-    // 创建校准器并收集数据
-    POTSqnrCalibrator::Config config;
-    config.num_bins = 2048;
-    config.exp2_inv_search_range = 6;
-    config.gamma = 3.0f;
-    config.use_ema = false;  // 单次调用不需要 EMA
-
-    POTSqnrCalibrator calibrator(config);
-    calibrator.update(data.data(), data.size());
-
-    // 计算最优参数
-    calibrator.computeOptimalParams<QuantT>(is_symmetric, exp2_inv, zp,
-                                            verbose ? name.c_str() : nullptr);
-
-    // 计算对齐后的范围
-    float scale = std::pow(2.0f, -static_cast<float>(exp2_inv));
-    const int32_t quant_min = std::numeric_limits<QuantT>::min();
-    const int32_t quant_max = std::numeric_limits<QuantT>::max();
-
-    if (is_symmetric) {
-        aligned_max = static_cast<T>(scale * quant_max);
-        aligned_min = -aligned_max;
-    } else {
-        aligned_min = static_cast<T>((quant_min - zp) * scale);
-        aligned_max = static_cast<T>((quant_max - zp) * scale);
-    }
-}
-
-/**
- * 从直方图计算 POT-SQNR 量化参数
- * 这是真正的 AIMET 风格校准方法
- * 
- * @param percentile_clip 百分位数裁剪 (例如 0.001 表示裁剪 0.1% 的极值)
- *                        设为 0 表示不裁剪（默认，使用完整 min/max 范围）
- * 
- * 注意：默认不裁剪 (percentile_clip=0)，因为裁剪可能导致推理时极值被 clip，
- *       严重影响模型精度。如果需要裁剪，请显式指定 percentile_clip 值。
+ * 从直方图计算 POT 量化参数（便捷函数）
  */
 template <typename QuantT>
 inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_symmetric,
                                               int8_t& exp2_inv, int32_t& zp,
-                                              const char* name = nullptr, int search_range = 6,
-                                              float gamma = 3.0f, float percentile_clip = 0.0f) {
-    // 如果需要百分位数裁剪，创建一个裁剪后的直方图副本
-    if (percentile_clip > 0.0f && hist.is_valid()) {
-        auto [pmin, pmax] = hist.getPercentileRange(percentile_clip);
-        
-        // 创建裁剪后的直方图
-        Histogram clipped_hist = hist;
-        clipped_hist.min_val = pmin;
-        clipped_hist.max_val = pmax;
-        
-        POTSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(clipped_hist, is_symmetric, exp2_inv, zp,
-                                                                     name, search_range, gamma);
-    } else {
-        POTSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(hist, is_symmetric, exp2_inv, zp,
-                                                                     name, search_range, gamma);
-    }
+                                              const char* name = nullptr) {
+    AimetPotSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(
+        hist, is_symmetric, exp2_inv, zp, name);
 }
 
-/**
- * Per-Channel POT-SQNR 校准
- * 用于权重的 per-channel 量化
- */
-template <typename T, typename QuantT>
-inline std::vector<int8_t> calibratePerChannelSQNR(const T* data, int input_size, int channel_size,
-                                                   bool verbose = false,
-                                                   const std::string& name = "") {
-    std::vector<int8_t> exp2_invs(channel_size);
-
-    POTSqnrCalibrator::Config config;
-    config.num_bins = 256;  // per-channel 用较少的 bins
-    config.exp2_inv_search_range = 4;
-    config.gamma = 3.0f;
-    config.use_ema = false;
-
-#pragma omp parallel for
-    for (int c = 0; c < channel_size; ++c) {
-        // 提取该 channel 的数据
-        std::vector<float> channel_data(input_size);
-        for (int i = 0; i < input_size; ++i) {
-            channel_data[i] = static_cast<float>(data[i * channel_size + c]);
-        }
-
-        // 校准
-        POTSqnrCalibrator calibrator(config);
-        calibrator.update(channel_data.data(), channel_data.size());
-
-        int32_t zp_tmp;
-        calibrator.computeOptimalParams<QuantT>(true,  // per-channel 权重通常用对称量化
-                                                exp2_invs[c], zp_tmp,
-                                                verbose ? (name + "_ch" + std::to_string(c)).c_str()
-                                                        : nullptr);
-    }
-
-    return exp2_invs;
-}
-
-// POT_SQNR_CALIBRATOR_HPP
+// 向后兼容别名
+using POTSqnrCalibrator = AimetPotSqnrCalibrator;

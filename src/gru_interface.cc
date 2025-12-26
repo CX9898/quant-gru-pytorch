@@ -859,32 +859,26 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     quant_params.hidden_ = hist_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
-    const char *name_ptr = verbose ? "" : nullptr;
-
     // 输入 x 的量化 - 从直方图计算
     dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
         using XT = typename decltype(tag)::type;
-        if (hist_collectors.x_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<XT>(
-                hist_collectors.x_hist.histogram(), bitwidth_config.x_symmetric_,
-                quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr);
-        } else {
-            quant_params.exp2_inv_x_ = 7;
-            quant_params.zp_x_ = 0;
+        if (!hist_collectors.x_hist.is_valid()) {
+            throw std::runtime_error("x_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<XT>(
+            hist_collectors.x_hist.histogram(), bitwidth_config.x_symmetric_,
+            quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr);
     });
 
     // 隐藏状态 h 的量化
     dispatchByBitWidth(bitwidth_config.h_, [&](auto tag) {
         using HT = typename decltype(tag)::type;
-        if (hist_collectors.h_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<HT>(
-                hist_collectors.h_hist.histogram(), bitwidth_config.h_symmetric_,
-                quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr);
-        } else {
-            quant_params.exp2_inv_h_ = 7;
-            quant_params.zp_h_ = 0;
+        if (!hist_collectors.h_hist.is_valid()) {
+            throw std::runtime_error("h_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<HT>(
+            hist_collectors.h_hist.histogram(), bitwidth_config.h_symmetric_,
+            quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr);
     });
 
     // 权重 W 的量化（per-channel）- 从直方图计算
@@ -894,13 +888,12 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using WT = typename decltype(tag)::type;
         for (int c = 0; c < channel_size; ++c) {
             int32_t zp_tmp;
-            if (hist_collectors.W_hist[c].is_valid()) {
-                calibrateQuantParamsFromHistogram<WT>(hist_collectors.W_hist[c].histogram(),
-                                                      bitwidth_config.W_symmetric_,
-                                                      quant_params.exp2_inv_W_[c], zp_tmp, nullptr);
-            } else {
-                quant_params.exp2_inv_W_[c] = 7;
+            if (!hist_collectors.W_hist[c].is_valid()) {
+                throw std::runtime_error("W_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
             }
+            calibrateQuantParamsFromHistogram<WT>(hist_collectors.W_hist[c].histogram(),
+                                                  bitwidth_config.W_symmetric_,
+                                                  quant_params.exp2_inv_W_[c], zp_tmp, nullptr);
         }
     });
 
@@ -910,40 +903,35 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using RT = typename decltype(tag)::type;
         for (int c = 0; c < channel_size; ++c) {
             int32_t zp_tmp;
-            if (hist_collectors.R_hist[c].is_valid()) {
-                calibrateQuantParamsFromHistogram<RT>(hist_collectors.R_hist[c].histogram(),
-                                                      bitwidth_config.R_symmetric_,
-                                                      quant_params.exp2_inv_R_[c], zp_tmp, nullptr);
-            } else {
-                quant_params.exp2_inv_R_[c] = 7;
+            if (!hist_collectors.R_hist[c].is_valid()) {
+                throw std::runtime_error("R_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
             }
+            calibrateQuantParamsFromHistogram<RT>(hist_collectors.R_hist[c].histogram(),
+                                                  bitwidth_config.R_symmetric_,
+                                                  quant_params.exp2_inv_R_[c], zp_tmp, nullptr);
         }
     });
 
     // Wx 结果的量化 - 从直方图计算
     dispatchByBitWidth(bitwidth_config.Wx_, [&](auto tag) {
         using WxT = typename decltype(tag)::type;
-        if (hist_collectors.Wx_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<WxT>(
-                hist_collectors.Wx_hist.histogram(), bitwidth_config.Wx_symmetric_,
-                quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr);
-        } else {
-            quant_params.exp2_inv_Wx_ = 7;
-            quant_params.zp_Wx_ = 0;
+        if (!hist_collectors.Wx_hist.is_valid()) {
+            throw std::runtime_error("Wx_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<WxT>(
+            hist_collectors.Wx_hist.histogram(), bitwidth_config.Wx_symmetric_,
+            quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr);
     });
 
     // Rh 结果的量化
     dispatchByBitWidth(bitwidth_config.Rh_, [&](auto tag) {
         using RhT = typename decltype(tag)::type;
-        if (hist_collectors.Rh_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<RhT>(
-                hist_collectors.Rh_hist.histogram(), bitwidth_config.Rh_symmetric_,
-                quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr);
-        } else {
-            quant_params.exp2_inv_Rh_ = 7;
-            quant_params.zp_Rh_ = 0;
+        if (!hist_collectors.Rh_hist.is_valid()) {
+            throw std::runtime_error("Rh_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<RhT>(
+            hist_collectors.Rh_hist.histogram(), bitwidth_config.Rh_symmetric_,
+            quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr);
     });
 
     // 偏置 bx 的量化（per-channel）
@@ -952,13 +940,12 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using BxT = typename decltype(tag)::type;
         for (int c = 0; c < channel_size; ++c) {
             int32_t zp_tmp;
-            if (hist_collectors.bx_hist[c].is_valid()) {
-                calibrateQuantParamsFromHistogram<BxT>(
-                    hist_collectors.bx_hist[c].histogram(), bitwidth_config.bx_symmetric_,
-                    quant_params.exp2_inv_bx_[c], zp_tmp, nullptr);
-            } else {
-                quant_params.exp2_inv_bx_[c] = 7;
+            if (!hist_collectors.bx_hist[c].is_valid()) {
+                throw std::runtime_error("bx_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
             }
+            calibrateQuantParamsFromHistogram<BxT>(
+                hist_collectors.bx_hist[c].histogram(), bitwidth_config.bx_symmetric_,
+                quant_params.exp2_inv_bx_[c], zp_tmp, nullptr);
         }
     });
 
@@ -968,238 +955,134 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         using BrT = typename decltype(tag)::type;
         for (int c = 0; c < channel_size; ++c) {
             int32_t zp_tmp;
-            if (hist_collectors.br_hist[c].is_valid()) {
-                calibrateQuantParamsFromHistogram<BrT>(
-                    hist_collectors.br_hist[c].histogram(), bitwidth_config.br_symmetric_,
-                    quant_params.exp2_inv_br_[c], zp_tmp, nullptr);
-            } else {
-                quant_params.exp2_inv_br_[c] = 7;
+            if (!hist_collectors.br_hist[c].is_valid()) {
+                throw std::runtime_error("br_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
             }
+            calibrateQuantParamsFromHistogram<BrT>(
+                hist_collectors.br_hist[c].histogram(), bitwidth_config.br_symmetric_,
+                quant_params.exp2_inv_br_[c], zp_tmp, nullptr);
         }
     });
 
-    // z 门输入的量化 - 优先使用真实收集的 z_pre 直方图
+    // z 门输入的量化 - 必须使用真实收集的 z_pre 直方图
     dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
         using ZPreT = typename decltype(tag)::type;
-        if (hist_collectors.z_pre_hist.is_valid()) {
-            // 使用真实收集的 z_pre 直方图
-            calibrateQuantParamsFromHistogram<ZPreT>(
-                hist_collectors.z_pre_hist.histogram(), bitwidth_config.z_pre_symmetric_,
-                quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
-                verbose ? "scale_z_pre" : nullptr);
-        } else if (hist_collectors.z_out_hist.is_valid()) {
-            // 回退：使用 sigmoid 反函数估计
-            const Histogram &z_out_hist = hist_collectors.z_out_hist.histogram();
-            auto sigmoid_inv = [](float y) {
-                y = std::max(0.01f, std::min(0.99f, y));
-                return std::log(y / (1.0f - y));
-            };
-            float z_pre_min = sigmoid_inv(z_out_hist.min_val);
-            float z_pre_max = sigmoid_inv(z_out_hist.max_val);
-
-            Histogram z_pre_hist_approx(256);
-            z_pre_hist_approx.min_val = z_pre_min;
-            z_pre_hist_approx.max_val = z_pre_max;
-            z_pre_hist_approx.total_count = 1;
-            z_pre_hist_approx.counts.assign(256, 1.0f);
-
-            calibrateQuantParamsFromHistogram<ZPreT>(
-                z_pre_hist_approx, bitwidth_config.z_pre_symmetric_, quant_params.exp2_inv_z_pre_,
-                quant_params.zp_z_pre_, verbose ? "scale_z_pre (approx)" : nullptr);
-        } else {
-            quant_params.exp2_inv_z_pre_ = 4;
-            quant_params.zp_z_pre_ = 0;
+        if (!hist_collectors.z_pre_hist.is_valid()) {
+            throw std::runtime_error("z_pre_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<ZPreT>(
+            hist_collectors.z_pre_hist.histogram(), bitwidth_config.z_pre_symmetric_,
+            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
+            verbose ? "scale_z_pre" : nullptr);
     });
 
-    // r 门输入的量化 - 优先使用真实收集的 r_pre 直方图
+    // r 门输入的量化 - 必须使用真实收集的 r_pre 直方图
     dispatchByBitWidth(bitwidth_config.r_pre_, [&](auto tag) {
         using RPreT = typename decltype(tag)::type;
-        if (hist_collectors.r_pre_hist.is_valid()) {
-            // 使用真实收集的 r_pre 直方图
-            calibrateQuantParamsFromHistogram<RPreT>(
-                hist_collectors.r_pre_hist.histogram(), bitwidth_config.r_pre_symmetric_,
-                quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-                verbose ? "scale_r_pre" : nullptr);
-        } else if (hist_collectors.r_out_hist.is_valid()) {
-            // 回退：使用 sigmoid 反函数估计
-            const Histogram &r_out_hist = hist_collectors.r_out_hist.histogram();
-            auto sigmoid_inv = [](float y) {
-                y = std::max(0.01f, std::min(0.99f, y));
-                return std::log(y / (1.0f - y));
-            };
-            float r_pre_min = sigmoid_inv(r_out_hist.min_val);
-            float r_pre_max = sigmoid_inv(r_out_hist.max_val);
-
-            Histogram r_pre_hist_approx(256);
-            r_pre_hist_approx.min_val = r_pre_min;
-            r_pre_hist_approx.max_val = r_pre_max;
-            r_pre_hist_approx.total_count = 1;
-            r_pre_hist_approx.counts.assign(256, 1.0f);
-
-            calibrateQuantParamsFromHistogram<RPreT>(
-                r_pre_hist_approx, bitwidth_config.r_pre_symmetric_, quant_params.exp2_inv_r_pre_,
-                quant_params.zp_r_pre_, verbose ? "scale_r_pre (approx)" : nullptr);
-        } else {
-            quant_params.exp2_inv_r_pre_ = 4;
-            quant_params.zp_r_pre_ = 0;
+        if (!hist_collectors.r_pre_hist.is_valid()) {
+            throw std::runtime_error("r_pre_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<RPreT>(
+            hist_collectors.r_pre_hist.histogram(), bitwidth_config.r_pre_symmetric_,
+            quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+            verbose ? "scale_r_pre" : nullptr);
     });
 
-    // g 门输入的量化 - 优先使用真实收集的 g_pre 直方图
+    // g 门输入的量化 - 必须使用真实收集的 g_pre 直方图
     dispatchByBitWidth(bitwidth_config.g_pre_, [&](auto tag) {
         using GPreT = typename decltype(tag)::type;
-        if (hist_collectors.g_pre_hist.is_valid()) {
-            // 使用真实收集的 g_pre 直方图
-            calibrateQuantParamsFromHistogram<GPreT>(
-                hist_collectors.g_pre_hist.histogram(), bitwidth_config.g_pre_symmetric_,
-                quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
-                verbose ? "scale_g_pre" : nullptr);
-        } else if (hist_collectors.g_out_hist.is_valid()) {
-            // 回退：使用 tanh 反函数估计
-            const Histogram &g_out_hist = hist_collectors.g_out_hist.histogram();
-            auto tanh_inv = [](float y) {
-                y = std::max(-0.99f, std::min(0.99f, y));
-                return 0.5f * std::log((1.0f + y) / (1.0f - y));
-            };
-            float g_pre_min = tanh_inv(g_out_hist.min_val);
-            float g_pre_max = tanh_inv(g_out_hist.max_val);
-
-            Histogram g_pre_hist_approx(256);
-            g_pre_hist_approx.min_val = g_pre_min;
-            g_pre_hist_approx.max_val = g_pre_max;
-            g_pre_hist_approx.total_count = 1;
-            g_pre_hist_approx.counts.assign(256, 1.0f);
-
-            calibrateQuantParamsFromHistogram<GPreT>(
-                g_pre_hist_approx, bitwidth_config.g_pre_symmetric_, quant_params.exp2_inv_g_pre_,
-                quant_params.zp_g_pre_, verbose ? "scale_g_pre (approx)" : nullptr);
-        } else {
-            quant_params.exp2_inv_g_pre_ = 4;
-            quant_params.zp_g_pre_ = 0;
+        if (!hist_collectors.g_pre_hist.is_valid()) {
+            throw std::runtime_error("g_pre_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<GPreT>(
+            hist_collectors.g_pre_hist.histogram(), bitwidth_config.g_pre_symmetric_,
+            quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
+            verbose ? "scale_g_pre" : nullptr);
     });
 
-    // 激活函数输出的校准
-    // 使用直方图收集的实际范围（INT8 和 INT16 统一使用实际范围）
-    constexpr float MIN_ACTIVATION_RANGE_HIST = 0.5f;
+    // 激活函数输出的校准 - 使用 AIMET SQNR 方法
 
     // z 门输出 - sigmoid
-    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
         using ZOutT = typename decltype(tag)::type;
-        float aligned_min, aligned_max;
-        float min_val, max_val;
-        if (hist_collectors.z_out_hist.is_valid()) {
-            const Histogram &z_out_hist = hist_collectors.z_out_hist.histogram();
-            min_val = z_out_hist.min_val;
-            max_val = z_out_hist.max_val;
-        } else {
-            // 回退到固定范围
-            min_val = 0.0f;
-            max_val = 1.0f;
+        if (!hist_collectors.z_out_hist.is_valid()) {
+            throw std::runtime_error("z_out_hist is invalid. Calibration data may be empty or corrupted.");
         }
-        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "z_out");
-        calibrateQuantParams<float, ZOutT>(min_val, max_val, bitwidth_config.z_out_symmetric_,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_z_out_,
-                                           quant_params.zp_z_out_, verbose ? "scale_z_out" : "");
+        calibrateQuantParamsFromHistogram<ZOutT>(
+            hist_collectors.z_out_hist.histogram(), bitwidth_config.z_out_symmetric_,
+            quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
+            verbose ? "scale_z_out" : nullptr);
     });
 
     // r 门输出 - sigmoid
-    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
         using ROutT = typename decltype(tag)::type;
-        float aligned_min, aligned_max;
-        float min_val, max_val;
-        if (hist_collectors.r_out_hist.is_valid()) {
-            const Histogram &r_out_hist = hist_collectors.r_out_hist.histogram();
-            min_val = r_out_hist.min_val;
-            max_val = r_out_hist.max_val;
-        } else {
-            // 回退到固定范围
-            min_val = 0.0f;
-            max_val = 1.0f;
+        if (!hist_collectors.r_out_hist.is_valid()) {
+            throw std::runtime_error("r_out_hist is invalid. Calibration data may be empty or corrupted.");
         }
-        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "r_out");
-        calibrateQuantParams<float, ROutT>(min_val, max_val, bitwidth_config.r_out_symmetric_,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_r_out_,
-                                           quant_params.zp_r_out_, verbose ? "scale_r_out" : "");
+        calibrateQuantParamsFromHistogram<ROutT>(
+            hist_collectors.r_out_hist.histogram(), bitwidth_config.r_out_symmetric_,
+            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
+            verbose ? "scale_r_out" : nullptr);
     });
 
     // g 门输出 - tanh
-    // 使用实际校准范围（INT8 和 INT16 统一使用实际范围）
     dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
         using GOutT = typename decltype(tag)::type;
-        float aligned_min, aligned_max;
-        float min_val, max_val;
-        if (hist_collectors.g_out_hist.is_valid()) {
-            const Histogram &g_out_hist = hist_collectors.g_out_hist.histogram();
-            min_val = g_out_hist.min_val;
-            max_val = g_out_hist.max_val;
-        } else {
-            // 回退到固定范围
-            min_val = -1.0f;
-            max_val = 1.0f;
+        if (!hist_collectors.g_out_hist.is_valid()) {
+            throw std::runtime_error("g_out_hist is invalid. Calibration data may be empty or corrupted.");
         }
-        ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE_HIST, "g_out");
-        calibrateQuantParams<float, GOutT>(min_val, max_val, bitwidth_config.g_out_symmetric_,
-                                           aligned_min, aligned_max, quant_params.exp2_inv_g_out_,
-                                           quant_params.zp_g_out_, verbose ? "scale_g_out" : "");
+        calibrateQuantParamsFromHistogram<GOutT>(
+            hist_collectors.g_out_hist.histogram(), bitwidth_config.g_out_symmetric_,
+            quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
+            verbose ? "scale_g_out" : nullptr);
     });
 
     // Rh + br 的量化
     dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
         using RhAddBrT = typename decltype(tag)::type;
-        if (hist_collectors.Rh_add_br_g_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<RhAddBrT>(
-                hist_collectors.Rh_add_br_g_hist.histogram(), bitwidth_config.Rh_add_br_symmetric_,
-                quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_,
-                verbose ? "scale_Rh_add_br" : nullptr);
-        } else {
-            quant_params.exp2_inv_Rh_add_br_ = 7;
-            quant_params.zp_Rh_add_br_ = 0;
+        if (!hist_collectors.Rh_add_br_g_hist.is_valid()) {
+            throw std::runtime_error("Rh_add_br_g_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<RhAddBrT>(
+            hist_collectors.Rh_add_br_g_hist.histogram(), bitwidth_config.Rh_add_br_symmetric_,
+            quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_,
+            verbose ? "scale_Rh_add_br" : nullptr);
     });
 
     // r × Rh 的量化
     dispatchByBitWidth(bitwidth_config.rRh_, [&](auto tag) {
         using rRhT = typename decltype(tag)::type;
-        if (hist_collectors.rRh_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<rRhT>(
-                hist_collectors.rRh_hist.histogram(), bitwidth_config.rRh_symmetric_,
-                quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr);
-        } else {
-            quant_params.exp2_inv_rRh_ = 7;
-            quant_params.zp_rRh_ = 0;
+        if (!hist_collectors.rRh_hist.is_valid()) {
+            throw std::runtime_error("rRh_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<rRhT>(
+            hist_collectors.rRh_hist.histogram(), bitwidth_config.rRh_symmetric_,
+            quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr);
     });
 
     // (1.0 - z) * g 的量化
     dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
         using NewContribT = typename decltype(tag)::type;
-        if (hist_collectors.new_contrib_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<NewContribT>(
-                hist_collectors.new_contrib_hist.histogram(),
-                bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
-                quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr);
-        } else {
-            quant_params.exp2_inv_new_contrib_ = 7;
-            quant_params.zp_new_contrib_ = 0;
+        if (!hist_collectors.new_contrib_hist.is_valid()) {
+            throw std::runtime_error("new_contrib_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<NewContribT>(
+            hist_collectors.new_contrib_hist.histogram(),
+            bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
+            quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr);
     });
 
     // z * h 的量化
     dispatchByBitWidth(bitwidth_config.old_contrib_, [&](auto tag) {
         using OldContribT = typename decltype(tag)::type;
-        if (hist_collectors.old_contrib_hist.is_valid()) {
-            calibrateQuantParamsFromHistogram<OldContribT>(
-                hist_collectors.old_contrib_hist.histogram(),
-                bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
-                quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr);
-        } else {
-            quant_params.exp2_inv_old_contrib_ = 7;
-            quant_params.zp_old_contrib_ = 0;
+        if (!hist_collectors.old_contrib_hist.is_valid()) {
+            throw std::runtime_error("old_contrib_hist is invalid. Calibration data may be empty or corrupted.");
         }
+        calibrateQuantParamsFromHistogram<OldContribT>(
+            hist_collectors.old_contrib_hist.histogram(),
+            bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
+            quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr);
     });
 
     return quant_params;
