@@ -43,19 +43,22 @@ enum class CalibrationScheme {
 };
 
 /**
- * AIMET 风格的校准配置（统一配置，支持 SQNR 和 Percentile）
+ * 直方图校准配置（统一配置，支持 SQNR 和 Percentile 两种方案）
  */
-struct AimetSqnrConfig {
-    int num_bins = 2048;
-    int symmetric_delta_candidates = 201;   // 增大以提高精度
-    int asymmetric_delta_candidates = 35;   // 增大以提高精度
-    int offset_candidates = 31;             // 增大以提高精度
-    float gamma = 3.0f;  // AIMET 默认值
-    float p = 2.0f;       // Lp 范数 (p=2 = MSE)
+struct HistogramCalibrationConfig {
+    // ========== 通用配置 ==========
+    int num_bins = 2048;                    // 直方图 bin 数量
+    CalibrationScheme scheme = CalibrationScheme::SQNR;  // 校准方案
     
-    // Percentile 配置
-    CalibrationScheme scheme = CalibrationScheme::SQNR;
-    float percentile = 99.99f;  // 仅 PERCENTILE 方案使用
+    // ========== SQNR 方案配置 ==========
+    int symmetric_delta_candidates = 201;   // 对称量化搜索精度
+    int asymmetric_delta_candidates = 35;   // 非对称量化搜索精度
+    int offset_candidates = 31;             // offset 搜索精度
+    float gamma = 3.0f;                     // clipping noise 权重 (AIMET 默认 3.0)
+    float p = 2.0f;                         // Lp 范数 (p=2 = MSE)
+    
+    // ========== Percentile 方案配置 ==========
+    float percentile = 99.99f;              // 百分位数 (如 99.99 表示保留 99.99% 数据)
 };
 
 /**
@@ -74,7 +77,7 @@ struct ContinuousCalibrationResult {
  */
 class AimetPotSqnrCalibrator {
    public:
-    explicit AimetPotSqnrCalibrator(AimetSqnrConfig config = AimetSqnrConfig())
+    explicit AimetPotSqnrCalibrator(HistogramCalibrationConfig config = HistogramCalibrationConfig())
         : config_(config), collector_(config.num_bins) {}
 
     void update(const float* data, size_t size) {
@@ -118,7 +121,7 @@ class AimetPotSqnrCalibrator {
     static void computeOptimalParamsFromHistogram(const Histogram& hist, bool is_symmetric,
                                                   int8_t& out_exp2_inv, int32_t& out_zp,
                                                   const char* name = nullptr,
-                                                  const AimetSqnrConfig& config = AimetSqnrConfig()) {
+                                                  const HistogramCalibrationConfig& config = HistogramCalibrationConfig()) {
         if (!hist.is_valid()) {
             throw std::runtime_error("Histogram is invalid in computeOptimalParamsFromHistogram");
         }
@@ -189,7 +192,7 @@ class AimetPotSqnrCalibrator {
      */
     template <typename QuantT>
     static ContinuousCalibrationResult computeOptimalContinuousScale(
-        const Histogram& hist, bool is_symmetric, const AimetSqnrConfig& config = AimetSqnrConfig()) {
+        const Histogram& hist, bool is_symmetric, const HistogramCalibrationConfig& config = HistogramCalibrationConfig()) {
         
         const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
         const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
@@ -228,14 +231,14 @@ class AimetPotSqnrCalibrator {
     }
 
    private:
-    AimetSqnrConfig config_;
+    HistogramCalibrationConfig config_;
     HistogramCollector collector_;
 
     /**
      * 对称量化搜索
      */
     static ContinuousCalibrationResult searchSymmetric(
-        const Histogram& hist, float max_delta, int64_t num_steps, const AimetSqnrConfig& config) {
+        const Histogram& hist, float max_delta, int64_t num_steps, const HistogramCalibrationConfig& config) {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
         // 对称量化：offset = -num_steps // 2（整数除法，与 AIMET 一致）
@@ -267,7 +270,7 @@ class AimetPotSqnrCalibrator {
      */
     static ContinuousCalibrationResult searchAsymmetric(
         const Histogram& hist, float min_val, float max_val, float max_delta,
-        int64_t num_steps, const AimetSqnrConfig& config) {
+        int64_t num_steps, const HistogramCalibrationConfig& config) {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
         
@@ -365,7 +368,7 @@ inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_sym
                                               const char* name = nullptr,
                                               CalibrationScheme scheme = CalibrationScheme::SQNR,
                                               float percentile = 99.99f) {
-    AimetSqnrConfig config;
+    HistogramCalibrationConfig config;
     config.scheme = scheme;
     config.percentile = percentile;
     AimetPotSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(
