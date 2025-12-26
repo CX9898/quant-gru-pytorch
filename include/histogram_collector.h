@@ -19,6 +19,18 @@
 #include <vector>
 
 /**
+ * 与 AIMET _get_minimum_scale 完全一致的实现
+ * 返回给定量化步数的最小 scale
+ * 
+ * 定义: 最大的 s <= float32.eps 使得 -0.005 <= s * min_int < s * max_int <= 0.005
+ */
+inline float get_minimum_scale(int num_steps) {
+    constexpr float fp32_eps = 1.19209290e-07f;  // float32 epsilon
+    constexpr float min_range_to_represent = 0.01f;  // (-0.005, 0.005) 范围
+    return std::min(fp32_eps, min_range_to_represent / static_cast<float>(num_steps));
+}
+
+/**
  * 单个直方图结构体
  * 存储一个张量的直方图数据
  */
@@ -119,13 +131,20 @@ struct Histogram {
 class HistogramCollector {
    public:
     struct Config {
-        int num_bins = 2048;  // 直方图 bin 数量（AIMET 默认 2048）
-        float ema_decay = 0.0f;  // EMA 衰减系数，0 表示不使用 EMA
+        int num_bins = 2048;      // 直方图 bin 数量（AIMET 默认 2048）
+        float ema_decay = 0.0f;   // EMA 衰减系数，0 表示不使用 EMA
+        float growth_limit = std::numeric_limits<float>::infinity();  // 范围扩展限制（AIMET 默认无穷大）
+                                   // 范围最多扩展到首次范围的 growth_limit 倍
     };
 
    private:
     Config config_;
     Histogram hist_;
+    
+    // 范围限制（首次收集后设置，与 AIMET _histogram_range_limit 一致）
+    bool range_limit_set_ = false;
+    float range_limit_min_ = 0.0f;
+    float range_limit_max_ = 0.0f;
 
    public:
     HistogramCollector() : config_(), hist_() {}
@@ -133,8 +152,10 @@ class HistogramCollector {
     explicit HistogramCollector(int num_bins) : config_(), hist_(num_bins) { config_.num_bins = num_bins; }
 
     /**
-     * 收集数据到直方图（首次收集）
-     * 自动确定范围
+     * 收集数据到直方图
+     * 与 AIMET _HistogramObserver.merge_stats 完全一致：
+     * - 首次收集：初始化直方图，设置范围限制
+     * - 后续收集：在范围限制内扩展，超出部分裁剪到边界 bin
      */
     void collect(const float* data, size_t size) {
         if (size == 0) return;
@@ -147,9 +168,20 @@ class HistogramCollector {
             data_max = std::max(data_max, data[i]);
         }
 
-        // 确保范围有效
-        if (data_max <= data_min) {
-            data_max = data_min + 1e-6f;
+        // 与 AIMET minimum_scale 逻辑完全一致
+        float minimum_scale = get_minimum_scale(config_.num_bins);
+        float minimum_range = minimum_scale * config_.num_bins;
+        float input_range = data_max - data_min;
+        
+        // 如果范围太小（包括 min == max），使用最小范围并确保 0 在范围内
+        // 与 AIMET zero_range_mask 处理一致
+        if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
+            // 确保 0 在范围内
+            data_min = std::min(data_min, 0.0f);
+            data_max = std::max(data_max, 0.0f);
+            input_range = minimum_range;
+            // 基于 data_min 扩展
+            data_max = data_min + minimum_range;
         }
 
         if (!hist_.is_valid()) {
@@ -158,14 +190,32 @@ class HistogramCollector {
             hist_.min_val = data_min;
             hist_.max_val = data_max;
             _add_to_histogram(data, size);
+            
+            // 设置范围限制（与 AIMET growth_limit 完全一致）
+            range_limit_min_ = data_min - input_range * config_.growth_limit / 2.0f;
+            range_limit_max_ = data_max + input_range * config_.growth_limit / 2.0f;
+            range_limit_set_ = true;
         } else {
-            // 后续收集：可能需要扩展范围并合并
-            if (data_min >= hist_.min_val && data_max <= hist_.max_val) {
-                // 新数据在已有范围内，直接添加
+            // 后续收集：应用范围限制（与 AIMET clamp 逻辑完全一致）
+            float updated_min = hist_.min_val;
+            float updated_max = hist_.max_val;
+            
+            if (range_limit_set_) {
+                // new_stats.min.clamp(left_limit, curr_stats.min)
+                updated_min = std::max(range_limit_min_, std::min(data_min, hist_.min_val));
+                // new_stats.max.clamp(curr_stats.max, right_limit)
+                updated_max = std::min(range_limit_max_, std::max(data_max, hist_.max_val));
+            } else {
+                updated_min = std::min(data_min, hist_.min_val);
+                updated_max = std::max(data_max, hist_.max_val);
+            }
+            
+            if (updated_min == hist_.min_val && updated_max == hist_.max_val) {
+                // 范围不变，直接添加（超出范围的值会被裁剪到边界 bin）
                 _add_to_histogram(data, size);
             } else {
                 // 需要扩展范围
-                _merge_with_extended_range(data, size, data_min, data_max);
+                _merge_with_extended_range(data, size, updated_min, updated_max);
             }
         }
     }
@@ -202,9 +252,14 @@ class HistogramCollector {
     Histogram& histogram() { return hist_; }
 
     /**
-     * 重置直方图
+     * 重置直方图和范围限制
      */
-    void reset() { hist_.reset(config_.num_bins); }
+    void reset() { 
+        hist_.reset(config_.num_bins);
+        range_limit_set_ = false;
+        range_limit_min_ = 0.0f;
+        range_limit_max_ = 0.0f;
+    }
 
     /**
      * 是否有有效数据
@@ -227,46 +282,60 @@ class HistogramCollector {
 
     /**
      * 扩展范围并合并新数据
-     * 类似 AIMET 的 _adjust_min_max_and_update_histogram
+     * 与 AIMET _HistogramObserver.merge_stats 完全一致：
+     * - 精确按比例分割源 bin 到目标 bin
+     * - 处理源 bin 跨越多个目标 bin 的情况
      */
-    void _merge_with_extended_range(const float* data, size_t size, float data_min, float data_max) {
-        float new_min = std::min(hist_.min_val, data_min);
-        float new_max = std::max(hist_.max_val, data_max);
-
+    void _merge_with_extended_range(const float* data, size_t size, float new_min, float new_max) {
         // 创建新直方图
         std::vector<float> new_counts(config_.num_bins, 0.0f);
-        float new_bin_width = (new_max - new_min) / config_.num_bins;
+        float dest_bin_width = (new_max - new_min) / config_.num_bins;
+        float src_bin_width = hist_.bin_width();
 
-        // 重新分配旧直方图的计数
-        float old_bin_width = hist_.bin_width();
-        for (int old_idx = 0; old_idx < hist_.num_bins; ++old_idx) {
-            if (hist_.counts[old_idx] <= 0) continue;
+        // 检查源 bin 宽度有效性（与 AIMET minimum_scale 完全一致）
+        float minimum_scale = get_minimum_scale(config_.num_bins);
+        if (std::abs(src_bin_width) < minimum_scale || std::isnan(src_bin_width) || std::isinf(src_bin_width)) {
+            // 旧直方图不可用（基于常数值），直接丢弃
+            // 稍后用新数据重建
+        } else {
+            // 重新分配旧直方图的计数（与 AIMET 精确比例分配一致）
+            for (int src_idx = 0; src_idx < hist_.num_bins; ++src_idx) {
+                if (hist_.counts[src_idx] <= 0) continue;
 
-            // 旧 bin 的范围
-            float old_bin_start = hist_.min_val + old_idx * old_bin_width;
-            float old_bin_end = old_bin_start + old_bin_width;
-
-            // 映射到新直方图
-            int new_start_idx = static_cast<int>((old_bin_start - new_min) / new_bin_width);
-            int new_end_idx = static_cast<int>((old_bin_end - new_min) / new_bin_width);
-
-            new_start_idx = std::max(0, std::min(new_start_idx, config_.num_bins - 1));
-            new_end_idx = std::max(0, std::min(new_end_idx, config_.num_bins - 1));
-
-            if (new_start_idx == new_end_idx) {
-                new_counts[new_start_idx] += hist_.counts[old_idx];
-            } else {
-                // 跨多个 bin，按比例分配
-                float count_per_bin = hist_.counts[old_idx] / (new_end_idx - new_start_idx + 1);
-                for (int j = new_start_idx; j <= new_end_idx; ++j) {
-                    new_counts[j] += count_per_bin;
+                float count = hist_.counts[src_idx];
+                
+                // 源 bin 的起始位置
+                float src_bin_start = hist_.min_val + src_idx * src_bin_width;
+                
+                // 计算落入的目标 bin 索引
+                int dest_bin_index = static_cast<int>((src_bin_start - new_min) / dest_bin_width);
+                dest_bin_index = std::max(0, std::min(dest_bin_index, config_.num_bins - 1));
+                
+                // 目标 bin 的结束位置
+                float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
+                
+                // 计算分割比例（与 AIMET split_hist_value 逻辑一致）
+                // 源 bin 落入第一个目标 bin 的比例
+                float overlap_ratio = (dest_bin_end - src_bin_start) / src_bin_width;
+                overlap_ratio = std::max(0.0f, std::min(1.0f, overlap_ratio));
+                
+                float first_bin_count = std::round(overlap_ratio * count);
+                first_bin_count = std::min(first_bin_count, count);
+                
+                // 添加到第一个目标 bin
+                new_counts[dest_bin_index] += first_bin_count;
+                
+                // 如果有剩余部分，添加到下一个 bin（与 AIMET other_bin_updates 一致）
+                float remaining_count = count - first_bin_count;
+                if (remaining_count > 0 && dest_bin_index + 1 < config_.num_bins) {
+                    new_counts[dest_bin_index + 1] += remaining_count;
                 }
             }
         }
 
-        // 添加新数据
+        // 添加新数据（超出范围的值裁剪到边界 bin，与 AIMET 一致）
         for (size_t i = 0; i < size; ++i) {
-            int bin_idx = static_cast<int>((data[i] - new_min) / new_bin_width);
+            int bin_idx = static_cast<int>((data[i] - new_min) / dest_bin_width);
             bin_idx = std::max(0, std::min(bin_idx, config_.num_bins - 1));
             new_counts[bin_idx] += 1.0f;
         }
@@ -310,29 +379,45 @@ class HistogramCollector {
 
     /**
      * 将直方图重新分配到新的 bin
+     * 与 AIMET 精确比例分配逻辑完全一致
      */
     void _redistribute_histogram(const Histogram& src, std::vector<float>& dst, float new_min,
-                                 float new_bin_width) {
+                                 float dest_bin_width) {
         float src_bin_width = src.bin_width();
+        
+        // 检查源 bin 宽度有效性（与 AIMET 完全一致）
+        float minimum_scale = get_minimum_scale(config_.num_bins);
+        if (std::abs(src_bin_width) < minimum_scale || std::isnan(src_bin_width) || std::isinf(src_bin_width)) {
+            return;  // 源直方图不可用（基于常数值）
+        }
+        
         for (int src_idx = 0; src_idx < src.num_bins; ++src_idx) {
             if (src.counts[src_idx] <= 0) continue;
 
+            float count = src.counts[src_idx];
             float src_bin_start = src.min_val + src_idx * src_bin_width;
-            float src_bin_end = src_bin_start + src_bin_width;
-
-            int dst_start_idx = static_cast<int>((src_bin_start - new_min) / new_bin_width);
-            int dst_end_idx = static_cast<int>((src_bin_end - new_min) / new_bin_width);
-
-            dst_start_idx = std::max(0, std::min(dst_start_idx, config_.num_bins - 1));
-            dst_end_idx = std::max(0, std::min(dst_end_idx, config_.num_bins - 1));
-
-            if (dst_start_idx == dst_end_idx) {
-                dst[dst_start_idx] += src.counts[src_idx];
-            } else {
-                float count_per_bin = src.counts[src_idx] / (dst_end_idx - dst_start_idx + 1);
-                for (int j = dst_start_idx; j <= dst_end_idx; ++j) {
-                    dst[j] += count_per_bin;
-                }
+            
+            // 计算落入的目标 bin 索引
+            int dest_bin_index = static_cast<int>((src_bin_start - new_min) / dest_bin_width);
+            dest_bin_index = std::max(0, std::min(dest_bin_index, config_.num_bins - 1));
+            
+            // 目标 bin 的结束位置
+            float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
+            
+            // 计算分割比例（与 AIMET 一致）
+            float overlap_ratio = (dest_bin_end - src_bin_start) / src_bin_width;
+            overlap_ratio = std::max(0.0f, std::min(1.0f, overlap_ratio));
+            
+            float first_bin_count = std::round(overlap_ratio * count);
+            first_bin_count = std::min(first_bin_count, count);
+            
+            // 添加到第一个目标 bin
+            dst[dest_bin_index] += first_bin_count;
+            
+            // 剩余部分添加到下一个 bin
+            float remaining_count = count - first_bin_count;
+            if (remaining_count > 0 && dest_bin_index + 1 < config_.num_bins) {
+                dst[dest_bin_index + 1] += remaining_count;
             }
         }
     }
