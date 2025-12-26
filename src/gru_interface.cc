@@ -854,10 +854,13 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
 
 GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors, const OperatorQuantConfig &bitwidth_config,
-    bool verbose) {
+    bool verbose, bool use_percentile, float percentile_value) {
     GRUQuantitativeParameters quant_params;
     quant_params.hidden_ = hist_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
+
+    // 根据 use_percentile 选择校准方案
+    CalibrationScheme scheme = use_percentile ? CalibrationScheme::PERCENTILE : CalibrationScheme::SQNR;
 
     // 输入 x 的量化 - 从直方图计算
     dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
@@ -867,7 +870,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
         calibrateQuantParamsFromHistogram<XT>(
             hist_collectors.x_hist.histogram(), bitwidth_config.x_symmetric_,
-            quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr);
+            quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr,
+            scheme, percentile_value);
     });
 
     // 隐藏状态 h 的量化
@@ -878,7 +882,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
         calibrateQuantParamsFromHistogram<HT>(
             hist_collectors.h_hist.histogram(), bitwidth_config.h_symmetric_,
-            quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr);
+            quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr,
+            scheme, percentile_value);
     });
 
     // 权重 W 的量化（per-channel）- 从直方图计算
@@ -893,7 +898,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             }
             calibrateQuantParamsFromHistogram<WT>(hist_collectors.W_hist[c].histogram(),
                                                   bitwidth_config.W_symmetric_,
-                                                  quant_params.exp2_inv_W_[c], zp_tmp, nullptr);
+                                                  quant_params.exp2_inv_W_[c], zp_tmp, nullptr,
+                                                  scheme, percentile_value);
         }
     });
 
@@ -908,7 +914,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             }
             calibrateQuantParamsFromHistogram<RT>(hist_collectors.R_hist[c].histogram(),
                                                   bitwidth_config.R_symmetric_,
-                                                  quant_params.exp2_inv_R_[c], zp_tmp, nullptr);
+                                                  quant_params.exp2_inv_R_[c], zp_tmp, nullptr,
+                                                  scheme, percentile_value);
         }
     });
 
@@ -920,7 +927,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
         calibrateQuantParamsFromHistogram<WxT>(
             hist_collectors.Wx_hist.histogram(), bitwidth_config.Wx_symmetric_,
-            quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr);
+            quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr,
+            scheme, percentile_value);
     });
 
     // Rh 结果的量化
@@ -931,7 +939,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
         calibrateQuantParamsFromHistogram<RhT>(
             hist_collectors.Rh_hist.histogram(), bitwidth_config.Rh_symmetric_,
-            quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr);
+            quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr,
+            scheme, percentile_value);
     });
 
     // 偏置 bx 的量化（per-channel）
@@ -945,7 +954,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             }
             calibrateQuantParamsFromHistogram<BxT>(
                 hist_collectors.bx_hist[c].histogram(), bitwidth_config.bx_symmetric_,
-                quant_params.exp2_inv_bx_[c], zp_tmp, nullptr);
+                quant_params.exp2_inv_bx_[c], zp_tmp, nullptr,
+                scheme, percentile_value);
         }
     });
 
@@ -960,7 +970,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             }
             calibrateQuantParamsFromHistogram<BrT>(
                 hist_collectors.br_hist[c].histogram(), bitwidth_config.br_symmetric_,
-                quant_params.exp2_inv_br_[c], zp_tmp, nullptr);
+                quant_params.exp2_inv_br_[c], zp_tmp, nullptr,
+                scheme, percentile_value);
         }
     });
 
@@ -973,7 +984,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<ZPreT>(
             hist_collectors.z_pre_hist.histogram(), bitwidth_config.z_pre_symmetric_,
             quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
-            verbose ? "scale_z_pre" : nullptr);
+            verbose ? "scale_z_pre" : nullptr,
+            scheme, percentile_value);
     });
 
     // r 门输入的量化 - 必须使用真实收集的 r_pre 直方图
@@ -985,7 +997,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<RPreT>(
             hist_collectors.r_pre_hist.histogram(), bitwidth_config.r_pre_symmetric_,
             quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            verbose ? "scale_r_pre" : nullptr);
+            verbose ? "scale_r_pre" : nullptr,
+            scheme, percentile_value);
     });
 
     // g 门输入的量化 - 必须使用真实收集的 g_pre 直方图
@@ -997,10 +1010,11 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<GPreT>(
             hist_collectors.g_pre_hist.histogram(), bitwidth_config.g_pre_symmetric_,
             quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
-            verbose ? "scale_g_pre" : nullptr);
+            verbose ? "scale_g_pre" : nullptr,
+            scheme, percentile_value);
     });
 
-    // 激活函数输出的校准 - 使用 AIMET SQNR 方法
+    // 激活函数输出的校准
 
     // z 门输出 - sigmoid
     dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
@@ -1011,7 +1025,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<ZOutT>(
             hist_collectors.z_out_hist.histogram(), bitwidth_config.z_out_symmetric_,
             quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
-            verbose ? "scale_z_out" : nullptr);
+            verbose ? "scale_z_out" : nullptr,
+            scheme, percentile_value);
     });
 
     // r 门输出 - sigmoid
@@ -1023,7 +1038,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<ROutT>(
             hist_collectors.r_out_hist.histogram(), bitwidth_config.r_out_symmetric_,
             quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
-            verbose ? "scale_r_out" : nullptr);
+            verbose ? "scale_r_out" : nullptr,
+            scheme, percentile_value);
     });
 
     // g 门输出 - tanh
@@ -1035,7 +1051,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<GOutT>(
             hist_collectors.g_out_hist.histogram(), bitwidth_config.g_out_symmetric_,
             quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
-            verbose ? "scale_g_out" : nullptr);
+            verbose ? "scale_g_out" : nullptr,
+            scheme, percentile_value);
     });
 
     // Rh + br 的量化
@@ -1047,7 +1064,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<RhAddBrT>(
             hist_collectors.Rh_add_br_g_hist.histogram(), bitwidth_config.Rh_add_br_symmetric_,
             quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_,
-            verbose ? "scale_Rh_add_br" : nullptr);
+            verbose ? "scale_Rh_add_br" : nullptr,
+            scheme, percentile_value);
     });
 
     // r × Rh 的量化
@@ -1058,7 +1076,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
         calibrateQuantParamsFromHistogram<rRhT>(
             hist_collectors.rRh_hist.histogram(), bitwidth_config.rRh_symmetric_,
-            quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr);
+            quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr,
+            scheme, percentile_value);
     });
 
     // (1.0 - z) * g 的量化
@@ -1070,7 +1089,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<NewContribT>(
             hist_collectors.new_contrib_hist.histogram(),
             bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
-            quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr);
+            quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr,
+            scheme, percentile_value);
     });
 
     // z * h 的量化
@@ -1082,7 +1102,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         calibrateQuantParamsFromHistogram<OldContribT>(
             hist_collectors.old_contrib_hist.histogram(),
             bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
-            quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr);
+            quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr,
+            scheme, percentile_value);
     });
 
     return quant_params;

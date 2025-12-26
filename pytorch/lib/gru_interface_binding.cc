@@ -604,14 +604,18 @@ void calibrate_gru_histograms_wrapper(
 }
 
 // 从直方图计算量化参数的包装函数
+// use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
+// percentile_value: 仅 Percentile 方案使用，默认 99.99%
 GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
     const GRUHistogramCollectorsPy &hist_collectors,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy(),
-    bool verbose = false) {
+    bool verbose = false,
+    bool use_percentile = false,
+    float percentile_value = 99.99f) {
 
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
     GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParametersFromHistograms(
-        hist_collectors.cpp_collectors, cpp_bitwidth, verbose);
+        hist_collectors.cpp_collectors, cpp_bitwidth, verbose, use_percentile, percentile_value);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -982,12 +986,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
           py::arg("x"), py::arg("hist_collectors"));
 
-    // 从直方图计算量化参数
+    // 从直方图计算量化参数（支持 SQNR 和 Percentile 两种方案）
     m.def("calculate_gru_quantitative_parameters_from_histograms",
           &calculate_gru_quantitative_parameters_from_histograms_wrapper,
-          "Calculate GRU quantitative parameters from accumulated histograms (AIMET-style SQNR)",
+          "Calculate GRU quantitative parameters from accumulated histograms.\n"
+          "Supports two calibration schemes:\n"
+          "  - SQNR (default): AIMET tf_enhanced style, searches optimal scale to minimize quantization noise\n"
+          "  - Percentile: AIMET percentile style, uses percentile range for clipping",
           py::arg("hist_collectors"), py::arg("bitwidth_config") = OperatorQuantConfigPy(),
-          py::arg("verbose") = false);
+          py::arg("verbose") = false,
+          py::arg("use_percentile") = false,
+          py::arg("percentile_value") = 99.99f);
 
     // 非量化 GRU 前向传播
     m.def("haste_gru_forward", &haste_gru_forward_wrapper, "Non-quantized GRU forward pass",

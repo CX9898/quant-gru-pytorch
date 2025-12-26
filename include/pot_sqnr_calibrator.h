@@ -35,7 +35,15 @@
 #include "histogram_collector.h"
 
 /**
- * AIMET 风格的 SQNR 校准配置
+ * 校准方案枚举
+ */
+enum class CalibrationScheme {
+    SQNR,        // AIMET tf_enhanced 风格：SQNR 优化搜索最优 scale
+    PERCENTILE   // AIMET percentile 风格：百分位数裁剪
+};
+
+/**
+ * AIMET 风格的校准配置（统一配置，支持 SQNR 和 Percentile）
  */
 struct AimetSqnrConfig {
     int num_bins = 2048;
@@ -44,6 +52,10 @@ struct AimetSqnrConfig {
     int offset_candidates = 31;             // 增大以提高精度
     float gamma = 3.0f;  // AIMET 默认值
     float p = 2.0f;       // Lp 范数 (p=2 = MSE)
+    
+    // Percentile 配置
+    CalibrationScheme scheme = CalibrationScheme::SQNR;
+    float percentile = 99.99f;  // 仅 PERCENTILE 方案使用
 };
 
 /**
@@ -93,12 +105,14 @@ class AimetPotSqnrCalibrator {
     }
 
     /**
-     * 完全 AIMET 一致的 POT 量化参数计算
+     * 统一的 POT 量化参数计算（支持 SQNR 和 Percentile 两种方案）
      * 
-     * 流程（与 AIMET 完全一致）：
-     * 1. SQNR 优化找到最优连续 scale 和 min
+     * 流程：
+     * 1. 根据 scheme 选择计算最优连续 scale 和 min 的方式
+     *    - SQNR: 搜索最优 delta/offset，最小化量化噪声
+     *    - PERCENTILE: 直接从百分位数范围计算
      * 2. round 到最近的 POT（AIMET find_closest_power_of_2_scale）
-     * 3. 使用 SQNR 优化的 optimal_min 计算 zp
+     * 3. 计算 zero-point
      */
     template <typename QuantT>
     static void computeOptimalParamsFromHistogram(const Histogram& hist, bool is_symmetric,
@@ -111,28 +125,61 @@ class AimetPotSqnrCalibrator {
 
         const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
         const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
+        const int64_t num_steps = quant_max - quant_min;
 
-        // 阶段 1：SQNR 优化找最优连续 scale 和 min
-        auto result = computeOptimalContinuousScale<QuantT>(hist, is_symmetric, config);
-        
+        float optimal_scale, optimal_min;
+
+        if (config.scheme == CalibrationScheme::PERCENTILE) {
+            // ========== Percentile 方案 ==========
+            // 从直方图获取百分位数范围
+            float clip_ratio = (100.0f - config.percentile) / 100.0f;
+            auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
+            
+            // 确保范围包含 0（与 AIMET 一致）
+            pmin = std::min(pmin, 0.0f);
+            pmax = std::max(pmax, 0.0f);
+            
+            // 确保范围有效
+            if (pmax <= pmin) {
+                pmax = pmin + 1e-6f;
+            }
+            
+            if (is_symmetric) {
+                float abs_max = std::max(std::abs(pmin), std::abs(pmax));
+                optimal_scale = 2.0f * abs_max / static_cast<float>(num_steps);
+                optimal_min = -abs_max;
+            } else {
+                optimal_scale = (pmax - pmin) / static_cast<float>(num_steps);
+                optimal_min = pmin;
+            }
+            
+            // 确保 scale 有效
+            optimal_scale = std::max(optimal_scale, 1e-8f);
+        } else {
+            // ========== SQNR 方案（默认）==========
+            auto result = computeOptimalContinuousScale<QuantT>(hist, is_symmetric, config);
+            optimal_scale = result.optimal_scale;
+            optimal_min = result.optimal_min;
+        }
+
         // 阶段 2：round 到最近的 POT（AIMET 方式）
-        auto [po2_scale, n] = roundToPowerOfTwo(result.optimal_scale);
+        auto [po2_scale, n] = roundToPowerOfTwo(optimal_scale);
         
         out_exp2_inv = n;
         
-        // 阶段 3：使用 SQNR 优化的 optimal_min 计算 zp（AIMET 方式）
+        // 阶段 3：计算 zp
         if (is_symmetric) {
             out_zp = 0;
         } else {
-            // AIMET 方式：使用 SQNR 优化得到的 optimal_min
-            float zp_fp = static_cast<float>(quant_min) - result.optimal_min / po2_scale;
+            float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
             out_zp = static_cast<int32_t>(std::round(zp_fp));
         }
 
 #ifdef DEBUG
         if (name && name[0]) {
-            printf("[AIMET-POT][%s] range=[%.4f,%.4f] opt_min=%.4f cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
-                   name, hist.min_val, hist.max_val, result.optimal_min, result.optimal_scale, po2_scale, n, out_zp);
+            const char* scheme_name = (config.scheme == CalibrationScheme::PERCENTILE) ? "PERC" : "SQNR";
+            printf("[AIMET-POT][%s][%s] range=[%.4f,%.4f] opt_min=%.4f cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
+                   scheme_name, name, hist.min_val, hist.max_val, optimal_min, optimal_scale, po2_scale, n, out_zp);
         }
 #endif
     }
@@ -303,13 +350,26 @@ class AimetPotSqnrCalibrator {
 
 /**
  * 从直方图计算 POT 量化参数（便捷函数）
+ * 
+ * @param hist 直方图数据
+ * @param is_symmetric 是否对称量化
+ * @param exp2_inv 输出：POT 指数 (scale = 2^(-exp2_inv))
+ * @param zp 输出：零点
+ * @param name 调试名称（可选）
+ * @param scheme 校准方案：SQNR 或 PERCENTILE
+ * @param percentile 百分位数（仅 PERCENTILE 方案使用）
  */
 template <typename QuantT>
 inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_symmetric,
                                               int8_t& exp2_inv, int32_t& zp,
-                                              const char* name = nullptr) {
+                                              const char* name = nullptr,
+                                              CalibrationScheme scheme = CalibrationScheme::SQNR,
+                                              float percentile = 99.99f) {
+    AimetSqnrConfig config;
+    config.scheme = scheme;
+    config.percentile = percentile;
     AimetPotSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(
-        hist, is_symmetric, exp2_inv, zp, name);
+        hist, is_symmetric, exp2_inv, zp, name, config);
 }
 
 // 向后兼容别名

@@ -77,11 +77,15 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
                             const float *x, const cublasHandle_t &g_blas_handle,
                             GRUHistogramCollectors &hist_collectors);
 
-// 从直方图计算量化参数（真正的 AIMET 风格 SQNR 优化）
+// 从直方图计算量化参数（支持 SQNR 和 Percentile 两种校准方案）
+// use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
+// percentile_value: 仅 Percentile 方案使用，默认 99.99%
 GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
-    bool verbose = false);
+    bool verbose = false,
+    bool use_percentile = false,
+    float percentile_value = 99.99f);
 
 // 初始化量化 LUT 表
 // 根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法

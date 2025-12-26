@@ -534,7 +534,8 @@ class QuantGRU(nn.Module):
     
     Attributes:
         use_quantization: 量化开关（默认 False）
-        calibration_method: 校准方法 ('minmax' 或 'histogram')
+        calibration_method: 校准方法 ('minmax'/'sqnr'/'percentile')
+        percentile_value: 百分位值（仅 'percentile' 方法使用，默认 99.99）
         export_mode: ONNX 导出模式（默认 False，使用 CUDA；True 时使用纯 PyTorch）
     """
 
@@ -608,10 +609,16 @@ class QuantGRU(nn.Module):
         self._bitwidth_config_dict = None  # 位宽配置（Python 字典，可序列化）
         self._cublas_initialized = False  # CUDA 延迟初始化标志
 
-        # 校准方法: 'minmax'（快速）或 'histogram'（AIMET 风格，高精度）
-        self.calibration_method = 'histogram'
+        # 校准方法:
+        #   - 'minmax': 使用 min/max 范围（快速，无直方图）
+        #   - 'sqnr': SQNR 优化搜索最优 scale（基于直方图，高精度）
+        #   - 'percentile': 百分位裁剪（基于直方图）
+        self.calibration_method = 'sqnr'
+        
+        # Percentile 配置（仅 calibration_method='percentile' 时使用）
+        self.percentile_value = 99.99
 
-        # 直方图收集器（histogram 方法使用）
+        # 直方图收集器（sqnr/percentile 方法使用）
         self.hist_collectors = None
         if bidirectional:
             self.hist_collectors_reverse = None
@@ -718,6 +725,10 @@ class QuantGRU(nn.Module):
 
         return W, R, bx, br
 
+    def _use_histogram_collection(self) -> bool:
+        """判断是否使用直方图收集（sqnr/percentile 都需要）"""
+        return self.calibration_method in ('sqnr', 'percentile')
+
     def _accumulate_calibration_ranges(self, calibration_data: torch.Tensor):
         """累积校准范围"""
         self._ensure_cublas_initialized()
@@ -741,13 +752,15 @@ class QuantGRU(nn.Module):
 
         # 前向校准
         W, R, bx, br = self._convert_weights_to_haste_format(device, reverse=False)
-        if self.calibration_method == 'histogram':
+        if self._use_histogram_collection():
+            # histogram 和 percentile 都使用直方图收集
             if self.hist_collectors is None:
                 self.hist_collectors = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
             gru_ops.calibrate_gru_histograms(
                 time_steps=time_steps, batch_size=batch_size, input_size=input_size, hidden_size=hidden_size,
                 W=W, R=R, bx=bx, br=br, x=calibration_data, hist_collectors=self.hist_collectors)
         else:
+            # minmax 使用范围收集
             if self.quant_ranges is None:
                 self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
             gru_ops.calibrate_gru_ranges(
@@ -759,7 +772,7 @@ class QuantGRU(nn.Module):
             W_rev, R_rev, bx_rev, br_rev = self._convert_weights_to_haste_format(device, reverse=True)
             calibration_data_reversed = calibration_data.flip(0).contiguous()
 
-            if self.calibration_method == 'histogram':
+            if self._use_histogram_collection():
                 if self.hist_collectors_reverse is None:
                     self.hist_collectors_reverse = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
                 gru_ops.calibrate_gru_histograms(
@@ -878,7 +891,8 @@ class QuantGRU(nn.Module):
         Raises:
             RuntimeError: 未调用过 calibrate()
         """
-        use_histogram = (self.calibration_method == 'histogram')
+        use_histogram = self._use_histogram_collection()
+        use_percentile = (self.calibration_method == 'percentile')
 
         # 检查校准数据
         if use_histogram:
@@ -891,14 +905,21 @@ class QuantGRU(nn.Module):
         cpp_config = self._get_cpp_bitwidth_config()
 
         if verbose:
-            method_name = {'minmax': 'MINMAX', 'histogram': 'HISTOGRAM'}.get(
-                self.calibration_method, self.calibration_method.upper())
+            method_name = {
+                'minmax': 'MINMAX',
+                'sqnr': 'SQNR',
+                'percentile': f'PERCENTILE ({self.percentile_value}%)'
+            }.get(self.calibration_method, self.calibration_method.upper())
             print(f"\n[QuantGRU] 校准方法: {method_name}")
 
         # 前向方向
         if use_histogram:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
-                hist_collectors=self.hist_collectors, bitwidth_config=cpp_config, verbose=verbose)
+                hist_collectors=self.hist_collectors,
+                bitwidth_config=cpp_config,
+                verbose=verbose,
+                use_percentile=use_percentile,
+                percentile_value=self.percentile_value)
         else:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges, bitwidth_config=cpp_config)
@@ -910,7 +931,11 @@ class QuantGRU(nn.Module):
                 if self.hist_collectors_reverse is None or not self.hist_collectors_reverse.is_valid():
                     raise RuntimeError("双向 GRU 反向直方图数据异常")
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
-                    hist_collectors=self.hist_collectors_reverse, bitwidth_config=cpp_config, verbose=verbose)
+                    hist_collectors=self.hist_collectors_reverse,
+                    bitwidth_config=cpp_config,
+                    verbose=verbose,
+                    use_percentile=use_percentile,
+                    percentile_value=self.percentile_value)
             else:
                 if self.quant_ranges_reverse is None:
                     raise RuntimeError("双向 GRU 反向校准数据异常")
@@ -1501,7 +1526,7 @@ class QuantGRU(nn.Module):
                 # 校准数据已更新，需要重新计算量化参数
                 self.finalize_calibration()
             elif not self.is_calibrated():
-                # 检查是否有未完成的校准数据（支持 minmax 和 histogram 两种方法）
+                # 检查是否有未完成的校准数据（支持 minmax/histogram/percentile）
                 if self.quant_ranges is not None or self.hist_collectors is not None:
                     # 已累积数据但未完成校准，自动调用 finalize
                     self.finalize_calibration()
