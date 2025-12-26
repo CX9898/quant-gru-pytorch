@@ -752,11 +752,14 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
     // 4. 收集 Rh 结果的直方图
     collectHistogramPerStep(hist_collectors.Rh_hist, tmp_Rh_dev.data(), time_steps, NH * 3);
 
-    // 5. 收集权重的 per-channel 直方图
-    collectPerChannelHistograms(hist_collectors.W_hist, W, input_size, hidden_size * 3);
-    collectPerChannelHistograms(hist_collectors.R_hist, R, hidden_size, hidden_size * 3);
-    collectPerChannelHistograms(hist_collectors.bx_hist, bx, 1, hidden_size * 3);
-    collectPerChannelHistograms(hist_collectors.br_hist, br, 1, hidden_size * 3);
+    // 5. 收集权重的 per-channel 直方图（只在首次收集，权重在推理时固定不变）
+    // 如果需要重新校准权重（如 QAT 训练后），应先调用 reset_calibration()
+    if (!hist_collectors.W_hist[0].is_valid()) {
+        collectPerChannelHistograms(hist_collectors.W_hist, W, input_size, hidden_size * 3);
+        collectPerChannelHistograms(hist_collectors.R_hist, R, hidden_size, hidden_size * 3);
+        collectPerChannelHistograms(hist_collectors.bx_hist, bx, 1, hidden_size * 3);
+        collectPerChannelHistograms(hist_collectors.br_hist, br, 1, hidden_size * 3);
+    }
 
     // 6. 从 v 中收集门的中间值直方图
     // v 布局: [T, B, H*4] = [z, r, g, Rh_add_br_g]
