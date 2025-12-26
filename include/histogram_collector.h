@@ -75,49 +75,67 @@ struct Histogram {
     }
 
     /**
-     * 获取百分位数范围
-     * @param percentile 裁剪百分位数 (例如 0.001 表示 0.1% ~ 99.9%)
+     * 获取百分位数范围（与 AIMET PercentileEncodingAnalyzer 完全一致）
+     * @param clip_percentile 裁剪百分位数 (例如 0.0001 表示裁剪两端各 0.01%，保留 99.98%)
      * @return (min, max) 对应的范围
+     * 
+     * AIMET 实现参考：
+     *   cum_sum = torch.cumsum(histogram, dim=0)
+     *   max_index = torch.searchsorted(cum_sum, cum_sum[-1] * percentile / 100)
+     *   min_index = torch.searchsorted(cum_sum, cum_sum[-1] * (1 - percentile / 100))
      */
-    std::pair<float, float> getPercentileRange(float percentile = 0.001f) const {
+    std::pair<float, float> getPercentileRange(float clip_percentile = 0.0001f) const {
         if (!is_valid() || total_count == 0) {
             return {min_val, max_val};
         }
 
-        float cumsum = 0.0f;
-        float total = 0.0f;
-        for (int i = 0; i < num_bins; ++i) {
-            total += counts[i];
+        // 计算累积和（与 AIMET torch.cumsum 一致）
+        std::vector<float> cum_sum(num_bins);
+        cum_sum[0] = counts[0];
+        for (int i = 1; i < num_bins; ++i) {
+            cum_sum[i] = cum_sum[i - 1] + counts[i];
         }
 
+        float total = cum_sum[num_bins - 1];
         if (total < 1e-6f) {
             return {min_val, max_val};
         }
 
-        float threshold = total * percentile;  // 两端各裁剪 percentile 比例
-
         float bw = bin_width();
-        float pmin = min_val;
-        float pmax = max_val;
-
-        // 找下限：从左边累积到 threshold
-        cumsum = 0.0f;
+        
+        // 计算保留的百分比 (与 AIMET percentile 语义一致)
+        // clip_percentile = 0.0001 表示裁剪 0.01%，即保留 99.99%
+        float keep_percentile = 1.0f - clip_percentile;
+        
+        // 找 min_index: searchsorted(cum_sum, total * clip_percentile)
+        // 即累积和首次 >= total * clip_percentile 的位置
+        float min_threshold = total * clip_percentile;
+        int min_index = 0;
         for (int i = 0; i < num_bins; ++i) {
-            cumsum += counts[i];
-            if (cumsum >= threshold) {
-                pmin = min_val + i * bw;
+            if (cum_sum[i] >= min_threshold) {
+                min_index = i;
                 break;
             }
         }
-
-        // 找上限：从右边累积到 threshold
-        cumsum = 0.0f;
-        for (int i = num_bins - 1; i >= 0; --i) {
-            cumsum += counts[i];
-            if (cumsum >= threshold) {
-                pmax = min_val + (i + 1) * bw;
+        
+        // 找 max_index: searchsorted(cum_sum, total * keep_percentile)
+        // 即累积和首次 >= total * keep_percentile 的位置
+        float max_threshold = total * keep_percentile;
+        int max_index = num_bins - 1;
+        for (int i = 0; i < num_bins; ++i) {
+            if (cum_sum[i] >= max_threshold) {
+                max_index = i;
                 break;
             }
+        }
+        
+        // 使用 bin 左边界（与 AIMET bin_edges[index] 一致）
+        float pmin = min_val + min_index * bw;
+        float pmax = min_val + max_index * bw;
+        
+        // 确保范围有效
+        if (pmax <= pmin) {
+            pmax = max_val;
         }
 
         return {pmin, pmax};
