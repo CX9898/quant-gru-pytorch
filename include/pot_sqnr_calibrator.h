@@ -148,9 +148,17 @@ class AimetPotSqnrCalibrator {
             }
             
             if (is_symmetric) {
-                float abs_max = std::max(std::abs(pmin), std::abs(pmax));
-                optimal_scale = 2.0f * abs_max / static_cast<float>(num_steps);
-                optimal_min = -abs_max;
+                // 与 AIMET adjust_min_max 对称量化处理完全一致
+                // delta = max(curr_max / num_pos_steps, -curr_min / num_neg_steps)
+                int64_t num_pos_steps = num_steps / 2;
+                int64_t num_neg_steps = (num_steps + 1) / 2;
+                
+                float delta_from_max = pmax / static_cast<float>(num_pos_steps);
+                float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
+                optimal_scale = std::max(delta_from_max, delta_from_min);
+                
+                // curr_min = offset * delta, curr_max = num_pos_steps * delta
+                optimal_min = -static_cast<float>(num_neg_steps) * optimal_scale;
             } else {
                 optimal_scale = (pmax - pmin) / static_cast<float>(num_steps);
                 optimal_min = pmin;
@@ -241,8 +249,11 @@ class AimetPotSqnrCalibrator {
         const Histogram& hist, float max_delta, int64_t num_steps, const HistogramCalibrationConfig& config) {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
-        // 对称量化：offset = -num_steps // 2（整数除法，与 AIMET 一致）
-        const float offset = -static_cast<float>(num_steps / 2);
+        // 对称量化：offset = (-num_steps) // 2（Python floor division）
+        // Python: (-255) // 2 = -128（向下取整）
+        // C++:    (-255) / 2 = -127（向零取整）
+        // 等价于: -((num_steps + 1) / 2) 对于奇数 num_steps
+        const float offset = -static_cast<float>((num_steps + 1) / 2);
         
         for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
             float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
