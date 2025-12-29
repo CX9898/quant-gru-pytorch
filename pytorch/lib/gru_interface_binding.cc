@@ -15,6 +15,23 @@ static cublasHandle_t g_blas_handle = nullptr;
 // 初始化 cublas handle 的包装函数
 void init_gru_cublas_wrapper() { init_gru_cublas(g_blas_handle); }
 
+// CalibrationMethod 字符串转换
+// Python 端只需要传字符串，C++ wrapper 内部转换
+inline CalibrationMethod stringToCalibMethod(const std::string &method) {
+    if (method.empty() || method == "none") {
+        return CalibrationMethod::NONE;
+    } else if (method == "minmax") {
+        return CalibrationMethod::MINMAX;
+    } else if (method == "sqnr") {
+        return CalibrationMethod::SQNR;
+    } else if (method == "percentile") {
+        return CalibrationMethod::PERCENTILE;
+    } else {
+        throw std::invalid_argument("Invalid calibration method: '" + method + 
+            "'. Valid options: 'none', 'minmax', 'sqnr', 'percentile'");
+    }
+}
+
 // ============================================================================
 //                    位宽转换辅助函数（前置定义）
 // ============================================================================
@@ -179,199 +196,22 @@ struct OperatorQuantConfigPy {
     }
 };
 
-// GRUQuantizationRanges 的 Python 绑定
+// GRUQuantizationRanges 的 Python 绑定（直接包装 C++ 对象）
 struct GRUQuantizationRangesPy {
+    GRUQuantizationRanges cpp_ranges;  // 直接包装 C++ 对象
+
     // 默认构造函数
     GRUQuantizationRangesPy() = default;
 
     // 带 hidden 参数的构造函数
-    explicit GRUQuantizationRangesPy(int hidden) : hidden_(hidden) { reset(); }
+    explicit GRUQuantizationRangesPy(int hidden) : cpp_ranges(hidden) {}
 
-    int hidden_ = 0;
+    // 重置所有范围
+    void reset(int hidden = -1) { cpp_ranges.reset(hidden); }
 
-    // 输入和隐藏状态
-    float min_x_ = std::numeric_limits<float>::max();
-    float max_x_ = std::numeric_limits<float>::lowest();
-    float min_h_ = std::numeric_limits<float>::max();
-    float max_h_ = std::numeric_limits<float>::lowest();
-
-    // 权重矩阵（per-channel）
-    std::vector<float> min_W_, max_W_;
-    std::vector<float> min_R_, max_R_;
-
-    // 矩阵乘法结果
-    float min_Wx_ = std::numeric_limits<float>::max();
-    float max_Wx_ = std::numeric_limits<float>::lowest();
-    float min_Rh_ = std::numeric_limits<float>::max();
-    float max_Rh_ = std::numeric_limits<float>::lowest();
-
-    // 偏置（per-channel）
-    std::vector<float> min_bx_, max_bx_;
-    std::vector<float> min_br_, max_br_;
-
-    // 门的预激活值
-    float min_z_pre_ = std::numeric_limits<float>::max();
-    float max_z_pre_ = std::numeric_limits<float>::lowest();
-    float min_r_pre_ = std::numeric_limits<float>::max();
-    float max_r_pre_ = std::numeric_limits<float>::lowest();
-    float min_g_pre_ = std::numeric_limits<float>::max();
-    float max_g_pre_ = std::numeric_limits<float>::lowest();
-
-    // 门的输出值
-    float min_z_out_ = std::numeric_limits<float>::max();
-    float max_z_out_ = std::numeric_limits<float>::lowest();
-    float min_r_out_ = std::numeric_limits<float>::max();
-    float max_r_out_ = std::numeric_limits<float>::lowest();
-    float min_g_out_ = std::numeric_limits<float>::max();
-    float max_g_out_ = std::numeric_limits<float>::lowest();
-
-    // 中间计算结果
-    float min_Rh_add_br_g_ = std::numeric_limits<float>::max();
-    float max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
-    float min_rRh_ = std::numeric_limits<float>::max();
-    float max_rRh_ = std::numeric_limits<float>::lowest();
-
-    // 最终输出计算
-    float min_new_contrib_ = std::numeric_limits<float>::max();
-    float max_new_contrib_ = std::numeric_limits<float>::lowest();
-    float min_old_contrib_ = std::numeric_limits<float>::max();
-    float max_old_contrib_ = std::numeric_limits<float>::lowest();
-
-    // 从 C++ 结构体转换
-    void from_cpp(const GRUQuantizationRanges &cpp_ranges) {
-        hidden_ = cpp_ranges.hidden_;
-        min_x_ = cpp_ranges.min_x_;
-        max_x_ = cpp_ranges.max_x_;
-        min_h_ = cpp_ranges.min_h_;
-        max_h_ = cpp_ranges.max_h_;
-        min_W_ = cpp_ranges.min_W_;
-        max_W_ = cpp_ranges.max_W_;
-        min_R_ = cpp_ranges.min_R_;
-        max_R_ = cpp_ranges.max_R_;
-        min_Wx_ = cpp_ranges.min_Wx_;
-        max_Wx_ = cpp_ranges.max_Wx_;
-        min_Rh_ = cpp_ranges.min_Rh_;
-        max_Rh_ = cpp_ranges.max_Rh_;
-        min_bx_ = cpp_ranges.min_bx_;
-        max_bx_ = cpp_ranges.max_bx_;
-        min_br_ = cpp_ranges.min_br_;
-        max_br_ = cpp_ranges.max_br_;
-        min_z_pre_ = cpp_ranges.min_z_pre_;
-        max_z_pre_ = cpp_ranges.max_z_pre_;
-        min_r_pre_ = cpp_ranges.min_r_pre_;
-        max_r_pre_ = cpp_ranges.max_r_pre_;
-        min_g_pre_ = cpp_ranges.min_g_pre_;
-        max_g_pre_ = cpp_ranges.max_g_pre_;
-        min_z_out_ = cpp_ranges.min_z_out_;
-        max_z_out_ = cpp_ranges.max_z_out_;
-        min_r_out_ = cpp_ranges.min_r_out_;
-        max_r_out_ = cpp_ranges.max_r_out_;
-        min_g_out_ = cpp_ranges.min_g_out_;
-        max_g_out_ = cpp_ranges.max_g_out_;
-        min_Rh_add_br_g_ = cpp_ranges.min_Rh_add_br_g_;
-        max_Rh_add_br_g_ = cpp_ranges.max_Rh_add_br_g_;
-        min_rRh_ = cpp_ranges.min_rRh_;
-        max_rRh_ = cpp_ranges.max_rRh_;
-        min_new_contrib_ = cpp_ranges.min_new_contrib_;
-        max_new_contrib_ = cpp_ranges.max_new_contrib_;
-        min_old_contrib_ = cpp_ranges.min_old_contrib_;
-        max_old_contrib_ = cpp_ranges.max_old_contrib_;
-    }
-
-    // 转换为 C++ 结构体
-    GRUQuantizationRanges to_cpp() const {
-        GRUQuantizationRanges cpp_ranges;
-        cpp_ranges.hidden_ = hidden_;
-        cpp_ranges.min_x_ = min_x_;
-        cpp_ranges.max_x_ = max_x_;
-        cpp_ranges.min_h_ = min_h_;
-        cpp_ranges.max_h_ = max_h_;
-        cpp_ranges.min_W_ = min_W_;
-        cpp_ranges.max_W_ = max_W_;
-        cpp_ranges.min_R_ = min_R_;
-        cpp_ranges.max_R_ = max_R_;
-        cpp_ranges.min_Wx_ = min_Wx_;
-        cpp_ranges.max_Wx_ = max_Wx_;
-        cpp_ranges.min_Rh_ = min_Rh_;
-        cpp_ranges.max_Rh_ = max_Rh_;
-        cpp_ranges.min_bx_ = min_bx_;
-        cpp_ranges.max_bx_ = max_bx_;
-        cpp_ranges.min_br_ = min_br_;
-        cpp_ranges.max_br_ = max_br_;
-        cpp_ranges.min_z_pre_ = min_z_pre_;
-        cpp_ranges.max_z_pre_ = max_z_pre_;
-        cpp_ranges.min_r_pre_ = min_r_pre_;
-        cpp_ranges.max_r_pre_ = max_r_pre_;
-        cpp_ranges.min_g_pre_ = min_g_pre_;
-        cpp_ranges.max_g_pre_ = max_g_pre_;
-        cpp_ranges.min_z_out_ = min_z_out_;
-        cpp_ranges.max_z_out_ = max_z_out_;
-        cpp_ranges.min_r_out_ = min_r_out_;
-        cpp_ranges.max_r_out_ = max_r_out_;
-        cpp_ranges.min_g_out_ = min_g_out_;
-        cpp_ranges.max_g_out_ = max_g_out_;
-        cpp_ranges.min_Rh_add_br_g_ = min_Rh_add_br_g_;
-        cpp_ranges.max_Rh_add_br_g_ = max_Rh_add_br_g_;
-        cpp_ranges.min_rRh_ = min_rRh_;
-        cpp_ranges.max_rRh_ = max_rRh_;
-        cpp_ranges.min_new_contrib_ = min_new_contrib_;
-        cpp_ranges.max_new_contrib_ = max_new_contrib_;
-        cpp_ranges.min_old_contrib_ = min_old_contrib_;
-        cpp_ranges.max_old_contrib_ = max_old_contrib_;
-        return cpp_ranges;
-    }
-
-    // 重置所有范围为无效值
-    // 如果传入 hidden > 0，则更新 hidden_ 并重新分配 per-channel 向量
-    void reset(int hidden = -1) {
-        // 如果传入有效的 hidden 值，则更新 hidden_
-        if (hidden > 0) {
-            hidden_ = hidden;
-        }
-
-        // 重置所有标量范围
-        min_x_ = std::numeric_limits<float>::max();
-        max_x_ = std::numeric_limits<float>::lowest();
-        min_h_ = std::numeric_limits<float>::max();
-        max_h_ = std::numeric_limits<float>::lowest();
-        min_Wx_ = std::numeric_limits<float>::max();
-        max_Wx_ = std::numeric_limits<float>::lowest();
-        min_Rh_ = std::numeric_limits<float>::max();
-        max_Rh_ = std::numeric_limits<float>::lowest();
-        min_z_pre_ = std::numeric_limits<float>::max();
-        max_z_pre_ = std::numeric_limits<float>::lowest();
-        min_r_pre_ = std::numeric_limits<float>::max();
-        max_r_pre_ = std::numeric_limits<float>::lowest();
-        min_g_pre_ = std::numeric_limits<float>::max();
-        max_g_pre_ = std::numeric_limits<float>::lowest();
-        min_z_out_ = std::numeric_limits<float>::max();
-        max_z_out_ = std::numeric_limits<float>::lowest();
-        min_r_out_ = std::numeric_limits<float>::max();
-        max_r_out_ = std::numeric_limits<float>::lowest();
-        min_g_out_ = std::numeric_limits<float>::max();
-        max_g_out_ = std::numeric_limits<float>::lowest();
-        min_Rh_add_br_g_ = std::numeric_limits<float>::max();
-        max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
-        min_rRh_ = std::numeric_limits<float>::max();
-        max_rRh_ = std::numeric_limits<float>::lowest();
-        min_new_contrib_ = std::numeric_limits<float>::max();
-        max_new_contrib_ = std::numeric_limits<float>::lowest();
-        min_old_contrib_ = std::numeric_limits<float>::max();
-        max_old_contrib_ = std::numeric_limits<float>::lowest();
-
-        // 重置 per-channel 向量
-        if (hidden_ > 0) {
-            const int channel_size = hidden_ * 3;
-            min_W_.assign(channel_size, std::numeric_limits<float>::max());
-            max_W_.assign(channel_size, std::numeric_limits<float>::lowest());
-            min_R_.assign(channel_size, std::numeric_limits<float>::max());
-            max_R_.assign(channel_size, std::numeric_limits<float>::lowest());
-            min_bx_.assign(channel_size, std::numeric_limits<float>::max());
-            max_bx_.assign(channel_size, std::numeric_limits<float>::lowest());
-            min_br_.assign(channel_size, std::numeric_limits<float>::max());
-            max_br_.assign(channel_size, std::numeric_limits<float>::lowest());
-        }
-    }
+    // 直接访问内部 C++ 对象（用于 C++ 层调用）
+    GRUQuantizationRanges& get_cpp() { return cpp_ranges; }
+    const GRUQuantizationRanges& get_cpp() const { return cpp_ranges; }
 };
 
 // GRUQuantitativeParameters 的 Python 绑定
@@ -503,52 +343,16 @@ struct GRUQuantitativeParametersPy {
     }
 };
 
-// 校准 GRU 量化范围的包装函数（支持累积更新）
-void calibrate_gru_ranges_wrapper(int time_steps, int batch_size, int input_size, int hidden_size,
-                                  const torch::Tensor &W, const torch::Tensor &R,
-                                  const torch::Tensor &bx, const torch::Tensor &br,
-                                  const torch::Tensor &x, GRUQuantizationRangesPy &quant_ranges) {
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-
-    // 检查 x 的形状，期望 [time_steps, batch_size, input_size]
-    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
-                "x must have shape [time_steps, batch_size, input_size]");
-
-    // 确保 x 是连续的
-    torch::Tensor x_contiguous = x.contiguous();
-
-    // 确保 cublas handle 已初始化
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
-    }
-
-    // 转换为 C++ 结构体
-    GRUQuantizationRanges cpp_ranges = quant_ranges.to_cpp();
-
-    // 调用 C++ 函数（累积更新范围）
-    calibrateGruRanges(time_steps, batch_size, input_size, hidden_size, W.data_ptr<float>(),
-                       R.data_ptr<float>(), bx.data_ptr<float>(), br.data_ptr<float>(),
-                       x_contiguous.data_ptr<float>(), g_blas_handle, cpp_ranges);
-
-    // 更新 Python 对象
-    quant_ranges.from_cpp(cpp_ranges);
-}
-
 // 根据量化范围计算量化参数的包装函数（支持自定义位宽配置）
 GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
     const GRUQuantizationRangesPy &quant_ranges,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy()) {
-    // 转换为 C++ 结构体
-    GRUQuantizationRanges cpp_ranges = quant_ranges.to_cpp();
+    // 直接使用包装的 C++ 对象
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
 
     // 调用 C++ 函数
     GRUQuantitativeParameters quant_params =
-        calculateGRUQuantitativeParameters(cpp_ranges, cpp_bitwidth);
+        calculateGRUQuantitativeParameters(quant_ranges.cpp_ranges, cpp_bitwidth);
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
@@ -573,36 +377,6 @@ struct GRUHistogramCollectorsPy {
     void print() const { cpp_collectors.print(); }
 };
 
-// 收集直方图的包装函数
-void calibrate_gru_histograms_wrapper(
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
-    const torch::Tensor &br, const torch::Tensor &x,
-    GRUHistogramCollectorsPy &hist_collectors) {
-
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-
-    // 检查 x 的形状
-    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
-                "x must have shape [time_steps, batch_size, input_size]");
-
-    torch::Tensor x_contiguous = x.contiguous();
-
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
-    }
-
-    calibrateGruHistograms(time_steps, batch_size, input_size, hidden_size,
-                           W.data_ptr<float>(), R.data_ptr<float>(),
-                           bx.data_ptr<float>(), br.data_ptr<float>(),
-                           x_contiguous.data_ptr<float>(), g_blas_handle,
-                           hist_collectors.cpp_collectors);
-}
-
 // 从直方图计算量化参数的包装函数
 // use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
 // percentile_value: 仅 Percentile 方案使用，默认 99.99%
@@ -622,68 +396,36 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histogram
     return py_params;
 }
 
-// 非量化 GRU 前向传播
-std::tuple<torch::Tensor, torch::Tensor> haste_gru_forward_wrapper(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    int time_steps, int batch_size, int input_size, int hidden_size, const torch::Tensor &W,
-    const torch::Tensor &R, const torch::Tensor &bx, const torch::Tensor &br,
-    const torch::Tensor &x,
-    const torch::Tensor &h0) {  // 初始隐藏状态，可以为空张量
-
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-
-    // h0 可以为空张量（未提供初始状态）
-    const float *h0_ptr = nullptr;
-    if (h0.defined() && h0.numel() > 0) {
-        TORCH_CHECK(h0.is_cuda() && h0.dtype() == torch::kFloat32,
-                    "h0 must be CUDA float32 tensor");
-        TORCH_CHECK(h0.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
-                    "h0 must have shape [batch_size, hidden_size]");
-        h0_ptr = h0.data_ptr<float>();
-    }
-
-    // 确保 cublas handle 已初始化
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
-    }
-
-    // 创建输出张量，包含初始状态，大小为 (time_steps + 1) * batch_size * hidden_size
-    auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
-                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
-
-    // 创建v输出张量，大小为 time_steps * batch_size * hidden_size * 4
-    auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
-                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
-
-    hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
-                    W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
-                    br.data_ptr<float>(), x.data_ptr<float>(),
-                    h0_ptr,  // 初始隐藏状态，可以为 nullptr
-                    g_blas_handle, h.data_ptr<float>(),
-                    v.data_ptr<float>()  // 中间值v输出
-    );
-
-    return std::make_tuple(h, v);
-}
-
-// forwardInterface 的包装函数
-// 位宽配置直接从 quant_params.bitwidth_config_ 中读取（单一数据源）
+// forwardInterface 的包装函数（统一接口）
+// 支持校准模式：calib_method 指定校准方式（字符串: 'none', 'minmax', 'sqnr', 'percentile'）
 std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     bool is_training,  // 是否开启训练模式，true为训练，false为推理
     bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size,
     const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
-    const GRUQuantitativeParametersPy &quant_params) {
+    const GRUQuantitativeParametersPy &quant_params,
+    const std::string &calib_method_str = "none",  // 校准方法字符串
+    GRUHistogramCollectorsPy *hist_collectors = nullptr,  // 直方图收集器（SQNR/Percentile）
+    GRUQuantizationRangesPy *quant_ranges = nullptr) {  // 量化范围（MINMAX）
+    
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // 字符串转枚举（内部处理）
+    CalibrationMethod calib_method = stringToCalibMethod(calib_method_str);
+    
+    // 验证校准参数
+    if (calib_method == CalibrationMethod::MINMAX) {
+        TORCH_CHECK(quant_ranges != nullptr, "quant_ranges is required for MINMAX calibration");
+    } else if (calib_method == CalibrationMethod::SQNR || 
+               calib_method == CalibrationMethod::PERCENTILE) {
+        TORCH_CHECK(hist_collectors != nullptr, 
+                    "hist_collectors is required for SQNR/Percentile calibration");
+    }
 
     // h0 可以为空张量（未提供初始状态）
     const float *h0_ptr = nullptr;
@@ -710,14 +452,20 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
 
     // 直接使用 quant_params 中的 bitwidth_config_（单一数据源）
     GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
+    
+    // 准备校准收集器指针（直接使用包装的 C++ 对象）
+    GRUHistogramCollectors *cpp_hist = hist_collectors ? &(hist_collectors->cpp_collectors) : nullptr;
+    GRUQuantizationRanges *cpp_ranges = quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr;
 
     forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
                      W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
                      br.data_ptr<float>(), x.data_ptr<float>(),
                      h0_ptr,  // 初始隐藏状态，可以为 nullptr
-                     cpp_params, g_blas_handle, h.data_ptr<float>(),
-                     v.data_ptr<float>()  // 传递v参数
-    );
+                     cpp_params, g_blas_handle,
+                     calib_method, cpp_hist, cpp_ranges,
+                     h.data_ptr<float>(), v.data_ptr<float>());
+    
+    // 不需要手动同步，cpp_ranges 直接指向 Python 对象内部的 C++ 对象
 
     return std::make_tuple(h, v);
 }
@@ -822,51 +570,59 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // 初始化 cublas handle
     m.def("init_gru_cublas", &init_gru_cublas_wrapper, "Initialize cuBLAS handle for GRU");
 
-    // GRUQuantizationRanges 绑定
+    // GRUQuantizationRanges 绑定（通过 lambda 访问内部 C++ 对象的字段）
+    // 宏定义简化属性绑定
+    #define DEF_PROP(name) \
+        .def_property(#name, \
+            [](const GRUQuantizationRangesPy &self) { return self.cpp_ranges.name; }, \
+            [](GRUQuantizationRangesPy &self, decltype(GRUQuantizationRanges::name) v) { self.cpp_ranges.name = v; })
+
     py::class_<GRUQuantizationRangesPy>(m, "GRUQuantizationRanges")
         .def(py::init<>())
         .def(py::init<int>(), py::arg("hidden"))
-        .def_readwrite("hidden_", &GRUQuantizationRangesPy::hidden_)
-        .def_readwrite("min_x_", &GRUQuantizationRangesPy::min_x_)
-        .def_readwrite("max_x_", &GRUQuantizationRangesPy::max_x_)
-        .def_readwrite("min_h_", &GRUQuantizationRangesPy::min_h_)
-        .def_readwrite("max_h_", &GRUQuantizationRangesPy::max_h_)
-        .def_readwrite("min_W_", &GRUQuantizationRangesPy::min_W_)
-        .def_readwrite("max_W_", &GRUQuantizationRangesPy::max_W_)
-        .def_readwrite("min_R_", &GRUQuantizationRangesPy::min_R_)
-        .def_readwrite("max_R_", &GRUQuantizationRangesPy::max_R_)
-        .def_readwrite("min_Wx_", &GRUQuantizationRangesPy::min_Wx_)
-        .def_readwrite("max_Wx_", &GRUQuantizationRangesPy::max_Wx_)
-        .def_readwrite("min_Rh_", &GRUQuantizationRangesPy::min_Rh_)
-        .def_readwrite("max_Rh_", &GRUQuantizationRangesPy::max_Rh_)
-        .def_readwrite("min_bx_", &GRUQuantizationRangesPy::min_bx_)
-        .def_readwrite("max_bx_", &GRUQuantizationRangesPy::max_bx_)
-        .def_readwrite("min_br_", &GRUQuantizationRangesPy::min_br_)
-        .def_readwrite("max_br_", &GRUQuantizationRangesPy::max_br_)
-        .def_readwrite("min_z_pre_", &GRUQuantizationRangesPy::min_z_pre_)
-        .def_readwrite("max_z_pre_", &GRUQuantizationRangesPy::max_z_pre_)
-        .def_readwrite("min_r_pre_", &GRUQuantizationRangesPy::min_r_pre_)
-        .def_readwrite("max_r_pre_", &GRUQuantizationRangesPy::max_r_pre_)
-        .def_readwrite("min_g_pre_", &GRUQuantizationRangesPy::min_g_pre_)
-        .def_readwrite("max_g_pre_", &GRUQuantizationRangesPy::max_g_pre_)
-        .def_readwrite("min_z_out_", &GRUQuantizationRangesPy::min_z_out_)
-        .def_readwrite("max_z_out_", &GRUQuantizationRangesPy::max_z_out_)
-        .def_readwrite("min_r_out_", &GRUQuantizationRangesPy::min_r_out_)
-        .def_readwrite("max_r_out_", &GRUQuantizationRangesPy::max_r_out_)
-        .def_readwrite("min_g_out_", &GRUQuantizationRangesPy::min_g_out_)
-        .def_readwrite("max_g_out_", &GRUQuantizationRangesPy::max_g_out_)
-        .def_readwrite("min_Rh_add_br_g_", &GRUQuantizationRangesPy::min_Rh_add_br_g_)
-        .def_readwrite("max_Rh_add_br_g_", &GRUQuantizationRangesPy::max_Rh_add_br_g_)
-        .def_readwrite("min_rRh_", &GRUQuantizationRangesPy::min_rRh_)
-        .def_readwrite("max_rRh_", &GRUQuantizationRangesPy::max_rRh_)
-        .def_readwrite("min_new_contrib_", &GRUQuantizationRangesPy::min_new_contrib_)
-        .def_readwrite("max_new_contrib_", &GRUQuantizationRangesPy::max_new_contrib_)
-        .def_readwrite("min_old_contrib_", &GRUQuantizationRangesPy::min_old_contrib_)
-        .def_readwrite("max_old_contrib_", &GRUQuantizationRangesPy::max_old_contrib_)
+        DEF_PROP(hidden_)
+        DEF_PROP(min_x_)
+        DEF_PROP(max_x_)
+        DEF_PROP(min_h_)
+        DEF_PROP(max_h_)
+        DEF_PROP(min_W_)
+        DEF_PROP(max_W_)
+        DEF_PROP(min_R_)
+        DEF_PROP(max_R_)
+        DEF_PROP(min_Wx_)
+        DEF_PROP(max_Wx_)
+        DEF_PROP(min_Rh_)
+        DEF_PROP(max_Rh_)
+        DEF_PROP(min_bx_)
+        DEF_PROP(max_bx_)
+        DEF_PROP(min_br_)
+        DEF_PROP(max_br_)
+        DEF_PROP(min_z_pre_)
+        DEF_PROP(max_z_pre_)
+        DEF_PROP(min_r_pre_)
+        DEF_PROP(max_r_pre_)
+        DEF_PROP(min_g_pre_)
+        DEF_PROP(max_g_pre_)
+        DEF_PROP(min_z_out_)
+        DEF_PROP(max_z_out_)
+        DEF_PROP(min_r_out_)
+        DEF_PROP(max_r_out_)
+        DEF_PROP(min_g_out_)
+        DEF_PROP(max_g_out_)
+        DEF_PROP(min_Rh_add_br_g_)
+        DEF_PROP(max_Rh_add_br_g_)
+        DEF_PROP(min_rRh_)
+        DEF_PROP(max_rRh_)
+        DEF_PROP(min_new_contrib_)
+        DEF_PROP(max_new_contrib_)
+        DEF_PROP(min_old_contrib_)
+        DEF_PROP(max_old_contrib_)
         .def("reset", &GRUQuantizationRangesPy::reset,
              "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize "
              "per-channel vectors.",
              py::arg("hidden") = -1);
+
+    #undef DEF_PROP
 
     // OperatorQuantConfig 绑定（位宽配置 + 对称量化配置）
     // 位宽值: 8, 16, 32（Python 端只看到位宽数量，C++ 端决定实际类型）
@@ -952,13 +708,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
         .def_readwrite("bitwidth_config_", &GRUQuantitativeParametersPy::bitwidth_config_);
 
-    // 校准量化范围（支持多次调用累积更新）
-    m.def("calibrate_gru_ranges", &calibrate_gru_ranges_wrapper,
-          "Calibrate GRU quantization ranges (supports accumulative updates)",
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"), py::arg("quant_ranges"));
-
     // 根据量化范围计算量化参数（支持自定义位宽配置）
     m.def("calculate_gru_quantitative_parameters", &calculate_gru_quantitative_parameters_wrapper,
           "Calculate GRU quantitative parameters from quantization ranges", py::arg("quant_ranges"),
@@ -979,13 +728,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("num_bins", &GRUHistogramCollectorsPy::num_bins, "Get number of histogram bins")
         .def("print", &GRUHistogramCollectorsPy::print, "Print histogram statistics");
 
-    // 收集直方图（支持多批次累积）
-    m.def("calibrate_gru_histograms", &calibrate_gru_histograms_wrapper,
-          "Collect GRU histogram data for AIMET-style calibration (supports multi-batch accumulation)",
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"), py::arg("hist_collectors"));
-
     // 从直方图计算量化参数（支持 SQNR 和 Percentile 两种方案）
     m.def("calculate_gru_quantitative_parameters_from_histograms",
           &calculate_gru_quantitative_parameters_from_histograms_wrapper,
@@ -998,25 +740,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("use_percentile") = false,
           py::arg("percentile_value") = 99.99f);
 
-    // 非量化 GRU 前向传播
-    m.def("haste_gru_forward", &haste_gru_forward_wrapper, "Non-quantized GRU forward pass",
-          py::arg("is_training"),  // 是否开启训练模式，true为训练，false为推理
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"),
-          py::arg("h0") =
-              torch::Tensor());  // 初始隐藏状态，可选；返回 (h, v) 元组，h包含初始状态，v为中间值
-
     // forwardInterface 统一接口
-    // 位宽配置直接从 quant_params.bitwidth_config_ 中读取（单一数据源）
+    // 支持校准模式：calib_method 指定校准方式（字符串）
     m.def("forward_interface", &forward_interface_wrapper,
-          "Unified GRU forward interface supporting both quantized and non-quantized modes",
+          "Unified GRU forward interface supporting both quantized/non-quantized modes and calibration.\n"
+          "When calib_method != 'none', calibration data is collected during forward pass.\n"
+          "  calib_method: 'none', 'minmax', 'sqnr', 'percentile'\n"
+          "  hist_collectors: Required for 'sqnr'/'percentile' calibration\n"
+          "  quant_ranges: Required for 'minmax' calibration",
           py::arg("is_training"),  // 是否开启训练模式，true为训练，false为推理
           py::arg("is_quant"), py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
           py::arg("x"),
           py::arg("h0") = torch::Tensor(),  // 初始隐藏状态，可选
-          py::arg("quant_params"));
+          py::arg("quant_params"),
+          py::arg("calib_method") = "none",  // 校准方法字符串，默认 none
+          py::arg("hist_collectors") = nullptr,  // 直方图收集器
+          py::arg("quant_ranges") = nullptr);  // 量化范围
 
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",
