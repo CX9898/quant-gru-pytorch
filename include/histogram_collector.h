@@ -12,6 +12,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cinttypes>  // for PRId64
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -71,7 +72,7 @@ struct Histogram {
 
     void print(const char* name = nullptr) const {
         if (name) printf("[Histogram %s] ", name);
-        printf("bins=%d, range=[%.6f, %.6f], total=%ld\n", num_bins, min_val, max_val, total_count);
+        printf("bins=%d, range=[%.6f, %.6f], total=%" PRId64 "\n", num_bins, min_val, max_val, total_count);
     }
 
     /**
