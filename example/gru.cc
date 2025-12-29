@@ -12,18 +12,17 @@
 #include "check_data.h"
 #include "dev_vector.h"
 #include "gru_interface.h"
+#include "gru_quant_cpu.h"  // CPU 版本量化 GRU
 #include "histogram_collector.h"
 #include "quantized_unit_testing.cuh"
 #include "tensor_utils.h"
 
 // ==================== 校准方式选择 ====================
-enum class CalibrationMethod {
-    MIN_MAX,   // 使用 min/max 范围校准（简单快速）
-    HISTOGRAM  // 使用直方图校准（SQNR 优化，更精确）
-};
+// CalibrationMethod 枚举现在定义在 gru_interface.h 中：
+//   NONE, MINMAX, SQNR, PERCENTILE
 
 // 全局配置：选择校准方式
-constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MIN_MAX;
+constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MINMAX;
 
 // 默认配置（可通过命令行参数覆盖）
 int g_batch_size = 64;    // 批大小 (B)
@@ -104,12 +103,120 @@ void runQuantInference(const int time_steps, const int batch_size, const int inp
                        const int hidden_size, const float *W, const float *R, const float *bx,
                        const float *br, const float *x,
                        const GRUQuantitativeParameters &quant_params, float *h) {
-    ScopeTimer t("QuantInference:");
+    ScopeTimer t("QuantInference (GPU):");
     forwardInterface(false,  // inference mode
                      true,   // is_quant
                      time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
                      nullptr,  // h0
-                     quant_params, g_blas_handle, h, nullptr);
+                     quant_params, g_blas_handle, 
+                     CalibrationMethod::NONE, nullptr, nullptr,  // 不校准
+                     h, nullptr);
+}
+
+// CPU 版本量化 GRU 推理
+// 使用模板参数选择量化位宽：WeightT=int8_t/int16_t, ActivationT=int8_t/int16_t
+template <typename WeightT, typename ActivationT>
+void runQuantInferenceCPU(const int time_steps, const int batch_size, const int input_size,
+                          const int hidden_size, const std::vector<float> &W_fp,
+                          const std::vector<float> &R_fp, const std::vector<float> &bx_fp,
+                          const std::vector<float> &br_fp, const std::vector<float> &x_fp,
+                          const GRUQuantitativeParameters &quant_params,
+                          std::vector<float> &h_out) {
+    // 1. 量化权重 W, R（per-channel 量化）
+    const int W_size = input_size * hidden_size * 3;
+    const int R_size = hidden_size * hidden_size * 3;
+    const int hidden3 = hidden_size * 3;
+
+    std::vector<WeightT> W_quant(W_size);
+    std::vector<WeightT> R_quant(R_size);
+
+    // W: [input_size, hidden_size*3] per-channel 量化
+    for (int k = 0; k < input_size; k++) {
+        for (int m = 0; m < hidden3; m++) {
+            int idx = k * hidden3 + m;
+            W_quant[idx] = quantize<WeightT>(W_fp[idx], quant_params.exp2_inv_W_[m], 0);
+        }
+    }
+
+    // R: [hidden_size, hidden_size*3] per-channel 量化
+    for (int k = 0; k < hidden_size; k++) {
+        for (int m = 0; m < hidden3; m++) {
+            int idx = k * hidden3 + m;
+            R_quant[idx] = quantize<WeightT>(R_fp[idx], quant_params.exp2_inv_R_[m], 0);
+        }
+    }
+
+    // 2. 量化 bias（per-channel 量化到 int32）
+    std::vector<int32_t> bx_quant(hidden3);
+    std::vector<int32_t> br_quant(hidden3);
+    for (int m = 0; m < hidden3; m++) {
+        bx_quant[m] = quantize<int32_t>(bx_fp[m], quant_params.exp2_inv_bx_[m], 0);
+        br_quant[m] = quantize<int32_t>(br_fp[m], quant_params.exp2_inv_br_[m], 0);
+    }
+
+    // 3. 量化输入 x
+    const int x_size = time_steps * batch_size * input_size;
+    std::vector<ActivationT> x_quant(x_size);
+    for (int i = 0; i < x_size; i++) {
+        x_quant[i] = quantize<ActivationT>(x_fp[i], quant_params.exp2_inv_x_, quant_params.zp_x_);
+    }
+
+    // 4. 分配输出缓冲区
+    const int h_size = (time_steps + 1) * batch_size * hidden_size;
+    std::vector<ActivationT> h_quant(h_size);
+    // 初始化 h0 为零点值
+    for (int i = 0; i < batch_size * hidden_size; i++) {
+        h_quant[i] = static_cast<ActivationT>(quant_params.zp_h_);
+    }
+
+    // 5. 创建 CPU 版本 ForwardPass 并运行
+    cpu::ForwardPassQuantCPU<ActivationT, ActivationT, WeightT, WeightT> forward(
+        false,  // inference mode
+        batch_size, input_size, hidden_size);
+
+    forward.setRescaleParam(quant_params);
+
+    forward.Run(time_steps, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(),
+                x_quant.data(), h_quant.data(), nullptr, 0.0f, nullptr);
+
+    // 6. 反量化输出 h
+    h_out.resize(h_size);
+    for (int i = 0; i < h_size; i++) {
+        h_out[i] = dequantize(h_quant[i], quant_params.exp2_inv_h_, quant_params.zp_h_);
+    }
+}
+
+// CPU 推理封装（根据位宽配置自动选择模板实例）
+void runQuantInferenceCPUWrapper(const int time_steps, const int batch_size, const int input_size,
+                                  const int hidden_size, const std::vector<float> &W,
+                                  const std::vector<float> &R, const std::vector<float> &bx,
+                                  const std::vector<float> &br, const std::vector<float> &x,
+                                  const GRUQuantitativeParameters &quant_params,
+                                  std::vector<float> &h) {
+    const auto &config = quant_params.bitwidth_config_;
+    const bool weight_8bit = (config.W_ == QuantBitWidth::INT8);
+    const bool activation_8bit = (config.x_ == QuantBitWidth::INT8);
+
+    printf("CPU Quant Inference: Weight=%dbit, Activation=%dbit\n",
+           weight_8bit ? 8 : 16, activation_8bit ? 8 : 16);
+
+    if (weight_8bit && activation_8bit) {
+        // W8A8
+        runQuantInferenceCPU<int8_t, int8_t>(time_steps, batch_size, input_size, hidden_size,
+                                             W, R, bx, br, x, quant_params, h);
+    } else if (weight_8bit && !activation_8bit) {
+        // W8A16
+        runQuantInferenceCPU<int8_t, int16_t>(time_steps, batch_size, input_size, hidden_size,
+                                              W, R, bx, br, x, quant_params, h);
+    } else if (!weight_8bit && !activation_8bit) {
+        // W16A16
+        runQuantInferenceCPU<int16_t, int16_t>(time_steps, batch_size, input_size, hidden_size,
+                                               W, R, bx, br, x, quant_params, h);
+    } else {
+        // W16A8 (不太常用)
+        runQuantInferenceCPU<int16_t, int8_t>(time_steps, batch_size, input_size, hidden_size,
+                                              W, R, bx, br, x, quant_params, h);
+    }
 }
 
 // ==================== 训练接口 ====================
@@ -196,7 +303,9 @@ GRUTrainGradients runQuantTraining(const int time_steps, const int batch_size, c
                          true,  // is_quant
                          time_steps, batch_size, input_size, hidden_size, W, R, bx, br, x,
                          nullptr,  // h0
-                         quant_params, g_blas_handle, h_dev.data(), v_dev.data());
+                         quant_params, g_blas_handle, 
+                         CalibrationMethod::NONE, nullptr, nullptr,  // 不校准
+                         h_dev.data(), v_dev.data());
     }
 
     // 反向传播（使用反量化后的 h 和 v）
@@ -316,9 +425,9 @@ int main(int argc, char *argv[]) {
 
     // ========== 4. 校准量化参数并初始化 LUT（只做一次）==========
     printf("\n========== Calibrating Quantization Parameters ==========\n");
-    printf("Calibration method: %s\n", CALIBRATION_METHOD == CalibrationMethod::HISTOGRAM
-                                           ? "HISTOGRAM (SQNR优化)"
-                                           : "MIN_MAX (简单快速)");
+    printf("Calibration method: %s\n", CALIBRATION_METHOD == CalibrationMethod::SQNR
+                                           ? "SQNR (直方图优化)"
+                                           : "MINMAX (简单快速)");
 
     OperatorQuantConfig bitwidth_config;
     // bitwidth_config.setAllBitWidths(16);
@@ -326,18 +435,25 @@ int main(int argc, char *argv[]) {
     {
         ScopeTimer t("CalibrateAndInitLut:");
 
-        if constexpr (CALIBRATION_METHOD == CalibrationMethod::HISTOGRAM) {
+        if constexpr (CALIBRATION_METHOD == CalibrationMethod::SQNR) {
             // ==================== 方式一：直方图校准（SQNR 优化）====================
             // 优点：更精确，使用 SQNR 优化选择最佳量化范围
             // 缺点：计算开销稍大
 
-            // 步骤 1: 收集直方图
+            // 使用 forwardWithCalibration 收集直方图
             GRUHistogramCollectors hist_collectors(hidden_size);
-            calibrateGruHistograms(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
-                                   R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
-                                   g_blas_handle, hist_collectors);
+            dev::vector<float> h_calib((time_steps + 1) * batch_size * hidden_size);
+            dev::vector<float> v_calib(time_steps * batch_size * hidden_size * 4);
+            h_calib.zero();
+            
+            forwardWithCalibration(
+                true, time_steps, batch_size, input_size, hidden_size,
+                W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                nullptr, g_blas_handle,
+                CalibrationMethod::SQNR, &hist_collectors, nullptr,
+                h_calib.data(), v_calib.data());
 
-            // 步骤 2: 从直方图计算量化参数
+            // 从直方图计算量化参数
             quant_params = calculateGRUQuantitativeParametersFromHistograms(hist_collectors,
                                                                             bitwidth_config, true);
         } else {
@@ -345,13 +461,20 @@ int main(int argc, char *argv[]) {
             // 优点：简单快速
             // 缺点：对异常值敏感，量化范围可能不够紧凑
 
-            // 步骤 1: 收集 min/max 范围
+            // 使用 forwardWithCalibration 收集 min/max 范围
             GRUQuantizationRanges quant_ranges(hidden_size);
-            calibrateGruRanges(time_steps, batch_size, input_size, hidden_size, W_dev.data(),
-                               R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
-                               g_blas_handle, quant_ranges);
+            dev::vector<float> h_calib((time_steps + 1) * batch_size * hidden_size);
+            dev::vector<float> v_calib(time_steps * batch_size * hidden_size * 4);
+            h_calib.zero();
+            
+            forwardWithCalibration(
+                true, time_steps, batch_size, input_size, hidden_size,
+                W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(), x_dev.data(),
+                nullptr, g_blas_handle,
+                CalibrationMethod::MINMAX, nullptr, &quant_ranges,
+                h_calib.data(), v_calib.data());
 
-            // 步骤 2: 从 min/max 范围计算量化参数
+            // 从 min/max 范围计算量化参数
             quant_params = calculateGRUQuantitativeParameters(quant_ranges, bitwidth_config);
         }
 
@@ -365,22 +488,38 @@ int main(int argc, char *argv[]) {
     // ========== 5. 推理测试 ==========
     printf("\n========== Running Inference Tests ==========\n");
 
-    // 浮点推理
+    // 浮点推理 (GPU)
     dev::vector<float> h_float_dev((time_steps + 1) * batch_size * hidden_size);
     runFloatInference(time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(),
                       bx_dev.data(), br_dev.data(), x_dev.data(), h_float_dev.data());
 
-    // 量化推理
+    // 量化推理 (GPU)
     dev::vector<float> h_quant_dev((time_steps + 1) * batch_size * hidden_size);
     runQuantInference(time_steps, batch_size, input_size, hidden_size, W_dev.data(), R_dev.data(),
                       bx_dev.data(), br_dev.data(), x_dev.data(), quant_params, h_quant_dev.data());
 
+    // 量化推理 (CPU)
+    std::vector<float> h_quant_cpu;
+    {
+        ScopeTimer t("QuantInference (CPU):");
+        runQuantInferenceCPUWrapper(time_steps, batch_size, input_size, hidden_size,
+                                     W, R, bx, br, x, quant_params, h_quant_cpu);
+    }
+
     // 比较推理结果
-    std::vector<float> h_float, h_quant;
+    std::vector<float> h_float, h_quant_gpu;
     d2h(h_float, h_float_dev);
-    d2h(h_quant, h_quant_dev);
-    compareHValues(h_float, h_quant, time_steps, batch_size, hidden_size,
-                   "Inference: Float vs Quant");
+    d2h(h_quant_gpu, h_quant_dev);
+
+    printf("\n----- Comparison Results -----\n");
+    compareHValues(h_float, h_quant_gpu, time_steps, batch_size, hidden_size,
+                   "Float (GPU) vs Quant (GPU)");
+
+    compareHValues(h_float, h_quant_cpu, time_steps, batch_size, hidden_size,
+                   "Float (GPU) vs Quant (CPU)");
+
+    compareHValues(h_quant_gpu, h_quant_cpu, time_steps, batch_size, hidden_size,
+                   "Quant (GPU) vs Quant (CPU)");
 
     printf("cudaError(Inference): %s\n", cudaGetErrorString(cudaGetLastError()));
 

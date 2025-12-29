@@ -5,51 +5,11 @@
 #include <cstdint>
 
 #include "quantize_bitwidth_config.h"
+#include "quantize_lut_types.h"  // LUT 结构体和生成函数声明（纯 C++，CPU/GPU 共用）
 #include "quantize_ops_helper.h"
 
-// ==================== 分段线性量化数据结构 ====================
-#define NUM_SEGMENTS 16
-
-// ==================== 统一的 LUT 结构 ====================
-// 
-// 设计原则：使用统一的最大精度类型，避免任何溢出截断问题
-// 
-// 优点：
-//   1. 代码简化，消除重复的结构体定义
-//   2. 避免 INT8 版本的 q_b 截断 bug（tanh 斜率 1.0 → q_b=128 > INT8_MAX）
-//   3. 维护更容易，所有版本共用同一套代码
-//
-// 内存占用：每个 LUT 约 220 bytes（16 segments * 13 bytes + header）
-//           对于 GPU 常量内存（64KB）来说完全可以接受
-//
-
-/// @brief 统一的段参数结构（使用最大精度类型）
-struct SegmentParams {
-    int32_t q_b;                 // 量化后的系数 b (INT32，避免溢出截断)
-    int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
-    int32_t term_c_precomputed;  // 预计算的 term_c (INT32)
-    int16_t threshold;           // 段阈值 (INT16，可容纳 INT8 和 INT16 输入)
-};
-
-/// @brief 统一的查找表结构
-struct SigmoidLUT {
-    SegmentParams segments[NUM_SEGMENTS];
-    int32_t zp_x;         // 输入 zero-point (INT32)
-    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
-    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int32_t zp_y;         // 输出 zero-point (INT32)
-};
-
-// 为了兼容性，保留旧类型名作为别名
-using SegmentParams_INT8 = SegmentParams;
-using SegmentParams_INT16 = SegmentParams;
-using SegmentParams_INT8_to_INT16 = SegmentParams;
-using SigmoidLUT_INT8 = SigmoidLUT;
-using SigmoidLUT_INT16 = SigmoidLUT;
-using SigmoidLUT_INT8_to_INT16 = SigmoidLUT;
-
-// 常量内存声明（CUDA设备端）
-// 每个门独立的 LUT，支持不同的量化参数
+// ==================== CUDA 常量内存声明 ====================
+// LUT 结构体定义在 quantize_lut_types.h 中
 
 // 前向方向 LUT（单向 GRU 或双向 GRU 的前向）
 extern __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
@@ -341,9 +301,3 @@ __device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, Qua
 }
 
 }  // namespace dev
-
-// ==================== 主机端 LUT 生成函数声明 ====================
-SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
-SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);

@@ -23,6 +23,23 @@
 #include "gru_quantization_ranges.h"
 
 // =====================================================================
+// 校准方法枚举
+// =====================================================================
+
+enum class CalibrationMethod : int8_t {
+    NONE = 0,        // 不校准，正常 forward
+    MINMAX = 1,      // 收集 min/max 范围
+    SQNR = 2,        // 收集直方图，使用 SQNR 优化
+    PERCENTILE = 3   // 收集直方图，使用百分位裁剪
+};
+
+// 辅助函数：判断是否需要直方图
+inline bool needsHistogram(CalibrationMethod method) {
+    return method == CalibrationMethod::SQNR || 
+           method == CalibrationMethod::PERCENTILE;
+}
+
+// =====================================================================
 // cuBLAS 初始化
 // =====================================================================
 
@@ -34,48 +51,16 @@ inline void init_gru_cublas(cublasHandle_t &g_blas_handle) {
 }
 
 // =====================================================================
-// 量化校准接口
+// 量化参数计算接口
 // =====================================================================
-
-// 校准 GRU 量化范围（收集 min/max 数据分布）
-// 输入:
-//   W:  [C, H*3]   输入权重矩阵
-//   R:  [H, H*3]   循环权重矩阵
-//   bx: [H*3]      输入偏置
-//   br: [H*3]      循环偏置
-//   x:  [T, B, I]  输入序列
-// 输出:
-//   quant_ranges: 收集到的量化范围
-void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidden_size,
-                        const float *W, const float *R, const float *bx, const float *br,
-                        const float *x, const cublasHandle_t &g_blas_handle,
-                        GRUQuantizationRanges &quant_ranges);
 
 // 根据量化范围和位宽配置计算量化参数（scale 和 zero point）
 GRUQuantitativeParameters calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
-// =====================================================================
-// AIMET 风格的真正直方图校准接口（多批次累积直方图 + SQNR 优化）
-// =====================================================================
-
 // 前向声明直方图收集器
 struct GRUHistogramCollectors;
-
-// 收集直方图数据（支持多批次累积）
-// 输入:
-//   W:  [C, H*3]   输入权重矩阵
-//   R:  [H, H*3]   循环权重矩阵
-//   bx: [H*3]      输入偏置
-//   br: [H*3]      循环偏置
-//   x:  [T, B, I]  输入序列
-// 输出:
-//   hist_collectors: 收集到的直方图（会累积更新）
-void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int hidden_size,
-                            const float *W, const float *R, const float *bx, const float *br,
-                            const float *x, const cublasHandle_t &g_blas_handle,
-                            GRUHistogramCollectors &hist_collectors);
 
 // 从直方图计算量化参数（支持 SQNR 和 Percentile 两种校准方案）
 // use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
@@ -155,13 +140,30 @@ void hasteGRUForward(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v);
 
-// 统一前向传播接口（根据 is_quant 自动选择浮点或量化实现）
+// 统一前向传播接口（根据 is_quant 和 calib_method 自动选择实现）
+// calib_method: 校准方法，NONE 表示正常推理
 void forwardInterface(
     bool is_training, bool is_quant,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bx, const float *br, const float *x,
     const float *h0,
     const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
+    CalibrationMethod calib_method,
+    GRUHistogramCollectors *hist_collectors,
+    GRUQuantizationRanges *quant_ranges,
+    float *h, float *v);
+
+// 带校准的前向传播（内部使用，职责分明）
+// 专门用于校准模式，会设置 calibration_mode 并收集数据
+void forwardWithCalibration(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0,
+    const cublasHandle_t &g_blas_handle,
+    CalibrationMethod calib_method,
+    GRUHistogramCollectors *hist_collectors,
+    GRUQuantizationRanges *quant_ranges,
     float *h, float *v);
 
 // =====================================================================

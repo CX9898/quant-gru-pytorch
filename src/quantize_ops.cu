@@ -12,11 +12,7 @@
 #include "quantize_ops.cuh"
 #include "quantize_ops_helper.h"
 
-// 统一的 LUT 生成函数（前向声明）
-SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, 
-                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
-SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, 
-                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
+// LUT 生成函数声明已在 quantize_lut_types.h 中（通过 quantize_ops.cuh 包含）
 
 // 分段线性量化常量内存（统一结构）
 // 前向方向 LUT（单向 GRU 或双向 GRU 的前向）

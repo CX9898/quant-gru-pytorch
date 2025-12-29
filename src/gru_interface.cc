@@ -16,51 +16,7 @@
 #include "quantize_ops_helper.h"
 
 // =====================================================================
-// 量化校准实现
-// =====================================================================
-
-void calibrateGruRanges(int time_steps, int batch_size, int input_size, int hidden_size,
-                        const float *W, const float *R, const float *bx, const float *br,
-                        const float *x, const cublasHandle_t &g_blas_handle,
-                        GRUQuantizationRanges &quant_ranges) {
-    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
-
-    h_dev.zero();
-
-    // 初始化 quant_ranges（如果尚未初始化）
-    if (quant_ranges.hidden_ != hidden_size) {
-        quant_ranges.reset(hidden_size);
-    }
-
-    gru::ForwardPass<float> forward =
-        gru::ForwardPass<float>(true,  // training
-                                batch_size, input_size, hidden_size, g_blas_handle);
-
-    forward.setCalibrationMode(true, quant_ranges);
-
-    forward.Run(time_steps, W, R, bx, br, x, h_dev.data(), v_dev.data(), tmp_Wx_dev.data(),
-                tmp_Rh_dev.data(), 0.0f, nullptr);
-
-    // 同步所有 CUDA 操作，确保校准完成
-    cudaDeviceSynchronize();
-
-    // 检查 CUDA 错误
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in calibrateGruRanges: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in calibrateGruRanges: ") + err_str);
-    }
-
-    // 获取更新后的范围
-    quant_ranges = forward.getGRUQuantizationRanges();
-}
-
-// =====================================================================
-// 量化校准实现
+// 量化参数计算
 // =====================================================================
 
 // 确保范围不小于最小阈值，避免范围过窄导致量化精度问题
@@ -470,11 +426,25 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 //   - W8A8:   权重 int8,  激活 int8  (默认)
 //   - W8A16:  权重 int8,  激活 int16 (混合精度)
 //   - W16A16: 权重 int16, 激活 int16
+// calib_method: 校准方法，NONE 表示正常推理
 void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
                       int input_size, int hidden_size, const float *W, const float *R,
                       const float *bx, const float *br, const float *x, const float *h0,
                       const GRUQuantitativeParameters &quant_gru_scales,
-                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
+                      const cublasHandle_t &g_blas_handle,
+                      CalibrationMethod calib_method,
+                      GRUHistogramCollectors *hist_collectors,
+                      GRUQuantizationRanges *quant_ranges,
+                      float *h, float *v) {
+    // 如果需要校准，使用专门的校准前向传播
+    if (calib_method != CalibrationMethod::NONE) {
+        forwardWithCalibration(is_training, time_steps, batch_size, input_size, hidden_size,
+                               W, R, bx, br, x, h0, g_blas_handle,
+                               calib_method, hist_collectors, quant_ranges, h, v);
+        return;
+    }
+    
+    // 正常前向传播
     if (is_quant) {
         dev::vector<int32_t> bx_quant(hidden_size * 3);
         dev::vector<int32_t> br_quant(hidden_size * 3);
@@ -705,38 +675,19 @@ inline void collectPerChannelHistograms(std::vector<HistogramCollector> &collect
     }
 }
 
-void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int hidden_size,
-                            const float *W, const float *R, const float *bx, const float *br,
-                            const float *x, const cublasHandle_t &g_blas_handle,
-                            GRUHistogramCollectors &hist_collectors) {
-    // 分配临时缓冲区
-    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
+// =====================================================================
+// 公共直方图收集辅助函数（供 calibrateGruHistograms 和 forwardWithCalibration 复用）
+// =====================================================================
 
-    h_dev.zero();
-
-    // 初始化直方图收集器（如果需要）
-    if (hist_collectors.hidden_ != hidden_size) {
-        hist_collectors.reset(hidden_size);
-    }
-
-    // 创建量化范围用于前向传播（用于获取中间值）
-    GRUQuantizationRanges quant_ranges(hidden_size);
-
-    gru::ForwardPass<float> forward =
-        gru::ForwardPass<float>(true,  // training mode to get v
-                                batch_size, input_size, hidden_size, g_blas_handle);
-
-    forward.setCalibrationMode(true, quant_ranges);
-
-    forward.Run(time_steps, W, R, bx, br, x, h_dev.data(), v_dev.data(), tmp_Wx_dev.data(),
-                tmp_Rh_dev.data(), 0.0f, nullptr);
-
-    // 同步所有 CUDA 操作
-    cudaDeviceSynchronize();
-
+void collectAllHistograms(
+    GRUHistogramCollectors &hist_collectors,
+    const float *x, const float *h, const float *v,
+    const float *tmp_Wx, const float *tmp_Rh,
+    const float *W, const float *R, const float *bx, const float *br,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    // 预激活值（z_pre, r_pre, g_pre）- 可选，传 nullptr 则跳过
+    const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size) {
+    
     const int NH = batch_size * hidden_size;
     const int NI = batch_size * input_size;
 
@@ -744,16 +695,15 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
     collectHistogramPerStep(hist_collectors.x_hist, x, time_steps, NI);
 
     // 2. 收集隐藏状态 h 的直方图（跳过初始状态）
-    collectHistogramPerStep(hist_collectors.h_hist, h_dev.data() + NH, time_steps, NH);
+    collectHistogramPerStep(hist_collectors.h_hist, h + NH, time_steps, NH);
 
     // 3. 收集 Wx 结果的直方图
-    collectHistogramPerStep(hist_collectors.Wx_hist, tmp_Wx_dev.data(), time_steps, NH * 3);
+    collectHistogramPerStep(hist_collectors.Wx_hist, tmp_Wx, time_steps, NH * 3);
 
     // 4. 收集 Rh 结果的直方图
-    collectHistogramPerStep(hist_collectors.Rh_hist, tmp_Rh_dev.data(), time_steps, NH * 3);
+    collectHistogramPerStep(hist_collectors.Rh_hist, tmp_Rh, time_steps, NH * 3);
 
-    // 5. 收集权重的 per-channel 直方图（只在首次收集，权重在推理时固定不变）
-    // 如果需要重新校准权重（如 QAT 训练后），应先调用 reset_calibration()
+    // 5. 收集权重的 per-channel 直方图（只在首次收集）
     if (!hist_collectors.W_hist[0].is_valid()) {
         collectPerChannelHistograms(hist_collectors.W_hist, W, input_size, hidden_size * 3);
         collectPerChannelHistograms(hist_collectors.R_hist, R, hidden_size, hidden_size * 3);
@@ -763,8 +713,8 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
 
     // 6. 从 v 中收集门的中间值直方图
     // v 布局: [T, B, H*4] = [z, r, g, Rh_add_br_g]
-    std::vector<float> v_host = d2h(v_dev.data(), time_steps * batch_size * hidden_size * 4);
-    std::vector<float> h_host = d2h(h_dev.data(), (time_steps + 1) * batch_size * hidden_size);
+    std::vector<float> v_host = d2h(v, time_steps * batch_size * hidden_size * 4);
+    std::vector<float> h_host = d2h(h, (time_steps + 1) * batch_size * hidden_size);
 
     const size_t output_size = time_steps * batch_size * hidden_size;
     std::vector<float> z_out(output_size);
@@ -781,22 +731,22 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
             const size_t v_base = t * batch_size * hidden_size * 4 + b * hidden_size * 4;
             const size_t out_base = t * batch_size * hidden_size + b * hidden_size;
 
-            for (int h = 0; h < hidden_size; ++h) {
-                const float z_val = v_host[v_base + 0 * hidden_size + h];
-                const float r_val = v_host[v_base + 1 * hidden_size + h];
-                const float g_val = v_host[v_base + 2 * hidden_size + h];
-                const float Rh_add_br_val = v_host[v_base + 3 * hidden_size + h];
+            for (int hh = 0; hh < hidden_size; ++hh) {
+                const float z_val = v_host[v_base + 0 * hidden_size + hh];
+                const float r_val = v_host[v_base + 1 * hidden_size + hh];
+                const float g_val = v_host[v_base + 2 * hidden_size + hh];
+                const float Rh_add_br_val = v_host[v_base + 3 * hidden_size + hh];
 
-                z_out[out_base + h] = z_val;
-                r_out[out_base + h] = r_val;
-                g_out[out_base + h] = g_val;
-                Rh_add_br_g[out_base + h] = Rh_add_br_val;
-                rRh_g[out_base + h] = r_val * Rh_add_br_val;
-                new_contrib[out_base + h] = (1.0f - z_val) * g_val;
+                z_out[out_base + hh] = z_val;
+                r_out[out_base + hh] = r_val;
+                g_out[out_base + hh] = g_val;
+                Rh_add_br_g[out_base + hh] = Rh_add_br_val;
+                rRh_g[out_base + hh] = r_val * Rh_add_br_val;
+                new_contrib[out_base + hh] = (1.0f - z_val) * g_val;
 
                 // h_old 是上一个时间步的隐藏状态
                 const size_t h_base = t * batch_size * hidden_size + b * hidden_size;
-                old_contrib[out_base + h] = z_val * h_host[h_base + h];
+                old_contrib[out_base + hh] = z_val * h_host[h_base + hh];
             }
         }
     }
@@ -811,48 +761,114 @@ void calibrateGruHistograms(int time_steps, int batch_size, int input_size, int 
         const float *new_contrib_step = new_contrib.data() + t * batch_size * hidden_size;
         const float *old_contrib_step = old_contrib.data() + t * batch_size * hidden_size;
 
-        hist_collectors.z_out_hist.collect(z_step, batch_size * hidden_size);
-        hist_collectors.r_out_hist.collect(r_step, batch_size * hidden_size);
-        hist_collectors.g_out_hist.collect(g_step, batch_size * hidden_size);
-        hist_collectors.Rh_add_br_g_hist.collect(Rh_add_br_step, batch_size * hidden_size);
-        hist_collectors.rRh_hist.collect(rRh_step, batch_size * hidden_size);
-        hist_collectors.new_contrib_hist.collect(new_contrib_step, batch_size * hidden_size);
-        hist_collectors.old_contrib_hist.collect(old_contrib_step, batch_size * hidden_size);
+        hist_collectors.z_out_hist.collect(z_step, NH);
+        hist_collectors.r_out_hist.collect(r_step, NH);
+        hist_collectors.g_out_hist.collect(g_step, NH);
+        hist_collectors.Rh_add_br_g_hist.collect(Rh_add_br_step, NH);
+        hist_collectors.rRh_hist.collect(rRh_step, NH);
+        hist_collectors.new_contrib_hist.collect(new_contrib_step, NH);
+        hist_collectors.old_contrib_hist.collect(old_contrib_step, NH);
     }
 
-    // 7. 收集 z_pre, r_pre, g_pre 的直方图
-    // 从 ForwardPass 中获取预激活值
-    if (forward.getPresSize() > 0) {
-        std::vector<float> z_pres_host(forward.getPresSize());
-        std::vector<float> r_pres_host(forward.getPresSize());
-        std::vector<float> g_pres_host(forward.getPresSize());
+    // 7. 收集 z_pre, r_pre, g_pre 的直方图（如果提供）
+    if (pres_size > 0 && z_pres && r_pres && g_pres) {
+        std::vector<float> z_pres_host(pres_size);
+        std::vector<float> r_pres_host(pres_size);
+        std::vector<float> g_pres_host(pres_size);
 
-        cudaMemcpy(z_pres_host.data(), forward.getZPres(), forward.getPresSize() * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        cudaMemcpy(r_pres_host.data(), forward.getRPres(), forward.getPresSize() * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        cudaMemcpy(g_pres_host.data(), forward.getGPres(), forward.getPresSize() * sizeof(float),
-                   cudaMemcpyDeviceToHost);
+        cudaMemcpy(z_pres_host.data(), z_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(r_pres_host.data(), r_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(g_pres_host.data(), g_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
 
-        // 分时间步收集 z_pre, r_pre, g_pre 直方图
         for (int t = 0; t < time_steps; ++t) {
             const float *z_pre_step = z_pres_host.data() + t * batch_size * hidden_size;
             const float *r_pre_step = r_pres_host.data() + t * batch_size * hidden_size;
             const float *g_pre_step = g_pres_host.data() + t * batch_size * hidden_size;
 
-            hist_collectors.z_pre_hist.collect(z_pre_step, batch_size * hidden_size);
-            hist_collectors.r_pre_hist.collect(r_pre_step, batch_size * hidden_size);
-            hist_collectors.g_pre_hist.collect(g_pre_step, batch_size * hidden_size);
+            hist_collectors.z_pre_hist.collect(z_pre_step, NH);
+            hist_collectors.r_pre_hist.collect(r_pre_step, NH);
+            hist_collectors.g_pre_hist.collect(g_pre_step, NH);
         }
     }
+}
+
+// =====================================================================
+// 带校准的统一前向传播实现
+// =====================================================================
+
+void forwardWithCalibration(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0,
+    const cublasHandle_t &g_blas_handle,
+    CalibrationMethod calib_method,
+    GRUHistogramCollectors *hist_collectors,
+    GRUQuantizationRanges *quant_ranges,
+    float *h, float *v) {
+    
+    if (calib_method == CalibrationMethod::NONE) {
+        throw std::invalid_argument("forwardWithCalibration called with NONE calibration method");
+    }
+
+    // 分配临时缓冲区
+    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
+
+    // 创建 ForwardPass 对象
+    gru::ForwardPass<float> forward =
+        gru::ForwardPass<float>(is_training, batch_size, input_size, hidden_size, g_blas_handle);
+
+    // 根据校准方法设置校准模式
+    if (calib_method == CalibrationMethod::MINMAX) {
+        // MinMax 模式：设置校准模式，在 Run 过程中收集 min/max
+        if (!quant_ranges) {
+            throw std::invalid_argument("quant_ranges is required for MINMAX calibration");
+        }
+        if (quant_ranges->hidden_ != hidden_size) {
+            quant_ranges->reset(hidden_size);
+        }
+        forward.setCalibrationMode(true, *quant_ranges);
+    } else {
+        // SQNR/Percentile 模式：需要直方图收集器
+        if (!hist_collectors) {
+            throw std::invalid_argument("hist_collectors is required for SQNR/Percentile calibration");
+        }
+        if (hist_collectors->hidden_ != hidden_size) {
+            hist_collectors->reset(hidden_size);
+        }
+        // 直方图模式也需要临时的 quant_ranges 用于前向传播
+        GRUQuantizationRanges temp_ranges(hidden_size);
+        forward.setCalibrationMode(true, temp_ranges);
+    }
+
+    // 执行前向传播，收集中间结果
+    forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, h0);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
 
     // 检查 CUDA 错误
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in calibrateGruHistograms: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in calibrateGruHistograms: ") + err_str);
+        fprintf(stderr, "CUDA error in forwardWithCalibration: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in forwardWithCalibration: ") + err_str);
     }
+
+    // MinMax 模式：从 ForwardPass 获取收集的范围
+    if (calib_method == CalibrationMethod::MINMAX) {
+        *quant_ranges = forward.getGRUQuantizationRanges();
+        return;
+    }
+
+    // SQNR/Percentile 模式：使用公共辅助函数收集直方图
+    collectAllHistograms(*hist_collectors, x, h, v,
+                         tmp_Wx_dev.data(), tmp_Rh_dev.data(),
+                         W, R, bx, br,
+                         time_steps, batch_size, input_size, hidden_size,
+                         forward.getZPres(), forward.getRPres(), forward.getGPres(),
+                         forward.getPresSize());
 }
 
 GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
