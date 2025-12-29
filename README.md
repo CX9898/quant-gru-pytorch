@@ -8,7 +8,7 @@
 
 - **浮点和量化两种模式**：可在训练和推理时自由切换
 - **灵活的量化配置**：支持 8/16 位量化，可配置对称/非对称量化
-- **两种校准方法**：Histogram（AIMET 风格，默认，高精度）和 MinMax（快速）
+- **三种校准方法**：SQNR（默认，高精度）、Percentile（百分位裁剪）和 MinMax（快速）
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
 - **ONNX 导出**：支持 QDQ 格式导出，便于部署到各类推理引擎
@@ -148,8 +148,12 @@ for epoch in range(num_epochs):
 ### 校准方法选择
 
 ```python
-# AIMET 风格直方图校准（默认，精度高，推荐用于生产部署）
-gru.calibration_method = 'histogram'
+# SQNR 优化校准（默认，高精度，推荐用于生产部署）
+gru.calibration_method = 'sqnr'
+
+# 百分位裁剪校准（基于直方图，可配置裁剪比例）
+gru.calibration_method = 'percentile'
+gru.percentile_value = 99.99  # 默认 99.99%
 
 # MinMax 校准（速度快，适合快速原型验证）
 gru.calibration_method = 'minmax'
@@ -309,7 +313,8 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 | 方法 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
-| **Histogram (AIMET)** ⭐ 默认 | 精度高，SQNR 优化 | 计算开销稍大 | 生产部署 |
+| **SQNR** ⭐ 默认 | 精度最高，自动搜索最优 scale | 计算开销稍大 | 生产部署 |
+| **Percentile** | 可配置裁剪比例，抗异常值 | 需调参 | 数据有异常值时 |
 | **MinMax** | 速度快，实现简单 | 对异常值敏感 | 快速原型验证 |
 
 ## 📦 ONNX 导出
@@ -358,13 +363,13 @@ class QuantGRU(nn.Module):
         num_layers: int = 1,          # 层数（目前仅支持 1）
         bias: bool = True,            # 是否使用偏置
         batch_first: bool = False,    # 输入格式
-        bidirectional: bool = False,  # 是否双向
-        use_quantization: bool = False  # 是否启用量化
+        bidirectional: bool = False   # 是否双向
     )
     
     # 重要属性（可在创建后设置）
+    gru.use_quantization = True      # 是否启用量化
     gru.export_mode = True           # ONNX 导出模式
-    gru.calibration_method = 'histogram'  # 校准方法（默认）
+    gru.calibration_method = 'sqnr'  # 校准方法（默认）
 ```
 
 ### 主要属性
@@ -374,7 +379,8 @@ class QuantGRU(nn.Module):
 | `use_quantization` | bool | False | 是否启用量化推理 |
 | `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
 | `export_format` | str | 'float' | 导出格式：'float'（浮点）或 'qdq'（伪量化，需先校准） |
-| `calibration_method` | str | 'histogram' | 校准方法：'histogram'（高精度）或 'minmax'（快速） |
+| `calibration_method` | str | 'sqnr' | 校准方法：'sqnr'（高精度）、'percentile'（百分位）或 'minmax'（快速） |
+| `percentile_value` | float | 99.99 | 百分位值（仅 `calibration_method='percentile'` 时使用） |
 
 ### 主要方法
 
