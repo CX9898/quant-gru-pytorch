@@ -402,8 +402,11 @@ def test_quantized_int8():
     # 设置 8bit 量化
     quant_gru.set_all_bitwidth(8, verbose=True)
 
-    # 校准并完成量化初始化
-    quant_gru.calibrate(calibration_data)
+    # 校准并完成量化初始化（使用新的 calibrating 标志方式）
+    quant_gru.calibrating = True
+    with torch.no_grad():
+        quant_gru(calibration_data)
+    quant_gru.calibrating = False
     quant_gru.finalize_calibration()
     quant_gru.use_quantization = True
 
@@ -462,8 +465,11 @@ def test_quantized_int16():
     # 设置 16bit 量化
     quant_gru.set_all_bitwidth(16, verbose=True)
 
-    # 校准并完成量化初始化
-    quant_gru.calibrate(calibration_data)
+    # 校准并完成量化初始化（使用新的 calibrating 标志方式）
+    quant_gru.calibrating = True
+    with torch.no_grad():
+        quant_gru(calibration_data)
+    quant_gru.calibrating = False
     quant_gru.finalize_calibration()
     quant_gru.use_quantization = True
 
@@ -529,8 +535,11 @@ def test_batch_first():
     quant_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     quant_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 校准并完成量化初始化
-    quant_gru.calibrate(calibration_data)
+    # 校准并完成量化初始化（使用新的 calibrating 标志方式）
+    quant_gru.calibrating = True
+    with torch.no_grad():
+        quant_gru(calibration_data)
+    quant_gru.calibrating = False
     quant_gru.finalize_calibration()
     quant_gru.use_quantization = True
 
@@ -778,9 +787,12 @@ def test_training_quantized_int8():
     quant_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     quant_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 设置 8bit 量化并校准
+    # 设置 8bit 量化并校准（使用新的 calibrating 标志方式）
     quant_gru.set_all_bitwidth(8)
-    quant_gru.calibrate(calibration_data)
+    quant_gru.calibrating = True
+    with torch.no_grad():
+        quant_gru(calibration_data)
+    quant_gru.calibrating = False
     quant_gru.finalize_calibration()
     quant_gru.use_quantization = True
 
@@ -952,10 +964,13 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
     quant_gru.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     quant_gru.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 启用量化（如果需要）
+    # 启用量化（如果需要，使用新的 calibrating 标志方式）
     if use_quantization:
         quant_gru.set_all_bitwidth(bitwidth)
-        quant_gru.calibrate(calibration_data)
+        quant_gru.calibrating = True
+        with torch.no_grad():
+            quant_gru(calibration_data)
+        quant_gru.calibrating = False
         quant_gru.finalize_calibration()
         quant_gru.use_quantization = True
 
@@ -1115,9 +1130,12 @@ def test_quantized_vs_non_quantized(bitwidth=8):
     quant_gru_quant.bias_ih_l0.data.copy_(pytorch_gru.bias_ih_l0.data)
     quant_gru_quant.bias_hh_l0.data.copy_(pytorch_gru.bias_hh_l0.data)
 
-    # 设置位宽并校准
+    # 设置位宽并校准（使用新的 calibrating 标志方式）
     quant_gru_quant.set_all_bitwidth(bitwidth)
-    quant_gru_quant.calibrate(calibration_data)
+    quant_gru_quant.calibrating = True
+    with torch.no_grad():
+        quant_gru_quant(calibration_data)
+    quant_gru_quant.calibrating = False
     quant_gru_quant.finalize_calibration()
     quant_gru_quant.use_quantization = True
 
