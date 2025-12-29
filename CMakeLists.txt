@@ -50,6 +50,20 @@ set_target_properties(gru_quant_shared PROPERTIES
 )
 
 # ------------------------------
+# Windows 特定配置
+# ------------------------------
+if(WIN32)
+    set_target_properties(gru_quant_shared PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib  # Windows DLL 输出目录
+            WINDOWS_EXPORT_ALL_SYMBOLS ON  # 自动导出所有符号，生成 .lib 导入库
+    )
+    # MSVC 使用符合标准的预处理器，消除 CUDA/CUB 警告
+    if(MSVC)
+        add_compile_options(/Zc:preprocessor)
+    endif()
+endif()
+
+# ------------------------------
 # 可执行程序
 # ------------------------------
 add_executable(gru_example "${CMAKE_SOURCE_DIR}/example/gru.cc")

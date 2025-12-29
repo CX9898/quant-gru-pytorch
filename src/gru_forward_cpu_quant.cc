@@ -18,6 +18,14 @@
 #include <omp.h>
 #endif
 
+// MSVC OpenMP 只支持 2.0 版本，不完全支持 collapse 子句
+// 使用条件编译来区分 MSVC 和 GCC/Clang
+#if defined(_MSC_VER)
+#define OMP_PARALLEL_FOR_2D _Pragma("omp parallel for")
+#else
+#define OMP_PARALLEL_FOR_2D _Pragma("omp parallel for collapse(2)")
+#endif
+
 namespace cpu {
 
 // ============================================================================
@@ -234,7 +242,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, in
     const int hidden3 = hidden_size * 3;
     const int N = steps * batch_size;
 
-#pragma omp parallel for collapse(2)
+OMP_PARALLEL_FOR_2D
     for (int n = 0; n < N; n++) {
         for (int m = 0; m < hidden3; m++) {
             int64_t acc = 0;
@@ -257,7 +265,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
     const int hidden_size = data_->hidden_size;
     const int hidden3 = hidden_size * 3;
 
-#pragma omp parallel for collapse(2)
+OMP_PARALLEL_FOR_2D
     for (int n = 0; n < batch_size; n++) {
         for (int m = 0; m < hidden3; m++) {
             int64_t acc = 0;
@@ -287,7 +295,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::IterateInternal(const RT *R, const int
 
     ComputeRh(R, h);
 
-#pragma omp parallel for collapse(2)
+OMP_PARALLEL_FOR_2D
     for (int col = 0; col < batch_size; col++) {
         for (int row = 0; row < hidden_size; row++) {
             const int weight_idx = col * (hidden_size * 3) + row;

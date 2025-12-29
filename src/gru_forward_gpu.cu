@@ -424,9 +424,8 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     }
 
     // 计算并更新各中间结果的范围
-    const int step_size = batch_size * hidden_size;
-
 #ifdef USE_EMA
+    const int step_size = batch_size * hidden_size;
     computeMinMaxPerStepEMAHost(z_out, steps, step_size, quant_ranges.min_z_out_,
                                 quant_ranges.max_z_out_);
     computeMinMaxPerStepEMAHost(r_out, steps, step_size, quant_ranges.min_r_out_,

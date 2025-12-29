@@ -72,7 +72,7 @@ template <typename T>
 inline float computeMSE(const T *data1, const T *data2, size_t size) {
     double mse = 0.0;
 #pragma omp parallel for reduction(+ : mse)
-    for (size_t i = 0; i < size; ++i) {
+    for (int i = 0; i < size; ++i) {
         double diff = static_cast<double>(data1[i]) - static_cast<double>(data2[i]);
         mse += diff * diff;
     }
