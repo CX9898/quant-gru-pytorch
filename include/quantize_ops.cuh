@@ -1,303 +1,114 @@
 #pragma once
 
+// ============================================================================
+// quantize_ops.cuh - GPU 量化操作与 CUDA 常量内存声明
+// ============================================================================
+//
+// 本文件包含：
+//   1. CUDA 常量内存中的 LUT 声明（前向/反向）
+//   2. GPU 专用优化函数（使用 CUDA 内置函数）
+//   3. GRU 各门的激活函数封装
+//
+// 依赖关系：
+//   - quantize_lut_types.h: LUT 结构体定义
+//   - quantize_ops_helper.h: CPU/GPU 共用函数
+//
+// ============================================================================
+
 #include <cuda_runtime.h>
 
 #include <cstdint>
 
 #include "quantize_bitwidth_config.h"
-#include "quantize_lut_types.h"  // LUT 结构体和生成函数声明（纯 C++，CPU/GPU 共用）
+#include "quantize_lut_types.h"
 #include "quantize_ops_helper.h"
 
-// ==================== CUDA 常量内存声明 ====================
-// LUT 结构体定义在 quantize_lut_types.h 中
+// ============================================================================
+// CUDA 常量内存声明
+// ============================================================================
+// LUT 存储在常量内存中，供所有线程高速访问
 
 // 前向方向 LUT（单向 GRU 或双向 GRU 的前向）
-extern __constant__ SigmoidLUT d_sigmoid_z_lut;  // z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT d_sigmoid_r_lut;  // r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT d_tanh_lut;       // g 门的 Tanh LUT
+extern __constant__ SigmoidLUT d_sigmoid_z_lut;   ///< z 门 Sigmoid LUT
+extern __constant__ SigmoidLUT d_sigmoid_r_lut;   ///< r 门 Sigmoid LUT
+extern __constant__ SigmoidLUT d_tanh_lut;        ///< g 门 Tanh LUT
 
 // 反向方向 LUT（双向 GRU 的反向）
-extern __constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  // 反向 z 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  // 反向 r 门的 Sigmoid LUT
-extern __constant__ SigmoidLUT d_tanh_lut_reverse;       // 反向 g 门的 Tanh LUT
+extern __constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  ///< 反向 z 门 Sigmoid LUT
+extern __constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  ///< 反向 r 门 Sigmoid LUT
+extern __constant__ SigmoidLUT d_tanh_lut_reverse;       ///< 反向 g 门 Tanh LUT
+
+// ============================================================================
+// GPU 专用优化函数
+// ============================================================================
 
 namespace dev {
 
-template <typename T>
-__device__ __forceinline__ T clamp(int x);
-
-template <>
-__device__ __forceinline__ int8_t clamp(int x) {
-    return static_cast<int8_t>(max(-128, min(127, x)));
-}
-
-template <>
-__device__ __forceinline__ int16_t clamp(int x) {
-    return static_cast<int16_t>(max(-32768, min(32767, x)));
-}
-
-template <>
-__device__ __forceinline__ int32_t clamp(int x) {
-    // 使用 static_cast 确保字面量类型正确（-2147483648 会被识别为 long long）
-    constexpr int32_t min_val = static_cast<int32_t>(-2147483648LL);
-    constexpr int32_t max_val = 2147483647;
-    return max(min_val, min(max_val, x));
-}
-
-template <>
-__device__ __forceinline__ uint8_t clamp(int x) {
-    return static_cast<uint8_t>(max(0, min(255, x)));
-}
-
-// uint16_t 特化（用于 sigmoid 输出 [0, 65535]）
-template <>
-__device__ __forceinline__ uint16_t clamp(int x) {
-    return static_cast<uint16_t>(max(0, min(65535, x)));
-}
-
-// Round 函数
+/// @brief GPU 优化的四舍五入（使用 CUDA 内置函数）
 __device__ __forceinline__ int32_t round(float val) {
-    // 使用 CUDA 内置函数 __float2int_rn 进行四舍五入（round to nearest）
-    // 这比 roundf 更高效，因为它直接返回整数
-    return __float2int_rn(val);
+    return __float2int_rn(val);  // round to nearest
 }
 
-template <typename T>
-struct QuantLimits;
-
-template <>
-struct QuantLimits<int8_t> {
-    static __device__ __forceinline__ constexpr int32_t min() { return -128; }
-
-    static __device__ __forceinline__ constexpr int32_t max() { return 127; }
-};
-
-template <>
-struct QuantLimits<int16_t> {
-    static __device__ __forceinline__ constexpr int32_t min() { return -32768; }
-
-    static __device__ __forceinline__ constexpr int32_t max() { return 32767; }
-};
-
-// int32_t 特化
-template <>
-struct QuantLimits<int32_t> {
-    static __host__ __device__ constexpr int min() {
-        // 使用 LL 后缀确保类型正确，然后转换为 int32_t
-        return static_cast<int32_t>(-2147483648LL);
-    }
-
-    static __host__ __device__ constexpr int max() { return 2147483647; }
-};
-
-// uint8_t 特化（用于 sigmoid 输出）
-template <>
-struct QuantLimits<uint8_t> {
-    static __device__ __forceinline__ constexpr int32_t min() { return 0; }
-
-    static __device__ __forceinline__ constexpr int32_t max() { return 255; }
-};
-
-// uint16_t 特化（用于 sigmoid 输出）
-template <>
-struct QuantLimits<uint16_t> {
-    static __device__ __forceinline__ constexpr int32_t min() { return 0; }
-
-    static __device__ __forceinline__ constexpr int32_t max() { return 65535; }
-};
-
+/**
+ * @brief GPU 优化的量化函数
+ *
+ * 使用 __fdividef 进行快速除法优化。
+ *
+ * @tparam QuantT 量化类型
+ * @param src 浮点输入
+ * @param exp2_inv 缩放因子指数
+ * @param zp 零点
+ * @return 量化值
+ */
 template <typename QuantT>
 inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
-    // CUDA device code: 与CPU版本保持一致，使用位运算
-    // 量化公式：q = round(src / scale + zp)
-    float scale;
-    if (exp2_inv >= 0) {
-        // scale = 2^(-exp2) = 1 / (1 << exp2)
-        scale = __fdividef(1.0f, static_cast<float>(1 << exp2_inv));
-    } else {
-        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
-        scale = static_cast<float>(1 << (-exp2_inv));
-    }
-    // 正确的量化流程：先计算 src/scale + zp，然后四舍五入，最后截断到目标类型范围
+    float scale = (exp2_inv >= 0) ? __fdividef(1.0f, static_cast<float>(1 << exp2_inv))
+                                  : static_cast<float>(1 << (-exp2_inv));
     float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = round(shifted);  // 四舍五入
-    q = clamp<QuantT>(q);        // 截断到目标量化类型的范围
-
-    return static_cast<QuantT>(q);
+    int32_t q = round(shifted);
+    return clamp_to_type<QuantT>(q);
 }
 
-// sigmoid LUT 查找函数：输入为 int8_t（有符号），输出为 uint8_t（无符号，因为 sigmoid ∈ [0,1]）
-__device__ __forceinline__ uint8_t sigmoid_int8_lut(int8_t x, const uint8_t* lut) {
-    // x in [-128,127], lut 长度 = 256
-    const int idx = static_cast<uint8_t>(x + 128);  // 对齐 LUT 初始化
-    return lut[idx];
-}
-
-__device__ __forceinline__ int8_t tanh_int8_lut(int8_t x, const int8_t* lut) {
-    const int idx = static_cast<uint8_t>(x + 128);  // 对齐 LUT 初始化
-    return lut[static_cast<uint8_t>(idx)];
-}
-
-// ==================== 分段线性量化设备端函数 ====================
+// ============================================================================
+// GRU 门激活函数
+// ============================================================================
 //
-// 【原理】将非线性函数(Sigmoid/Tanh)在每个分段内用线性函数 y = b*x + c 近似
+// 以下函数是对 piecewise_linear() 的封装，自动选择正确的 LUT。
+// 核心计算函数（find_segment, piecewise_linear_raw, piecewise_linear）
+// 已统一定义在 quantize_ops_helper.h 中。
 //
-// 【浮点公式】 y_fp = b_fp * x_fp + c_fp
-//
-// 【量化公式】 q_y = (q_b * (q_x - zp_x)) >> n_BX_total + term_c_precomputed
-//
-// 【参数说明】
-//   q_x           : 量化输入（有符号整数 INT8/INT16）
-//   zp_x          : 输入零点
-//   q_b           : 量化斜率（有符号，对称量化）
-//   n_BX_total    : 融合移位 = shift_bits_b + shift_bits_x - shift_bits_y
-//   term_c_precomputed : 预计算常数项 = q_c >> (shift_bits_c - shift_bits_y)
-//                        其中 q_c 已包含输出零点烘焙: c_adjusted = c_fp + zp_y * scale_y
-//
-// 【计算步骤】
-//   Step 1: seg_id = find_segment(q_x)           // 段查找
-//   Step 2: x_offset = q_x - zp_x                // 去零点
-//   Step 3: bx = q_b * x_offset                  // 乘法（INT32）
-//   Step 4: term_bx = bx >> n_BX_total           // 移位（右移或左移）
-//   Step 5: q_y = term_bx + term_c_precomputed   // 相加
-//   Step 6: q_y = clamp(q_y, Q_MIN, Q_MAX)       // 饱和
-//
-// =========================================================================
 
 /**
- * @brief 段查找函数
- * @tparam SegParamsT 段参数类型
- * @param q_x 量化输入（int32_t，与 threshold 比较时自动类型提升）
- * @note 线性查找，对于 NUM_SEGMENTS=16 足够快
- */
-template <typename SegParamsT>
-__device__ __forceinline__ int find_segment(int32_t q_x, const SegParamsT* segments) {
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        if (q_x < segments[i].threshold) {
-            return i;
-        }
-    }
-    return NUM_SEGMENTS - 1;
-}
-
-// ==================== 分段线性量化核心函数 ====================
-//
-// 【设计理念】
-//   kernel 中用 int32_t 存储所有中间结果，clamp 只是逻辑上的区别。
-//   因此提供两层 API：
-//     1. 核心函数：返回 int32_t，不做 clamp（最大灵活性）
-//     2. 模板包装：按需 clamp 到目标类型（便捷使用）
-//
-// 【使用方式】
-//   // 方式1：核心函数 + 延迟 clamp（推荐用于 kernel 内部）
-//   int32_t y_raw = piecewise_linear_int16_raw(q_x, lut);
-//   // ... 后续计算 ...
-//   int32_t y_final = clamp_to<uint16_t>(y_raw);  // 存储前 clamp
-//
-//   // 方式2：模板包装，一步到位
-//   uint16_t y = piecewise_linear_int16<uint16_t>(q_x, lut);
-//
-// =========================================================================
-
-/**
- * @brief clamp 到目标类型范围（模板版本）
- * @tparam T 目标类型，支持 int8_t/uint8_t/int16_t/uint16_t
- */
-template <typename T>
-__device__ __forceinline__ int32_t clamp_to(int32_t val) {
-    return max(QuantLimits<T>::min(), min(QuantLimits<T>::max(), val));
-}
-
-/**
- * @brief 根据位宽枚举 clamp 到对应范围（运行时版本）
- * @param val 原始值
- * @param bw 位宽枚举
- * @return clamp 后的值
- */
-__device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw) {
-    switch (bw) {
-        case QuantBitWidth::INT8:
-            return max(-128, min(127, val));
-        case QuantBitWidth::INT16:
-            return max(-32768, min(32767, val));
-        case QuantBitWidth::UINT8:
-            return max(0, min(255, val));
-        case QuantBitWidth::UINT16:
-            return max(0, min(65535, val));
-        case QuantBitWidth::INT32:
-        default:
-            return val;  // 不 clamp
-    }
-}
-
-// ==================== 核心函数：返回 int32_t，不做 clamp ====================
-
-/**
- * @brief 分段线性近似核心（统一版本）
- * @param q_x 量化输入（int32_t，应已 clamp 到正确范围）
- * @param lut 分段线性查找表
- * @return int32_t 原始结果，未 clamp
+ * @brief Z 门 Sigmoid 激活
  *
- * 统一使用 int64 乘法确保精度，q_b 现在始终是 int32_t
+ * @param q_x 量化输入
+ * @param pre_bw 输入位宽
+ * @param out_bw 输出位宽
+ * @param is_reverse 是否为反向方向（双向 GRU）
+ * @return 量化输出
  */
-__device__ __forceinline__ int32_t piecewise_linear_raw(int32_t q_x, const SigmoidLUT& lut) {
-    int seg_id = find_segment(q_x, lut.segments);
-    const auto& seg = lut.segments[seg_id];
-
-    int32_t x_offset = q_x - static_cast<int32_t>(lut.zp_x);
-
-    // q_b 是 int32_t，使用 int64 避免溢出
-    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
-    int32_t term_bx = (seg.n_BX_total >= 0)
-                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
-                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
-
-    return term_bx + seg.term_c_precomputed;
-}
-
-// ==================== 包装函数：核心函数 + clamp_by_bitwidth ====================
-
-/**
- * @brief 通用分段线性近似（int32 输入，双位宽 clamp）
- */
-__device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const SigmoidLUT& lut,
-                                                    QuantBitWidth pre_bw, QuantBitWidth out_bw) {
-    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
-    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
-    return clamp_by_bitwidth(result, out_bw);
-}
-
-// ==================== 门专用函数：使用统一 LUT ====================
-
-/**
- * @brief Z 门 Sigmoid
- * @param q_x 量化输入（int32_t）
- * @param pre_bw 输入位宽（用于 clamp）
- * @param out_bw 输出位宽（用于 clamp）
- * @param is_reverse 是否为反向方向（双向 GRU 使用反向 LUT）
- */
-__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw, 
+__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
                                               bool is_reverse = false) {
-    return is_reverse ? piecewise_linear(q_x, d_sigmoid_z_lut_reverse, pre_bw, out_bw)
-                      : piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
+    return is_reverse ? ::piecewise_linear(q_x, d_sigmoid_z_lut_reverse, pre_bw, out_bw)
+                      : ::piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
 }
 
 /**
- * @brief R 门 Sigmoid
+ * @brief R 门 Sigmoid 激活
  */
 __device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
                                               bool is_reverse = false) {
-    return is_reverse ? piecewise_linear(q_x, d_sigmoid_r_lut_reverse, pre_bw, out_bw)
-                      : piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
+    return is_reverse ? ::piecewise_linear(q_x, d_sigmoid_r_lut_reverse, pre_bw, out_bw)
+                      : ::piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
 }
 
 /**
- * @brief G 门 Tanh
+ * @brief G 门 Tanh 激活
  */
 __device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
                                            bool is_reverse = false) {
-    return is_reverse ? piecewise_linear(q_x, d_tanh_lut_reverse, pre_bw, out_bw)
-                      : piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
+    return is_reverse ? ::piecewise_linear(q_x, d_tanh_lut_reverse, pre_bw, out_bw)
+                      : ::piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
 }
 
 }  // namespace dev

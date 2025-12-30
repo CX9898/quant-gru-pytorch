@@ -25,32 +25,14 @@
 namespace cpu {
 
 // ==================== CPU 专用辅助函数 ====================
-// rshift_round 直接使用 quantize_ops_helper.h 中的版本（带 __host__ 修饰）
+// 以下函数已统一定义在 quantize_ops_helper.h 中，使用 __host__ __device__ 标记：
+//   - rshift_round (int32_t / int64_t)
+//   - clamp_by_bitwidth
+//   - clamp_to_type<T>
+//   - find_segment
+//   - piecewise_linear_raw
+//   - piecewise_linear
 
-/// @brief 按位宽 clamp（CPU 版本，对应 quantize_ops.cuh 中的 dev::clamp_by_bitwidth）
-inline int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw) {
-    switch (bw) {
-        case QuantBitWidth::INT8:
-            return std::max(-128, std::min(127, val));
-        case QuantBitWidth::INT16:
-            return std::max(-32768, std::min(32767, val));
-        case QuantBitWidth::UINT8:
-            return std::max(0, std::min(255, val));
-        case QuantBitWidth::UINT16:
-            return std::max(0, std::min(65535, val));
-        case QuantBitWidth::INT32:
-        default:
-            return val;
-    }
-}
-
-/// @brief 模板 clamp 到指定类型范围
-template <typename T>
-inline T clamp(int32_t x) {
-    constexpr int32_t min_val = static_cast<int32_t>(std::numeric_limits<T>::min());
-    constexpr int32_t max_val = static_cast<int32_t>(std::numeric_limits<T>::max());
-    return static_cast<T>(std::max(min_val, std::min(max_val, x)));
-}
 
 // ==================== CPU 量化 rescale 参数 ====================
 
