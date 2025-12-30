@@ -104,13 +104,15 @@ gru = QuantGRU(
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
 # 方式二：直接设置统一位宽（8/16位，is_symmetric控制对称量化）
 # gru.set_all_bitwidth(bitwidth=8, is_symmetric=True, verbose=True)
-# gru.use_quantization = True  # 启用量化
 
-# 3. 使用校准数据进行量化校准
+# 3. 校准：设置 calibrating=True，然后用校准数据前向传播
+gru.calibrating = True
 for batch in calibration_loader:
-    gru.calibrate(batch.cuda())
+    gru(batch.cuda())  # forward 中同时收集校准数据
+gru.calibrating = False
 
-# 4. 推理（首次前向时会自动完成校准）
+# 4. 启用量化推理（首次 forward 会自动完成校准参数计算）
+gru.use_quantization = True
 output, h_n = gru(input_data)
 ```
 
@@ -128,8 +130,13 @@ gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
 
 # 校准
+gru.calibrating = True
 for batch in calibration_loader:
-    gru.calibrate(batch.cuda())
+    gru(batch.cuda())
+gru.calibrating = False
+
+# 启用量化
+gru.use_quantization = True
 
 # 训练循环（前向使用量化，反向使用浮点）
 optimizer = torch.optim.Adam(gru.parameters(), lr=0.001)
@@ -211,9 +218,11 @@ import torch
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
 
+gru.calibrating = True
 for batch in calibration_loader:
-    gru.calibrate(batch.cuda())
-gru.finalize_calibration()
+    gru(batch.cuda())
+gru.calibrating = False
+gru.finalize_calibration()  # 可选，导出时会自动调用
 
 # 2. 启用导出模式，指定 QDQ 格式
 gru.export_mode = True
@@ -244,7 +253,7 @@ gru.export_mode = False  # 恢复 CUDA 模式
 #### 注意事项
 
 1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
-2. **QDQ 格式需要先完成校准**：必须调用 `calibrate()` 和 `finalize_calibration()`
+2. **QDQ 格式需要先完成校准**：先设置 `calibrating=True` 并调用 `forward()`，再调用 `finalize_calibration()`
 3. **导出后恢复 CUDA 模式**：设置 `export_mode = False` 以恢复高性能推理
 4. **PyTorch 2.x 兼容**：使用 `dynamo=False` 参数以使用传统 TorchScript 导出
 
@@ -367,9 +376,10 @@ class QuantGRU(nn.Module):
     )
     
     # 重要属性（可在创建后设置）
+    gru.calibrating = True           # 校准模式（forward 时收集校准数据）
     gru.use_quantization = True      # 是否启用量化
-    gru.export_mode = True           # ONNX 导出模式
     gru.calibration_method = 'sqnr'  # 校准方法（默认）
+    gru.export_mode = True           # ONNX 导出模式
 ```
 
 ### 主要属性
@@ -377,22 +387,22 @@ class QuantGRU(nn.Module):
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `use_quantization` | bool | False | 是否启用量化推理 |
-| `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
-| `export_format` | str | 'float' | 导出格式：'float'（浮点）或 'qdq'（伪量化，需先校准） |
+| `calibrating` | bool | False | 校准模式（True 时 forward 会收集校准数据） |
 | `calibration_method` | str | 'sqnr' | 校准方法：'sqnr'（高精度）、'percentile'（百分位）或 'minmax'（快速） |
 | `percentile_value` | float | 99.99 | 百分位值（仅 `calibration_method='percentile'` 时使用） |
+| `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
+| `export_format` | str | 'float' | 导出格式：'float'（浮点）或 'qdq'（伪量化，需先校准） |
 
 ### 主要方法
 
 | 方法 | 说明 |
 |------|------|
-| `forward(input, hx=None)` | 前向传播（量化模式下会自动完成校准） |
-| `calibrate(data)` | 累积校准数据 |
-| `finalize_calibration(verbose=False)` | 手动完成校准（通常无需调用，forward 会自动处理） |
-| `reset_calibration()` | 重置校准状态 |
-| `load_bitwidth_config(path, verbose=False)` | 加载位宽配置 |
-| `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置统一位宽 |
-| `is_calibrated()` | 检查是否已校准 |
+| `forward(input, hx=None)` | 前向传播（`calibrating=True` 时同时收集校准数据） |
+| `finalize_calibration(verbose=False)` | 完成校准，计算量化参数（通常无需手动调用，`use_quantization=True` 时自动处理） |
+| `reset_calibration()` | 重置校准状态，清除所有累积的校准数据 |
+| `load_bitwidth_config(path, verbose=False)` | 从 JSON 文件加载位宽配置 |
+| `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置所有算子统一位宽 |
+| `is_calibrated()` | 检查是否已完成校准 |
 
 ## 🏗️ 项目结构
 
