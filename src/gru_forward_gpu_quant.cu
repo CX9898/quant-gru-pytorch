@@ -143,7 +143,7 @@ __global__ void quantizedGemmFused(const AT *__restrict__ A,  // [M, K] 权重�
         result += zp_out;
 
         // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
-        C[col * M + row] = dev::clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
+        C[col * M + row] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
     }
 }
 
@@ -179,7 +179,7 @@ __global__ void rescaleGemmI32(
     result += zp;
 
     // 根据位宽配置 clamp
-    data[idx] = dev::clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
+    data[idx] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
 }
 
 // ============================================================================
@@ -297,7 +297,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
                   rshift_round(br_val, rescale_params.n_br_div_Rh_add_br_[channel_idx]) +
                   rescale_params.zp_Rh_add_br_;
     // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
-    Rh_add_br_g = dev::clamp_by_bitwidth(Rh_add_br_g, rescale_params.bitwidth_config_.Rh_add_br_);
+    Rh_add_br_g = clamp_by_bitwidth(Rh_add_br_g, rescale_params.bitwidth_config_.Rh_add_br_);
 
     const int64_t r_diff = static_cast<int64_t>(r) - rescale_params.zp_r_out_;
     const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale_params.zp_Rh_add_br_;
@@ -307,7 +307,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
         static_cast<int32_t>(rshift_round(rRh_mul_i64, rescale_params.n_r_mul_Rh_add_br_div_rRh_)) +
         rescale_params.zp_rRh_;
     // 添加 clamp 到配置的位宽范围
-    rRh = dev::clamp_by_bitwidth(rRh, rescale_params.bitwidth_config_.rRh_);
+    rRh = clamp_by_bitwidth(rRh, rescale_params.bitwidth_config_.rRh_);
 
     const int32_t Wx_shifted =
         rshift_round(Wx_val - rescale_params.zp_Wx_, rescale_params.n_Wx_div_g_pre_);
@@ -359,9 +359,9 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
                 rescale_params.test.exp2_inv_g_pre_, rescale_params.test.exp2_inv_g_out_);
 
             // 手动计算期望的 tanh 输出
-            const int16_t g_pre_i16 = dev::clamp<int16_t>(g_pre_i32);
+            const int16_t g_pre_i16 = clamp_to_type<int16_t>(g_pre_i32);
             int seg_id =
-                dev::find_segment(static_cast<int32_t>(g_pre_i16), d_tanh_lut_int16.segments);
+                find_segment(static_cast<int32_t>(g_pre_i16), d_tanh_lut_int16.segments);
             printf("[G LUT] idx=%d seg_id=%d g_pre_i16=%d threshold[seg]=%d\n", debug_idx, seg_id,
                    g_pre_i16, d_tanh_lut_int16.segments[seg_id].threshold);
         }
@@ -385,7 +385,7 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
             rshift_round(old_contrib_mul_i64, rescale_params.n_z_mul_h_div_old_contrib_)) +
         rescale_params.zp_old_contrib_;
     // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
-    old_contrib = dev::clamp_by_bitwidth(old_contrib, rescale_params.bitwidth_config_.old_contrib_);
+    old_contrib = clamp_by_bitwidth(old_contrib, rescale_params.bitwidth_config_.old_contrib_);
 
     // 计算 (1-z) 在量化空间的差值表示
     // 【公式推导】
@@ -404,7 +404,7 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
             rshift_round(new_contrib_mul_i64, rescale_params.n_z_out_mul_g_div_new_contrib_)) +
         rescale_params.zp_new_contrib_;
     // 添加 clamp 到配置的位宽范围，防止混合精度时中间结果溢出
-    new_contrib = dev::clamp_by_bitwidth(new_contrib, rescale_params.bitwidth_config_.new_contrib_);
+    new_contrib = clamp_by_bitwidth(new_contrib, rescale_params.bitwidth_config_.new_contrib_);
 
     const int32_t h_i32 = rshift_round(old_contrib - rescale_params.zp_old_contrib_,
                                        rescale_params.n_old_contrib_div_h_) +
@@ -412,7 +412,7 @@ __device__ __forceinline__ QuantT computeH(const int32_t z, const int32_t g, con
                                        rescale_params.n_new_contrib_div_h_) +
                           rescale_params.zp_h_;
 
-    const QuantT h = dev::clamp<QuantT>(h_i32);
+    const QuantT h = clamp_to_type<QuantT>(h_i32);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {

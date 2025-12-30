@@ -1,5 +1,23 @@
 #pragma once
 
+// ============================================================================
+// quantize_ops_helper.h - GRU 量化核心定义与 CPU/GPU 共用函数
+// ============================================================================
+//
+// 本文件包含：
+//   1. GRU 量化参数结构体（Host 端与 Device 端）
+//   2. CPU/GPU 共用的内联函数（__host__ __device__）
+//   3. 量化/反量化基础操作函数
+//   4. LUT 辅助量化函数
+//   5. 调试与工具函数
+//
+// 设计原则：
+//   - 所有缩放因子均为 2 的负 n 次方：scale = 2^(-exp2_inv)
+//   - 支持对称量化（zp=0）和非对称量化（zp≠0）
+//   - CPU/GPU 共用函数使用 __host__ __device__ 标记，确保行为一致
+//
+// ============================================================================
+
 #include <cublas_v2.h>
 
 #include <algorithm>
@@ -10,145 +28,191 @@
 #include "dev_vector.h"
 #include "gru_quantization_ranges.h"
 #include "quantize_bitwidth_config.h"
+#include "quantize_lut_types.h"
 
 // #define DEBUG
 
-// GRU 量化参数结构体：存储GRU网络量化过程中所有定点化/反量化所需的参数
-// 核心约束：所有缩放因子均以「2的负n次方」形式存储，exp2_inv_xxx 表示缩放因子 scale =
-// 2^(-exp2_inv_xxx) zp_xxx 表示量化零点（zero point），用于浮点数与整数的映射：量化值 q = round(x /
-// scale + zp)，反量化 x = (q - zp) * scale
+// ============================================================================
+// Part 1: 量化参数结构体定义
+// ============================================================================
+
+/**
+ * @brief GRU 量化参数结构体（Host 端）
+ *
+ * 存储 GRU 网络量化过程中所有定点化/反量化所需的参数。
+ *
+ * 命名约定：
+ *   - exp2_inv_xxx: 缩放因子指数，scale = 2^(-exp2_inv_xxx)
+ *   - zp_xxx: 零点（zero point）
+ *
+ * 量化公式：q = round(x / scale + zp)
+ * 反量化公式：x = (q - zp) * scale
+ */
 struct GRUQuantitativeParameters {
-    // 为每个算子独立配置量化位宽
-    OperatorQuantConfig bitwidth_config_;
+    OperatorQuantConfig bitwidth_config_;  ///< 各算子的量化位宽配置
 
-    int hidden_;  // channel = hidden * 3
-    int8_t exp2_inv_x_;
-    int32_t zp_x_;
-    int8_t exp2_inv_h_;
-    int32_t zp_h_;
+    // -------------------- 基础参数 --------------------
+    int hidden_;         ///< 隐藏层大小，channel = hidden * 3
+    int8_t exp2_inv_x_;  ///< 输入 x 的缩放因子指数
+    int32_t zp_x_;       ///< 输入 x 的零点
+    int8_t exp2_inv_h_;  ///< 隐状态 h 的缩放因子指数
+    int32_t zp_h_;       ///< 隐状态 h 的零点
 
-    std::vector<int8_t> exp2_inv_W_;  // size = hidden * 3. per-channel
-                                      // (每个输出通道一个scale，即W的每一列一个scale)
-    std::vector<int8_t> exp2_inv_R_;  // size = hidden * 3. per-channel
-                                      // (每个输出通道一个scale，即R的每一列一个scale)
+    // -------------------- 权重参数（per-channel）--------------------
+    std::vector<int8_t> exp2_inv_W_;  ///< 输入权重 W 的缩放因子，size = hidden * 3
+    std::vector<int8_t> exp2_inv_R_;  ///< 循环权重 R 的缩放因子，size = hidden * 3
 
-    int8_t exp2_inv_Wx_;
-    int32_t zp_Wx_;
-    int8_t exp2_inv_Rh_;
-    int32_t zp_Rh_;
+    // -------------------- GEMM 输出参数 --------------------
+    int8_t exp2_inv_Wx_;   ///< W*x 的缩放因子指数
+    int32_t zp_Wx_;        ///< W*x 的零点
+    int8_t exp2_inv_Rh_;   ///< R*h 的缩放因子指数
+    int32_t zp_Rh_;        ///< R*h 的零点
 
-    std::vector<int8_t> exp2_inv_bx_;
-    std::vector<int8_t> exp2_inv_br_;
+    // -------------------- 偏置参数（per-channel）--------------------
+    std::vector<int8_t> exp2_inv_bx_;  ///< 输入偏置缩放因子
+    std::vector<int8_t> exp2_inv_br_;  ///< 循环偏置缩放因子
 
-    int8_t exp2_inv_z_pre_;
-    int32_t zp_z_pre_;
-    int8_t exp2_inv_r_pre_;
-    int32_t zp_r_pre_;
-    int8_t exp2_inv_g_pre_;
-    int32_t zp_g_pre_;
+    // -------------------- 门激活函数输入参数（pre-activation）--------------------
+    int8_t exp2_inv_z_pre_;   ///< z 门激活前的缩放因子
+    int32_t zp_z_pre_;        ///< z 门激活前的零点
+    int8_t exp2_inv_r_pre_;   ///< r 门激活前的缩放因子
+    int32_t zp_r_pre_;        ///< r 门激活前的零点
+    int8_t exp2_inv_g_pre_;   ///< g 门激活前的缩放因子
+    int32_t zp_g_pre_;        ///< g 门激活前的零点
 
-    int8_t exp2_inv_z_out_;
-    int32_t zp_z_out_;
-    int8_t exp2_inv_r_out_;
-    int32_t zp_r_out_;
-    int8_t exp2_inv_g_out_;
-    int32_t zp_g_out_;
+    // -------------------- 门激活函数输出参数（post-activation）--------------------
+    int8_t exp2_inv_z_out_;   ///< z 门激活后的缩放因子（sigmoid 输出）
+    int32_t zp_z_out_;        ///< z 门激活后的零点
+    int8_t exp2_inv_r_out_;   ///< r 门激活后的缩放因子（sigmoid 输出）
+    int32_t zp_r_out_;        ///< r 门激活后的零点
+    int8_t exp2_inv_g_out_;   ///< g 门激活后的缩放因子（tanh 输出）
+    int32_t zp_g_out_;        ///< g 门激活后的零点
 
-    int8_t exp2_inv_Rh_add_br_;
-    int32_t zp_Rh_add_br_;
-    int8_t exp2_inv_rRh_;
-    int32_t zp_rRh_;
+    // -------------------- 中间计算参数 --------------------
+    int8_t exp2_inv_Rh_add_br_;   ///< Rh + br 的缩放因子
+    int32_t zp_Rh_add_br_;        ///< Rh + br 的零点
+    int8_t exp2_inv_rRh_;         ///< r * Rh 的缩放因子
+    int32_t zp_rRh_;              ///< r * Rh 的零点
 
-    int8_t exp2_inv_new_contrib_;
-    int32_t zp_new_contrib_;
-    int8_t exp2_inv_old_contrib_;
-    int32_t zp_old_contrib_;
+    // -------------------- 隐状态更新参数 --------------------
+    int8_t exp2_inv_new_contrib_;   ///< (1-z)*g 的缩放因子
+    int32_t zp_new_contrib_;        ///< (1-z)*g 的零点
+    int8_t exp2_inv_old_contrib_;   ///< z*h 的缩放因子
+    int32_t zp_old_contrib_;        ///< z*h 的零点
 
-    // 是否为反向方向（双向 GRU 的反向方向使用反向 LUT）
-    bool is_reverse_ = false;
+    // -------------------- 双向 GRU 支持 --------------------
+    bool is_reverse_ = false;  ///< 是否为反向方向（使用反向 LUT）
 };
 
+/**
+ * @brief GRU 量化重缩放参数结构体（Device 端）
+ *
+ * 存储 GPU Kernel 运行时所需的预计算重缩放参数。
+ * 这些参数从 GRUQuantitativeParameters 计算得出，用于高效的定点运算。
+ *
+ * 命名约定：
+ *   - n_A_div_B: 表示 scale_A / scale_B ≈ 2^(-n)，即重缩放移位量
+ *   - exp2_inv_A_div_B: 同上，强调指数形式
+ *   - zp_xxx: 零点
+ */
 struct QuantGRUReScale {
-    int32_t zp_x_;
-    int32_t zp_h_;
+    // -------------------- 基础零点 --------------------
+    int32_t zp_x_;   ///< 输入 x 的零点
+    int32_t zp_h_;   ///< 隐状态 h 的零点
 
-    dev::vector<int8_t> n_W_mul_x_div_Wx_;  // size = hidden * 3
-    int32_t zp_Wx_;
-    dev::vector<int8_t> n_R_mul_h_div_Rh_;  // size = hidden * 3
-    int32_t zp_Rh_;
+    // -------------------- GEMM 重缩放参数 --------------------
+    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x 的 per-channel 重缩放移位
+    int32_t zp_Wx_;                          ///< W*x 的零点
+    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h 的 per-channel 重缩放移位
+    int32_t zp_Rh_;                          ///< R*h 的零点
 
-    // z门
-    int32_t zp_z_pre_;
-    int32_t zp_z_out_;
-    int8_t exp2_inv_Wx_div_z_pre_;
-    int8_t exp2_inv_Wx_div_z_;
-    int8_t exp2_inv_Rh_div_z_pre_;
-    int8_t exp2_inv_Rh_div_z_;
-    dev::vector<int8_t> n_bx_div_z_;
-    dev::vector<int8_t> n_br_div_z_;
+    // -------------------- Z 门参数 --------------------
+    int32_t zp_z_pre_;                ///< z 门激活前零点
+    int32_t zp_z_out_;                ///< z 门激活后零点
+    int8_t exp2_inv_Wx_div_z_pre_;    ///< Wx 到 z_pre 的重缩放
+    int8_t exp2_inv_Wx_div_z_;        ///< Wx 到 z 的重缩放
+    int8_t exp2_inv_Rh_div_z_pre_;    ///< Rh 到 z_pre 的重缩放
+    int8_t exp2_inv_Rh_div_z_;        ///< Rh 到 z 的重缩放
+    dev::vector<int8_t> n_bx_div_z_;  ///< bx 到 z 的 per-channel 重缩放
+    dev::vector<int8_t> n_br_div_z_;  ///< br 到 z 的 per-channel 重缩放
 
-    // r门
-    int32_t zp_r_pre_;
-    int32_t zp_r_out_;
-    int8_t exp2_inv_Wx_div_r_pre_;  // n5
-    int8_t exp2_inv_Rh_div_r_pre_;  // n6
-    dev::vector<int8_t> n_bx_div_r_;
-    dev::vector<int8_t> n_br_div_r_;
+    // -------------------- R 门参数 --------------------
+    int32_t zp_r_pre_;                ///< r 门激活前零点
+    int32_t zp_r_out_;                ///< r 门激活后零点
+    int8_t exp2_inv_Wx_div_r_pre_;    ///< Wx 到 r_pre 的重缩放
+    int8_t exp2_inv_Rh_div_r_pre_;    ///< Rh 到 r_pre 的重缩放
+    dev::vector<int8_t> n_bx_div_r_;  ///< bx 到 r 的 per-channel 重缩放
+    dev::vector<int8_t> n_br_div_r_;  ///< br 到 r 的 per-channel 重缩放
 
-    // New Gate
-    int32_t zp_g_pre_;
-    int32_t zp_g_out_;
-    int8_t n_Rh_div_Rh_add_br_;
-    int8_t exp2_inv_Rh_div_Rh_add_br_;
-    dev::vector<int8_t> n_br_div_Rh_add_br_;  // br 是 per-channel
-    int32_t zp_Rh_add_br_;
-    int8_t n_r_mul_Rh_add_br_div_rRh_;     // n9
-    int8_t exp2_inv_r_out_mul_h_div_rRh_;  // S9
-    int32_t zp_rRh_;
-    int8_t n_Wx_div_g_pre_;          // n10
-    int8_t exp2_inv_Wx_div_g_pre_;   // S10
-    int8_t n_rRh_div_g_pre_;         // n11
-    int8_t exp2_inv_rRh_div_g_pre_;  // S11
-    dev::vector<int8_t> exp2_inv_bx_div_g_pre_;
+    // -------------------- G 门（候选隐状态）参数 --------------------
+    int32_t zp_g_pre_;                           ///< g 门激活前零点
+    int32_t zp_g_out_;                           ///< g 门激活后零点
+    int8_t n_Rh_div_Rh_add_br_;                  ///< Rh 到 Rh+br 的重缩放
+    int8_t exp2_inv_Rh_div_Rh_add_br_;           ///< 同上（指数形式）
+    dev::vector<int8_t> n_br_div_Rh_add_br_;     ///< br 到 Rh+br 的 per-channel 重缩放
+    int32_t zp_Rh_add_br_;                       ///< Rh+br 的零点
+    int8_t n_r_mul_Rh_add_br_div_rRh_;           ///< r*(Rh+br) 的重缩放
+    int8_t exp2_inv_r_out_mul_h_div_rRh_;        ///< r_out*h 到 rRh 的重缩放
+    int32_t zp_rRh_;                             ///< r*Rh 的零点
+    int8_t n_Wx_div_g_pre_;                      ///< Wx 到 g_pre 的重缩放
+    int8_t exp2_inv_Wx_div_g_pre_;               ///< 同上（指数形式）
+    int8_t n_rRh_div_g_pre_;                     ///< rRh 到 g_pre 的重缩放
+    int8_t exp2_inv_rRh_div_g_pre_;              ///< 同上（指数形式）
+    dev::vector<int8_t> exp2_inv_bx_div_g_pre_;  ///< bx 到 g_pre 的 per-channel 重缩放
 
-    // h_new
-    // 1-z 直接复用 z_out 的 scale，将常数1对齐到 z_out 的量化空间
-    int32_t one_in_z_scale_;  // 1 对应的量化值: round(1.0 / scale_z_out) + zp_z_out
+    // -------------------- 隐状态更新参数 --------------------
+    int32_t one_in_z_scale_;  ///< 常数 1 在 z_out 量化空间的表示: round(1.0 / scale_z_out) + zp_z_out
 
-    int32_t zp_new_contrib_;
-    int8_t n_z_out_mul_g_div_new_contrib_;  // (1-z)*g 计算时的 rescale 参数
-    int32_t zp_old_contrib_;
-    int8_t n_z_mul_h_div_old_contrib_;         // n14
-    int8_t exp2_inv_z_mul_h_div_old_contrib_;  // S14
-    int8_t n_new_contrib_div_h_;               // n15
-    int8_t exp2_inv_new_contrib_div_h_;        // S15
-    int8_t n_old_contrib_div_h_;               // n16
-    int8_t exp2_inv_old_contrib_div_h_;        // S16
+    int32_t zp_new_contrib_;                   ///< (1-z)*g 的零点
+    int8_t n_z_out_mul_g_div_new_contrib_;     ///< (1-z)*g 的重缩放
+    int32_t zp_old_contrib_;                   ///< z*h 的零点
+    int8_t n_z_mul_h_div_old_contrib_;         ///< z*h 的重缩放
+    int8_t exp2_inv_z_mul_h_div_old_contrib_;  ///< 同上（指数形式）
+    int8_t n_new_contrib_div_h_;               ///< new_contrib 到 h 的重缩放
+    int8_t exp2_inv_new_contrib_div_h_;        ///< 同上（指数形式）
+    int8_t n_old_contrib_div_h_;               ///< old_contrib 到 h 的重缩放
+    int8_t exp2_inv_old_contrib_div_h_;        ///< 同上（指数形式）
 
-    // 位宽配置（从 GRUQuantitativeParameters 中复制，用于运行时选择正确的 kernel 实例）
-    OperatorQuantConfig bitwidth_config_;
+    // -------------------- 运行时配置 --------------------
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（运行时选择 kernel）
+    bool is_reverse_ = false;              ///< 是否为反向方向（双向 GRU）
 
-    // 是否为反向方向（双向 GRU 的反向方向使用反向 LUT）
-    bool is_reverse_ = false;
-
-    // 调试用：保存完整的量化参数
 #ifdef DEBUG
-    GRUQuantitativeParameters test;
-    // device 可访问的 bias scale (从 GRUQuantitativeParameters 拷贝)
-    dev::vector<int8_t> exp2_inv_bx_dev_;  // size = hidden * 3
-    dev::vector<int8_t> exp2_inv_br_dev_;  // size = hidden * 3
+    // -------------------- 调试参数 --------------------
+    GRUQuantitativeParameters test;            ///< 保存完整量化参数用于调试
+    dev::vector<int8_t> exp2_inv_bx_dev_;      ///< Device 端 bx 缩放因子
+    dev::vector<int8_t> exp2_inv_br_dev_;      ///< Device 端 br 缩放因子
 #endif
 };
 
-// 生成分段线性量化表（基于exp2_inv参数，支持模板类型）
-// x_min 和 x_max 从量化参数（exp2_inv_pre 和 zp_pre）自动计算：
-//   - scale = 2^(-exp2_inv_pre) = 1.0f / (1 << exp2_inv_pre)
-//   - x_min = (quant_min - zp_pre) * scale
-//   - x_max = (quant_max - zp_pre) * scale
-// 生成分段线性量化表（根据 GRUQuantitativeParameters 中的 bitwidth_config_ 决定各门的位宽）
-// 根据 params.is_reverse_ 自动选择初始化前向或反向 LUT
+/**
+ * @brief 生成分段线性量化查找表（LUT）
+ *
+ * 根据 GRUQuantitativeParameters 中的量化参数，为 Sigmoid（z/r 门）和 Tanh（g 门）
+ * 生成分段线性近似的查找表。
+ *
+ * @param params GRU 量化参数，包含各门的缩放因子和零点
+ *
+ * @note 自动根据 params.is_reverse_ 选择初始化前向或反向 LUT
+ * @note 输入范围从量化参数自动计算：x_min = (quant_min - zp) * scale
+ */
 void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params);
 
+// ============================================================================
+// Part 2: CPU/GPU 共用基础运算函数
+// ============================================================================
+
+/**
+ * @brief 带四舍五入的右移操作（int32_t 版本）
+ *
+ * 实现 round(x / 2^n) 的定点运算，支持正负移位。
+ *
+ * @param x 被移位的值
+ * @param n 移位量（正数右移，负数或零左移）
+ * @return 移位后的结果
+ *
+ * @note 对负数采用向零舍入（round toward zero）
+ */
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (n <= 0) return x << (-n);
 
@@ -156,12 +220,15 @@ __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (x >= 0) {
         return (x + offset) >> n;
     } else {
-        // 对负数要改成向零舍入：
-        return -((-x + offset) >> n);
+        return -((-x + offset) >> n);  // 向零舍入
     }
 }
 
-// int64_t 版本：用于处理 16 位量化时可能超出 int32 范围的乘积
+/**
+ * @brief 带四舍五入的右移操作（int64_t 版本）
+ *
+ * 用于处理 16 位量化时可能超出 int32 范围的乘积。
+ */
 __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     if (n <= 0) return x << (-n);
 
@@ -169,56 +236,208 @@ __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     if (x >= 0) {
         return (x + offset) >> n;
     } else {
-        // 对负数要改成向零舍入：
-        return -((-x + offset) >> n);
+        return -((-x + offset) >> n);  // 向零舍入
     }
 }
 
-// int64_t 版本：用于 16 位量化，避免溢出
-template <typename T>
-void computeWeightSumMulzp(
-    const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
-    int64_t *weight_sum,  // [out_dim] 输出数组（int64_t）
-    int32_t zp,
-    const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,                   // 输出通道数 (M)
-    int in_dim,                    // 输入通道数 (K)
-    cudaStream_t stream = 0);
+// ============================================================================
+// Part 3: CPU/GPU 共用饱和截断函数
+// ============================================================================
 
-// int32_t 版本：用于 8 位量化，不会溢出
+/**
+ * @brief 将 int32_t 饱和截断到指定类型范围（模板版本）
+ *
+ * 编译时确定目标类型，零运行时开销。
+ *
+ * @tparam T 目标类型（int8_t, int16_t, int32_t, uint8_t, uint16_t）
+ * @param x 输入值
+ * @return 截断后的值
+ */
 template <typename T>
-void computeWeightSumMulzp(
-    const T *W_q,         // [out_dim, in_dim] 权重量化矩阵
-    int32_t *weight_sum,  // [out_dim] 输出数组（int32_t）
-    int32_t zp,
-    const int8_t *__restrict__ n,  // n为: scale_W * scale_x / scale_Wx ≈ 2^-n. per-channel
-    int out_dim,                   // 输出通道数 (M)
-    int in_dim,                    // 输入通道数 (K)
-    cudaStream_t stream = 0);
+__host__ __device__ __forceinline__ T clamp_to_type(int32_t x);
 
+template <>
+__host__ __device__ __forceinline__ int8_t clamp_to_type<int8_t>(int32_t x) {
+    return static_cast<int8_t>((x < -128) ? -128 : ((x > 127) ? 127 : x));
+}
+
+template <>
+__host__ __device__ __forceinline__ int16_t clamp_to_type<int16_t>(int32_t x) {
+    return static_cast<int16_t>((x < -32768) ? -32768 : ((x > 32767) ? 32767 : x));
+}
+
+template <>
+__host__ __device__ __forceinline__ int32_t clamp_to_type<int32_t>(int32_t x) {
+    return x;  // int32_t 无需截断
+}
+
+template <>
+__host__ __device__ __forceinline__ uint8_t clamp_to_type<uint8_t>(int32_t x) {
+    return static_cast<uint8_t>((x < 0) ? 0 : ((x > 255) ? 255 : x));
+}
+
+template <>
+__host__ __device__ __forceinline__ uint16_t clamp_to_type<uint16_t>(int32_t x) {
+    return static_cast<uint16_t>((x < 0) ? 0 : ((x > 65535) ? 65535 : x));
+}
+
+/**
+ * @brief 按位宽枚举饱和截断（运行时分派版本）
+ *
+ * 适用于位宽在运行时确定的场景。
+ *
+ * @param val 输入值
+ * @param bw 目标位宽枚举
+ * @return 截断后的值（始终返回 int32_t，但值已在目标范围内）
+ */
+__host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw) {
+    switch (bw) {
+        case QuantBitWidth::INT8:
+            return (val < -128) ? -128 : ((val > 127) ? 127 : val);
+        case QuantBitWidth::INT16:
+            return (val < -32768) ? -32768 : ((val > 32767) ? 32767 : val);
+        case QuantBitWidth::UINT8:
+            return (val < 0) ? 0 : ((val > 255) ? 255 : val);
+        case QuantBitWidth::UINT16:
+            return (val < 0) ? 0 : ((val > 65535) ? 65535 : val);
+        case QuantBitWidth::INT32:
+        default:
+            return val;
+    }
+}
+
+// ============================================================================
+// Part 4: 分段线性近似函数（CPU/GPU 共用）
+// ============================================================================
+//
+// 【原理】将非线性函数（Sigmoid/Tanh）在每个分段内用线性函数 y = b*x + c 近似
+//
+// 【量化公式】q_y = (q_b * (q_x - zp_x)) >> n_BX_total + term_c_precomputed
+//
+// 【计算流程】
+//   1. find_segment: 根据输入找到所属分段
+//   2. x_offset = q_x - zp_x: 去零点
+//   3. bx = q_b * x_offset: 乘以斜率（INT64 避免溢出）
+//   4. term_bx = bx >> n_BX_total: 重缩放
+//   5. q_y = term_bx + term_c_precomputed: 加上预计算的截距项
+//
+// ============================================================================
+
+/**
+ * @brief 查找输入所属的分段索引
+ *
+ * @param q_x 量化输入值
+ * @param segments 分段参数数组（NUM_SEGMENTS 个元素）
+ * @return 分段索引 [0, NUM_SEGMENTS-1]
+ */
+__host__ __device__ __forceinline__ int find_segment(int32_t q_x, const SegmentParams *segments) {
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        if (q_x < segments[i].threshold) {
+            return i;
+        }
+    }
+    return NUM_SEGMENTS - 1;
+}
+
+/**
+ * @brief 分段线性近似核心函数（不做饱和截断）
+ *
+ * @param q_x 量化输入值
+ * @param lut 查找表（包含分段参数和量化参数）
+ * @return 近似结果（int32_t，未截断）
+ */
+__host__ __device__ __forceinline__ int32_t piecewise_linear_raw(int32_t q_x,
+                                                                   const SigmoidLUT &lut) {
+    int seg_id = find_segment(q_x, lut.segments);
+    const SegmentParams &seg = lut.segments[seg_id];
+
+    int32_t x_offset = q_x - lut.zp_x;
+    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
+
+    int32_t term_bx = (seg.n_BX_total >= 0)
+                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
+                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
+
+    return term_bx + seg.term_c_precomputed;
+}
+
+/**
+ * @brief 分段线性近似函数（带输入/输出饱和截断）
+ *
+ * @param q_x 量化输入值
+ * @param lut 查找表
+ * @param pre_bw 输入位宽（用于输入截断）
+ * @param out_bw 输出位宽（用于输出截断）
+ * @return 近似结果（已截断到输出范围）
+ */
+__host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const SigmoidLUT &lut,
+                                                              QuantBitWidth pre_bw,
+                                                              QuantBitWidth out_bw) {
+    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
+    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
+    return clamp_by_bitwidth(result, out_bw);
+}
+
+// ============================================================================
+// Part 5: GPU Kernel 函数声明
+// ============================================================================
+
+/**
+ * @brief 计算权重矩阵列和乘以零点（用于 GEMM 零点补偿）
+ *
+ * weight_sum[j] = sum_i(W_q[i,j]) * zp >> n[j]
+ *
+ * @tparam T 权重类型（int8_t/int16_t）
+ * @param W_q 量化权重矩阵 [out_dim, in_dim]
+ * @param weight_sum 输出数组 [out_dim]
+ * @param zp 输入零点
+ * @param n per-channel 重缩放移位
+ * @param out_dim 输出维度 (M)
+ * @param in_dim 输入维度 (K)
+ * @param stream CUDA 流
+ */
+template <typename T>
+void computeWeightSumMulzp(const T *W_q, int64_t *weight_sum, int32_t zp,
+                           const int8_t *__restrict__ n, int out_dim, int in_dim,
+                           cudaStream_t stream = 0);
+
+/// @brief int32_t 输出版本（适用于 8 位量化，不会溢出）
+template <typename T>
+void computeWeightSumMulzp(const T *W_q, int32_t *weight_sum, int32_t zp,
+                           const int8_t *__restrict__ n, int out_dim, int in_dim,
+                           cudaStream_t stream = 0);
+
+/**
+ * @brief 应用零点补偿到 2D GEMM 输出
+ *
+ * Y[i,j] -= weight_sum[i] * x_zp[j]
+ */
 void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, const int32_t *x_zp,
                                   int out_dim, int batch_size, cudaStream_t stream = 0);
 
+// ============================================================================
+// Part 6: 量化参数校准与量化/反量化函数
+// ============================================================================
+
 /**
- * @brief
- * 模板化量化参数计算函数：支持任意量化类型（int8/int6等）和输入范围类型，对齐2的负n次方缩放因子
- * @tparam T 输入范围数据类型（如float、double，需支持算术运算和std::log2）
- * @tparam QuantT 量化目标类型（如int8_t、int6_t，必须是有符号整数类型）
- * @param[in] orig_min 原始数据最小值（输入，类型T）
- * @param[in] orig_max 原始数据最大值（输入，类型T）
- * @param[in] is_symmetric 是否使用对称量化（true=对称，false=非对称）
- * @param[out] exp2_inv 缩放因子指数（scale = 2^(-exp2_inv)），非负int32_t
- * @param[out] aligned_min 对齐后的最小值（输出，类型T）
- * @param[out] aligned_max 对齐后的最大值（输出，类型T）
- * @param[out] zp 量化零点（zero point），类型与QuantT一致，对称量化时固定为0
- * @note 1.
- * 模板约束：QuantT必须是有符号整数类型（如int8_t、int6_t），T必须是浮点类型（float/double）；
- *       2. 缩放因子严格为2的负n次方（scale ∈ (0, 1]），exp2_inv ≥ 0；
- *       3. 对称量化：zp=0，对齐范围尽可能关于原点对称，覆盖原始min/max；
- *       4. 非对称量化：zp为QuantT类型整数，对齐范围覆盖原始min/max，满足 (aligned_max -
- * aligned_min) = scale × (quant_max - quant_min)；
- *       5. 自动适配量化范围：通过std::numeric_limits<QuantT>获取quant_min/quant_max，无需手动配置；
- *       6. 异常处理：原始min ≥ orig_max、QuantT非有符号整数、T非浮点类型时抛出异常。
+ * @brief 量化参数校准函数
+ *
+ * 根据数据范围计算量化参数，缩放因子对齐到 2 的负 n 次方。
+ *
+ * @tparam T 浮点类型（float/double）
+ * @tparam QuantT 量化类型（int8_t/int16_t 等）
+ *
+ * @param[in] orig_min 原始数据最小值
+ * @param[in] orig_max 原始数据最大值
+ * @param[in] is_symmetric 是否对称量化
+ * @param[out] aligned_min 对齐后的最小值
+ * @param[out] aligned_max 对齐后的最大值
+ * @param[out] exp2_inv 缩放因子指数，scale = 2^(-exp2_inv)
+ * @param[out] zp 零点（对称量化时为 0）
+ * @param[in] name 调试用名称（可选）
+ *
+ * @note 对称量化：zp=0，范围关于原点对称
+ * @note 非对称量化：zp 可为任意整数，范围覆盖原始 min/max
  */
 template <typename T, typename QuantT>
 inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool is_symmetric,
@@ -285,19 +504,21 @@ inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool 
 #endif
 }
 
+/**
+ * @brief 单值量化（Host 端）
+ *
+ * q = clamp(round(src / scale + zp), qmin, qmax)
+ *
+ * @tparam QuantT 量化类型
+ * @param src 浮点输入
+ * @param exp2_inv 缩放因子指数
+ * @param zp 零点
+ * @return 量化值
+ */
 template <typename QuantT>
 inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
-    // Host code: 与GPU版本保持一致，使用位运算
-    // 量化公式：q = round(src / scale + zp)
-    float scale;
-    if (exp2_inv >= 0) {
-        // scale = 2^(-exp2) = 1 / (1 << exp2)
-        scale = 1.0f / static_cast<float>(1 << exp2_inv);
-    } else {
-        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
-        scale = static_cast<float>(1 << (-exp2_inv));
-    }
-    // 正确的量化流程：先计算 src/scale + zp，然后四舍五入
+    float scale = (exp2_inv >= 0) ? (1.0f / static_cast<float>(1 << exp2_inv))
+                                  : static_cast<float>(1 << (-exp2_inv));
     float shifted = src / scale + static_cast<float>(zp);
     int32_t q = static_cast<int32_t>(std::round(shifted));
 
@@ -308,20 +529,22 @@ inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
     return static_cast<QuantT>(q);
 }
 
+/**
+ * @brief 单值反量化（CPU/GPU 共用）
+ *
+ * x = (q - zp) * scale
+ */
 template <typename QuantT>
 inline __host__ __device__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
-    // Host code: 与GPU版本保持一致
     int32_t v = static_cast<int32_t>(q) - zp;
-
     if (exp2_inv >= 0) {
-        // scale = 2^(-exp2) = 1 / (1 << exp2)
         return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);
     } else {
-        // scale = 2^(-(-x)) = 2^x = (1 << -exp2_inv)
         return static_cast<float>(v) * static_cast<float>(1 << (-exp2_inv));
     }
 }
 
+/// @brief 批量量化（Host 端，OpenMP 并行）
 template <typename T, typename QuantT>
 inline void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv,
                            int32_t zp) {
@@ -331,237 +554,225 @@ inline void quantification(const T *data, QuantT *quant_data, size_t size, int8_
     }
 }
 
+/// @brief Per-channel 批量量化（Host 端，用于权重矩阵）
 template <typename T, typename QuantT>
 inline void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
                                      size_t channel_size, const std::vector<int8_t> &exp2_invs) {
 #pragma omp parallel for
     for (int i = 0; i < channel_size; ++i) {
-        // i: [0, H*3)
         const int8_t exp2_inv = exp2_invs[i];
         for (int j = 0; j < input_size; ++j) {
-            // j: [0, input_size)
             const int idx = j * channel_size + i;
-            // 对称量化到int8：clip到[-128,127]
-            quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);
+            quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);  // 对称量化
         }
     }
 }
 
+// ============================================================================
+// Part 7: GPU 量化/反量化 Kernel 声明
+// ============================================================================
+
 namespace dev {
 
+/// @brief GPU 批量量化
 template <typename T, typename QuantT>
 void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv, int32_t zp);
 
+/// @brief GPU 批量反量化
 template <typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp);
 
-// v 统一使用 int32_t 存储，内部各部分使用不同量化参数
+/// @brief GPU 反量化 V 向量（各部分使用不同量化参数）
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                        int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
                        int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
                        int32_t zp_Rh_add_br);
 
+/// @brief GPU Per-channel 量化
 template <typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
                               size_t channel_size, const dev::vector<int8_t> &exp2_invs);
 
+/// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
                                 size_t channel_size, const dev::vector<int8_t> &exp2_invs);
+
 }  // namespace dev
+
+// ============================================================================
+// Part 8: 工具函数
+// ============================================================================
 
 #include <limits>
 #include <random>
 
-// 全局随机数生成器（使用固定种子确保可复现）
+/// @brief 获取全局随机数生成器（固定种子，确保可复现）
 inline std::mt19937 &getGlobalRng() {
-    static std::mt19937 gen(42);  // 固定种子
+    static std::mt19937 gen(42);
     return gen;
 }
 
-// 设置全局随机种子
+/// @brief 设置全局随机种子
 inline void setGlobalRandomSeed(unsigned int seed) { getGlobalRng().seed(seed); }
 
 /**
- * @brief Fill a vector with random values from a normal distribution, and clamp to range.
+ * @brief 用截断正态分布填充向量
  *
- * @param data [in/out]     The vector to fill with random values.
- * @param min_value [in]    Minimum allowed value.
- * @param max_value [in]    Maximum allowed value.
+ * @param data 待填充向量
+ * @param min_value 最小值
+ * @param max_value 最大值
+ *
+ * @note 使用 3σ 覆盖范围，超出范围的值会重新采样
  */
 inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min_value,
                                              float max_value) {
     float mean = (min_value + max_value) / 2.0f;
-    float stddev = (max_value - min_value) / 6.0f;  // 3σ 刚好覆盖范围
+    float stddev = (max_value - min_value) / 6.0f;
 
     std::mt19937 &gen = getGlobalRng();
     std::normal_distribution<float> dist(mean, stddev);
 
     for (auto &value : data) {
         float sample;
-        // 截断采样：直到落入范围
         do {
             sample = dist(gen);
         } while (sample < min_value || sample > max_value);
-
         value = sample;
     }
 }
 
-// 辅助函数：量化浮点数为 INT16（对称量化）
+// ============================================================================
+// Part 9: LUT 系数量化辅助函数
+// ============================================================================
+// 这些函数用于 LUT 生成时量化分段线性近似的系数（斜率、截距等）
+
+// -------------------- 系数量化（对称量化，zp=0）--------------------
+
+/// @brief 量化系数为 INT8
+inline int8_t quantize_coefficient_int8(float val_fp, int8_t shift_bits) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
+    return static_cast<int8_t>(std::max(-128, std::min(127, q)));
+}
+
+/// @brief 量化系数为 INT16
 inline int16_t quantize_coefficient_int16(float val_fp, int8_t shift_bits) {
     float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
     int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
-    q = std::max(-32768, std::min(32767, q));
-    return static_cast<int16_t>(q);
+    return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
 }
 
-// 辅助函数：量化浮点数为 INT32（对称量化，用于 LUT 系数避免溢出）
+/// @brief 量化系数为 INT32（用于 LUT 斜率 q_b，避免截断误差）
 inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
     float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
     int64_t q = static_cast<int64_t>(std::round(val_fp / scale));
-    // INT32 范围：[-2147483648, 2147483647]
     q = std::max(static_cast<int64_t>(INT32_MIN), std::min(static_cast<int64_t>(INT32_MAX), q));
     return static_cast<int32_t>(q);
 }
 
-// 辅助函数：量化输入为 UINT16（非对称量化）
-inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
-    q = std::max(0, std::min(65535, q));
-    return static_cast<uint16_t>(q);
-}
+// -------------------- 输入量化（非对称量化）--------------------
 
-// 辅助函数：量化输入为 INT16（非对称量化，有符号版本）
-inline int16_t quantize_input_int16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
-    q = std::max(-32768, std::min(32767, q));
-    return static_cast<int16_t>(q);
-}
-
-// 辅助函数：确定 shift_bits（根据最大值）
-// 由于 LUT 的 q_b 现在使用 INT32 存储，可以使用 ceil 获得更高精度
-inline int8_t determine_shift_bits_int16(float max_val) {
-    const float max_q = 32767.0f;
-    if (max_val < 1e-9f) return 0;
-    float scale = max_val / max_q;
-    // 使用 floor 来最小化 n_BX_total，提高精度
-    // q_b 使用 INT32 存储，允许超过 32767
-    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
-    return std::max(static_cast<int8_t>(0), shift_bits);
-}
-
-// 辅助函数：量化浮点数为 INT8（对称量化）
-inline int8_t quantize_coefficient_int8(float val_fp, int8_t shift_bits) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
-    q = std::max(-128, std::min(127, q));
-    return static_cast<int8_t>(q);
-}
-
-// 辅助函数：量化输入为 UINT8（非对称量化）
+/// @brief 量化输入为 UINT8
 inline uint8_t quantize_input_uint8(float val_fp, int8_t shift_bits, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
     int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
-    q = std::max(0, std::min(255, q));
-    return static_cast<uint8_t>(q);
+    return static_cast<uint8_t>(std::max(0, std::min(255, q)));
 }
 
-// 辅助函数：量化输入为 INT8（非对称量化，有符号版本）
+/// @brief 量化输入为 INT8
 inline int8_t quantize_input_int8(float val_fp, int8_t shift_bits, int32_t zp) {
     float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
     int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
-    q = std::max(-128, std::min(127, q));
-    return static_cast<int8_t>(q);
+    return static_cast<int8_t>(std::max(-128, std::min(127, q)));
 }
 
-// 辅助函数：确定 shift_bits（根据最大值，INT8 版本）
-// 使用 floor 而非 ceil，确保量化后的值不会超出 INT8 范围
+/// @brief 量化输入为 UINT16
+inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int32_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    return static_cast<uint16_t>(std::max(0, std::min(65535, q)));
+}
+
+/// @brief 量化输入为 INT16
+inline int16_t quantize_input_int16(float val_fp, int8_t shift_bits, int32_t zp) {
+    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
+    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
+}
+
+// -------------------- Shift bits 自动确定 --------------------
+
+/// @brief 根据最大值确定 INT8 的 shift_bits
 inline int8_t determine_shift_bits_int8(float max_val) {
-    const float max_q = 127.0f;
     if (max_val < 1e-9f) return 0;
-    float scale = max_val / max_q;
-    // 使用 floor 确保 max_val / scale <= max_q（即量化值不会溢出）
+    float scale = max_val / 127.0f;
     int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
-// 辅助函数：确定 shift_bits（根据最大值，INT32 版本）
-// 使用 floor 确保量化后不会溢出 INT32 范围
-// 对于 tanh 斜率 1.0: floor(31) = 31, 量化后 q_b = round(1.0 * 2^31) = 2^31
-//   但由于 rounding，实际可能得到 2147483648 > INT32_MAX
-// 因此使用稍微保守的目标值
+/// @brief 根据最大值确定 INT16 的 shift_bits
+inline int8_t determine_shift_bits_int16(float max_val) {
+    if (max_val < 1e-9f) return 0;
+    float scale = max_val / 32767.0f;
+    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
+    return std::max(static_cast<int8_t>(0), shift_bits);
+}
+
+/// @brief 根据最大值确定 INT32 的 shift_bits（留出 rounding 余量）
 inline int8_t determine_shift_bits_int32(float max_val) {
-    const float max_q = 2147483520.0f;  // 略小于 INT32_MAX，留出 rounding 余量
     if (max_val < 1e-9f) return 0;
-    float scale = max_val / max_q;
+    float scale = max_val / 2147483520.0f;  // 略小于 INT32_MAX
     int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
 
-// 统一的 LUT 生成函数声明（在 quantize_ops.cuh 中）
+// ============================================================================
+// Part 10: 调试函数
+// ============================================================================
 
+/// @brief 打印 GRU 量化参数（调试用）
 inline void printParms(const GRUQuantitativeParameters &quant_parms) {
-    printf("GRUQuantitativeParameters (量化参数):\n");
-    printf("  hidden_ = %d\n", quant_parms.hidden_);
-    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", static_cast<int>(quant_parms.exp2_inv_x_),
-           quant_parms.zp_x_);
-    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", static_cast<int>(quant_parms.exp2_inv_h_),
-           quant_parms.zp_h_);
+    printf("GRUQuantitativeParameters:\n");
+    printf("  hidden = %d\n", quant_parms.hidden_);
 
-    printf("  exp2_inv_W_ (size %zu): ", quant_parms.exp2_inv_W_.size());
-    for (size_t i = 0; i < quant_parms.exp2_inv_W_.size() && i < 5; ++i) {
-        printf("%d ", static_cast<int>(quant_parms.exp2_inv_W_[i]));
-    }
-    if (quant_parms.exp2_inv_W_.size() > 8) printf("...");
-    printf("\n");
+    // 输入/隐状态
+    printf("  x:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_x_, quant_parms.zp_x_);
+    printf("  h:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_h_, quant_parms.zp_h_);
 
-    printf("  exp2_inv_R_ (size %zu): ", quant_parms.exp2_inv_R_.size());
-    for (size_t i = 0; i < quant_parms.exp2_inv_R_.size() && i < 5; ++i) {
-        printf("%d ", static_cast<int>(quant_parms.exp2_inv_R_[i]));
-    }
-    if (quant_parms.exp2_inv_R_.size() > 8) printf("...");
-    printf("\n");
+    // Per-channel 权重
+    auto print_vec = [](const char *name, const std::vector<int8_t> &vec) {
+        printf("  %s (size %zu): ", name, vec.size());
+        for (size_t i = 0; i < vec.size() && i < 5; ++i) printf("%d ", vec[i]);
+        if (vec.size() > 5) printf("...");
+        printf("\n");
+    };
+    print_vec("W ", quant_parms.exp2_inv_W_);
+    print_vec("R ", quant_parms.exp2_inv_R_);
+    print_vec("bx", quant_parms.exp2_inv_bx_);
+    print_vec("br", quant_parms.exp2_inv_br_);
 
-    printf("  exp2_inv_bx_ (size %zu): ", quant_parms.exp2_inv_bx_.size());
-    for (size_t i = 0; i < quant_parms.exp2_inv_bx_.size() && i < 5; ++i) {
-        printf("%d ", static_cast<int>(quant_parms.exp2_inv_bx_[i]));
-    }
-    if (quant_parms.exp2_inv_bx_.size() > 8) printf("...");
-    printf("\n");
+    // GEMM 输出
+    printf("  Wx: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Wx_, quant_parms.zp_Wx_);
+    printf("  Rh: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Rh_, quant_parms.zp_Rh_);
 
-    printf("  exp2_inv_br_ (size %zu): ", quant_parms.exp2_inv_br_.size());
-    for (size_t i = 0; i < quant_parms.exp2_inv_br_.size() && i < 5; ++i) {
-        printf("%d ", static_cast<int>(quant_parms.exp2_inv_br_[i]));
-    }
-    if (quant_parms.exp2_inv_br_.size() > 8) printf("...");
-    printf("\n");
+    // 门参数
+    printf("  z_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_);
+    printf("  z_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_);
+    printf("  r_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_);
+    printf("  r_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_);
+    printf("  g_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_);
+    printf("  g_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
 
-    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Wx_),
-           quant_parms.zp_Wx_);
-    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", static_cast<int>(quant_parms.exp2_inv_Rh_),
-           quant_parms.zp_Rh_);
-    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n",
-           static_cast<int>(quant_parms.exp2_inv_z_pre_), quant_parms.zp_z_pre_);
-    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_r_pre_), quant_parms.zp_r_pre_);
-    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_g_pre_), quant_parms.zp_g_pre_);
-    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_z_out_), quant_parms.zp_z_out_);
-    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_r_out_), quant_parms.zp_r_out_);
-    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_g_out_), quant_parms.zp_g_out_);
-    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_Rh_add_br_), quant_parms.zp_Rh_add_br_);
-    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", static_cast<int>(quant_parms.exp2_inv_rRh_),
-           quant_parms.zp_rRh_);
-    printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_new_contrib_), quant_parms.zp_new_contrib_);
-    printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
-           static_cast<int>(quant_parms.exp2_inv_old_contrib_), quant_parms.zp_old_contrib_);
+    // 中间计算
+    printf("  Rh+br:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Rh_add_br_,
+           quant_parms.zp_Rh_add_br_);
+    printf("  r*Rh:   exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_);
+
+    // 隐状态更新
+    printf("  new_contrib: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_new_contrib_,
+           quant_parms.zp_new_contrib_);
+    printf("  old_contrib: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_old_contrib_,
+           quant_parms.zp_old_contrib_);
 }

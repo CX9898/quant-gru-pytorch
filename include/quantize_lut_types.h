@@ -1,42 +1,65 @@
 #pragma once
 
+// ============================================================================
+// quantize_lut_types.h - 分段线性查找表（LUT）类型定义
+// ============================================================================
+//
+// 本文件定义分段线性近似所需的数据结构和生成函数声明。
+// 用于将 Sigmoid/Tanh 等非线性函数在每个分段内用 y = b*x + c 近似。
+//
+// 设计特点：
+//   - 纯 C++ 代码，无 CUDA 依赖
+//   - CPU/GPU 代码共用同一套结构体
+//   - GPU 常量内存声明在 quantize_ops.cuh 中
+//
+// ============================================================================
+
 #include <cstdint>
 
 #include "quantize_bitwidth_config.h"
 
-// ============================================================================
-// quantize_lut_types.h - 分段线性 LUT 类型定义（纯 C++，无 CUDA 依赖）
-// ============================================================================
-//
-// 此文件定义 LUT 结构体和生成函数声明，供 CPU 和 GPU 代码共用。
-// GPU 特定的常量内存声明在 quantize_ops.cuh 中。
-//
-// ============================================================================
-
+/// @brief 分段数量（固定为 16 段）
 #ifndef NUM_SEGMENTS
 #define NUM_SEGMENTS 16
 #endif
 
-// ==================== 统一的 LUT 结构 ====================
+// ============================================================================
+// 分段参数结构体
+// ============================================================================
 
-/// @brief 统一的段参数结构（使用最大精度类型）
+/**
+ * @brief 单个分段的参数
+ *
+ * 分段线性公式：q_y = (q_b * (q_x - zp_x)) >> n_BX_total + term_c_precomputed
+ */
 struct SegmentParams {
-    int32_t q_b;                 // 量化后的系数 b (INT32，避免溢出截断)
-    int8_t n_BX_total;           // 融合后的移位位数 (INT8，可能为负)
-    int32_t term_c_precomputed;  // 预计算的 term_c (INT32)
-    int16_t threshold;           // 段阈值 (INT16，可容纳 INT8 和 INT16 输入)
+    int32_t q_b;                 ///< 量化斜率（INT32，避免截断误差）
+    int8_t n_BX_total;           ///< 融合移位量 = shift_b + shift_x - shift_y（可能为负）
+    int32_t term_c_precomputed;  ///< 预计算截距项（已含输出零点）
+    int16_t threshold;           ///< 分段上界阈值（q_x < threshold 则属于此段）
 };
 
-/// @brief 统一的查找表结构
+// ============================================================================
+// 查找表结构体
+// ============================================================================
+
+/**
+ * @brief Sigmoid/Tanh 分段线性查找表
+ *
+ * 包含 NUM_SEGMENTS 个分段参数和量化参数。
+ */
 struct SigmoidLUT {
-    SegmentParams segments[NUM_SEGMENTS];
-    int32_t zp_x;         // 输入 zero-point (INT32)
-    int8_t shift_bits_x;  // 输入 shift_bits (INT8)
-    int8_t shift_bits_y;  // 输出 shift_bits (INT8)
-    int32_t zp_y;         // 输出 zero-point (INT32)
+    SegmentParams segments[NUM_SEGMENTS];  ///< 分段参数数组
+    int32_t zp_x;                          ///< 输入零点
+    int8_t shift_bits_x;                   ///< 输入缩放因子指数
+    int8_t shift_bits_y;                   ///< 输出缩放因子指数
+    int32_t zp_y;                          ///< 输出零点
 };
 
-// 为了兼容性，保留旧类型名作为别名
+// ============================================================================
+// 类型别名（兼容旧代码）
+// ============================================================================
+
 using SegmentParams_INT8 = SegmentParams;
 using SegmentParams_INT16 = SegmentParams;
 using SegmentParams_INT8_to_INT16 = SegmentParams;
@@ -44,24 +67,29 @@ using SigmoidLUT_INT8 = SigmoidLUT;
 using SigmoidLUT_INT16 = SigmoidLUT;
 using SigmoidLUT_INT8_to_INT16 = SigmoidLUT;
 
-// ==================== LUT 生成函数声明（纯 CPU 代码）====================
-// 实现在 quantize_ops.cu 中（不依赖 CUDA kernel，可被 CPU/GPU 代码链接调用）
+// ============================================================================
+// LUT 生成函数声明
+// ============================================================================
+// 实现在 quantize_ops.cu 中
 
 /**
- * @brief 生成 Sigmoid LUT
- * @param shift_bits_x 输入量化 shift bits
- * @param zp_x 输入 zero-point
- * @param shift_bits_y 输出量化 shift bits
- * @param zp_y 输出 zero-point
- * @param input_bw 输入位宽（决定输入范围）
- * @param output_bw 输出位宽（决定精度）
+ * @brief 生成 Sigmoid 查找表
+ *
+ * @param shift_bits_x 输入缩放因子指数
+ * @param zp_x 输入零点
+ * @param shift_bits_y 输出缩放因子指数
+ * @param zp_y 输出零点
+ * @param input_bw 输入位宽（决定分段范围）
+ * @param output_bw 输出位宽（决定输出精度）
  * @return 生成的 SigmoidLUT 结构
  */
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
 
 /**
- * @brief 生成 Tanh LUT
+ * @brief 生成 Tanh 查找表
+ *
+ * 参数含义同 generate_sigmoid_lut
  */
-SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
-                             int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
+SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
+                             QuantBitWidth input_bw, QuantBitWidth output_bw);

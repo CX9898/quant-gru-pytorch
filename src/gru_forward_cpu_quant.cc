@@ -29,41 +29,11 @@
 namespace cpu {
 
 // ============================================================================
-// 1. LUT 查找函数（CPU 版本，与 GPU 版本算法一致）
+// 1. LUT 查找函数
 // ============================================================================
-
-namespace {
-
-int find_segment(int32_t q_x, const SegmentParams *segments) {
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        if (q_x < segments[i].threshold) return i;
-    }
-    return NUM_SEGMENTS - 1;
-}
-
-int32_t piecewise_linear_raw(int32_t q_x, const SigmoidLUT &lut) {
-    int seg_id = find_segment(q_x, lut.segments);
-    const auto &seg = lut.segments[seg_id];
-
-    int32_t x_offset = q_x - lut.zp_x;
-    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
-
-    // 复用 quantize_ops_helper.h 中的 rshift_round
-    int32_t term_bx = (seg.n_BX_total >= 0)
-                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
-                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
-
-    return term_bx + seg.term_c_precomputed;
-}
-
-int32_t piecewise_linear(int32_t q_x, const SigmoidLUT &lut, QuantBitWidth pre_bw,
-                         QuantBitWidth out_bw) {
-    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
-    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
-    return clamp_by_bitwidth(result, out_bw);
-}
-
-}  // namespace
+// 注意：find_segment, piecewise_linear_raw, piecewise_linear, clamp_by_bitwidth
+// 已统一定义在 quantize_ops_helper.h 中，使用 __host__ __device__ 标记，
+// 可在 CPU 和 GPU 上共用。
 
 // ============================================================================
 // 2. GRU Gate Functions - 与 GPU 版本 gru_forward_gpu_quant.cu 计算一致
@@ -147,7 +117,7 @@ HT computeH(int32_t z, int32_t g, HT h_old, const QuantGRUReScaleCPU &rescale) {
         rshift_round(new_contrib - rescale.zp_new_contrib_, rescale.n_new_contrib_div_h_) +
         rescale.zp_h_;
 
-    return clamp<HT>(h_i32);
+    return clamp_to_type<HT>(h_i32);
 }
 
 }  // namespace
