@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include "histogram_collector.h"
+#include "histogram_gpu.cuh"
 #include "parallel_algorithm.h"
 #include "pot_sqnr_calibrator.h"
 #include "quantize_ops_helper.h"
@@ -793,6 +794,135 @@ void collectAllHistograms(
 }
 
 // =====================================================================
+// GPU 加速直方图收集辅助函数
+// =====================================================================
+
+/**
+ * @brief 使用 GPU 收集所有直方图（高性能版本）
+ * 
+ * 所有直方图计算都在 GPU 上完成，避免大量 GPU->CPU 数据传输
+ * 使用 CUDA streams 并行收集多个直方图
+ */
+void collectAllHistogramsGPU(
+    GRUGPUHistogramCollectors &hist_collectors,
+    const float *x, const float *h, const float *v,
+    const float *tmp_Wx, const float *tmp_Rh,
+    const float *W, const float *R, const float *bx, const float *br,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size,
+    cudaStream_t stream = 0) {
+    
+    const size_t x_size = time_steps * batch_size * input_size;
+    const size_t h_size = time_steps * batch_size * hidden_size;
+    const size_t Wx_size = time_steps * batch_size * hidden_size * 3;
+    const size_t Rh_size = time_steps * batch_size * hidden_size * 3;
+    const float *h_skip_initial = h + batch_size * hidden_size;
+
+    // 创建 streams（按需数量）
+    constexpr int NUM_STREAMS = 8;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamCreate(&streams[i]);
+    }
+
+    // 并行收集 x, h, Wx, Rh 的直方图
+    hist_collectors.x_hist.collect(x, x_size, streams[0]);
+    hist_collectors.h_hist.collect(h_skip_initial, h_size, streams[1]);
+    hist_collectors.Wx_hist.collect(tmp_Wx, Wx_size, streams[2]);
+    hist_collectors.Rh_hist.collect(tmp_Rh, Rh_size, streams[3]);
+
+    // 并行收集 per-channel 直方图（使用零拷贝批量版本）
+    if (!hist_collectors.W_batch.is_valid()) {
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.W_batch, W, input_size, streams[4]);
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.R_batch, R, hidden_size, streams[5]);
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.bx_batch, bx, 1, streams[6]);
+        gpu_hist::collect_per_channel_histograms_batch(hist_collectors.br_batch, br, 1, streams[7]);
+    }
+
+    // 统一等待基础数据收集完成
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamSynchronize(streams[i]);
+    }
+
+    // 收集门值直方图（需要 h 数据完成后）
+    gpu_hist::collect_gate_histograms(hist_collectors, v, h, time_steps, batch_size, hidden_size,
+                                       stream);
+
+    // 并行收集 z_pre, r_pre, g_pre（如果提供）
+    if (pres_size > 0 && z_pres && r_pres && g_pres) {
+        hist_collectors.z_pre_hist.collect(z_pres, pres_size, streams[0]);
+        hist_collectors.r_pre_hist.collect(r_pres, pres_size, streams[1]);
+        hist_collectors.g_pre_hist.collect(g_pres, pres_size, streams[2]);
+        
+        for (int i = 0; i < 3; ++i) {
+            cudaStreamSynchronize(streams[i]);
+        }
+    }
+
+    // 清理 streams
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamDestroy(streams[i]);
+    }
+}
+
+/**
+ * @brief 将 GPU 直方图收集器转换为 CPU 版本
+ * 
+ * 用于与现有的 calculateGRUQuantitativeParametersFromHistograms 兼容
+ */
+GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors &gpu_collectors) {
+    GRUHistogramCollectors cpu_collectors(gpu_collectors.hidden_, gpu_collectors.num_bins_);
+
+    // 转换标量直方图
+    auto convert_collector = [](HistogramCollector &dst, const GPUHistogramCollector &src) {
+        if (src.is_valid()) {
+            dst.histogram() = gpu_histogram_to_cpu(src.histogram());
+        }
+    };
+
+    convert_collector(cpu_collectors.x_hist, gpu_collectors.x_hist);
+    convert_collector(cpu_collectors.h_hist, gpu_collectors.h_hist);
+    convert_collector(cpu_collectors.Wx_hist, gpu_collectors.Wx_hist);
+    convert_collector(cpu_collectors.Rh_hist, gpu_collectors.Rh_hist);
+    convert_collector(cpu_collectors.z_pre_hist, gpu_collectors.z_pre_hist);
+    convert_collector(cpu_collectors.r_pre_hist, gpu_collectors.r_pre_hist);
+    convert_collector(cpu_collectors.g_pre_hist, gpu_collectors.g_pre_hist);
+    convert_collector(cpu_collectors.z_out_hist, gpu_collectors.z_out_hist);
+    convert_collector(cpu_collectors.r_out_hist, gpu_collectors.r_out_hist);
+    convert_collector(cpu_collectors.g_out_hist, gpu_collectors.g_out_hist);
+    convert_collector(cpu_collectors.Rh_add_br_g_hist, gpu_collectors.Rh_add_br_g_hist);
+    convert_collector(cpu_collectors.rRh_hist, gpu_collectors.rRh_hist);
+    convert_collector(cpu_collectors.new_contrib_hist, gpu_collectors.new_contrib_hist);
+    convert_collector(cpu_collectors.old_contrib_hist, gpu_collectors.old_contrib_hist);
+
+    // 转换 per-channel 直方图（从批量结构）
+    auto convert_batch = [](std::vector<HistogramCollector> &dst, 
+                            const PerChannelHistogramBatch &src) {
+        if (!src.is_valid()) return;
+        
+        // 一次性读取所有 counts 到 CPU
+        std::vector<float> all_counts = src.all_counts_to_host();
+        
+        for (int c = 0; c < src.channel_size; ++c) {
+            Histogram& hist = dst[c].histogram();
+            hist.num_bins = src.num_bins;
+            hist.min_val = src.mins[c];
+            hist.max_val = src.maxs[c];
+            hist.total_count = src.per_channel_count;
+            hist.counts.assign(all_counts.begin() + c * src.num_bins,
+                              all_counts.begin() + (c + 1) * src.num_bins);
+        }
+    };
+
+    convert_batch(cpu_collectors.W_hist, gpu_collectors.W_batch);
+    convert_batch(cpu_collectors.R_hist, gpu_collectors.R_batch);
+    convert_batch(cpu_collectors.bx_hist, gpu_collectors.bx_batch);
+    convert_batch(cpu_collectors.br_hist, gpu_collectors.br_batch);
+
+    return cpu_collectors;
+}
+
+// =====================================================================
 // 带校准的统一前向传播实现
 // =====================================================================
 
@@ -869,6 +999,85 @@ void forwardWithCalibration(
                          time_steps, batch_size, input_size, hidden_size,
                          forward.getZPres(), forward.getRPres(), forward.getGPres(),
                          forward.getPresSize());
+}
+
+// =====================================================================
+// GPU 加速版本：带校准的前向传播
+// =====================================================================
+
+void forwardWithCalibrationGPU(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0,
+    const cublasHandle_t &g_blas_handle,
+    CalibrationMethod calib_method,
+    GRUGPUHistogramCollectors *gpu_hist_collectors,
+    GRUQuantizationRanges *quant_ranges,
+    float *h, float *v) {
+    
+    if (calib_method == CalibrationMethod::NONE) {
+        throw std::invalid_argument("forwardWithCalibrationGPU called with NONE calibration method");
+    }
+
+    // 分配临时缓冲区
+    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
+    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
+
+    // 创建 ForwardPass 对象
+    gru::ForwardPass<float> forward =
+        gru::ForwardPass<float>(is_training, batch_size, input_size, hidden_size, g_blas_handle);
+
+    // 根据校准方法设置校准模式
+    if (calib_method == CalibrationMethod::MINMAX) {
+        // MinMax 模式：设置校准模式，在 Run 过程中收集 min/max
+        if (!quant_ranges) {
+            throw std::invalid_argument("quant_ranges is required for MINMAX calibration");
+        }
+        if (quant_ranges->hidden_ != hidden_size) {
+            quant_ranges->reset(hidden_size);
+        }
+        forward.setCalibrationMode(true, *quant_ranges);
+    } else {
+        // SQNR/Percentile 模式：需要 GPU 直方图收集器
+        if (!gpu_hist_collectors) {
+            throw std::invalid_argument("gpu_hist_collectors is required for SQNR/Percentile calibration");
+        }
+        if (gpu_hist_collectors->hidden_ != hidden_size) {
+            gpu_hist_collectors->reset(hidden_size);
+        }
+        // 直方图模式也需要临时的 quant_ranges 用于前向传播
+        GRUQuantizationRanges temp_ranges(hidden_size);
+        forward.setCalibrationMode(true, temp_ranges);
+    }
+
+    // 执行前向传播，收集中间结果
+    forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, h0);
+
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in forwardWithCalibrationGPU: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in forwardWithCalibrationGPU: ") + err_str);
+    }
+
+    // MinMax 模式：从 ForwardPass 获取收集的范围
+    if (calib_method == CalibrationMethod::MINMAX) {
+        *quant_ranges = forward.getGRUQuantizationRanges();
+        return;
+    }
+
+    // SQNR/Percentile 模式：使用 GPU 加速直方图收集
+    collectAllHistogramsGPU(*gpu_hist_collectors, x, h, v,
+                            tmp_Wx_dev.data(), tmp_Rh_dev.data(),
+                            W, R, bx, br,
+                            time_steps, batch_size, input_size, hidden_size,
+                            forward.getZPres(), forward.getRPres(), forward.getGPres(),
+                            forward.getPresSize());
 }
 
 GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(

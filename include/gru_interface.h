@@ -61,6 +61,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
 
 // 前向声明直方图收集器
 struct GRUHistogramCollectors;
+struct GRUGPUHistogramCollectors;  // GPU 版本
 
 // 从直方图计算量化参数（支持 SQNR 和 Percentile 两种校准方案）
 // use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
@@ -165,6 +166,28 @@ void forwardWithCalibration(
     GRUHistogramCollectors *hist_collectors,
     GRUQuantizationRanges *quant_ranges,
     float *h, float *v);
+
+// =====================================================================
+// GPU 加速直方图收集接口
+// =====================================================================
+
+// GPU 加速版本：带校准的前向传播
+// 直方图在 GPU 上直接构建，避免大量 GPU->CPU 数据传输
+// 注意：小数据量时可能不如 CPU 版本快，建议数据量 > 100K 时使用
+void forwardWithCalibrationGPU(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0,
+    const cublasHandle_t &g_blas_handle,
+    CalibrationMethod calib_method,
+    GRUGPUHistogramCollectors *gpu_hist_collectors,
+    GRUQuantizationRanges *quant_ranges,
+    float *h, float *v);
+
+// 将 GPU 直方图收集器转换为 CPU 版本
+// 用于与 calculateGRUQuantitativeParametersFromHistograms 配合使用
+GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors &gpu_collectors);
 
 // =====================================================================
 // 反向传播接口
