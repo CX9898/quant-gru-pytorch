@@ -1,0 +1,745 @@
+// ============================================================================
+// histogram_gpu.cu - GPU 加速直方图实现
+// ============================================================================
+
+#include <cuda_runtime.h>
+#include <thrust/device_ptr.h>
+#include <thrust/extrema.h>
+#include <thrust/execution_policy.h>
+#include <thrust/reduce.h>
+
+#include <algorithm>
+#include <cfloat>  // for FLT_MAX
+#include <cmath>
+#include <limits>
+
+#include "histogram_gpu.cuh"
+#include "histogram_collector.h"  // for Histogram struct and get_minimum_scale
+#include "parallel_algorithm.h"   // for dev::fill_n
+
+// ============================================================================
+// CUDA Kernels
+// ============================================================================
+
+/**
+ * @brief 直方图构建核心 Kernel
+ *
+ * 使用 atomicAdd 累加到全局直方图
+ * 对于大数据量，atomic 竞争可接受；对于超大数据可考虑分块+归约
+ */
+__global__ void histogram_kernel(const float* __restrict__ data, size_t size,
+                                  float* __restrict__ counts, float min_val,
+                                  float inv_bin_width, int num_bins) {
+    const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+
+    float val = data[idx];
+    int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+    
+    // 裁剪到有效范围
+    bin_idx = max(0, min(bin_idx, num_bins - 1));
+
+    atomicAdd(&counts[bin_idx], 1.0f);
+}
+
+/**
+ * @brief 使用共享内存优化的直方图 Kernel（适用于 bin 数量较小的情况）
+ *
+ * 每个 block 先在共享内存中累加，最后再 atomicAdd 到全局
+ * 当 num_bins <= 2048 时效率更高
+ */
+__global__ void histogram_kernel_shared(const float* __restrict__ data, size_t size,
+                                         float* __restrict__ counts, float min_val,
+                                         float inv_bin_width, int num_bins) {
+    extern __shared__ float shared_hist[];
+
+    // 初始化共享内存
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        shared_hist[i] = 0.0f;
+    }
+    __syncthreads();
+
+    // 每个线程处理多个元素
+    const size_t stride = blockDim.x * gridDim.x;
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += stride) {
+        float val = data[idx];
+        int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+        bin_idx = max(0, min(bin_idx, num_bins - 1));
+        atomicAdd(&shared_hist[bin_idx], 1.0f);
+    }
+    __syncthreads();
+
+    // 将共享内存结果累加到全局
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        if (shared_hist[i] > 0) {
+            atomicAdd(&counts[i], shared_hist[i]);
+        }
+    }
+}
+
+/**
+ * @brief 直方图重分配 Kernel
+ *
+ * 将源直方图按比例分配到新范围的目标直方图
+ */
+__global__ void redistribute_histogram_kernel(const float* __restrict__ src_counts, float src_min,
+                                               float src_bin_width, float* __restrict__ dst_counts,
+                                               float dst_min, float dst_inv_bin_width,
+                                               int num_bins) {
+    const int src_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (src_idx >= num_bins) return;
+
+    float count = src_counts[src_idx];
+    if (count <= 0) return;
+
+    // 源 bin 的起始位置
+    float src_bin_start = src_min + src_idx * src_bin_width;
+
+    // 计算落入的目标 bin 索引
+    int dst_idx = static_cast<int>((src_bin_start - dst_min) * dst_inv_bin_width);
+    dst_idx = max(0, min(dst_idx, num_bins - 1));
+
+    // 目标 bin 的结束位置
+    float dst_bin_end = dst_min + (dst_idx + 1) / dst_inv_bin_width;
+
+    // 计算分割比例
+    float overlap_ratio = (dst_bin_end - src_bin_start) / src_bin_width;
+    overlap_ratio = fmaxf(0.0f, fminf(1.0f, overlap_ratio));
+
+    float first_bin_count = roundf(overlap_ratio * count);
+    first_bin_count = fminf(first_bin_count, count);
+
+    // 添加到第一个目标 bin
+    atomicAdd(&dst_counts[dst_idx], first_bin_count);
+
+    // 剩余部分添加到下一个 bin
+    float remaining = count - first_bin_count;
+    if (remaining > 0 && dst_idx + 1 < num_bins) {
+        atomicAdd(&dst_counts[dst_idx + 1], remaining);
+    }
+}
+
+/**
+ * @brief 从 v 张量提取门值并计算派生量的 Kernel
+ *
+ * v 布局: [T, B, H*4] = [z, r, g, Rh_add_br]
+ * 输出: z_out, r_out, g_out, Rh_add_br, rRh, new_contrib, old_contrib
+ */
+__global__ void extract_gate_values_kernel(const float* __restrict__ v,
+                                            const float* __restrict__ h,
+                                            float* __restrict__ z_out,
+                                            float* __restrict__ r_out,
+                                            float* __restrict__ g_out,
+                                            float* __restrict__ Rh_add_br,
+                                            float* __restrict__ rRh,
+                                            float* __restrict__ new_contrib,
+                                            float* __restrict__ old_contrib,
+                                            int time_steps, int batch_size, int hidden_size) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = time_steps * batch_size * hidden_size;
+    if (idx >= total) return;
+
+    // 计算 t, b, hh 索引
+    const int hh = idx % hidden_size;
+    const int b = (idx / hidden_size) % batch_size;
+    const int t = idx / (batch_size * hidden_size);
+
+    // v 索引: [t, b, h*4 + offset]
+    const int v_base = t * batch_size * hidden_size * 4 + b * hidden_size * 4;
+    const float z_val = v[v_base + 0 * hidden_size + hh];
+    const float r_val = v[v_base + 1 * hidden_size + hh];
+    const float g_val = v[v_base + 2 * hidden_size + hh];
+    const float Rh_add_br_val = v[v_base + 3 * hidden_size + hh];
+
+    // h 索引: [t, b, h]（h_old 是当前时间步的输入，即 h[t] 而非 h[t+1]）
+    const int h_base = t * batch_size * hidden_size + b * hidden_size;
+    const float h_old = h[h_base + hh];
+
+    // 输出
+    z_out[idx] = z_val;
+    r_out[idx] = r_val;
+    g_out[idx] = g_val;
+    Rh_add_br[idx] = Rh_add_br_val;
+    rRh[idx] = r_val * Rh_add_br_val;
+    new_contrib[idx] = (1.0f - z_val) * g_val;
+    old_contrib[idx] = z_val * h_old;
+}
+
+/**
+ * @brief 提取 per-channel 数据 Kernel
+ *
+ * 将 [input_size, channel_size] 的数据按 channel 分离出来
+ */
+__global__ void extract_channel_kernel(const float* __restrict__ data,
+                                        float* __restrict__ channel_data,
+                                        int input_size, int channel_size, int target_channel) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= input_size) return;
+
+    channel_data[i] = data[i * channel_size + target_channel];
+}
+
+/**
+ * @brief 批量计算所有 channel 的 min/max（一个 kernel 搞定）
+ *
+ * 数据布局: [input_size, channel_size]（行主序）
+ * 输出: mins[channel_size], maxs[channel_size]
+ * 
+ * 使用 shared memory 做 per-block reduction，然后 atomic 更新全局结果
+ */
+__global__ void compute_per_channel_minmax_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ mins,
+    float* __restrict__ maxs,
+    int input_size,
+    int channel_size) {
+    
+    // 每个 block 处理一个 channel
+    const int channel = blockIdx.x;
+    if (channel >= channel_size) return;
+    
+    // Shared memory for reduction
+    extern __shared__ float shared_mem[];
+    float* s_min = shared_mem;
+    float* s_max = shared_mem + blockDim.x;
+    
+    // 初始化
+    float local_min = FLT_MAX;
+    float local_max = -FLT_MAX;
+    
+    // 每个线程处理多个元素
+    for (int i = threadIdx.x; i < input_size; i += blockDim.x) {
+        float val = data[i * channel_size + channel];
+        local_min = fminf(local_min, val);
+        local_max = fmaxf(local_max, val);
+    }
+    
+    // 存入 shared memory
+    s_min[threadIdx.x] = local_min;
+    s_max[threadIdx.x] = local_max;
+    __syncthreads();
+    
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            s_min[threadIdx.x] = fminf(s_min[threadIdx.x], s_min[threadIdx.x + stride]);
+            s_max[threadIdx.x] = fmaxf(s_max[threadIdx.x], s_max[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    
+    // 写入全局结果
+    if (threadIdx.x == 0) {
+        mins[channel] = s_min[0];
+        maxs[channel] = s_max[0];
+    }
+}
+
+/**
+ * @brief 批量计算多个独立数组的 min/max（一个 kernel 搞定）
+ *
+ * 每个 block 处理一个数组，使用 shared memory reduction
+ * 用于 gate histograms 等场景（7 个独立数组）
+ */
+__global__ void compute_batch_minmax_kernel(
+    const float* const* __restrict__ data_ptrs,  // 数组指针数组
+    const size_t* __restrict__ sizes,            // 各数组大小
+    float* __restrict__ mins,                    // 输出 min
+    float* __restrict__ maxs,                    // 输出 max
+    int num_arrays) {
+    
+    const int arr_idx = blockIdx.x;
+    if (arr_idx >= num_arrays) return;
+    
+    const float* data = data_ptrs[arr_idx];
+    const size_t size = sizes[arr_idx];
+    
+    extern __shared__ float shared_mem[];
+    float* s_min = shared_mem;
+    float* s_max = shared_mem + blockDim.x;
+    
+    float local_min = FLT_MAX;
+    float local_max = -FLT_MAX;
+    
+    for (size_t i = threadIdx.x; i < size; i += blockDim.x) {
+        float val = data[i];
+        local_min = fminf(local_min, val);
+        local_max = fmaxf(local_max, val);
+    }
+    
+    s_min[threadIdx.x] = local_min;
+    s_max[threadIdx.x] = local_max;
+    __syncthreads();
+    
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            s_min[threadIdx.x] = fminf(s_min[threadIdx.x], s_min[threadIdx.x + stride]);
+            s_max[threadIdx.x] = fmaxf(s_max[threadIdx.x], s_max[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        mins[arr_idx] = s_min[0];
+        maxs[arr_idx] = s_max[0];
+    }
+}
+
+/**
+ * @brief 批量构建所有 channel 的直方图（一个 kernel 搞定）
+ *
+ * 数据布局: [input_size, channel_size]
+ * 输出: counts[channel_size * num_bins]（每个 channel 一个直方图）
+ */
+__global__ void build_per_channel_histogram_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ counts,  // [channel_size, num_bins]
+    const float* __restrict__ mins,
+    const float* __restrict__ maxs,
+    int input_size,
+    int channel_size,
+    int num_bins) {
+    
+    // 每个 block 处理一个 channel
+    const int channel = blockIdx.x;
+    if (channel >= channel_size) return;
+    
+    float min_val = mins[channel];
+    float max_val = maxs[channel];
+    float bin_width = (max_val - min_val) / num_bins;
+    if (bin_width < 1e-9f) bin_width = 1e-9f;
+    float inv_bin_width = 1.0f / bin_width;
+    
+    // 该 channel 的直方图起始位置
+    float* my_counts = counts + channel * num_bins;
+    
+    // 使用 shared memory 累加（避免 global atomic 竞争）
+    extern __shared__ float s_hist[];
+    
+    // 初始化 shared histogram
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        s_hist[i] = 0.0f;
+    }
+    __syncthreads();
+    
+    // 每个线程处理多个元素
+    for (int i = threadIdx.x; i < input_size; i += blockDim.x) {
+        float val = data[i * channel_size + channel];
+        int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+        bin_idx = max(0, min(bin_idx, num_bins - 1));
+        atomicAdd(&s_hist[bin_idx], 1.0f);
+    }
+    __syncthreads();
+    
+    // 写回 global memory
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        my_counts[i] = s_hist[i];
+    }
+}
+
+// ============================================================================
+// GPU 直方图辅助函数实现
+// ============================================================================
+
+namespace gpu_hist {
+
+void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val,
+                    cudaStream_t stream) {
+    if (size == 0) {
+        min_val = 0;
+        max_val = 0;
+        return;
+    }
+
+    thrust::device_ptr<const float> data_ptr(data_dev);
+    
+    // 使用 Thrust 计算 min/max
+    auto minmax_pair = thrust::minmax_element(thrust::device, data_ptr, data_ptr + size);
+    
+    // 拷贝结果到 Host
+    cudaMemcpy(&min_val, minmax_pair.first.get(), sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&max_val, minmax_pair.second.get(), sizeof(float), cudaMemcpyDeviceToHost);
+}
+
+void build_histogram(const float* data_dev, size_t size, float* counts_dev, float min_val,
+                     float max_val, int num_bins, cudaStream_t stream) {
+    if (size == 0 || num_bins <= 0) return;
+
+    float bin_width = (max_val - min_val) / num_bins;
+    if (bin_width < 1e-9f) bin_width = 1e-9f;
+    float inv_bin_width = 1.0f / bin_width;
+
+    const int threads = 256;
+
+    // 选择合适的 kernel
+    if (num_bins <= 2048) {
+        // 使用共享内存优化版本
+        const int blocks = std::min(static_cast<int>((size + threads - 1) / threads), 256);
+        const size_t shared_mem_size = num_bins * sizeof(float);
+        histogram_kernel_shared<<<blocks, threads, shared_mem_size, stream>>>(
+            data_dev, size, counts_dev, min_val, inv_bin_width, num_bins);
+    } else {
+        // 使用简单的全局 atomic 版本
+        const int blocks = (size + threads - 1) / threads;
+        histogram_kernel<<<blocks, threads, 0, stream>>>(data_dev, size, counts_dev, min_val,
+                                                          inv_bin_width, num_bins);
+    }
+}
+
+void redistribute_histogram(const float* src_counts_dev, float src_min, float src_max,
+                            float* dst_counts_dev, float dst_min, float dst_max, int num_bins,
+                            cudaStream_t stream) {
+    if (num_bins <= 0) return;
+
+    float src_bin_width = (src_max - src_min) / num_bins;
+    float dst_bin_width = (dst_max - dst_min) / num_bins;
+    if (dst_bin_width < 1e-9f) dst_bin_width = 1e-9f;
+    float dst_inv_bin_width = 1.0f / dst_bin_width;
+
+    const int threads = 256;
+    const int blocks = (num_bins + threads - 1) / threads;
+
+    redistribute_histogram_kernel<<<blocks, threads, 0, stream>>>(
+        src_counts_dev, src_min, src_bin_width, dst_counts_dev, dst_min, dst_inv_bin_width,
+        num_bins);
+}
+
+void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float* v_dev,
+                             const float* h_dev, int time_steps, int batch_size, int hidden_size,
+                             cudaStream_t stream) {
+    const size_t total_size = time_steps * batch_size * hidden_size;
+
+    // 分配临时 GPU 缓冲区
+    dev::vector<float> z_out_dev(total_size);
+    dev::vector<float> r_out_dev(total_size);
+    dev::vector<float> g_out_dev(total_size);
+    dev::vector<float> Rh_add_br_dev(total_size);
+    dev::vector<float> rRh_dev(total_size);
+    dev::vector<float> new_contrib_dev(total_size);
+    dev::vector<float> old_contrib_dev(total_size);
+
+    // 在 GPU 上提取并计算所有门值
+    const int threads = 256;
+    const int blocks = (total_size + threads - 1) / threads;
+
+    extract_gate_values_kernel<<<blocks, threads, 0, stream>>>(
+        v_dev, h_dev, z_out_dev.data(), r_out_dev.data(), g_out_dev.data(), Rh_add_br_dev.data(),
+        rRh_dev.data(), new_contrib_dev.data(), old_contrib_dev.data(), time_steps, batch_size,
+        hidden_size);
+
+    // 等待 kernel 完成
+    cudaStreamSynchronize(stream);
+
+    // 计算所有 7 个数组的 minmax
+    float mins[7], maxs[7];
+    const float* data_ptrs[7] = {z_out_dev.data(), r_out_dev.data(), g_out_dev.data(),
+                                  Rh_add_br_dev.data(), rRh_dev.data(), new_contrib_dev.data(),
+                                  old_contrib_dev.data()};
+    
+    for (int i = 0; i < 7; ++i) {
+        compute_minmax(data_ptrs[i], total_size, mins[i], maxs[i], stream);
+    }
+
+    // 用已知范围并行构建直方图
+    constexpr int NUM_STREAMS = 7;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamCreate(&streams[i]);
+    }
+
+    collectors.z_out_hist.collectWithKnownRange(z_out_dev.data(), total_size, mins[0], maxs[0], streams[0]);
+    collectors.r_out_hist.collectWithKnownRange(r_out_dev.data(), total_size, mins[1], maxs[1], streams[1]);
+    collectors.g_out_hist.collectWithKnownRange(g_out_dev.data(), total_size, mins[2], maxs[2], streams[2]);
+    collectors.Rh_add_br_g_hist.collectWithKnownRange(Rh_add_br_dev.data(), total_size, mins[3], maxs[3], streams[3]);
+    collectors.rRh_hist.collectWithKnownRange(rRh_dev.data(), total_size, mins[4], maxs[4], streams[4]);
+    collectors.new_contrib_hist.collectWithKnownRange(new_contrib_dev.data(), total_size, mins[5], maxs[5], streams[5]);
+    collectors.old_contrib_hist.collectWithKnownRange(old_contrib_dev.data(), total_size, mins[6], maxs[6], streams[6]);
+
+    // 等待所有 streams 完成
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamSynchronize(streams[i]);
+        cudaStreamDestroy(streams[i]);
+    }
+}
+
+void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collectors,
+                                    const float* data_dev, int input_size, int channel_size,
+                                    cudaStream_t stream) {
+    if (channel_size == 0 || input_size == 0) return;
+    
+    const int num_bins = collectors[0].histogram().num_bins;
+    
+    // 1. 分配批量 GPU 缓冲区
+    dev::vector<float> all_mins(channel_size);
+    dev::vector<float> all_maxs(channel_size);
+    dev::vector<float> all_counts(channel_size * num_bins);
+    all_counts.zero();
+    
+    // 2. 批量计算所有 channel 的 min/max
+    {
+        const int threads = 256;
+        const int blocks = channel_size;
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_per_channel_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, all_mins.data(), all_maxs.data(), input_size, channel_size);
+    }
+    
+    // 3. 批量构建所有 channel 的直方图
+    {
+        const int threads = 256;
+        const int blocks = channel_size;
+        const size_t shared_mem = num_bins * sizeof(float);
+        build_per_channel_histogram_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, all_counts.data(), all_mins.data(), all_maxs.data(),
+            input_size, channel_size, num_bins);
+    }
+    
+    // 4. 只拷贝 min/max 元数据到 CPU（很小，只有 channel_size * 8B）
+    std::vector<float> h_mins(channel_size);
+    std::vector<float> h_maxs(channel_size);
+    cudaMemcpyAsync(h_mins.data(), all_mins.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(h_maxs.data(), all_maxs.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    
+    // 5. 纯 D2D 拷贝 counts 到各 collector（不经过 CPU）
+    for (int c = 0; c < channel_size; ++c) {
+        GPUHistogram& hist = collectors[c].histogram();
+        hist.min_val = h_mins[c];
+        hist.max_val = h_maxs[c];
+        hist.total_count = input_size;
+        
+        // D2D: 完全在 GPU 上
+        cudaMemcpyAsync(hist.counts.data(), all_counts.data() + c * num_bins,
+                       num_bins * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+    }
+    cudaStreamSynchronize(stream);
+}
+
+/**
+ * @brief 批量收集 per-channel 直方图（直接写入 PerChannelHistogramBatch）
+ *
+ * 优化版本：直接把结果写入共享缓冲区，零拷贝
+ */
+void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
+                                           const float* data_dev, int input_size,
+                                           cudaStream_t stream) {
+    if (batch.channel_size == 0 || input_size == 0) return;
+    
+    const int channel_size = batch.channel_size;
+    const int num_bins = batch.num_bins;
+    
+    // 临时 GPU 缓冲区存储 min/max
+    dev::vector<float> d_mins(channel_size);
+    dev::vector<float> d_maxs(channel_size);
+    
+    // 1. 批量计算 min/max
+    {
+        const int threads = 256;
+        const int blocks = channel_size;
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_per_channel_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, d_mins.data(), d_maxs.data(), input_size, channel_size);
+    }
+    
+    // 2. 批量构建直方图（直接写入 batch.counts，零拷贝！）
+    batch.counts.zero();
+    {
+        const int threads = 256;
+        const int blocks = channel_size;
+        const size_t shared_mem = num_bins * sizeof(float);
+        build_per_channel_histogram_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, batch.counts.data(), d_mins.data(), d_maxs.data(),
+            input_size, channel_size, num_bins);
+    }
+    
+    // 3. 只拷贝 min/max 元数据到 CPU（很小）
+    cudaMemcpyAsync(batch.mins.data(), d_mins.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(batch.maxs.data(), d_maxs.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    
+    batch.per_channel_count = input_size;
+}
+
+}  // namespace gpu_hist
+
+// ============================================================================
+// GPUHistogramCollector 方法实现
+// ============================================================================
+
+void GPUHistogramCollector::collect(const float* data_dev, size_t size, cudaStream_t stream) {
+    if (size == 0) return;
+
+    // 在 GPU 上计算 min/max
+    float data_min, data_max;
+    gpu_hist::compute_minmax(data_dev, size, data_min, data_max, stream);
+
+    // 处理特殊情况
+    float minimum_scale = get_minimum_scale(config_.num_bins);
+    float minimum_range = minimum_scale * config_.num_bins;
+    float input_range = data_max - data_min;
+
+    if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
+        data_min = std::min(data_min, 0.0f);
+        data_max = std::max(data_max, 0.0f);
+        input_range = minimum_range;
+        data_max = data_min + minimum_range;
+    }
+
+    if (!hist_.is_valid()) {
+        // 首次收集：初始化直方图
+        hist_.reset(config_.num_bins);
+        hist_.min_val = data_min;
+        hist_.max_val = data_max;
+        _add_to_histogram_gpu(data_dev, size, stream);
+
+        // 设置范围限制
+        range_limit_min_ = data_min - input_range * config_.growth_limit / 2.0f;
+        range_limit_max_ = data_max + input_range * config_.growth_limit / 2.0f;
+        range_limit_set_ = true;
+    } else {
+        // 后续收集：应用范围限制
+        float updated_min = hist_.min_val;
+        float updated_max = hist_.max_val;
+
+        if (range_limit_set_) {
+            updated_min = std::max(range_limit_min_, std::min(data_min, hist_.min_val));
+            updated_max = std::min(range_limit_max_, std::max(data_max, hist_.max_val));
+        } else {
+            updated_min = std::min(data_min, hist_.min_val);
+            updated_max = std::max(data_max, hist_.max_val);
+        }
+
+        if (updated_min == hist_.min_val && updated_max == hist_.max_val) {
+            // 范围不变，直接添加
+            _add_to_histogram_gpu(data_dev, size, stream);
+        } else {
+            // 需要扩展范围
+            _merge_with_extended_range_gpu(data_dev, size, updated_min, updated_max, stream);
+        }
+    }
+}
+
+void GPUHistogramCollector::collectWithKnownRange(const float* data_dev, size_t size,
+                                                   float known_min, float known_max,
+                                                   cudaStream_t stream) {
+    if (size == 0) return;
+
+    // 使用已知范围，跳过 minmax 计算
+    float minimum_scale = get_minimum_scale(config_.num_bins);
+    float minimum_range = minimum_scale * config_.num_bins;
+    float input_range = known_max - known_min;
+
+    if (input_range < minimum_range) {
+        known_min = std::min(known_min, 0.0f);
+        known_max = std::max(known_max, 0.0f);
+        input_range = minimum_range;
+        known_max = known_min + minimum_range;
+    }
+
+    if (!hist_.is_valid()) {
+        hist_.reset(config_.num_bins);
+        hist_.min_val = known_min;
+        hist_.max_val = known_max;
+        _add_to_histogram_gpu(data_dev, size, stream);
+        range_limit_set_ = false;  // 已知范围模式不使用范围限制
+    } else {
+        // 直接添加（假设范围已经正确设置）
+        _add_to_histogram_gpu(data_dev, size, stream);
+    }
+}
+
+void GPUHistogramCollector::_add_to_histogram_gpu(const float* data_dev, size_t size,
+                                                   cudaStream_t stream) {
+    gpu_hist::build_histogram(data_dev, size, hist_.counts.data(), hist_.min_val, hist_.max_val,
+                              hist_.num_bins, stream);
+    hist_.total_count += size;
+}
+
+void GPUHistogramCollector::_merge_with_extended_range_gpu(const float* data_dev, size_t size,
+                                                           float new_min, float new_max,
+                                                           cudaStream_t stream) {
+    // 创建新的直方图计数并清零
+    dev::vector<float> new_counts(config_.num_bins);
+    dev::fill_n(new_counts.data(), config_.num_bins, 0.0f);
+
+    // 检查旧直方图是否有效
+    float src_bin_width = hist_.bin_width();
+    float minimum_scale = get_minimum_scale(config_.num_bins);
+
+    if (std::abs(src_bin_width) >= minimum_scale && !std::isnan(src_bin_width) &&
+        !std::isinf(src_bin_width)) {
+        // 重新分配旧直方图
+        gpu_hist::redistribute_histogram(hist_.counts.data(), hist_.min_val, hist_.max_val,
+                                         new_counts.data(), new_min, new_max, config_.num_bins,
+                                         stream);
+    }
+
+    // 添加新数据
+    gpu_hist::build_histogram(data_dev, size, new_counts.data(), new_min, new_max, config_.num_bins,
+                              stream);
+
+    // 更新直方图
+    hist_.counts = std::move(new_counts);
+    hist_.min_val = new_min;
+    hist_.max_val = new_max;
+    hist_.total_count += size;
+}
+
+void GPUHistogramCollector::merge(const GPUHistogram& other) {
+    if (!other.is_valid()) return;
+
+    if (!hist_.is_valid()) {
+        // 直接复制
+        hist_ = other;
+        return;
+    }
+
+    float new_min = std::min(hist_.min_val, other.min_val);
+    float new_max = std::max(hist_.max_val, other.max_val);
+
+    if (new_min == hist_.min_val && new_max == hist_.max_val) {
+        // 范围相同，直接累加
+        // 使用 Thrust 进行向量加法
+        thrust::device_ptr<float> dst_ptr(hist_.counts.data());
+        thrust::device_ptr<const float> src_ptr(other.counts.data());
+        thrust::transform(thrust::device, dst_ptr, dst_ptr + hist_.num_bins, src_ptr, dst_ptr,
+                          thrust::plus<float>());
+        hist_.total_count += other.total_count;
+    } else {
+        // 范围不同，需要重新分配
+        dev::vector<float> new_counts(config_.num_bins);
+        dev::fill_n(new_counts.data(), config_.num_bins, 0.0f);
+
+        // 重新分配当前直方图
+        gpu_hist::redistribute_histogram(hist_.counts.data(), hist_.min_val, hist_.max_val,
+                                         new_counts.data(), new_min, new_max, config_.num_bins, 0);
+
+        // 重新分配另一个直方图
+        gpu_hist::redistribute_histogram(other.counts.data(), other.min_val, other.max_val,
+                                         new_counts.data(), new_min, new_max, config_.num_bins, 0);
+
+        hist_.counts = std::move(new_counts);
+        hist_.min_val = new_min;
+        hist_.max_val = new_max;
+        hist_.total_count += other.total_count;
+    }
+}
+
+// ============================================================================
+// 转换函数实现
+// ============================================================================
+
+Histogram gpu_histogram_to_cpu(const GPUHistogram& gpu_hist) {
+    Histogram cpu_hist(gpu_hist.num_bins);
+    cpu_hist.min_val = gpu_hist.min_val;
+    cpu_hist.max_val = gpu_hist.max_val;
+    cpu_hist.total_count = gpu_hist.total_count;
+    cpu_hist.counts = gpu_hist.to_host();
+    return cpu_hist;
+}
+
+

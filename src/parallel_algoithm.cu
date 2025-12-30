@@ -141,6 +141,9 @@ void fill_n(uint16_t *first, size_t size, uint16_t val) {
 void fill_n(uint32_t *first, size_t size, uint32_t val) {
     thrust::fill_n(thrust::device, first, size, val);
 }
+void fill_n(float *first, size_t size, float val) {
+    thrust::fill_n(thrust::device, first, size, val);
+}
 void sort(uint32_t *first, uint32_t *last) {
     thrust::sort(thrust::device, first, last);
 }
