@@ -7,6 +7,7 @@
 #include "gru_interface.h"
 #include "gru_quantization_ranges.h"
 #include "histogram_collector.h"
+#include "histogram_gpu.cuh"
 #include "quantize_ops_helper.h"
 
 // 全局 cublas handle
@@ -360,43 +361,65 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
 }
 
 // =====================================================================
-// AIMET 风格直方图校准接口（真正的多批次累积直方图）
+// AIMET 风格直方图校准接口（默认使用 GPU 加速）
 // =====================================================================
 
 // GRUHistogramCollectors 的 Python 绑定包装
+// 内部使用 GPU 版本实现，Python 接口保持不变
 struct GRUHistogramCollectorsPy {
-    GRUHistogramCollectors cpp_collectors;
+    GRUGPUHistogramCollectors gpu_collectors;  // 使用 GPU 版本
 
     GRUHistogramCollectorsPy() = default;
-    explicit GRUHistogramCollectorsPy(int hidden, int num_bins = 2048) : cpp_collectors(hidden, num_bins) {}
+    explicit GRUHistogramCollectorsPy(int hidden, int num_bins = 2048) : gpu_collectors(hidden, num_bins) {}
 
-    void reset(int hidden = -1, int num_bins = -1) { cpp_collectors.reset(hidden, num_bins); }
-    bool is_valid() const { return cpp_collectors.is_valid(); }
-    int hidden() const { return cpp_collectors.hidden_; }
-    int num_bins() const { return cpp_collectors.num_bins_; }
-    void print() const { cpp_collectors.print(); }
+    void reset(int hidden = -1, int num_bins = -1) { gpu_collectors.reset(hidden, num_bins); }
+    bool is_valid() const { return gpu_collectors.is_valid(); }
+    int hidden() const { return gpu_collectors.hidden_; }
+    int num_bins() const { return gpu_collectors.num_bins_; }
+    
+    // 转换为 CPU 版本（内部使用）
+    GRUHistogramCollectors to_cpu() const {
+        return convertGPUHistogramsToCPU(gpu_collectors);
+    }
+    
+    // 打印统计信息
+    void print() const {
+        std::cout << "GRUHistogramCollectors (GPU):" << std::endl;
+        std::cout << "  hidden: " << gpu_collectors.hidden_ << std::endl;
+        std::cout << "  num_bins: " << gpu_collectors.num_bins_ << std::endl;
+        std::cout << "  is_valid: " << (is_valid() ? "true" : "false") << std::endl;
+    }
 };
 
 // 从直方图计算量化参数的包装函数
-// use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
-// percentile_value: 仅 Percentile 方案使用，默认 99.99%
+// 内部自动选择 GPU/CPU 实现：SQNR 用 GPU，Percentile 用 CPU
 GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
-    const GRUHistogramCollectorsPy &hist_collectors,
+    GRUHistogramCollectorsPy &hist_collectors,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy(),
     bool verbose = false,
     bool use_percentile = false,
     float percentile_value = 99.99f) {
 
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
-    GRUQuantitativeParameters quant_params = calculateGRUQuantitativeParametersFromHistograms(
-        hist_collectors.cpp_collectors, cpp_bitwidth, verbose, use_percentile, percentile_value);
+    GRUQuantitativeParameters quant_params;
+    
+    if (use_percentile) {
+        // Percentile 方案：转换为 CPU 直方图后计算
+        GRUHistogramCollectors cpu_collectors = hist_collectors.to_cpu();
+        quant_params = calculateGRUQuantitativeParametersFromHistograms(
+            cpu_collectors, cpp_bitwidth, verbose, true, percentile_value);
+    } else {
+        // SQNR 方案：直接使用 GPU 计算
+        quant_params = calculateGRUQuantitativeParametersFromGPUHistograms(
+            hist_collectors.gpu_collectors, cpp_bitwidth, verbose);
+    }
 
     GRUQuantitativeParametersPy py_params;
     py_params.from_cpp(quant_params);
     return py_params;
 }
 
-// forwardInterface 的包装函数（统一接口）
+// forwardInterface 的包装函数（统一接口，默认使用 GPU 加速直方图收集）
 // 支持校准模式：calib_method 指定校准方式（字符串: 'none', 'minmax', 'sqnr', 'percentile'）
 std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     bool is_training,  // 是否开启训练模式，true为训练，false为推理
@@ -450,22 +473,30 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
-    // 直接使用 quant_params 中的 bitwidth_config_（单一数据源）
     GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
     
-    // 准备校准收集器指针（直接使用包装的 C++ 对象）
-    GRUHistogramCollectors *cpp_hist = hist_collectors ? &(hist_collectors->cpp_collectors) : nullptr;
-    GRUQuantizationRanges *cpp_ranges = quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr;
-
-    forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
-                     W.data_ptr<float>(), R.data_ptr<float>(), bx.data_ptr<float>(),
-                     br.data_ptr<float>(), x.data_ptr<float>(),
-                     h0_ptr,  // 初始隐藏状态，可以为 nullptr
-                     cpp_params, g_blas_handle,
-                     calib_method, cpp_hist, cpp_ranges,
-                     h.data_ptr<float>(), v.data_ptr<float>());
-    
-    // 不需要手动同步，cpp_ranges 直接指向 Python 对象内部的 C++ 对象
+    if (calib_method != CalibrationMethod::NONE) {
+        // 校准模式：使用 GPU 加速直方图收集
+        GRUGPUHistogramCollectors *gpu_hist = 
+            hist_collectors ? &(hist_collectors->gpu_collectors) : nullptr;
+        GRUQuantizationRanges *cpp_ranges = 
+            quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr;
+        
+        forwardWithCalibrationGPU(is_training, time_steps, batch_size, input_size, hidden_size,
+                                  W.data_ptr<float>(), R.data_ptr<float>(), 
+                                  bx.data_ptr<float>(), br.data_ptr<float>(), 
+                                  x.data_ptr<float>(), h0_ptr, g_blas_handle,
+                                  calib_method, gpu_hist, cpp_ranges,
+                                  h.data_ptr<float>(), v.data_ptr<float>());
+    } else {
+        // 非校准模式：使用普通前向传播
+        forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
+                         W.data_ptr<float>(), R.data_ptr<float>(), 
+                         bx.data_ptr<float>(), br.data_ptr<float>(), 
+                         x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
+                         CalibrationMethod::NONE, nullptr, nullptr,
+                         h.data_ptr<float>(), v.data_ptr<float>());
+    }
 
     return std::make_tuple(h, v);
 }

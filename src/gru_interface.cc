@@ -5,6 +5,7 @@
 #include "gru_interface.h"
 
 #include <cuda_runtime.h>
+#include <omp.h>
 
 #include <cstdio>
 #include <iostream>
@@ -1089,250 +1090,362 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
 
     // 根据 use_percentile 选择校准方案
     CalibrationScheme scheme = use_percentile ? CalibrationScheme::PERCENTILE : CalibrationScheme::SQNR;
-
-    // 输入 x 的量化 - 从直方图计算
-    dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
-        using XT = typename decltype(tag)::type;
-        if (!hist_collectors.x_hist.is_valid()) {
-            throw std::runtime_error("x_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<XT>(
-            hist_collectors.x_hist.histogram(), bitwidth_config.x_symmetric_,
-            quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // 隐藏状态 h 的量化
-    dispatchByBitWidth(bitwidth_config.h_, [&](auto tag) {
-        using HT = typename decltype(tag)::type;
-        if (!hist_collectors.h_hist.is_valid()) {
-            throw std::runtime_error("h_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<HT>(
-            hist_collectors.h_hist.histogram(), bitwidth_config.h_symmetric_,
-            quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // 权重 W 的量化（per-channel）- 从直方图计算
     const int channel_size = hist_collectors.hidden_ * 3;
+    
+    // 预分配 per-channel 向量
     quant_params.exp2_inv_W_.resize(channel_size);
-    dispatchByBitWidth(bitwidth_config.W_, [&](auto tag) {
-        using WT = typename decltype(tag)::type;
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            if (!hist_collectors.W_hist[c].is_valid()) {
-                throw std::runtime_error("W_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
-            }
-            calibrateQuantParamsFromHistogram<WT>(hist_collectors.W_hist[c].histogram(),
-                                                  bitwidth_config.W_symmetric_,
-                                                  quant_params.exp2_inv_W_[c], zp_tmp, nullptr,
-                                                  scheme, percentile_value);
-        }
-    });
-
-    // 权重 R 的量化（per-channel）
     quant_params.exp2_inv_R_.resize(channel_size);
-    dispatchByBitWidth(bitwidth_config.R_, [&](auto tag) {
-        using RT = typename decltype(tag)::type;
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            if (!hist_collectors.R_hist[c].is_valid()) {
-                throw std::runtime_error("R_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
-            }
-            calibrateQuantParamsFromHistogram<RT>(hist_collectors.R_hist[c].histogram(),
-                                                  bitwidth_config.R_symmetric_,
-                                                  quant_params.exp2_inv_R_[c], zp_tmp, nullptr,
-                                                  scheme, percentile_value);
-        }
-    });
-
-    // Wx 结果的量化 - 从直方图计算
-    dispatchByBitWidth(bitwidth_config.Wx_, [&](auto tag) {
-        using WxT = typename decltype(tag)::type;
-        if (!hist_collectors.Wx_hist.is_valid()) {
-            throw std::runtime_error("Wx_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<WxT>(
-            hist_collectors.Wx_hist.histogram(), bitwidth_config.Wx_symmetric_,
-            quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // Rh 结果的量化
-    dispatchByBitWidth(bitwidth_config.Rh_, [&](auto tag) {
-        using RhT = typename decltype(tag)::type;
-        if (!hist_collectors.Rh_hist.is_valid()) {
-            throw std::runtime_error("Rh_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<RhT>(
-            hist_collectors.Rh_hist.histogram(), bitwidth_config.Rh_symmetric_,
-            quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // 偏置 bx 的量化（per-channel）
     quant_params.exp2_inv_bx_.resize(channel_size);
-    dispatchByBitWidth(bitwidth_config.bx_, [&](auto tag) {
-        using BxT = typename decltype(tag)::type;
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            if (!hist_collectors.bx_hist[c].is_valid()) {
-                throw std::runtime_error("bx_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
-            }
-            calibrateQuantParamsFromHistogram<BxT>(
-                hist_collectors.bx_hist[c].histogram(), bitwidth_config.bx_symmetric_,
-                quant_params.exp2_inv_bx_[c], zp_tmp, nullptr,
-                scheme, percentile_value);
-        }
-    });
-
-    // 偏置 br 的量化（per-channel）
     quant_params.exp2_inv_br_.resize(channel_size);
-    dispatchByBitWidth(bitwidth_config.br_, [&](auto tag) {
-        using BrT = typename decltype(tag)::type;
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            if (!hist_collectors.br_hist[c].is_valid()) {
-                throw std::runtime_error("br_hist[" + std::to_string(c) + "] is invalid. Calibration data may be empty or corrupted.");
-            }
-            calibrateQuantParamsFromHistogram<BrT>(
-                hist_collectors.br_hist[c].histogram(), bitwidth_config.br_symmetric_,
-                quant_params.exp2_inv_br_[c], zp_tmp, nullptr,
-                scheme, percentile_value);
-        }
-    });
 
-    // z 门输入的量化 - 必须使用真实收集的 z_pre 直方图
-    dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
-        using ZPreT = typename decltype(tag)::type;
-        if (!hist_collectors.z_pre_hist.is_valid()) {
-            throw std::runtime_error("z_pre_hist is invalid. Calibration data may be empty or corrupted.");
+    // ========== OpenMP 并行化 per-channel 计算 ==========
+    // 使用 4 个线程分别处理 W, R, bx, br（每个约 768 channels）
+    // 标量参数由线程 3 顺便处理（开销小，不影响负载均衡）
+    #pragma omp parallel num_threads(4) shared(quant_params, hist_collectors, bitwidth_config, scheme, percentile_value, channel_size)
+    {
+        int tid = omp_get_thread_num();
+        int32_t zp_tmp;
+        
+        if (tid == 0) {
+            // 线程 0: 处理 W（per-channel）
+            dispatchByBitWidth(bitwidth_config.W_, [&](auto tag) {
+                using WT = typename decltype(tag)::type;
+                for (int c = 0; c < channel_size; ++c) {
+                    if (!hist_collectors.W_hist[c].is_valid()) {
+                        throw std::runtime_error("W_hist[" + std::to_string(c) + "] is invalid.");
+                    }
+                    calibrateQuantParamsFromHistogram<WT>(hist_collectors.W_hist[c].histogram(),
+                                                          bitwidth_config.W_symmetric_,
+                                                          quant_params.exp2_inv_W_[c], zp_tmp, nullptr,
+                                                          scheme, percentile_value);
+                }
+            });
+        } else if (tid == 1) {
+            // 线程 1: 处理 R（per-channel）
+            dispatchByBitWidth(bitwidth_config.R_, [&](auto tag) {
+                using RT = typename decltype(tag)::type;
+                for (int c = 0; c < channel_size; ++c) {
+                    if (!hist_collectors.R_hist[c].is_valid()) {
+                        throw std::runtime_error("R_hist[" + std::to_string(c) + "] is invalid.");
+                    }
+                    calibrateQuantParamsFromHistogram<RT>(hist_collectors.R_hist[c].histogram(),
+                                                          bitwidth_config.R_symmetric_,
+                                                          quant_params.exp2_inv_R_[c], zp_tmp, nullptr,
+                                                          scheme, percentile_value);
+                }
+            });
+        } else if (tid == 2) {
+            // 线程 2: 处理 bx（per-channel）
+            dispatchByBitWidth(bitwidth_config.bx_, [&](auto tag) {
+                using BxT = typename decltype(tag)::type;
+                for (int c = 0; c < channel_size; ++c) {
+                    if (!hist_collectors.bx_hist[c].is_valid()) {
+                        throw std::runtime_error("bx_hist[" + std::to_string(c) + "] is invalid.");
+                    }
+                    calibrateQuantParamsFromHistogram<BxT>(
+                        hist_collectors.bx_hist[c].histogram(), bitwidth_config.bx_symmetric_,
+                        quant_params.exp2_inv_bx_[c], zp_tmp, nullptr,
+                        scheme, percentile_value);
+                }
+            });
+        } else {
+            // 线程 3: 处理 br（per-channel）+ 所有标量参数
+            dispatchByBitWidth(bitwidth_config.br_, [&](auto tag) {
+                using BrT = typename decltype(tag)::type;
+                for (int c = 0; c < channel_size; ++c) {
+                    if (!hist_collectors.br_hist[c].is_valid()) {
+                        throw std::runtime_error("br_hist[" + std::to_string(c) + "] is invalid.");
+                    }
+                    calibrateQuantParamsFromHistogram<BrT>(
+                        hist_collectors.br_hist[c].histogram(), bitwidth_config.br_symmetric_,
+                        quant_params.exp2_inv_br_[c], zp_tmp, nullptr,
+                        scheme, percentile_value);
+                }
+            });
+            
+            // 标量参数（计算量小，由最后一个线程顺便处理）
+            // x
+            dispatchByBitWidth(bitwidth_config.x_, [&](auto tag) {
+                using XT = typename decltype(tag)::type;
+                if (!hist_collectors.x_hist.is_valid()) {
+                    throw std::runtime_error("x_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<XT>(
+                    hist_collectors.x_hist.histogram(), bitwidth_config.x_symmetric_,
+                    quant_params.exp2_inv_x_, quant_params.zp_x_, verbose ? "scale_x" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // h
+            dispatchByBitWidth(bitwidth_config.h_, [&](auto tag) {
+                using HT = typename decltype(tag)::type;
+                if (!hist_collectors.h_hist.is_valid()) {
+                    throw std::runtime_error("h_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<HT>(
+                    hist_collectors.h_hist.histogram(), bitwidth_config.h_symmetric_,
+                    quant_params.exp2_inv_h_, quant_params.zp_h_, verbose ? "scale_h" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // Wx
+            dispatchByBitWidth(bitwidth_config.Wx_, [&](auto tag) {
+                using WxT = typename decltype(tag)::type;
+                if (!hist_collectors.Wx_hist.is_valid()) {
+                    throw std::runtime_error("Wx_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<WxT>(
+                    hist_collectors.Wx_hist.histogram(), bitwidth_config.Wx_symmetric_,
+                    quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, verbose ? "scale_Wx" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // Rh
+            dispatchByBitWidth(bitwidth_config.Rh_, [&](auto tag) {
+                using RhT = typename decltype(tag)::type;
+                if (!hist_collectors.Rh_hist.is_valid()) {
+                    throw std::runtime_error("Rh_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<RhT>(
+                    hist_collectors.Rh_hist.histogram(), bitwidth_config.Rh_symmetric_,
+                    quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, verbose ? "scale_Rh" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // z_pre
+            dispatchByBitWidth(bitwidth_config.z_pre_, [&](auto tag) {
+                using ZPreT = typename decltype(tag)::type;
+                if (!hist_collectors.z_pre_hist.is_valid()) {
+                    throw std::runtime_error("z_pre_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<ZPreT>(
+                    hist_collectors.z_pre_hist.histogram(), bitwidth_config.z_pre_symmetric_,
+                    quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
+                    verbose ? "scale_z_pre" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // r_pre
+            dispatchByBitWidth(bitwidth_config.r_pre_, [&](auto tag) {
+                using RPreT = typename decltype(tag)::type;
+                if (!hist_collectors.r_pre_hist.is_valid()) {
+                    throw std::runtime_error("r_pre_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<RPreT>(
+                    hist_collectors.r_pre_hist.histogram(), bitwidth_config.r_pre_symmetric_,
+                    quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
+                    verbose ? "scale_r_pre" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // g_pre
+            dispatchByBitWidth(bitwidth_config.g_pre_, [&](auto tag) {
+                using GPreT = typename decltype(tag)::type;
+                if (!hist_collectors.g_pre_hist.is_valid()) {
+                    throw std::runtime_error("g_pre_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<GPreT>(
+                    hist_collectors.g_pre_hist.histogram(), bitwidth_config.g_pre_symmetric_,
+                    quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
+                    verbose ? "scale_g_pre" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // z_out
+            dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
+                using ZOutT = typename decltype(tag)::type;
+                if (!hist_collectors.z_out_hist.is_valid()) {
+                    throw std::runtime_error("z_out_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<ZOutT>(
+                    hist_collectors.z_out_hist.histogram(), bitwidth_config.z_out_symmetric_,
+                    quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
+                    verbose ? "scale_z_out" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // r_out
+            dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
+                using ROutT = typename decltype(tag)::type;
+                if (!hist_collectors.r_out_hist.is_valid()) {
+                    throw std::runtime_error("r_out_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<ROutT>(
+                    hist_collectors.r_out_hist.histogram(), bitwidth_config.r_out_symmetric_,
+                    quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
+                    verbose ? "scale_r_out" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // g_out
+            dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
+                using GOutT = typename decltype(tag)::type;
+                if (!hist_collectors.g_out_hist.is_valid()) {
+                    throw std::runtime_error("g_out_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<GOutT>(
+                    hist_collectors.g_out_hist.histogram(), bitwidth_config.g_out_symmetric_,
+                    quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
+                    verbose ? "scale_g_out" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // Rh_add_br
+            dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
+                using RhAddBrT = typename decltype(tag)::type;
+                if (!hist_collectors.Rh_add_br_g_hist.is_valid()) {
+                    throw std::runtime_error("Rh_add_br_g_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<RhAddBrT>(
+                    hist_collectors.Rh_add_br_g_hist.histogram(), bitwidth_config.Rh_add_br_symmetric_,
+                    quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_,
+                    verbose ? "scale_Rh_add_br" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // rRh
+            dispatchByBitWidth(bitwidth_config.rRh_, [&](auto tag) {
+                using rRhT = typename decltype(tag)::type;
+                if (!hist_collectors.rRh_hist.is_valid()) {
+                    throw std::runtime_error("rRh_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<rRhT>(
+                    hist_collectors.rRh_hist.histogram(), bitwidth_config.rRh_symmetric_,
+                    quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // new_contrib
+            dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
+                using NewContribT = typename decltype(tag)::type;
+                if (!hist_collectors.new_contrib_hist.is_valid()) {
+                    throw std::runtime_error("new_contrib_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<NewContribT>(
+                    hist_collectors.new_contrib_hist.histogram(),
+                    bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
+                    quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr,
+                    scheme, percentile_value);
+            });
+            
+            // old_contrib
+            dispatchByBitWidth(bitwidth_config.old_contrib_, [&](auto tag) {
+                using OldContribT = typename decltype(tag)::type;
+                if (!hist_collectors.old_contrib_hist.is_valid()) {
+                    throw std::runtime_error("old_contrib_hist is invalid.");
+                }
+                calibrateQuantParamsFromHistogram<OldContribT>(
+                    hist_collectors.old_contrib_hist.histogram(),
+                    bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
+                    quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr,
+                    scheme, percentile_value);
+            });
         }
-        calibrateQuantParamsFromHistogram<ZPreT>(
-            hist_collectors.z_pre_hist.histogram(), bitwidth_config.z_pre_symmetric_,
-            quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_,
-            verbose ? "scale_z_pre" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // r 门输入的量化 - 必须使用真实收集的 r_pre 直方图
-    dispatchByBitWidth(bitwidth_config.r_pre_, [&](auto tag) {
-        using RPreT = typename decltype(tag)::type;
-        if (!hist_collectors.r_pre_hist.is_valid()) {
-            throw std::runtime_error("r_pre_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<RPreT>(
-            hist_collectors.r_pre_hist.histogram(), bitwidth_config.r_pre_symmetric_,
-            quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_,
-            verbose ? "scale_r_pre" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // g 门输入的量化 - 必须使用真实收集的 g_pre 直方图
-    dispatchByBitWidth(bitwidth_config.g_pre_, [&](auto tag) {
-        using GPreT = typename decltype(tag)::type;
-        if (!hist_collectors.g_pre_hist.is_valid()) {
-            throw std::runtime_error("g_pre_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<GPreT>(
-            hist_collectors.g_pre_hist.histogram(), bitwidth_config.g_pre_symmetric_,
-            quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_,
-            verbose ? "scale_g_pre" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // 激活函数输出的校准
-
-    // z 门输出 - sigmoid
-    dispatchByBitWidth(bitwidth_config.z_out_, [&](auto tag) {
-        using ZOutT = typename decltype(tag)::type;
-        if (!hist_collectors.z_out_hist.is_valid()) {
-            throw std::runtime_error("z_out_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<ZOutT>(
-            hist_collectors.z_out_hist.histogram(), bitwidth_config.z_out_symmetric_,
-            quant_params.exp2_inv_z_out_, quant_params.zp_z_out_,
-            verbose ? "scale_z_out" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // r 门输出 - sigmoid
-    dispatchByBitWidth(bitwidth_config.r_out_, [&](auto tag) {
-        using ROutT = typename decltype(tag)::type;
-        if (!hist_collectors.r_out_hist.is_valid()) {
-            throw std::runtime_error("r_out_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<ROutT>(
-            hist_collectors.r_out_hist.histogram(), bitwidth_config.r_out_symmetric_,
-            quant_params.exp2_inv_r_out_, quant_params.zp_r_out_,
-            verbose ? "scale_r_out" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // g 门输出 - tanh
-    dispatchByBitWidth(bitwidth_config.g_out_, [&](auto tag) {
-        using GOutT = typename decltype(tag)::type;
-        if (!hist_collectors.g_out_hist.is_valid()) {
-            throw std::runtime_error("g_out_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<GOutT>(
-            hist_collectors.g_out_hist.histogram(), bitwidth_config.g_out_symmetric_,
-            quant_params.exp2_inv_g_out_, quant_params.zp_g_out_,
-            verbose ? "scale_g_out" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // Rh + br 的量化
-    dispatchByBitWidth(bitwidth_config.Rh_add_br_, [&](auto tag) {
-        using RhAddBrT = typename decltype(tag)::type;
-        if (!hist_collectors.Rh_add_br_g_hist.is_valid()) {
-            throw std::runtime_error("Rh_add_br_g_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<RhAddBrT>(
-            hist_collectors.Rh_add_br_g_hist.histogram(), bitwidth_config.Rh_add_br_symmetric_,
-            quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_,
-            verbose ? "scale_Rh_add_br" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // r × Rh 的量化
-    dispatchByBitWidth(bitwidth_config.rRh_, [&](auto tag) {
-        using rRhT = typename decltype(tag)::type;
-        if (!hist_collectors.rRh_hist.is_valid()) {
-            throw std::runtime_error("rRh_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<rRhT>(
-            hist_collectors.rRh_hist.histogram(), bitwidth_config.rRh_symmetric_,
-            quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, verbose ? "scale_rRh" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // (1.0 - z) * g 的量化
-    dispatchByBitWidth(bitwidth_config.new_contrib_, [&](auto tag) {
-        using NewContribT = typename decltype(tag)::type;
-        if (!hist_collectors.new_contrib_hist.is_valid()) {
-            throw std::runtime_error("new_contrib_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<NewContribT>(
-            hist_collectors.new_contrib_hist.histogram(),
-            bitwidth_config.new_contrib_symmetric_, quant_params.exp2_inv_new_contrib_,
-            quant_params.zp_new_contrib_, verbose ? "scale_new_contrib" : nullptr,
-            scheme, percentile_value);
-    });
-
-    // z * h 的量化
-    dispatchByBitWidth(bitwidth_config.old_contrib_, [&](auto tag) {
-        using OldContribT = typename decltype(tag)::type;
-        if (!hist_collectors.old_contrib_hist.is_valid()) {
-            throw std::runtime_error("old_contrib_hist is invalid. Calibration data may be empty or corrupted.");
-        }
-        calibrateQuantParamsFromHistogram<OldContribT>(
-            hist_collectors.old_contrib_hist.histogram(),
-            bitwidth_config.old_contrib_symmetric_, quant_params.exp2_inv_old_contrib_,
-            quant_params.zp_old_contrib_, verbose ? "scale_old_contrib" : nullptr,
-            scheme, percentile_value);
-    });
+    }  // end omp parallel
 
     return quant_params;
 }
+
+/**
+ * @brief 从 GPU 直方图收集器计算量化参数（GPU 加速 SQNR）
+ *
+ * 直接使用 GPU 上的直方图数据计算 SQNR，避免 GPU→CPU 传输
+ */
+GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
+    GRUGPUHistogramCollectors &gpu_collectors, const OperatorQuantConfig &bitwidth_config,
+    bool verbose) {
+    
+    GRUQuantitativeParameters quant_params;
+    quant_params.hidden_ = gpu_collectors.hidden_;
+    quant_params.bitwidth_config_ = bitwidth_config;
+    
+    const int channel_size = gpu_collectors.hidden_ * 3;
+    quant_params.exp2_inv_W_.resize(channel_size);
+    quant_params.exp2_inv_R_.resize(channel_size);
+    quant_params.exp2_inv_bx_.resize(channel_size);
+    quant_params.exp2_inv_br_.resize(channel_size);
+    
+    // Helper: 计算单个标量直方图的 SQNR 参数
+    auto compute_scalar_sqnr = [&](const GPUHistogramCollector& collector, 
+                                    bool is_symmetric, QuantBitWidth quant_bw,
+                                    int8_t& out_exp2_inv, int32_t& out_zp,
+                                    const char* name) {
+        int quant_bits = std::abs(static_cast<int>(quant_bw));
+        bool is_unsigned = static_cast<int>(quant_bw) > 0;  // UINT 类型是正数
+        if (!collector.is_valid()) {
+            throw std::runtime_error(std::string("GPU histogram ") + (name ? name : "unknown") + " is invalid");
+        }
+        const auto& hist = collector.histogram();
+        gpu_hist::compute_sqnr_params_gpu(
+            hist.counts.data(), hist.min_val, hist.max_val,
+            hist.num_bins, hist.total_count,
+            is_symmetric, quant_bits, is_unsigned, out_exp2_inv, out_zp);
+        
+        if (verbose && name) {
+            printf("[GPU-SQNR][%s] range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
+                   name, hist.min_val, hist.max_val, out_exp2_inv, out_zp);
+        }
+    };
+    
+    // 标量直方图
+    compute_scalar_sqnr(gpu_collectors.x_hist, bitwidth_config.x_symmetric_, 
+                        bitwidth_config.x_, quant_params.exp2_inv_x_, quant_params.zp_x_, "x");
+    compute_scalar_sqnr(gpu_collectors.h_hist, bitwidth_config.h_symmetric_,
+                        bitwidth_config.h_, quant_params.exp2_inv_h_, quant_params.zp_h_, "h");
+    compute_scalar_sqnr(gpu_collectors.Wx_hist, bitwidth_config.Wx_symmetric_,
+                        bitwidth_config.Wx_, quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, "Wx");
+    compute_scalar_sqnr(gpu_collectors.Rh_hist, bitwidth_config.Rh_symmetric_,
+                        bitwidth_config.Rh_, quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, "Rh");
+    compute_scalar_sqnr(gpu_collectors.z_pre_hist, bitwidth_config.z_pre_symmetric_,
+                        bitwidth_config.z_pre_, quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, "z_pre");
+    compute_scalar_sqnr(gpu_collectors.r_pre_hist, bitwidth_config.r_pre_symmetric_,
+                        bitwidth_config.r_pre_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_, "r_pre");
+    compute_scalar_sqnr(gpu_collectors.g_pre_hist, bitwidth_config.g_pre_symmetric_,
+                        bitwidth_config.g_pre_, quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_, "g_pre");
+    compute_scalar_sqnr(gpu_collectors.z_out_hist, bitwidth_config.z_out_symmetric_,
+                        bitwidth_config.z_out_, quant_params.exp2_inv_z_out_, quant_params.zp_z_out_, "z_out");
+    compute_scalar_sqnr(gpu_collectors.r_out_hist, bitwidth_config.r_out_symmetric_,
+                        bitwidth_config.r_out_, quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, "r_out");
+    compute_scalar_sqnr(gpu_collectors.g_out_hist, bitwidth_config.g_out_symmetric_,
+                        bitwidth_config.g_out_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_, "g_out");
+    compute_scalar_sqnr(gpu_collectors.Rh_add_br_g_hist, bitwidth_config.Rh_add_br_symmetric_,
+                        bitwidth_config.Rh_add_br_, quant_params.exp2_inv_Rh_add_br_, 
+                        quant_params.zp_Rh_add_br_, "Rh_add_br");
+    compute_scalar_sqnr(gpu_collectors.rRh_hist, bitwidth_config.rRh_symmetric_,
+                        bitwidth_config.rRh_, quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, "rRh");
+    compute_scalar_sqnr(gpu_collectors.new_contrib_hist, bitwidth_config.new_contrib_symmetric_,
+                        bitwidth_config.new_contrib_, quant_params.exp2_inv_new_contrib_,
+                        quant_params.zp_new_contrib_, "new_contrib");
+    compute_scalar_sqnr(gpu_collectors.old_contrib_hist, bitwidth_config.old_contrib_symmetric_,
+                        bitwidth_config.old_contrib_, quant_params.exp2_inv_old_contrib_,
+                        quant_params.zp_old_contrib_, "old_contrib");
+    
+    // Per-channel 直方图（使用批量 GPU SQNR）
+    auto getBits = [](QuantBitWidth bw) { return std::abs(static_cast<int>(bw)); };
+    
+    if (gpu_collectors.W_batch.is_valid()) {
+        gpu_hist::compute_sqnr_per_channel_gpu(
+            gpu_collectors.W_batch, bitwidth_config.W_symmetric_, 
+            getBits(bitwidth_config.W_), quant_params.exp2_inv_W_);
+    }
+    if (gpu_collectors.R_batch.is_valid()) {
+        gpu_hist::compute_sqnr_per_channel_gpu(
+            gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
+            getBits(bitwidth_config.R_), quant_params.exp2_inv_R_);
+    }
+    if (gpu_collectors.bx_batch.is_valid()) {
+        gpu_hist::compute_sqnr_per_channel_gpu(
+            gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
+            getBits(bitwidth_config.bx_), quant_params.exp2_inv_bx_);
+    }
+    if (gpu_collectors.br_batch.is_valid()) {
+        gpu_hist::compute_sqnr_per_channel_gpu(
+            gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
+            getBits(bitwidth_config.br_), quant_params.exp2_inv_br_);
+    }
+    
+    return quant_params;
+}
+
+// 注意：PERCENTILE 校准使用 CPU OpenMP 实现（比 GPU 更快）
+// 使用 calculateGRUQuantitativeParametersFromHistograms() 并设置 use_percentile=true

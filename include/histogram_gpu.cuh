@@ -366,6 +366,64 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
                                            const float* data_dev, int input_size,
                                            cudaStream_t stream = 0);
 
+/**
+ * @brief GPU 加速的 SQNR 量化参数计算
+ *
+ * 输入：直方图 counts (GPU), min_val, max_val, num_bins
+ * 输出：最优 exp2_inv 和 zp
+ *
+ * 算法：
+ * 1. 对称量化：搜索 201 个 delta 候选
+ * 2. 非对称量化：搜索 35×31 = 1085 个 (delta, offset) 组合
+ * 3. 每个候选并行计算所有 bin 的噪声，reduction 求和
+ */
+/**
+ * @brief GPU SQNR 配置（与 HistogramCalibrationConfig 对应）
+ */
+struct GPUSqnrConfig {
+    int symmetric_delta_candidates = 201;
+    int asymmetric_delta_candidates = 35;
+    int offset_candidates = 31;
+    float gamma = 3.0f;
+    float p = 2.0f;
+};
+
+void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val, 
+                              int num_bins, int64_t total_count,
+                              bool is_symmetric, int quant_bits, bool is_unsigned,
+                              int8_t& out_exp2_inv, int32_t& out_zp,
+                              const GPUSqnrConfig& config = GPUSqnrConfig(),
+                              cudaStream_t stream = 0);
+
+/**
+ * @brief 批量 GPU SQNR 计算（处理多个直方图）
+ *
+ * 一次调用计算多个直方图的量化参数
+ */
+void compute_sqnr_params_batch_gpu(
+    const std::vector<const float*>& counts_ptrs,  // GPU 端 counts 指针数组
+    const std::vector<float>& mins,
+    const std::vector<float>& maxs,
+    int num_bins,
+    const std::vector<int64_t>& total_counts,
+    const std::vector<bool>& is_symmetric,
+    int quant_bits,
+    std::vector<int8_t>& out_exp2_inv,
+    std::vector<int32_t>& out_zp,
+    cudaStream_t stream = 0);
+
+/**
+ * @brief 从 PerChannelHistogramBatch 计算 per-channel SQNR 参数
+ *
+ * 一次调用计算所有 channel 的量化参数
+ */
+void compute_sqnr_per_channel_gpu(
+    const PerChannelHistogramBatch& batch,
+    bool is_symmetric, int quant_bits,
+    std::vector<int8_t>& out_exp2_inv,
+    const GPUSqnrConfig& config = GPUSqnrConfig(),
+    cudaStream_t stream = 0);
+
 }  // namespace gpu_hist
 
 // ============================================================================

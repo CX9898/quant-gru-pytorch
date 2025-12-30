@@ -189,6 +189,13 @@ void forwardWithCalibrationGPU(
 // 用于与 calculateGRUQuantitativeParametersFromHistograms 配合使用
 GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors &gpu_collectors);
 
+// 从 GPU 直方图收集器直接计算量化参数（GPU 加速 SQNR）
+// 避免 GPU→CPU 传输，直接在 GPU 上计算 SQNR
+GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
+    GRUGPUHistogramCollectors &gpu_collectors,
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
+    bool verbose = false);
+
 // =====================================================================
 // 反向传播接口
 // =====================================================================

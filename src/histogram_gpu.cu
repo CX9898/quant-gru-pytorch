@@ -543,7 +543,35 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
             data_dev, d_mins.data(), d_maxs.data(), input_size, channel_size);
     }
     
-    // 2. 批量构建直方图（直接写入 batch.counts，零拷贝！）
+    // 2. 拷贝 min/max 到 CPU 进行范围扩展
+    cudaMemcpyAsync(batch.mins.data(), d_mins.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(batch.maxs.data(), d_maxs.data(), channel_size * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    
+    // 3. 范围扩展：与 CPU HistogramCollector::collect() 完全一致
+    // 必须在构建直方图之前进行，以确保 bin 分布一致
+    const float minimum_scale = get_minimum_scale(num_bins);
+    const float minimum_range = minimum_scale * num_bins;
+    for (int c = 0; c < channel_size; ++c) {
+        float input_range = batch.maxs[c] - batch.mins[c];
+        if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
+            // 确保 0 在范围内（与 CPU 一致）
+            batch.mins[c] = std::min(batch.mins[c], 0.0f);
+            batch.maxs[c] = std::max(batch.maxs[c], 0.0f);
+            // 基于 min 扩展范围
+            batch.maxs[c] = batch.mins[c] + minimum_range;
+        }
+    }
+    
+    // 4. 将扩展后的范围拷贝回 GPU
+    cudaMemcpyAsync(d_mins.data(), batch.mins.data(), channel_size * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_maxs.data(), batch.maxs.data(), channel_size * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+    
+    // 5. 使用扩展后的范围构建直方图
     batch.counts.zero();
     {
         const int threads = 256;
@@ -553,12 +581,6 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
             data_dev, batch.counts.data(), d_mins.data(), d_maxs.data(),
             input_size, channel_size, num_bins);
     }
-    
-    // 3. 只拷贝 min/max 元数据到 CPU（很小）
-    cudaMemcpyAsync(batch.mins.data(), d_mins.data(), channel_size * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(batch.maxs.data(), d_maxs.data(), channel_size * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
     
     batch.per_channel_count = input_size;
@@ -741,5 +763,535 @@ Histogram gpu_histogram_to_cpu(const GPUHistogram& gpu_hist) {
     cpu_hist.counts = gpu_hist.to_host();
     return cpu_hist;
 }
+
+// ============================================================================
+// GPU SQNR 量化参数计算
+// ============================================================================
+
+namespace {
+
+// SQNR 配置现在从 GPUSqnrConfig 参数传入
+
+/**
+ * @brief SQNR 噪声计算 Kernel（对称量化）
+ *
+ * 每个 block 处理一个 delta 候选
+ * block 内线程并行计算各 bin 的噪声，然后 reduction
+ */
+__global__ void sqnr_noise_symmetric_kernel(
+    const float* __restrict__ counts,
+    float min_val, float bin_width, int num_bins,
+    float max_delta, int num_delta_candidates,
+    int64_t num_steps, float offset,
+    float gamma, float p,
+    float* __restrict__ noise_out)  // [num_delta_candidates]
+{
+    const int delta_idx = blockIdx.x;
+    if (delta_idx >= num_delta_candidates) return;
+    
+    // 计算当前 delta
+    float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
+    delta = fmaxf(delta, 1e-8f);
+    
+    // Shared memory for reduction
+    extern __shared__ float shared_noise[];
+    
+    float local_noise = 0.0f;
+    
+    // 每个线程处理多个 bin
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        float count = counts[i];
+        if (count < 1e-6f) continue;
+        
+        float x = min_val + (i + 0.5f) * bin_width;
+        
+        // AIMET: q = round(x / delta - offset)
+        float q = roundf(x / delta - offset);
+        
+        bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
+        q = fmaxf(0.0f, fminf(static_cast<float>(num_steps), q));
+        float x_recon = (q + offset) * delta;
+        
+        float error = powf(fabsf(x_recon - x), p);
+        if (clipped) error *= gamma;
+        
+        local_noise += error * count;
+    }
+    
+    shared_noise[threadIdx.x] = local_noise;
+    __syncthreads();
+    
+    // Reduction
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_noise[threadIdx.x] += shared_noise[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        noise_out[delta_idx] = shared_noise[0];
+    }
+}
+
+/**
+ * @brief SQNR 噪声计算 Kernel（非对称量化）
+ *
+ * 每个 block 处理一个 (delta_idx, offset_idx) 组合
+ */
+__global__ void sqnr_noise_asymmetric_kernel(
+    const float* __restrict__ counts,
+    float min_val, float max_val, float bin_width, int num_bins,
+    float max_delta, int num_delta_candidates, int num_offset_candidates,
+    int64_t num_steps,
+    const float* __restrict__ offsets,  // [num_offset_candidates]
+    float gamma, float p,
+    float* __restrict__ noise_out)  // [num_delta_candidates * num_offset_candidates]
+{
+    const int combo_idx = blockIdx.x;
+    const int total_combos = num_delta_candidates * num_offset_candidates;
+    if (combo_idx >= total_combos) return;
+    
+    const int delta_idx = combo_idx / num_offset_candidates;
+    const int offset_idx = combo_idx % num_offset_candidates;
+    
+    // 计算 delta
+    float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
+    delta = fmaxf(delta, 1e-8f);
+    
+    // 获取 offset 并 clamp
+    float offset = offsets[offset_idx];
+    float test_min = fmaxf(min_val, delta * offset);
+    float test_max = fminf(max_val, test_min + delta * num_steps);
+    float clamped_delta = fmaxf((test_max - test_min) / num_steps, 1e-8f);
+    float clamped_offset = roundf(test_min / clamped_delta);
+    
+    // Shared memory for reduction
+    extern __shared__ float shared_noise[];
+    
+    float local_noise = 0.0f;
+    
+    for (int i = threadIdx.x; i < num_bins; i += blockDim.x) {
+        float count = counts[i];
+        if (count < 1e-6f) continue;
+        
+        float x = min_val + (i + 0.5f) * bin_width;
+        
+        float q = roundf(x / clamped_delta - clamped_offset);
+        bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
+        q = fmaxf(0.0f, fminf(static_cast<float>(num_steps), q));
+        float x_recon = (q + clamped_offset) * clamped_delta;
+        
+        float error = powf(fabsf(x_recon - x), p);
+        if (clipped) error *= gamma;
+        
+        local_noise += error * count;
+    }
+    
+    shared_noise[threadIdx.x] = local_noise;
+    __syncthreads();
+    
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared_noise[threadIdx.x] += shared_noise[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        noise_out[combo_idx] = shared_noise[0];
+    }
+}
+
+/**
+ * @brief 找最小噪声索引的 Kernel
+ */
+__global__ void find_min_noise_kernel(
+    const float* __restrict__ noise, int n,
+    int* __restrict__ min_idx, float* __restrict__ min_val)
+{
+    extern __shared__ float shared_data[];
+    float* shared_vals = shared_data;
+    int* shared_idxs = (int*)(shared_data + blockDim.x);
+    
+    float local_min = FLT_MAX;
+    int local_idx = 0;
+    
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        if (noise[i] < local_min) {
+            local_min = noise[i];
+            local_idx = i;
+        }
+    }
+    
+    shared_vals[threadIdx.x] = local_min;
+    shared_idxs[threadIdx.x] = local_idx;
+    __syncthreads();
+    
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            if (shared_vals[threadIdx.x + stride] < shared_vals[threadIdx.x]) {
+                shared_vals[threadIdx.x] = shared_vals[threadIdx.x + stride];
+                shared_idxs[threadIdx.x] = shared_idxs[threadIdx.x + stride];
+            }
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        *min_idx = shared_idxs[0];
+        *min_val = shared_vals[0];
+    }
+}
+
+}  // anonymous namespace
+
+namespace gpu_hist {
+
+void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val,
+                              int num_bins, int64_t total_count,
+                              bool is_symmetric, int quant_bits, bool is_unsigned,
+                              int8_t& out_exp2_inv, int32_t& out_zp,
+                              const GPUSqnrConfig& config,
+                              cudaStream_t stream) {
+    
+    // 计算量化范围（区分有符号/无符号）
+    int64_t quant_min, quant_max;
+    if (is_unsigned) {
+        quant_min = 0;
+        quant_max = (quant_bits == 8) ? 255 : 65535;
+    } else {
+        quant_min = (quant_bits == 8) ? -128 : -32768;
+        quant_max = (quant_bits == 8) ? 127 : 32767;
+    }
+    const int64_t num_steps = quant_max - quant_min;
+    
+    // 确保范围包含 0
+    min_val = std::min(min_val, 0.0f);
+    max_val = std::max(max_val, 0.0f);
+    max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+    
+    float bin_width = (max_val - min_val) / num_bins;
+    if (bin_width < 1e-9f) bin_width = 1e-9f;
+    
+    float optimal_scale, optimal_min;
+    
+    if (is_symmetric) {
+        // 对称量化
+        float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+        float offset = -static_cast<float>((num_steps + 1) / 2);
+        
+        const int num_candidates = config.symmetric_delta_candidates;
+        
+        // 分配噪声缓冲区
+        dev::vector<float> noise_dev(num_candidates);
+        
+        // 启动 kernel
+        const int threads = 256;
+        const int blocks = num_candidates;
+        size_t shared_mem = threads * sizeof(float);
+        
+        sqnr_noise_symmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
+            counts_dev, min_val, bin_width, num_bins,
+            max_delta, num_candidates,
+            num_steps, offset, config.gamma, config.p, noise_dev.data());
+        
+        // 找最小噪声
+        dev::vector<int> min_idx_dev(1);
+        dev::vector<float> min_val_dev(1);
+        
+        find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), stream>>>(
+            noise_dev.data(), num_candidates,
+            min_idx_dev.data(), min_val_dev.data());
+        
+        int best_idx;
+        cudaMemcpyAsync(&best_idx, min_idx_dev.data(), sizeof(int), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        
+        optimal_scale = max_delta * (best_idx + 1) / (num_candidates - 1);
+        optimal_scale = std::max(optimal_scale, 1e-8f);
+        optimal_min = offset * optimal_scale;
+        
+    } else {
+        // 非对称量化
+        float max_delta = (max_val - min_val) / num_steps;
+        
+        const int num_delta_candidates = config.asymmetric_delta_candidates;
+        
+        // 生成 offset 候选
+        const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
+        std::vector<float> h_offsets(num_offsets);
+        float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
+        for (int o = 0; o < num_offsets - 1; ++o) {
+            h_offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+        }
+        h_offsets[num_offsets - 1] = std::round(min_val / max_delta);
+        
+        dev::vector<float> offsets_dev(num_offsets);
+        cudaMemcpyAsync(offsets_dev.data(), h_offsets.data(), num_offsets * sizeof(float),
+                       cudaMemcpyHostToDevice, stream);
+        
+        // 分配噪声缓冲区
+        int total_combos = num_delta_candidates * num_offsets;
+        dev::vector<float> noise_dev(total_combos);
+        
+        // 启动 kernel
+        const int threads = 256;
+        const int blocks = total_combos;
+        size_t shared_mem = threads * sizeof(float);
+        
+        sqnr_noise_asymmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
+            counts_dev, min_val, max_val, bin_width, num_bins,
+            max_delta, num_delta_candidates, num_offsets,
+            num_steps, offsets_dev.data(), config.gamma, config.p, noise_dev.data());
+        
+        // 找最小噪声
+        dev::vector<int> min_idx_dev(1);
+        dev::vector<float> min_val_dev(1);
+        
+        find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), stream>>>(
+            noise_dev.data(), total_combos, min_idx_dev.data(), min_val_dev.data());
+        
+        int best_idx;
+        cudaMemcpyAsync(&best_idx, min_idx_dev.data(), sizeof(int), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        
+        int best_delta_idx = best_idx / num_offsets;
+        int best_offset_idx = best_idx % num_offsets;
+        
+        float delta = max_delta * (best_delta_idx + 1) / (num_delta_candidates - 1);
+        delta = std::max(delta, 1e-8f);
+        float offset = h_offsets[best_offset_idx];
+        
+        float test_min = std::max(min_val, delta * offset);
+        float test_max = std::min(max_val, test_min + delta * num_steps);
+        optimal_scale = std::max((test_max - test_min) / num_steps, 1e-8f);
+        optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
+    }
+    
+    // 转换到 POT
+    float n = -std::log2(optimal_scale);
+    int8_t n_rounded = static_cast<int8_t>(std::round(n));
+    float po2_scale = std::pow(2.0f, -static_cast<float>(n_rounded));
+    
+    out_exp2_inv = n_rounded;
+    
+    // 计算 zp
+    if (is_symmetric) {
+        out_zp = 0;
+    } else {
+        float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
+        out_zp = static_cast<int32_t>(std::round(zp_fp));
+    }
+}
+
+void compute_sqnr_params_batch_gpu(
+    const std::vector<const float*>& counts_ptrs,
+    const std::vector<float>& mins,
+    const std::vector<float>& maxs,
+    int num_bins,
+    const std::vector<int64_t>& total_counts,
+    const std::vector<bool>& is_symmetric,
+    int quant_bits,
+    std::vector<int8_t>& out_exp2_inv,
+    std::vector<int32_t>& out_zp,
+    cudaStream_t stream) {
+    
+    const int n = counts_ptrs.size();
+    out_exp2_inv.resize(n);
+    out_zp.resize(n);
+    
+    GPUSqnrConfig config;  // 使用默认配置
+    
+    // 简单实现：串行处理每个直方图
+    // TODO: 可以进一步优化为真正的批量并行
+    for (int i = 0; i < n; ++i) {
+        compute_sqnr_params_gpu(
+            counts_ptrs[i], mins[i], maxs[i], num_bins, total_counts[i],
+            is_symmetric[i], quant_bits, false, out_exp2_inv[i], out_zp[i], config, stream);
+    }
+}
+
+void compute_sqnr_per_channel_gpu(
+    const PerChannelHistogramBatch& batch,
+    bool is_symmetric, int quant_bits,
+    std::vector<int8_t>& out_exp2_inv,
+    const GPUSqnrConfig& config,
+    cudaStream_t stream) {
+    
+    const int n = batch.channel_size;
+    if (n == 0 || !batch.is_valid()) {
+        out_exp2_inv.clear();
+        return;
+    }
+    
+    out_exp2_inv.resize(n);
+    
+    // 使用多个 CUDA stream 并行计算
+    constexpr int NUM_STREAMS = 8;
+    cudaStream_t streams[NUM_STREAMS];
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamCreate(&streams[i]);
+    }
+    
+    // 从配置获取候选数量
+    const int sym_candidates = config.symmetric_delta_candidates;
+    const int asym_delta_candidates = config.asymmetric_delta_candidates;
+    const int offset_candidates = config.offset_candidates;
+    
+    // 分配缓冲区给每个 stream
+    std::vector<dev::vector<float>> noise_buffers(NUM_STREAMS);
+    std::vector<dev::vector<int>> idx_buffers(NUM_STREAMS);
+    std::vector<dev::vector<float>> val_buffers(NUM_STREAMS);
+    
+    const int max_candidates = is_symmetric ? sym_candidates 
+                                            : asym_delta_candidates * offset_candidates;
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        noise_buffers[i].resize(max_candidates);
+        idx_buffers[i].resize(1);
+        val_buffers[i].resize(1);
+    }
+    
+    // 非对称量化需要的 offset 数组
+    const int64_t quant_min = (quant_bits == 8) ? -128 : -32768;
+    const int64_t quant_max = (quant_bits == 8) ? 127 : 32767;
+    const int64_t num_steps = quant_max - quant_min;
+    
+    std::vector<std::vector<float>> h_offsets_all;
+    std::vector<dev::vector<float>> offsets_dev_all;
+    
+    if (!is_symmetric) {
+        h_offsets_all.resize(n);
+        offsets_dev_all.resize(n);
+        
+        for (int c = 0; c < n; ++c) {
+            float max_delta = (batch.maxs[c] - batch.mins[c]) / num_steps;
+            if (max_delta < 1e-8f) max_delta = 1e-8f;
+            
+            const int num_offsets = std::min(static_cast<int>(num_steps + 2), offset_candidates);
+            h_offsets_all[c].resize(num_offsets);
+            float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
+            for (int o = 0; o < num_offsets - 1; ++o) {
+                h_offsets_all[c][o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+            }
+            h_offsets_all[c][num_offsets - 1] = std::round(batch.mins[c] / max_delta);
+            
+            offsets_dev_all[c].resize(num_offsets);
+            cudaMemcpyAsync(offsets_dev_all[c].data(), h_offsets_all[c].data(), 
+                           num_offsets * sizeof(float), cudaMemcpyHostToDevice, streams[c % NUM_STREAMS]);
+        }
+    }
+    
+    // 并行处理所有 channel
+    std::vector<int> best_idx_host(n);
+    
+    for (int c = 0; c < n; ++c) {
+        int stream_id = c % NUM_STREAMS;
+        cudaStream_t s = streams[stream_id];
+        
+        // 使用原始直方图的 min/max 计算 bin_width（与 CPU 一致）
+        float hist_min = batch.mins[c];
+        float hist_max = batch.maxs[c];
+        float bin_width = (hist_max - hist_min) / batch.num_bins;
+        // 注意：不对 bin_width 做 clamp，保持与 CPU 一致（允许为 0）
+        
+        // 计算搜索用的 min_val/max_val（确保包含 0）
+        float min_val = std::min(hist_min, 0.0f);
+        float max_val = std::max(hist_max, 0.0f);
+        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        
+        const float* counts_ptr = batch.channel_counts(c);
+        
+        if (is_symmetric) {
+            float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+            float offset = -static_cast<float>((num_steps + 1) / 2);
+            
+            const int threads = 256;
+            size_t shared_mem = threads * sizeof(float);
+            
+            // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 一致）
+            sqnr_noise_symmetric_kernel<<<sym_candidates, threads, shared_mem, s>>>(
+                counts_ptr, hist_min, bin_width, batch.num_bins,
+                max_delta, sym_candidates,
+                num_steps, offset, config.gamma, config.p, noise_buffers[stream_id].data());
+            
+            find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), s>>>(
+                noise_buffers[stream_id].data(), sym_candidates,
+                idx_buffers[stream_id].data(), val_buffers[stream_id].data());
+            
+        } else {
+            float max_delta = (max_val - min_val) / num_steps;
+            max_delta = std::max(max_delta, 1e-8f);
+            
+            const int num_offsets = h_offsets_all[c].size();
+            const int total_combos = asym_delta_candidates * num_offsets;
+            
+            const int threads = 256;
+            size_t shared_mem = threads * sizeof(float);
+            
+            // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 一致）
+            sqnr_noise_asymmetric_kernel<<<total_combos, threads, shared_mem, s>>>(
+                counts_ptr, hist_min, max_val, bin_width, batch.num_bins,
+                max_delta, asym_delta_candidates, num_offsets,
+                num_steps, offsets_dev_all[c].data(), config.gamma, config.p,
+                noise_buffers[stream_id].data());
+            
+            find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), s>>>(
+                noise_buffers[stream_id].data(), total_combos,
+                idx_buffers[stream_id].data(), val_buffers[stream_id].data());
+        }
+    }
+    
+    // 同步并收集结果
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamSynchronize(streams[i]);
+    }
+    
+    // 拷贝最小索引到 host 并计算最终参数
+    for (int c = 0; c < n; ++c) {
+        int stream_id = c % NUM_STREAMS;
+        int best_idx;
+        cudaMemcpy(&best_idx, idx_buffers[stream_id].data(), sizeof(int), cudaMemcpyDeviceToHost);
+        
+        float min_val = std::min(batch.mins[c], 0.0f);
+        float max_val = std::max(batch.maxs[c], 0.0f);
+        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        
+        float optimal_scale;
+        
+        if (is_symmetric) {
+            float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+            
+            optimal_scale = max_delta * (best_idx + 1) / (sym_candidates - 1);
+            optimal_scale = std::max(optimal_scale, 1e-8f);
+        } else {
+            float max_delta = (max_val - min_val) / num_steps;
+            max_delta = std::max(max_delta, 1e-8f);
+            
+            const int num_offsets = h_offsets_all[c].size();
+            int best_delta_idx = best_idx / num_offsets;
+            int best_offset_idx = best_idx % num_offsets;
+            
+            float delta = max_delta * (best_delta_idx + 1) / (asym_delta_candidates - 1);
+            delta = std::max(delta, 1e-8f);
+            float offset = h_offsets_all[c][best_offset_idx];
+            
+            float test_min = std::max(min_val, delta * offset);
+            float test_max = std::min(max_val, test_min + delta * num_steps);
+            optimal_scale = std::max((test_max - test_min) / num_steps, 1e-8f);
+        }
+        
+        // 转换到 POT
+        float n_val = -std::log2(optimal_scale);
+        out_exp2_inv[c] = static_cast<int8_t>(std::round(n_val));
+    }
+    
+    // 清理 streams
+    for (int i = 0; i < NUM_STREAMS; ++i) {
+        cudaStreamDestroy(streams[i]);
+    }
+}
+
+}  // namespace gpu_hist
 
 
