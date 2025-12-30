@@ -217,8 +217,8 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::PrecomputeWeightSums(const WT *W, cons
         for (int k = 0; k < input_size; k++) {
             sum += static_cast<int64_t>(W[k * hidden3 + m]);
         }
-        int64_t product = sum * rescale_param_.zp_x_;
-        W_sum_mul_x_zp_[m] = rshift_round(product, rescale_param_.n_W_mul_x_div_Wx_[m]);
+        // 与 GPU 保持一致：不在此处移位，只计算 W_sum * zp_x
+        W_sum_mul_x_zp_[m] = sum * rescale_param_.zp_x_;
     }
 
 #pragma omp parallel for
@@ -227,8 +227,8 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::PrecomputeWeightSums(const WT *W, cons
         for (int k = 0; k < hidden_size; k++) {
             sum += static_cast<int64_t>(R[k * hidden3 + m]);
         }
-        int64_t product = sum * rescale_param_.zp_h_;
-        R_sum_mul_h_zp_[m] = rshift_round(product, rescale_param_.n_R_mul_h_div_Rh_[m]);
+        // 与 GPU 保持一致：不在此处移位，只计算 R_sum * zp_h
+        R_sum_mul_h_zp_[m] = sum * rescale_param_.zp_h_;
     }
 
     weight_sums_computed_ = true;
