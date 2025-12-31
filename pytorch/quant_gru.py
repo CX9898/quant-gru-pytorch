@@ -52,6 +52,28 @@ except ImportError:
 #                      位宽配置工具函数
 # ============================================================
 
+# JSON 配置字段映射: JSON key -> (位宽属性名, 对称量化属性名)
+_BITWIDTH_FIELD_MAP = {
+    "input.x": ("x_", "x_symmetric_"),
+    "input.h": ("h_", "h_symmetric_"),
+    "weight.W": ("W_", "W_symmetric_"),
+    "weight.R": ("R_", "R_symmetric_"),
+    "weight.bx": ("bx_", "bx_symmetric_"),
+    "weight.br": ("br_", "br_symmetric_"),
+    "matmul.Wx": ("Wx_", "Wx_symmetric_"),
+    "matmul.Rh": ("Rh_", "Rh_symmetric_"),
+    "gate.z_pre": ("z_pre_", "z_pre_symmetric_"),
+    "gate.z_out": ("z_out_", "z_out_symmetric_"),
+    "gate.r_pre": ("r_pre_", "r_pre_symmetric_"),
+    "gate.r_out": ("r_out_", "r_out_symmetric_"),
+    "gate.g_pre": ("g_pre_", "g_pre_symmetric_"),
+    "gate.g_out": ("g_out_", "g_out_symmetric_"),
+    "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
+    "op.rRh": ("rRh_", "rRh_symmetric_"),
+    "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
+    "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
+}
+
 
 def _get_bitwidth_value(op_cfg: dict) -> int:
     """从配置中获取位宽值（8/16/32），默认 8"""
@@ -80,29 +102,7 @@ def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
     gru_config = data.get('GRU_config', {})
     op_config = gru_config.get('operator_config', {})
 
-    # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
-    field_map = {
-        "input.x": ("x_", "x_symmetric_"),
-        "input.h": ("h_", "h_symmetric_"),
-        "weight.W": ("W_", "W_symmetric_"),
-        "weight.R": ("R_", "R_symmetric_"),
-        "weight.bx": ("bx_", "bx_symmetric_"),
-        "weight.br": ("br_", "br_symmetric_"),
-        "matmul.Wx": ("Wx_", "Wx_symmetric_"),
-        "matmul.Rh": ("Rh_", "Rh_symmetric_"),
-        "gate.z_pre": ("z_pre_", "z_pre_symmetric_"),
-        "gate.z_out": ("z_out_", "z_out_symmetric_"),
-        "gate.r_pre": ("r_pre_", "r_pre_symmetric_"),
-        "gate.r_out": ("r_out_", "r_out_symmetric_"),
-        "gate.g_pre": ("g_pre_", "g_pre_symmetric_"),
-        "gate.g_out": ("g_out_", "g_out_symmetric_"),
-        "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
-        "op.rRh": ("rRh_", "rRh_symmetric_"),
-        "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
-        "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
-    }
-
-    for json_key, (bw_attr, sym_attr) in field_map.items():
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
         if json_key in op_config:
             op_cfg = op_config[json_key]
             # 设置位宽
@@ -245,6 +245,55 @@ def ensure_cuda_float32(tensor: torch.Tensor, device: torch.device) -> torch.Ten
         tensor = tensor.float()
     return tensor
 
+
+def convert_weights_to_haste_format(
+        weight_ih: torch.Tensor,
+        weight_hh: torch.Tensor,
+        bias_ih: Optional[torch.Tensor],
+        bias_hh: Optional[torch.Tensor],
+        hidden_size: int,
+        device: torch.device
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    将 PyTorch GRU 权重转换为 Haste 格式（独立工具函数）
+    
+    PyTorch 格式: (r, z, n)
+    Haste 格式:   (z, r, n)
+    
+    Args:
+        weight_ih: [3*H, I] 输入权重 (PyTorch 格式)
+        weight_hh: [3*H, H] 循环权重 (PyTorch 格式)
+        bias_ih: [3*H] 输入偏置 或 None
+        bias_hh: [3*H] 循环偏置 或 None
+        hidden_size: 隐藏层大小（用于创建零偏置）
+        device: 目标设备
+        
+    Returns:
+        (W, R, bx, br): Haste 格式的权重和偏置
+            - W: [I, 3*H] 转置后的输入权重
+            - R: [H, 3*H] 转置后的循环权重
+            - bx: [3*H] 输入偏置
+            - br: [3*H] 循环偏置
+    """
+    # 权重转换: 重排序 (r,z,n) -> (z,r,n) 并转置
+    weight_ih = ensure_cuda_float32(weight_ih, device)
+    weight_hh = ensure_cuda_float32(weight_hh, device)
+    W = reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
+    R = reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
+    
+    # 偏置处理
+    if bias_ih is not None and bias_hh is not None:
+        bias_ih = ensure_cuda_float32(bias_ih, device)
+        bias_hh = ensure_cuda_float32(bias_hh, device)
+        bx = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+        br = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
+    else:
+        bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+        br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+    
+    return W, R, bx, br
+
+
 # ============================================================
 #                      QDQ (Quantize-Dequantize) 辅助函数
 #                      用于 ONNX 导出的伪量化操作
@@ -382,21 +431,10 @@ class GRUFunction(torch.autograd.Function):
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
 
-        # 权重格式转换: PyTorch (r,z,n) -> Haste (z,r,n)，并转置
-        weight_ih = ensure_cuda_float32(weight_ih, device)
-        weight_hh = ensure_cuda_float32(weight_hh, device)
-        W = reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
-        R = reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
-
-        # 偏置处理
-        if bias_ih is not None and bias_hh is not None:
-            bias_ih = ensure_cuda_float32(bias_ih, device)
-            bias_hh = ensure_cuda_float32(bias_hh, device)
-            bx = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
-            br = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
-        else:
-            bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
-            br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+        # 权重格式转换（使用统一工具函数）
+        W, R, bx, br = convert_weights_to_haste_format(
+            weight_ih, weight_hh, bias_ih, bias_hh, hidden_size, device
+        )
 
         # 初始状态
         h0_tensor = ensure_cuda_float32(h0, device) if h0 is not None else torch.empty(0, device=device,
@@ -661,29 +699,7 @@ class QuantGRU(nn.Module):
 
         op_config = gru_config.get('operator_config', {})
 
-        # 字段映射: JSON key -> (位宽属性名, 对称量化属性名)
-        field_map = {
-            "input.x": ("x_", "x_symmetric_"),
-            "input.h": ("h_", "h_symmetric_"),
-            "weight.W": ("W_", "W_symmetric_"),
-            "weight.R": ("R_", "R_symmetric_"),
-            "weight.bx": ("bx_", "bx_symmetric_"),
-            "weight.br": ("br_", "br_symmetric_"),
-            "matmul.Wx": ("Wx_", "Wx_symmetric_"),
-            "matmul.Rh": ("Rh_", "Rh_symmetric_"),
-            "gate.z_pre": ("z_pre_", "z_pre_symmetric_"),
-            "gate.z_out": ("z_out_", "z_out_symmetric_"),
-            "gate.r_pre": ("r_pre_", "r_pre_symmetric_"),
-            "gate.r_out": ("r_out_", "r_out_symmetric_"),
-            "gate.g_pre": ("g_pre_", "g_pre_symmetric_"),
-            "gate.g_out": ("g_out_", "g_out_symmetric_"),
-            "op.Rh_add_br": ("Rh_add_br_", "Rh_add_br_symmetric_"),
-            "op.rRh": ("rRh_", "rRh_symmetric_"),
-            "op.old_contrib": ("old_contrib_", "old_contrib_symmetric_"),
-            "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
-        }
-
-        for json_key, (bw_attr, sym_attr) in field_map.items():
+        for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
             if json_key in op_config:
                 op_cfg = op_config[json_key]
                 self._bitwidth_config_dict[bw_attr] = op_cfg.get('bitwidth', 8)
@@ -696,39 +712,6 @@ class QuantGRU(nn.Module):
             for attr, value in self._bitwidth_config_dict.items():
                 setattr(config, attr, value)
         return config
-
-    def _convert_weights_to_haste_format(self, device: torch.device, reverse: bool = False):
-        """
-        将权重转换为 Haste 格式 (z,r,n)
-        
-        Returns:
-            W, R, bx, br: Haste 格式的权重和偏置
-        """
-        if reverse and self.bidirectional:
-            weight_ih = ensure_cuda_float32(self.weight_ih_l0_reverse, device)
-            weight_hh = ensure_cuda_float32(self.weight_hh_l0_reverse, device)
-        else:
-            weight_ih = ensure_cuda_float32(self.weight_ih_l0, device)
-            weight_hh = ensure_cuda_float32(self.weight_hh_l0, device)
-
-        W = reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
-        R = reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
-
-        if self.bias:
-            if reverse and self.bidirectional:
-                bias_ih = ensure_cuda_float32(self.bias_ih_l0_reverse, device)
-                bias_hh = ensure_cuda_float32(self.bias_hh_l0_reverse, device)
-            else:
-                bias_ih = ensure_cuda_float32(self.bias_ih_l0, device)
-                bias_hh = ensure_cuda_float32(self.bias_hh_l0, device)
-            bx = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
-            br = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
-        else:
-            hidden_size = self.hidden_size
-            bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
-            br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
-
-        return W, R, bx, br
 
     def _use_histogram_collection(self) -> bool:
         """判断是否使用直方图收集（sqnr/percentile 都需要）"""
@@ -775,6 +758,65 @@ class QuantGRU(nn.Module):
                 self.hist_collectors if use_histogram else None,
                 self.quant_ranges if not use_histogram else None
             )
+
+    def _parse_initial_state(
+            self,
+            hx: Optional[torch.Tensor],
+            batch_size: int,
+            device: torch.device = None,
+            to_cuda: bool = False
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        解析初始隐藏状态（统一接口）
+        
+        Args:
+            hx: 初始隐藏状态，形状 [num_directions, B, H] 或 None
+            batch_size: 批次大小
+            device: 目标设备（to_cuda=True 时使用）
+            to_cuda: 是否转换为 CUDA float32
+            
+        Returns:
+            (h0_forward, h0_reverse): 前向和反向初始状态
+        """
+        h0_forward, h0_reverse = None, None
+        if hx is not None:
+            expected_layers = self.num_layers * self.num_directions
+            expected_shape = (expected_layers, batch_size, self.hidden_size)
+            if hx.shape != expected_shape:
+                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {hx.shape}")
+            h0_forward = ensure_cuda_float32(hx[0], device) if to_cuda else hx[0]
+            if self.bidirectional:
+                h0_reverse = ensure_cuda_float32(hx[1], device) if to_cuda else hx[1]
+        return h0_forward, h0_reverse
+
+    def _combine_bidirectional_outputs(
+            self,
+            output_forward: torch.Tensor,
+            h_n_forward: torch.Tensor,
+            output_reverse: Optional[torch.Tensor] = None,
+            h_n_reverse: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        合并双向 GRU 输出（统一接口）
+        
+        Args:
+            output_forward: 前向输出 [T, B, H]
+            h_n_forward: 前向最终状态 [1, B, H]
+            output_reverse: 反向输出 [T, B, H]（已翻转或未翻转均可）
+            h_n_reverse: 反向最终状态 [1, B, H]
+            
+        Returns:
+            (output, h_n): 合并后的输出和状态
+        """
+        if self.bidirectional and output_reverse is not None:
+            # 拼接输出: [T, B, H] + [T, B, H] -> [T, B, 2H]
+            output = torch.cat([output_forward, output_reverse], dim=-1)
+            # 拼接隐藏状态: [1, B, H] + [1, B, H] -> [2, B, H]
+            h_n = torch.cat([h_n_forward, h_n_reverse], dim=0)
+        else:
+            output = output_forward
+            h_n = h_n_forward
+        return output, h_n
 
     # -------------------- 公开接口 --------------------
 
@@ -1015,6 +1057,9 @@ class QuantGRU(nn.Module):
             return self._forward_onnx_qdq_single_direction(
                 input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
             )
+        
+        # 理论上不会执行到这里（setter 已限制值），但为了健壮性抛出异常
+        raise ValueError(f"未知的 export_format: '{self._export_format}'")
 
     def _forward_python_float_single_direction(
             self,
@@ -1233,9 +1278,9 @@ class QuantGRU(nn.Module):
                                          bitwidth=self._get_bitwidth('br'),
                                          symmetric=self._get_symmetric('br')).squeeze(0)
         
-        # 分割偏置（Haste 格式：z, r, n）
-        bx_z, bx_r, bx_n = bx_q.chunk(3)  # 各 [H]
-        br_z, br_r, br_n = br_q.chunk(3)  # 各 [H]
+        # 分割偏置（Haste 格式：z, r, g）
+        bx_z, bx_r, bx_g = bx_q.chunk(3)  # 各 [H]
+        br_z, br_r, br_g = br_q.chunk(3)  # 各 [H]
         
         # ========== 初始化隐藏状态 ==========
         if h0 is None:
@@ -1278,9 +1323,9 @@ class QuantGRU(nn.Module):
                                symmetric=self._get_symmetric('Rh'))
             
             # ========== 分割门控 ==========
-            # [与 CUDA 一致] Haste 格式 (z, r, n)
-            Wx_z, Wx_r, Wx_n = Wx.chunk(3, dim=1)  # 各 [B, H]
-            Rh_z, Rh_r, Rh_n = Rh.chunk(3, dim=1)  # 各 [B, H]
+            # [与 CUDA 一致] Haste 格式 (z, r, g)
+            Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)  # 各 [B, H]
+            Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)  # 各 [B, H]
             
             # ========== z 门（Update Gate）==========
             # [与 CUDA 一致] z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
@@ -1320,8 +1365,8 @@ class QuantGRU(nn.Module):
                               is_unsigned=True)
             
             # ========== g 门（New Gate / Candidate）==========
-            # [与 CUDA 一致] g = tanh(Wx_n + r * (Rh_n + br_n) + bx_n)
-            Rh_add_br = Rh_n + br_n.unsqueeze(0)
+            # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
+            Rh_add_br = Rh_g + br_g.unsqueeze(0)
             
             # [与 CUDA 一致] 中间结果量化（从配置读取位宽）
             Rh_add_br = fake_quantize(Rh_add_br, quant_params.exp2_inv_Rh_add_br_,
@@ -1337,7 +1382,7 @@ class QuantGRU(nn.Module):
                                 bitwidth=self._get_bitwidth('rRh'),
                                 symmetric=self._get_symmetric('rRh'))
             
-            g_pre = Wx_n + rRh + bx_n.unsqueeze(0)
+            g_pre = Wx_g + rRh + bx_g.unsqueeze(0)
             
             g_pre = fake_quantize(g_pre, exp2_g_pre, zp_g_pre,
                                   bitwidth=self._get_bitwidth('g_pre'),
@@ -1400,20 +1445,23 @@ class QuantGRU(nn.Module):
         
         Note: batch_first 转换已在 forward() 中统一处理
         """
+        # ===== QDQ 模式提前校验（快速失败）=====
+        if self._export_format == 'qdq':
+            if self.quant_params is None:
+                raise RuntimeError(
+                    "export_format='qdq' 需要量化参数，"
+                    "请先设置 calibrating=True 进行校准"
+                )
+            if self.bidirectional and self.quant_params_reverse is None:
+                raise RuntimeError(
+                    "双向 GRU 的 export_format='qdq' 需要反向量化参数，"
+                    "请先设置 calibrating=True 进行校准"
+                )
+        
         T, B, I = input.shape
-        H = self.hidden_size
-        device = input.device
 
-        # 初始状态处理
-        h0_forward, h0_reverse = None, None
-        if hx is not None:
-            expected_layers = self.num_layers * self.num_directions
-            expected_shape = (expected_layers, B, H)
-            if hx.shape != expected_shape:
-                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {hx.shape}")
-            h0_forward = hx[0]
-            if self.bidirectional:
-                h0_reverse = hx[1]
+        # 初始状态处理（统一接口）
+        h0_forward, h0_reverse = self._parse_initial_state(hx, B, to_cuda=False)
 
         # 前向方向
         output_forward, h_n_forward = self._forward_python_single_direction(
@@ -1424,8 +1472,9 @@ class QuantGRU(nn.Module):
             self.quant_params
         )
 
+        # 反向方向（双向时）
+        output_reverse, h_n_reverse = None, None
         if self.bidirectional:
-            # 反向方向（输入需要翻转）
             output_reverse, h_n_reverse = self._forward_python_single_direction(
                 input.flip(0), h0_reverse,
                 self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
@@ -1433,18 +1482,13 @@ class QuantGRU(nn.Module):
                 self.bias_hh_l0_reverse if self.bias else None,
                 self.quant_params_reverse
             )
-
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
-            # 拼接输出: [T, B, H] + [T, B, H] -> [T, B, 2H]
-            output = torch.cat([output_forward, output_reverse], dim=-1)
-            # 拼接隐藏状态: [1, B, H] + [1, B, H] -> [2, B, H]
-            h_n = torch.cat([h_n_forward, h_n_reverse], dim=0)
-        else:
-            output = output_forward
-            h_n = h_n_forward
 
-        return output, h_n
+        # 合并双向输出（统一接口）
+        return self._combine_bidirectional_outputs(
+            output_forward, h_n_forward, output_reverse, h_n_reverse
+        )
 
     # -------------------- 校准模式 forward --------------------
 
@@ -1474,23 +1518,20 @@ class QuantGRU(nn.Module):
             for buffer in self.buffers():
                 buffer.data = buffer.data.to(device)
 
-        # 初始状态处理
-        h0_forward, h0_reverse = None, None
-        if hx is not None:
-            expected_layers = self.num_layers * self.num_directions
-            expected_shape = (expected_layers, batch_size, hidden_size)
-            if hx.shape != expected_shape:
-                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {hx.shape}")
-            h0_forward = ensure_cuda_float32(hx[0], device)
-            if self.bidirectional:
-                h0_reverse = ensure_cuda_float32(hx[1], device)
+        # 初始状态处理（统一接口）
+        h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
         # 初始化校准收集器（统一接口）
         self._ensure_calibration_collectors(hidden_size, reverse=False)
         hist_collectors, quant_ranges = self._get_calibration_args(reverse=False)
 
-        # 准备权重
-        W, R, bx, br = self._convert_weights_to_haste_format(device, reverse=False)
+        # 准备权重（使用统一工具函数）
+        W, R, bx, br = convert_weights_to_haste_format(
+            self.weight_ih_l0, self.weight_hh_l0,
+            self.bias_ih_l0 if self.bias else None,
+            self.bias_hh_l0 if self.bias else None,
+            self.hidden_size, device
+        )
         dummy_quant_params = gru_ops.GRUQuantitativeParameters()
 
         # 前向传播 + 校准数据收集（统一的 forward_interface 调用）
@@ -1516,7 +1557,12 @@ class QuantGRU(nn.Module):
             self._ensure_calibration_collectors(hidden_size, reverse=True)
             hist_collectors_rev, quant_ranges_rev = self._get_calibration_args(reverse=True)
 
-            W_rev, R_rev, bx_rev, br_rev = self._convert_weights_to_haste_format(device, reverse=True)
+            W_rev, R_rev, bx_rev, br_rev = convert_weights_to_haste_format(
+                self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
+                self.bias_ih_l0_reverse if self.bias else None,
+                self.bias_hh_l0_reverse if self.bias else None,
+                self.hidden_size, device
+            )
             input_reversed = input.flip(0).contiguous()
 
             h_rev, v_rev = gru_ops.forward_interface(
@@ -1532,21 +1578,19 @@ class QuantGRU(nn.Module):
                 quant_ranges=quant_ranges_rev
             )
 
-            # 提取反向输出
+            # 提取反向输出（已翻转）
             output_reverse = h_rev[1:].flip(0).contiguous()  # [T, B, H]
             h_n_reverse = h_rev[-1:].contiguous()  # [1, B, H]
-
-            # 拼接输出
-            output = torch.cat([output_forward, output_reverse], dim=-1)
-            h_n = torch.cat([h_n_forward, h_n_reverse], dim=0)
         else:
-            output = output_forward
-            h_n = h_n_forward
+            output_reverse, h_n_reverse = None, None
 
         # 标记校准数据已更新
         self._calibration_dirty = True
 
-        return output, h_n
+        # 合并双向输出（统一接口）
+        return self._combine_bidirectional_outputs(
+            output_forward, h_n_forward, output_reverse, h_n_reverse
+        )
 
     # -------------------- 主 forward 方法 --------------------
 
@@ -1617,51 +1661,37 @@ class QuantGRU(nn.Module):
                     raise RuntimeError("量化已启用但未校准，请先设置 calibrating=True 并调用 forward()")
 
         seq_len, batch_size, input_size = input.shape
-        hidden_size = self.hidden_size
 
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
 
-        # 初始状态处理
-        h0_forward, h0_reverse = None, None
-        if hx is not None:
-            expected_layers = self.num_layers * self.num_directions
-            expected_shape = (expected_layers, batch_size, hidden_size)
-            if hx.shape != expected_shape:
-                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {hx.shape}")
-            h0_forward = ensure_cuda_float32(hx[0], device)
-            if self.bidirectional:
-                h0_reverse = ensure_cuda_float32(hx[1], device)
+        # 初始状态处理（统一接口）
+        h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
         # 前向方向
         # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到 QuantGRUReScale
-        # 不再需要每次 forward 前重新初始化全局 LUT
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
             self.bias_hh_l0 if self.bias else None,
             h0_forward, self.training, self.use_quantization, self.quant_params)
 
+        # 反向方向（双向时）
+        output_reverse, h_n_reverse = None, None
         if self.bidirectional:
-            # 反向方向
-            # LUT 存储在 quant_params_reverse 中，不再需要每次 forward 前初始化
+            # LUT 存储在 quant_params_reverse 中
             output_reverse, h_n_reverse = GRUFunction.apply(
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
                 self.bias_hh_l0_reverse if self.bias else None,
                 h0_reverse, self.training, self.use_quantization, self.quant_params_reverse)
-
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
-            # 拼接输出: [T, B, H] + [T, B, H] -> [T, B, 2H]
-            output = torch.cat([output_forward, output_reverse], dim=-1)
-            # 拼接隐藏状态: [1, B, H] + [1, B, H] -> [2, B, H]
-            h_n = torch.cat([h_n_forward, h_n_reverse], dim=0)
-        else:
-            output = output_forward
-            h_n = h_n_forward
 
-        return output, h_n
+        # 合并双向输出（统一接口）
+        return self._combine_bidirectional_outputs(
+            output_forward, h_n_forward, output_reverse, h_n_reverse
+        )
 
 
 # ============================================================
