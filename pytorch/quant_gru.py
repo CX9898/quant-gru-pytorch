@@ -612,6 +612,8 @@ class QuantGRU(nn.Module):
         - 仅支持单层 GRU（num_layers=1）
         - 不支持 dropout
         - 量化推理需要先校准（设置 calibrating=True 并运行 forward）
+        - 支持 pickle/deepcopy，但校准数据不会被保存（位宽配置会保留）
+        - pickle/deepcopy 后如需量化推理，必须重新校准
     """
 
     def __init__(
@@ -704,6 +706,64 @@ class QuantGRU(nn.Module):
 
         # 校准模式标志：当为 True 时，forward() 会同时收集校准数据
         self.calibrating = False
+
+    def __getstate__(self):
+        """
+        序列化状态（用于 pickle/deepcopy）
+        
+        将 C++ 扩展对象转换为 Python 字典，使 QuantGRU 可被序列化。
+        
+        Note:
+            - 位宽配置会被保留
+            - 校准数据（quant_params 等）不会被保存，反序列化后需重新校准
+        """
+        state = self.__dict__.copy()
+        
+        # 将 _bitwidth_config (C++ 对象) 转换为 Python 字典
+        if self._bitwidth_config is not None:
+            bitwidth_dict = {}
+            for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+                bitwidth_dict[bw_attr] = getattr(self._bitwidth_config, bw_attr)
+                bitwidth_dict[sym_attr] = getattr(self._bitwidth_config, sym_attr)
+            state['_bitwidth_config'] = bitwidth_dict
+        
+        # C++ 对象无法序列化，设为 None（反序列化后需重新校准）
+        state['quant_ranges'] = None
+        state['quant_params'] = None
+        state['hist_collectors'] = None
+        if self.bidirectional:
+            state['quant_ranges_reverse'] = None
+            state['quant_params_reverse'] = None
+            state['hist_collectors_reverse'] = None
+        
+        # 重置运行时状态（反序列化后需要重新初始化）
+        state['_cublas_initialized'] = False
+        state['_quant_params_dirty'] = False
+        
+        return state
+
+    def __setstate__(self, state):
+        """
+        反序列化状态
+        
+        从 Python 字典重建 C++ 扩展对象。
+        
+        Note:
+            反序列化后如需量化推理，必须重新校准。
+        """
+        # 恢复 _bitwidth_config
+        bitwidth_dict = state.get('_bitwidth_config')
+        if isinstance(bitwidth_dict, dict):
+            # 从字典重建 C++ 对象
+            config = gru_ops.OperatorQuantConfig()
+            for attr, value in bitwidth_dict.items():
+                setattr(config, attr, value)
+            state['_bitwidth_config'] = config
+        elif bitwidth_dict is None:
+            # 创建默认配置
+            state['_bitwidth_config'] = gru_ops.OperatorQuantConfig()
+        
+        self.__dict__.update(state)
 
     def reset_parameters(self):
         """权重初始化(与 nn.GRU 相同的均匀分布)"""
@@ -1716,7 +1776,13 @@ class QuantGRU(nn.Module):
                     # 已累积数据但未完成校准，自动调用 finalize
                     self.finalize_calibration()
                 else:
-                    raise RuntimeError("量化已启用但未校准，请先设置 calibrating=True 并调用 forward()")
+                    raise RuntimeError(
+                        "量化已启用但未校准。请先进行校准：\n"
+                        "  1. gru.calibrating = True\n"
+                        "  2. gru(calibration_data)\n"
+                        "  3. gru.calibrating = False\n"
+                        "注意：pickle/deepcopy 后校准数据会丢失，需要重新校准。"
+                    )
 
         seq_len, batch_size, input_size = input.shape
 
