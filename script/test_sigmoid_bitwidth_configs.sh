@@ -37,6 +37,7 @@ COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改配置文件中的位宽
+# 新格式: QuantBitWidth z_pre_{bits, is_signed}
 modify_bitwidth() {
     local z_pre=$1
     local z_out=$2
@@ -45,21 +46,14 @@ modify_bitwidth() {
     local g_pre=$5
     local g_out=$6
     
-    # 根据位宽生成正确的类型
-    local z_pre_type="INT${z_pre}"
-    local z_out_type="UINT${z_out}"
-    local r_pre_type="INT${r_pre}"
-    local r_out_type="UINT${r_out}"
-    local g_pre_type="INT${g_pre}"
-    local g_out_type="INT${g_out}"
-    
-    # 使用 sed 替换配置
-    sed -i "s/QuantBitWidth z_pre_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth z_pre_ = QuantBitWidth::${z_pre_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth z_out_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth z_out_ = QuantBitWidth::${z_out_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth r_pre_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth r_pre_ = QuantBitWidth::${r_pre_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth r_out_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth r_out_ = QuantBitWidth::${r_out_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth g_pre_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth g_pre_ = QuantBitWidth::${g_pre_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth g_out_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth g_out_ = QuantBitWidth::${g_out_type};/" "$CONFIG_FILE"
+    # z_pre, r_pre, g_pre, g_out: 有符号 (true)
+    # z_out, r_out: 无符号 (false)，sigmoid 输出
+    sed -i "s/z_pre_{[0-9]*, [a-z]*}/z_pre_{${z_pre}, true}/g" "$CONFIG_FILE"
+    sed -i "s/z_out_{[0-9]*, [a-z]*}/z_out_{${z_out}, false}/g" "$CONFIG_FILE"
+    sed -i "s/r_pre_{[0-9]*, [a-z]*}/r_pre_{${r_pre}, true}/g" "$CONFIG_FILE"
+    sed -i "s/r_out_{[0-9]*, [a-z]*}/r_out_{${r_out}, false}/g" "$CONFIG_FILE"
+    sed -i "s/g_pre_{[0-9]*, [a-z]*}/g_pre_{${g_pre}, true}/g" "$CONFIG_FILE"
+    sed -i "s/g_out_{[0-9]*, [a-z]*}/g_out_{${g_out}, true}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改对称配置
@@ -305,6 +299,7 @@ done
 
 # 恢复原始配置
 cp "$CONFIG_FILE.backup" "$CONFIG_FILE"
+rm -f "$CONFIG_FILE.backup"
 echo ""
 echo "原始配置已恢复"
 

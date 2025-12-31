@@ -43,26 +43,23 @@ MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改权重和激活位宽配置
 # 参数：weight_bits, activation_bits, gemm_result_bits (可选，默认跟随 activation_bits)
+# 新格式: W_{bits, true}
 modify_weight_activation_bitwidth() {
     local weight_bits=$1
     local activation_bits=$2
     local gemm_result_bits=${3:-$activation_bits}  # 默认跟随激活位宽
     
-    local weight_type="INT${weight_bits}"
-    local activation_type="INT${activation_bits}"
-    local gemm_result_type="INT${gemm_result_bits}"
+    # 修改权重位宽 (W_, R_) - 有符号
+    sed -i "s/W_{[0-9]*, [a-z]*}/W_{${weight_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/R_{[0-9]*, [a-z]*}/R_{${weight_bits}, true}/g" "$CONFIG_FILE"
     
-    # 修改权重位宽 (W_, R_)
-    sed -i "s/QuantBitWidth W_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth W_ = QuantBitWidth::${weight_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth R_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth R_ = QuantBitWidth::${weight_type};/" "$CONFIG_FILE"
+    # 修改激活位宽 (x_, h_) - 有符号
+    sed -i "s/x_{[0-9]*, [a-z]*}/x_{${activation_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/h_{[0-9]*, [a-z]*}/h_{${activation_bits}, true}/g" "$CONFIG_FILE"
     
-    # 修改激活位宽 (x_, h_)
-    sed -i "s/QuantBitWidth x_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth x_ = QuantBitWidth::${activation_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth h_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth h_ = QuantBitWidth::${activation_type};/" "$CONFIG_FILE"
-    
-    # 修改 GEMM 结果位宽 (Wx_, Rh_)
-    sed -i "s/QuantBitWidth Wx_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth Wx_ = QuantBitWidth::${gemm_result_type};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth Rh_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth Rh_ = QuantBitWidth::${gemm_result_type};/" "$CONFIG_FILE"
+    # 修改 GEMM 结果位宽 (Wx_, Rh_) - 有符号
+    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${gemm_result_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${gemm_result_bits}, true}/g" "$CONFIG_FILE"
 }
 
 # 函数：编译项目
@@ -100,7 +97,7 @@ run_test() {
     if ! compile_project; then
         echo "  ❌ 编译失败"
         echo "  状态: 编译失败" >> "$RESULT_FILE"
-        echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},COMPILE_ERROR,N/A,N/A,Compilation failed" >> "$CSV_FILE"
+        echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},COMPILE_ERROR,N/A,N/A,Compilation failed" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -122,13 +119,13 @@ run_test() {
             echo "  ✓ 预期失败，正确拒绝了不支持的配置"
             echo "  状态: 正确拒绝 (预期行为)" >> "$RESULT_FILE"
             echo "  错误信息: $error_msg" >> "$RESULT_FILE"
-            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},EXPECTED_FAIL,N/A,N/A,$error_msg" >> "$CSV_FILE"
+            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},EXPECTED_FAIL,N/A,N/A,$error_msg" >> "$CSV_FILE"
             PASS_COUNT=$((PASS_COUNT + 1))
         else
             echo "  ❌ 运行失败: $error_msg"
             echo "  状态: 运行失败" >> "$RESULT_FILE"
             echo "  错误信息: $error_msg" >> "$RESULT_FILE"
-            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},RUNTIME_ERROR,N/A,N/A,$error_msg" >> "$CSV_FILE"
+            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},RUNTIME_ERROR,N/A,N/A,$error_msg" >> "$CSV_FILE"
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
         return
@@ -161,7 +158,7 @@ run_test() {
                 echo "  ✓ 成功 - MSE: $mse (<= $MSE_THRESHOLD), Cosine: $cos (>= $COSINE_THRESHOLD)"
                 echo "  状态: 成功" >> "$RESULT_FILE"
                 echo "  MSE: $mse, Cosine Similarity: $cos" >> "$RESULT_FILE"
-                echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},PASS,$mse,$cos," >> "$CSV_FILE"
+                echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},PASS,$mse,$cos," >> "$CSV_FILE"
                 PASS_COUNT=$((PASS_COUNT + 1))
             else
                 # 构建失败原因
@@ -175,19 +172,19 @@ run_test() {
                 echo "  ✗ 精度不足 - MSE: $mse, Cosine: $cos ($fail_reason)"
                 echo "  状态: 精度不足" >> "$RESULT_FILE"
                 echo "  MSE: $mse, Cosine Similarity: $cos ($fail_reason)" >> "$RESULT_FILE"
-                echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},LOW_ACCURACY,$mse,$cos,$fail_reason" >> "$CSV_FILE"
+                echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},LOW_ACCURACY,$mse,$cos,$fail_reason" >> "$CSV_FILE"
                 FAIL_COUNT=$((FAIL_COUNT + 1))
             fi
         else
             echo "  ✗ 无法提取结果 - MSE: $mse, Cosine: $cos"
             echo "  状态: 无法提取结果" >> "$RESULT_FILE"
-            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},NO_RESULT,$mse,$cos,Cannot extract result" >> "$CSV_FILE"
+            echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},NO_RESULT,$mse,$cos,Cannot extract result" >> "$CSV_FILE"
             FAIL_COUNT=$((FAIL_COUNT + 1))
         fi
     else
         echo "  ⚠ 预期失败但成功了 - MSE: $mse, Cosine: $cos"
         echo "  状态: 意外成功 (预期应失败)" >> "$RESULT_FILE"
-        echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,INT${weight_bits},INT${weight_bits},INT${activation_bits},INT${activation_bits},INT${gemm_result_bits},INT${gemm_result_bits},UNEXPECTED_PASS,$mse,$cos,Expected to fail but passed" >> "$CSV_FILE"
+        echo "$config_name,$weight_bits,$activation_bits,$gemm_result_bits,${weight_bits},${weight_bits},${activation_bits},${activation_bits},${gemm_result_bits},${gemm_result_bits},UNEXPECTED_PASS,$mse,$cos,Expected to fail but passed" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 }
@@ -281,4 +278,3 @@ echo "CSV 数据: $CSV_FILE"
 if [ $FAIL_COUNT -gt 0 ]; then
     exit 1
 fi
-
