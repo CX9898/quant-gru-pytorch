@@ -135,8 +135,8 @@ run_test() {
     fi
     
     # 运行成功，提取结果
-    local mse=$(echo "$output" | grep "Overall H: MSE" | sed 's/.*MSE = \([0-9.e+-]*\),.*/\1/')
-    local cos=$(echo "$output" | grep "Overall H: MSE" | sed 's/.*Cosine Similarity = \([0-9.]*\)/\1/')
+    local mse=$(echo "$output" | grep "Overall H: MSE" | head -1 | sed 's/.*MSE = \([0-9.e+-]*\),.*/\1/')
+    local cos=$(echo "$output" | grep "Overall H: MSE" | head -1 | sed 's/.*Cosine Similarity = \([0-9.]*\)/\1/')
     
     if [ -z "$mse" ]; then mse="N/A"; fi
     if [ -z "$cos" ]; then cos="N/A"; fi
