@@ -6,7 +6,6 @@ QuantGRU - 支持量化的 GRU 实现
     - 支持 INT8/INT16/INT32 混合精度量化推理
     - 支持 MinMax / SQNR / Percentile 校准方法
     - 支持 JSON 配置文件指定各算子的位宽和对称量化设置
-    - 延迟初始化设计，支持 pickle/deepcopy 序列化
     - 支持 ONNX 导出(float / QDQ 两种格式)
 
 关键属性:
@@ -54,10 +53,24 @@ except ImportError:
     )
 
 # ============================================================
-#                      位宽配置工具函数
+#                   模块级常量与配置映射
 # ============================================================
+#
+# 本节定义 JSON 配置文件与 C++ OperatorQuantConfig 之间的映射关系。
+# 采用 2 层设计：JSON 文件 → C++ 对象（无中间 Python 字典层）。
+#
+# JSON 配置示例:
+#   {
+#     "GRU_config": {
+#       "operator_config": {
+#         "input.x": {"bitwidth": 8, "is_symmetric": true},
+#         ...
+#       }
+#     }
+#   }
 
-# JSON 配置字段映射: JSON key -> (位宽属性名, 对称量化属性名)
+# JSON 配置字段映射表
+# 格式: "JSON键名" -> ("C++位宽属性名", "C++对称量化属性名")
 _BITWIDTH_FIELD_MAP = {
     "input.x": ("x_", "x_symmetric_"),
     "input.h": ("h_", "h_symmetric_"),
@@ -79,16 +92,55 @@ _BITWIDTH_FIELD_MAP = {
     "op.new_contrib": ("new_contrib_", "new_contrib_symmetric_"),
 }
 
+# 派生常量：从映射表提取的 C++ 属性名集合
+_VALID_BITWIDTH_ATTRS = {bw_attr for bw_attr, _ in _BITWIDTH_FIELD_MAP.values()}  # 18 个位宽属性
+_VALID_SYMMETRIC_ATTRS = {sym_attr for _, sym_attr in _BITWIDTH_FIELD_MAP.values()}  # 18 个对称属性
 
-def _get_bitwidth_value(op_cfg: dict) -> int:
-    """从配置中获取位宽值(8/16/32)，默认 8"""
-    return op_cfg.get('bitwidth', 8)
+# 对称量化属性分类（用于 set_all_bitwidth）
+# - 权重/偏置：始终使用对称量化（zero_point=0），计算效率更高
+# - 激活值：可配置，非对称量化可能提高精度但增加计算开销
+_WEIGHT_SYMMETRIC_ATTRS = {'W_symmetric_', 'R_symmetric_', 'bx_symmetric_', 'br_symmetric_'}
+_ACTIVATION_SYMMETRIC_ATTRS = _VALID_SYMMETRIC_ATTRS - _WEIGHT_SYMMETRIC_ATTRS
 
 
-def _get_symmetric_value(op_cfg: dict) -> bool:
-    """从配置中获取是否对称量化，默认 True"""
-    return op_cfg.get('is_symmetric', True)
+def _validate_bitwidth_field_map():
+    """
+    验证 Python 端映射表与 C++ 端属性定义一致性
+    
+    在模块加载时自动调用，确保 _BITWIDTH_FIELD_MAP 中的属性名
+    与 C++ OperatorQuantConfig 的实际属性一致。
+    不一致时立即抛出异常，避免运行时静默失败。
+    """
+    try:
+        test_config = gru_ops.OperatorQuantConfig()
+    except Exception as e:
+        # gru_ops 可能未正确加载，跳过验证（后续使用时会报错）
+        import warnings
+        warnings.warn(f"无法验证 _BITWIDTH_FIELD_MAP: {e}")
+        return
 
+    missing_attrs = []
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+        if not hasattr(test_config, bw_attr):
+            missing_attrs.append(f"{json_key} -> {bw_attr}")
+        if not hasattr(test_config, sym_attr):
+            missing_attrs.append(f"{json_key} -> {sym_attr}")
+
+    if missing_attrs:
+        raise RuntimeError(
+            f"_BITWIDTH_FIELD_MAP 与 C++ OperatorQuantConfig 不一致！\n"
+            f"缺少属性: {missing_attrs}\n"
+            f"请检查 gru_interface_binding.cc 中的 OperatorQuantConfigPy 定义"
+        )
+
+
+# 模块加载时执行一致性验证（import 时自动运行）
+_validate_bitwidth_field_map()
+
+
+# ============================================================
+#                      格式化辅助函数
+# ============================================================
 
 def _format_bitwidth(val: int) -> str:
     """格式化位宽值: 8 -> '8bit'"""
@@ -113,16 +165,6 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     """
     if not verbose:
         return
-
-    # 位宽配置字段数量(用于统计)
-    bitwidth_attrs = ['x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
-                      'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
-                      'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_']
-    symmetric_attrs = ['x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
-                       'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
-                       'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
-                       'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
-                       'old_contrib_symmetric_', 'new_contrib_symmetric_']
 
     print("\n" + "=" * 70)
     print("🔧 GRU 量化配置(位宽 + 对称量化)")
@@ -157,6 +199,12 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
 # ============================================================
 #                      权重格式转换
 # ============================================================
+#
+# PyTorch GRU 和 Haste GRU 使用不同的门控顺序：
+#   - PyTorch: (reset, update, new) 即 (r, z, n)
+#   - Haste:   (update, reset, new) 即 (z, r, n)
+#
+# 权重张量形状为 [3*H, ...]，需要重排序前 2/3 的部分。
 
 def reorder_weights_pytorch_to_haste(w: torch.Tensor) -> torch.Tensor:
     """
@@ -260,9 +308,19 @@ def convert_weights_to_haste_format(
 
 
 # ============================================================
-#                      QDQ (Quantize-Dequantize) 辅助函数
-#                      用于 ONNX 导出的伪量化操作
+#                      QDQ (Quantize-Dequantize) 伪量化
 # ============================================================
+#
+# 伪量化用于 ONNX 导出，在浮点域模拟量化效果：
+#   q = clamp(round(x / scale) + zp, qmin, qmax)
+#   x' = (q - zp) * scale
+#
+# 推理引擎（如 TensorRT）会识别 QDQ 模式并替换为真实量化算子。
+#
+# 量化参数说明：
+#   - exp2_inv: 量化指数，scale = 2^(-exp2_inv)
+#   - zp: 零点（对称量化时为 0）
+#   - bitwidth: 位宽 (8/16/32)
 
 def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
                   bitwidth: int = 8, symmetric: bool = True,
@@ -353,14 +411,22 @@ def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
 
 
 # ============================================================
-#                      GRUFunction (autograd)
+#                   GRUFunction (autograd.Function)
 # ============================================================
+#
+# PyTorch 自定义算子，连接 Python 层与 C++ CUDA 实现。
+# 负责：
+#   1. 权重格式转换（PyTorch ↔ Haste）
+#   2. 调用 C++ forward/backward 接口
+#   3. 管理梯度计算和中间变量保存
 
 class GRUFunction(torch.autograd.Function):
     """
     GRU 自定义 autograd Function
     
-    负责 PyTorch/Haste 格式转换、调用 C++ 接口、管理反向传播
+    职责：
+        - forward: 权重格式转换 → 调用 gru_ops.forward_interface → 返回输出
+        - backward: 梯度格式转换 → 调用 gru_ops.haste_gru_backward → 返回梯度
     """
 
     @staticmethod
@@ -498,50 +564,54 @@ class GRUFunction(torch.autograd.Function):
 
 
 # ============================================================
-#                      QuantGRU 模块
+#                      QuantGRU 核心模块
 # ============================================================
+#
+# QuantGRU 是本模块的核心类，提供：
+#   - 兼容 nn.GRU 的接口
+#   - INT8/16/32 混合精度量化推理
+#   - 多种校准方法（MinMax/SQNR/Percentile）
+#   - ONNX 导出支持（float/QDQ 格式）
+#
+# 内部状态管理：
+#   - _bitwidth_config: C++ OperatorQuantConfig 对象（位宽配置）
+#   - _quant_params_dirty: 脏标志（配置修改或校准数据变化时置 True）
+#   - quant_params: 量化参数（finalize_calibration 后生成）
 
 class QuantGRU(nn.Module):
     """
-    支持量化的自定义 GRU 实现，兼容 nn.GRU 接口
+    支持量化的 GRU 实现，兼容 nn.GRU 接口
     
-    特性:
-        - 延迟初始化: CUDA handle 在首次使用时初始化
-        - 可序列化: 支持 pickle/deepcopy
-        - 双向支持: bidirectional=True 时输出维度为 2*hidden_size
-        - ONNX 导出: export_mode=True 时使用纯 PyTorch 实现
-
-    量化流程:
-        1. gru.load_bitwidth_config("config.json")  # 可选
-        2. gru.calibrating = True
-        3. output = gru(data)  # 收集校准数据(可多次调用累积)
-        4. gru.calibrating = False
-        5. gru.use_quantization = True
-        6. output = gru(input)  # 自动完成校准并进行量化推理
-    
-    ONNX 导出流程:
-        1. gru.export_mode = True
-        2. torch.onnx.export(model, ...)
-        3. gru.export_mode = False  # 恢复 CUDA 模式
-    
-    高级：指定导出格式:
-        gru.export_format = 'float'      # 浮点(默认，与 Haste 一致)
-        gru.export_format = 'qdq'        # QDQ 伪量化(量化模型推荐)
-
     Args:
         input_size: 输入特征维度
         hidden_size: 隐藏状态维度
-        num_layers: 层数(仅支持 1)
-        bias: 是否使用偏置
-        batch_first: True 时输入为 [B, T, I]
-        dropout: 暂不支持
-        bidirectional: 是否双向
+        num_layers: 层数（仅支持 1）
+        bias: 是否使用偏置（默认 True）
+        batch_first: True 时输入为 [B, T, I]，False 时为 [T, B, I]（默认 False）
+        dropout: 暂不支持，必须为 0
+        bidirectional: 是否双向（默认 False）
+        use_quantization: 是否启用量化（默认 False）
     
     Attributes:
-        use_quantization: 量化开关(默认 False)
-        calibration_method: 校准方法 ('minmax'/'sqnr'/'percentile')
-        percentile_value: 百分位值(仅 'percentile' 方法使用，默认 99.99)
-        export_mode: ONNX 导出模式(默认 False，使用 CUDA；True 时使用纯 PyTorch)
+        use_quantization (bool): 量化开关
+        calibrating (bool): 校准模式开关，True 时 forward 会收集校准数据
+        calibration_method (str): 校准方法 'minmax'|'sqnr'|'percentile'（默认 'sqnr'）
+        percentile_value (float): 百分位值，仅 'percentile' 方法使用（默认 99.99）
+        export_mode (bool): ONNX 导出模式，True 时使用纯 PyTorch 实现
+        export_format (str): 导出格式 'float'|'qdq'（默认 'float'）
+    
+    Example:
+        >>> gru = QuantGRU(64, 128, batch_first=True).cuda()
+        >>> gru.calibrating = True
+        >>> _ = gru(calibration_data)  # 收集校准数据
+        >>> gru.calibrating = False
+        >>> gru.use_quantization = True
+        >>> output, h_n = gru(x)  # 量化推理
+    
+    Note:
+        - 仅支持单层 GRU（num_layers=1）
+        - 不支持 dropout
+        - 量化推理需要先校准（设置 calibrating=True 并运行 forward）
     """
 
     def __init__(
@@ -610,8 +680,12 @@ class QuantGRU(nn.Module):
             self.quant_ranges_reverse = None
             self.quant_params_reverse = None
 
-        self._calibration_dirty = False  # 校准数据更新标志
-        self._bitwidth_config_dict = None  # 位宽配置(Python 字典，可序列化)
+        # 统一脏标志：标记量化参数是否需要更新（校准数据变化或配置修改都会设置）
+        self._quant_params_dirty = False
+
+        # 位宽配置对象（直接初始化，避免延迟创建的线程安全问题）
+        self._bitwidth_config = gru_ops.OperatorQuantConfig()  # 位宽配置(直接存储 C++ 对象)
+
         self._cublas_initialized = False  # CUDA 延迟初始化标志
 
         # 校准方法:
@@ -644,39 +718,6 @@ class QuantGRU(nn.Module):
         if not self._cublas_initialized:
             gru_ops.init_gru_cublas()
             self._cublas_initialized = True
-
-    def _load_bitwidth_config_to_dict(self, config_file: str):
-        """从 JSON 文件加载配置到内部字典"""
-        if self._bitwidth_config_dict is None:
-            self._bitwidth_config_dict = {}
-
-        with open(config_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # 读取 GRU_config 节点下的配置
-        gru_config = data.get('GRU_config', {})
-
-        # 读取全局配置
-        default_config = gru_config.get('default_config', {})
-        if 'disable_quantization' in default_config:
-            # disable_quantization=true 表示禁用量化，所以 use_quantization 取反
-            self.use_quantization = not default_config['disable_quantization']
-
-        op_config = gru_config.get('operator_config', {})
-
-        for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
-            if json_key in op_config:
-                op_cfg = op_config[json_key]
-                self._bitwidth_config_dict[bw_attr] = op_cfg.get('bitwidth', 8)
-                self._bitwidth_config_dict[sym_attr] = op_cfg.get('is_symmetric', True)
-
-    def _get_cpp_bitwidth_config(self) -> gru_ops.OperatorQuantConfig:
-        """从 Python 字典创建 C++ OperatorQuantConfig 对象"""
-        config = gru_ops.OperatorQuantConfig()
-        if self._bitwidth_config_dict is not None:
-            for attr, value in self._bitwidth_config_dict.items():
-                setattr(config, attr, value)
-        return config
 
     def _use_histogram_collection(self) -> bool:
         """判断是否使用直方图收集(sqnr/percentile 都需要)"""
@@ -786,16 +827,57 @@ class QuantGRU(nn.Module):
     # -------------------- 公开接口 --------------------
 
     def load_bitwidth_config(self, config_file: str, verbose: bool = False):
-        """从 JSON 文件加载位宽配置"""
-        self._load_bitwidth_config_to_dict(config_file)
+        """
+        从 JSON 文件加载位宽配置（2 层设计：JSON → C++ 对象）
+        
+        Args:
+            config_file: JSON 配置文件路径
+            verbose: 是否打印配置信息
+        """
+        import warnings
+
+        # 解析 JSON 文件
+        with open(config_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # 读取 GRU_config 节点下的配置
+        gru_config = data.get('GRU_config', {})
+
+        # 读取全局配置
+        default_config = gru_config.get('default_config', {})
+        if 'disable_quantization' in default_config:
+            self.use_quantization = not default_config['disable_quantization']
+
+        # 直接将配置写入 C++ 对象
+        op_config = gru_config.get('operator_config', {})
+
+        # 检查 JSON 中缺失的字段并发出警告
+        missing_fields = []
+        for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+            if json_key in op_config:
+                op_cfg = op_config[json_key]
+                setattr(self._bitwidth_config, bw_attr, op_cfg.get('bitwidth', 8))
+                setattr(self._bitwidth_config, sym_attr, op_cfg.get('is_symmetric', True))
+            else:
+                missing_fields.append(json_key)
+
+        if missing_fields:
+            warnings.warn(
+                f"JSON 配置文件 '{config_file}' 缺少以下字段，将使用默认值 (8bit, 对称):\n"
+                f"  {missing_fields}",
+                UserWarning
+            )
+
+        # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
+        self._quant_params_dirty = True
+
         if verbose:
-            cpp_config = self._get_cpp_bitwidth_config()
-            print_bitwidth_config(cpp_config, config_file)
+            print_bitwidth_config(self._bitwidth_config, config_file)
             print(f"  [全局]  use_quantization: {self.use_quantization}")
 
     def set_all_bitwidth(self, bitwidth: int = 8, is_symmetric: bool = True, verbose: bool = False):
         """
-        设置所有算子统一的位宽和对称量化配置
+        设置所有算子统一的位宽和对称量化配置（2 层设计：直接操作 C++ 对象）
         
         Args:
             bitwidth: 位宽 (8/16/32)
@@ -805,41 +887,20 @@ class QuantGRU(nn.Module):
         if bitwidth not in (8, 16, 32):
             raise ValueError(f"bitwidth must be 8, 16 or 32, got {bitwidth}")
 
-        # 初始化配置字典
-        if self._bitwidth_config_dict is None:
-            self._bitwidth_config_dict = {}
+        # 设置所有位宽属性（使用模块级常量）
+        for attr in _VALID_BITWIDTH_ATTRS:
+            setattr(self._bitwidth_config, attr, bitwidth)
 
-        # 位宽属性列表
-        bitwidth_attrs = [
-            'x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
-            'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
-            'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_'
-        ]
+        # 权重/偏置始终使用对称量化（使用模块级常量）
+        for attr in _WEIGHT_SYMMETRIC_ATTRS:
+            setattr(self._bitwidth_config, attr, True)
 
-        # 权重/偏置对称量化属性(始终为 True，不可配置)
-        weight_symmetric_attrs = [
-            'W_symmetric_', 'R_symmetric_', 'bx_symmetric_', 'br_symmetric_'
-        ]
+        # 激活值对称量化配置由参数控制（使用模块级常量）
+        for attr in _ACTIVATION_SYMMETRIC_ATTRS:
+            setattr(self._bitwidth_config, attr, is_symmetric)
 
-        # 激活值对称量化属性(可配置)
-        activation_symmetric_attrs = [
-            'x_symmetric_', 'h_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
-            'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
-            'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
-            'old_contrib_symmetric_', 'new_contrib_symmetric_'
-        ]
-
-        # 设置所有位宽
-        for attr in bitwidth_attrs:
-            self._bitwidth_config_dict[attr] = bitwidth
-
-        # 权重/偏置始终使用对称量化
-        for attr in weight_symmetric_attrs:
-            self._bitwidth_config_dict[attr] = True
-
-        # 激活值对称量化配置由参数控制
-        for attr in activation_symmetric_attrs:
-            self._bitwidth_config_dict[attr] = is_symmetric
+        # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
+        self._quant_params_dirty = True
 
         if verbose:
             sym_str = "对称" if is_symmetric else "非对称"
@@ -872,7 +933,7 @@ class QuantGRU(nn.Module):
             if self.quant_ranges is None:
                 raise RuntimeError("未收集校准数据，请先设置 calibrating=True 并调用 forward()")
 
-        cpp_config = self._get_cpp_bitwidth_config()
+        bitwidth_config = self._bitwidth_config
 
         if verbose:
             method_name = {
@@ -886,13 +947,13 @@ class QuantGRU(nn.Module):
         if use_histogram:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
                 hist_collectors=self.hist_collectors,
-                bitwidth_config=cpp_config,
+                bitwidth_config=bitwidth_config,
                 verbose=verbose,
                 use_percentile=use_percentile,
                 percentile_value=self.percentile_value)
         else:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
-                quant_ranges=self.quant_ranges, bitwidth_config=cpp_config)
+                quant_ranges=self.quant_ranges, bitwidth_config=bitwidth_config)
 
         # 反向方向(双向时)
         if self.bidirectional:
@@ -901,7 +962,7 @@ class QuantGRU(nn.Module):
                     raise RuntimeError("双向 GRU 反向直方图数据异常")
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
                     hist_collectors=self.hist_collectors_reverse,
-                    bitwidth_config=cpp_config,
+                    bitwidth_config=bitwidth_config,
                     verbose=verbose,
                     use_percentile=use_percentile,
                     percentile_value=self.percentile_value)
@@ -909,16 +970,18 @@ class QuantGRU(nn.Module):
                 if self.quant_ranges_reverse is None:
                     raise RuntimeError("双向 GRU 反向校准数据异常")
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
-                    quant_ranges=self.quant_ranges_reverse, bitwidth_config=cpp_config)
+                    quant_ranges=self.quant_ranges_reverse, bitwidth_config=bitwidth_config)
 
-        self._calibration_dirty = False
+        # 量化参数已更新，清除脏标志
+        self._quant_params_dirty = False
 
     def reset_calibration(self):
         """重置校准状态，清除所有累积的范围和参数"""
         self.quant_ranges = None
         self.quant_params = None
         self.hist_collectors = None
-        self._calibration_dirty = False
+        # 重置校准后，脏标志清除（下次校准会重新应用配置）
+        self._quant_params_dirty = False
         if self.bidirectional:
             self.quant_ranges_reverse = None
             self.quant_params_reverse = None
@@ -926,23 +989,53 @@ class QuantGRU(nn.Module):
 
     # -------------------- ONNX 导出模式：纯 PyTorch 实现 --------------------
 
-    def _get_quant_param(self, param_name: str, quant_params) -> Tuple[int, int]:
-        """获取量化参数 (exp2_inv, zero_point)"""
-        exp2_inv = getattr(quant_params, f'exp2_inv_{param_name}_', 0)
-        zp = getattr(quant_params, f'zp_{param_name}_', 0)
-        return exp2_inv, zp
-
     def _get_bitwidth(self, op_name: str) -> int:
-        """获取指定操作的位宽"""
-        if self._bitwidth_config_dict is not None:
-            return self._bitwidth_config_dict.get(f'{op_name}_', 8)
-        return 8
+        """
+        获取指定操作的位宽
+        
+        Args:
+            op_name: 操作名称（如 'x', 'h', 'Wx' 等）
+            
+        Returns:
+            位宽值（8/16/32），无效操作名返回默认值 8 并发出警告
+        """
+        attr_name = f'{op_name}_'
+
+        # 验证属性名是否有效
+        if attr_name not in _VALID_BITWIDTH_ATTRS:
+            import warnings
+            warnings.warn(
+                f"未知的位宽属性名: '{attr_name}'，将返回默认值 8。"
+                f"有效属性: {sorted(_VALID_BITWIDTH_ATTRS)}",
+                UserWarning
+            )
+            return 8
+
+        return getattr(self._bitwidth_config, attr_name, 8)
 
     def _get_symmetric(self, op_name: str) -> bool:
-        """获取指定操作是否对称量化"""
-        if self._bitwidth_config_dict is not None:
-            return self._bitwidth_config_dict.get(f'{op_name}_symmetric_', True)
-        return True
+        """
+        获取指定操作是否使用对称量化
+        
+        Args:
+            op_name: 操作名称（如 'x', 'h', 'Wx' 等）
+            
+        Returns:
+            是否对称量化，无效操作名返回默认值 True 并发出警告
+        """
+        attr_name = f'{op_name}_symmetric_'
+
+        # 验证属性名是否有效
+        if attr_name not in _VALID_SYMMETRIC_ATTRS:
+            import warnings
+            warnings.warn(
+                f"未知的对称量化属性名: '{attr_name}'，将返回默认值 True。"
+                f"有效属性: {sorted(_VALID_SYMMETRIC_ATTRS)}",
+                UserWarning
+            )
+            return True
+
+        return getattr(self._bitwidth_config, attr_name, True)
 
     @property
     def export_format(self) -> str:
@@ -1549,8 +1642,8 @@ class QuantGRU(nn.Module):
         else:
             output_reverse, h_n_reverse = None, None
 
-        # 标记校准数据已更新
-        self._calibration_dirty = True
+        # 标记量化参数需要更新（校准数据已收集）
+        self._quant_params_dirty = True
 
         # 合并双向输出(统一接口)
         return self._combine_bidirectional_outputs(
@@ -1614,8 +1707,8 @@ class QuantGRU(nn.Module):
         """
         # 量化模式下检查校准状态
         if self.use_quantization:
-            if self._calibration_dirty:
-                # 校准数据已更新，需要重新计算量化参数
+            if self._quant_params_dirty:
+                # 校准数据已更新或配置已修改，需要重新计算量化参数
                 self.finalize_calibration()
             elif not self.is_calibrated():
                 # 检查是否有未完成的校准数据(支持 minmax/histogram/percentile)
@@ -1660,8 +1753,12 @@ class QuantGRU(nn.Module):
 
 
 # ============================================================
-#                      调试工具函数
+#                      调试与诊断工具
 # ============================================================
+#
+# 以下函数用于调试和诊断量化问题：
+#   - print_quant_params: 打印量化参数（scale/zero_point）
+#   - print_quant_ranges: 打印校准收集到的数值范围
 
 def print_quant_params(gru: QuantGRU):
     """
