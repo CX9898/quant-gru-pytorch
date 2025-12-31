@@ -198,11 +198,11 @@ run_test() {
     
     if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
         # 检查余弦相似度
-        if awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+        if awk -v cos="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(cos >= threshold)}'; then
             cos_ok=true
         fi
         # 检查 MSE
-        if awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+        if awk -v mse="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(mse <= threshold)}'; then
             mse_ok=true
         fi
         
@@ -536,10 +536,10 @@ if [ $FAIL_COUNT -gt 0 ]; then
             # 检查是否不满足阈值
             cos_fail=false
             mse_fail=false
-            if ! awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+            if ! awk -v cos="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(cos >= threshold)}'; then
                 cos_fail=true
             fi
-            if ! awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+            if ! awk -v mse="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(mse <= threshold)}'; then
                 mse_fail=true
             fi
             if $cos_fail || $mse_fail; then

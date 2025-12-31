@@ -149,11 +149,11 @@ run_test() {
         
         if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
             # 检查余弦相似度
-            if awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+            if awk -v cos="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(cos >= threshold)}'; then
                 cos_ok=true
             fi
             # 检查 MSE
-            if awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+            if awk -v mse="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(mse <= threshold)}'; then
                 mse_ok=true
             fi
             
