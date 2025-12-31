@@ -28,12 +28,13 @@
 // ============================================================================
 // LUT 存储在常量内存中，供所有线程高速访问
 
-// 前向方向 LUT（单向 GRU 或双向 GRU 的前向）
+// 全局 LUT（已废弃，保留用于向后兼容）
+// ⚠️ 多层 GRU 会互相覆盖全局 LUT，建议使用参数传递的 LUT
 extern __constant__ SigmoidLUT d_sigmoid_z_lut;   ///< z 门 Sigmoid LUT
 extern __constant__ SigmoidLUT d_sigmoid_r_lut;   ///< r 门 Sigmoid LUT
 extern __constant__ SigmoidLUT d_tanh_lut;        ///< g 门 Tanh LUT
 
-// 反向方向 LUT（双向 GRU 的反向）
+// 反向方向 LUT（已废弃，保留用于向后兼容）
 extern __constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  ///< 反向 z 门 Sigmoid LUT
 extern __constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  ///< 反向 r 门 Sigmoid LUT
 extern __constant__ SigmoidLUT d_tanh_lut_reverse;       ///< 反向 g 门 Tanh LUT
@@ -79,36 +80,33 @@ inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
 //
 
 /**
- * @brief Z 门 Sigmoid 激活
+ * @brief Z 门 Sigmoid 激活（使用参数传递的 LUT，推荐）
  *
  * @param q_x 量化输入
+ * @param lut Sigmoid LUT（从 QuantGRUReScale 中获取）
  * @param pre_bw 输入位宽
  * @param out_bw 输出位宽
- * @param is_reverse 是否为反向方向（双向 GRU）
  * @return 量化输出
  */
-__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
-                                              bool is_reverse = false) {
-    return is_reverse ? ::piecewise_linear(q_x, d_sigmoid_z_lut_reverse, pre_bw, out_bw)
-                      : ::piecewise_linear(q_x, d_sigmoid_z_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t sigmoid_z(int32_t q_x, const SigmoidLUT& lut, 
+                                              QuantBitWidth pre_bw, QuantBitWidth out_bw) {
+    return ::piecewise_linear(q_x, lut, pre_bw, out_bw);
 }
 
 /**
- * @brief R 门 Sigmoid 激活
+ * @brief R 门 Sigmoid 激活（使用参数传递的 LUT，推荐）
  */
-__device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
-                                              bool is_reverse = false) {
-    return is_reverse ? ::piecewise_linear(q_x, d_sigmoid_r_lut_reverse, pre_bw, out_bw)
-                      : ::piecewise_linear(q_x, d_sigmoid_r_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t sigmoid_r(int32_t q_x, const SigmoidLUT& lut,
+                                              QuantBitWidth pre_bw, QuantBitWidth out_bw) {
+    return ::piecewise_linear(q_x, lut, pre_bw, out_bw);
 }
 
 /**
- * @brief G 门 Tanh 激活
+ * @brief G 门 Tanh 激活（使用参数传递的 LUT，推荐）
  */
-__device__ __forceinline__ int32_t tanh_g(int32_t q_x, QuantBitWidth pre_bw, QuantBitWidth out_bw,
-                                           bool is_reverse = false) {
-    return is_reverse ? ::piecewise_linear(q_x, d_tanh_lut_reverse, pre_bw, out_bw)
-                      : ::piecewise_linear(q_x, d_tanh_lut, pre_bw, out_bw);
+__device__ __forceinline__ int32_t tanh_g(int32_t q_x, const SigmoidLUT& lut,
+                                           QuantBitWidth pre_bw, QuantBitWidth out_bw) {
+    return ::piecewise_linear(q_x, lut, pre_bw, out_bw);
 }
 
 }  // namespace dev
