@@ -363,15 +363,97 @@ class AimetPotSqnrCalibrator {
 };
 
 /**
- * 从直方图计算 POT 量化参数（便捷函数）
+ * 从直方图计算 POT 量化参数（任意位宽版本）
  * 
  * @param hist 直方图数据
+ * @param bw 量化位宽配置
  * @param is_symmetric 是否对称量化
  * @param exp2_inv 输出：POT 指数 (scale = 2^(-exp2_inv))
  * @param zp 输出：零点
  * @param name 调试名称（可选）
  * @param scheme 校准方案：SQNR 或 PERCENTILE
  * @param percentile 百分位数（仅 PERCENTILE 方案使用）
+ */
+inline void calibrateQuantParamsFromHistogram(const Histogram& hist, QuantBitWidth bw,
+                                              bool is_symmetric,
+                                              int8_t& exp2_inv, int32_t& zp,
+                                              const char* name = nullptr,
+                                              CalibrationScheme scheme = CalibrationScheme::SQNR,
+                                              float percentile = 99.99f) {
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
+    }
+
+    HistogramCalibrationConfig config;
+    config.scheme = scheme;
+    config.percentile = percentile;
+
+    const int64_t quant_min = bw.qmin();
+    const int64_t quant_max = bw.qmax();
+    const int64_t num_steps = quant_max - quant_min;
+
+    float optimal_scale, optimal_min;
+
+    if (config.scheme == CalibrationScheme::PERCENTILE) {
+        // Percentile 方案
+        float clip_ratio = (100.0f - config.percentile) / 100.0f;
+        auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
+        pmin = std::min(pmin, 0.0f);
+        pmax = std::max(pmax, 0.0f);
+        if (pmax <= pmin) pmax = pmin + 1e-6f;
+
+        if (is_symmetric) {
+            int64_t num_pos_steps = num_steps / 2;
+            int64_t num_neg_steps = (num_steps + 1) / 2;
+            float delta_from_max = pmax / static_cast<float>(num_pos_steps);
+            float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
+            optimal_scale = std::max(delta_from_max, delta_from_min);
+            optimal_min = -static_cast<float>(num_neg_steps) * optimal_scale;
+        } else {
+            optimal_scale = (pmax - pmin) / static_cast<float>(num_steps);
+            optimal_min = pmin;
+        }
+        optimal_scale = std::max(optimal_scale, 1e-8f);
+    } else {
+        // SQNR 方案 - 需要根据位宽调整搜索参数
+        // 简化实现：使用 min/max 范围直接计算
+        float min_val = std::min(hist.min_val, 0.0f);
+        float max_val = std::max(hist.max_val, 0.0f);
+        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+
+        if (is_symmetric) {
+            float abs_max = std::max(std::abs(min_val), std::abs(max_val));
+            optimal_scale = abs_max / quant_max;
+            optimal_min = -abs_max;
+        } else {
+            optimal_scale = (max_val - min_val) / static_cast<float>(num_steps);
+            optimal_min = min_val;
+        }
+        optimal_scale = std::max(optimal_scale, 1e-8f);
+    }
+
+    // Round to POT
+    auto [po2_scale, n] = AimetPotSqnrCalibrator::roundToPowerOfTwo(optimal_scale);
+    exp2_inv = n;
+
+    // Compute zero-point
+    if (is_symmetric) {
+        zp = 0;
+    } else {
+        float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
+        zp = static_cast<int32_t>(std::round(zp_fp));
+    }
+
+#ifdef DEBUG
+    if (name && name[0]) {
+        printf("[POT-Calibrate][%s] bits=%d range=[%.4f,%.4f] scale=%.6f exp2=%d zp=%d\n",
+               name, bw.bits_, hist.min_val, hist.max_val, po2_scale, n, zp);
+    }
+#endif
+}
+
+/**
+ * 从直方图计算 POT 量化参数（模板版本，兼容旧代码）
  */
 template <typename QuantT>
 inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_symmetric,

@@ -6,7 +6,7 @@
 //
 // 本文件包含：
 //   1. GRU 量化参数结构体（Host 端与 Device 端）
-//   2. CPU/GPU 共用的内联函数（__host__ __device__）
+//   2. CPU/GPU 共用的内联函数（__host__ __device__ __forceinline__）
 //   3. 量化/反量化基础操作函数
 //   4. LUT 辅助量化函数
 //   5. 调试与工具函数
@@ -14,10 +14,11 @@
 // 设计原则：
 //   - 所有缩放因子均为 2 的负 n 次方：scale = 2^(-exp2_inv)
 //   - 支持对称量化（zp=0）和非对称量化（zp≠0）
-//   - CPU/GPU 共用函数使用 __host__ __device__ 标记，确保行为一致
+//   - CPU/GPU 共用函数使用 __host__ __device__ __forceinline__ 标记，确保行为一致
 //
 // ============================================================================
 
+#include "cuda_compat.h"
 #include <cublas_v2.h>
 
 #include <algorithm>
@@ -285,28 +286,18 @@ __host__ __device__ __forceinline__ uint16_t clamp_to_type<uint16_t>(int32_t x) 
 }
 
 /**
- * @brief 按位宽枚举饱和截断（运行时分派版本）
+ * @brief 按任意位宽饱和截断
  *
- * 适用于位宽在运行时确定的场景。
+ * 适用于位宽在运行时确定的场景，支持 1-31 位任意位宽。
  *
  * @param val 输入值
- * @param bw 目标位宽枚举
+ * @param bw 目标位宽配置
  * @return 截断后的值（始终返回 int32_t，但值已在目标范围内）
  */
 __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw) {
-    switch (bw) {
-        case QuantBitWidth::INT8:
-            return (val < -128) ? -128 : ((val > 127) ? 127 : val);
-        case QuantBitWidth::INT16:
-            return (val < -32768) ? -32768 : ((val > 32767) ? 32767 : val);
-        case QuantBitWidth::UINT8:
-            return (val < 0) ? 0 : ((val > 255) ? 255 : val);
-        case QuantBitWidth::UINT16:
-            return (val < 0) ? 0 : ((val > 65535) ? 65535 : val);
-        case QuantBitWidth::INT32:
-        default:
-            return val;
-    }
+    int32_t lo = bw.qmin();
+    int32_t hi = bw.qmax();
+    return (val < lo) ? lo : ((val > hi) ? hi : val);
 }
 
 // ============================================================================
@@ -423,100 +414,82 @@ void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, c
 // ============================================================================
 
 /**
- * @brief 量化参数校准函数
+ * @brief 量化参数校准函数（任意位宽版本）
  *
- * 根据数据范围计算量化参数，缩放因子对齐到 2 的负 n 次方。
- *
- * @tparam T 浮点类型（float/double）
- * @tparam QuantT 量化类型（int8_t/int16_t 等）
+ * 根据数据范围和位宽配置计算量化参数，缩放因子对齐到 2 的负 n 次方。
  *
  * @param[in] orig_min 原始数据最小值
  * @param[in] orig_max 原始数据最大值
+ * @param[in] bw 位宽配置（含位数和符号）
  * @param[in] is_symmetric 是否对称量化
  * @param[out] aligned_min 对齐后的最小值
  * @param[out] aligned_max 对齐后的最大值
  * @param[out] exp2_inv 缩放因子指数，scale = 2^(-exp2_inv)
  * @param[out] zp 零点（对称量化时为 0）
  * @param[in] name 调试用名称（可选）
- *
- * @note 对称量化：zp=0，范围关于原点对称
- * @note 非对称量化：zp 可为任意整数，范围覆盖原始 min/max
  */
-template <typename T, typename QuantT>
-inline void calibrateQuantParams(const T orig_min, const T orig_max, const bool is_symmetric,
-                                 T &aligned_min, T &aligned_max, int8_t &exp2_inv, int32_t &zp,
-                                 const std::string &name = "") {
-    static_assert(std::is_floating_point<T>::value, "T must be float or double");
-
-    // 量化类型的范围
-    const int32_t quant_min = std::numeric_limits<QuantT>::min();
-    const int32_t quant_max = std::numeric_limits<QuantT>::max();
+inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth bw,
+                                 bool is_symmetric, float &aligned_min, float &aligned_max,
+                                 int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
+    // 从位宽配置获取量化范围
+    const int32_t quant_min = bw.qmin();
+    const int32_t quant_max = bw.qmax();
 
     float scale;
     if (is_symmetric) {
-        // 对称量化，zero point 固定为 0
         zp = 0;
+        float abs_max = std::max(std::abs(orig_min), std::abs(orig_max));
+        abs_max = std::max(abs_max, 1e-9f);
 
-        // 取绝对值范围，保证对称
-        T abs_max = std::max(std::abs(orig_min), std::abs(orig_max));
-        abs_max = std::max(abs_max, static_cast<T>(1e-9));  // 避免除零
-
-        // scale = abs_max / quant_max => 对齐到 2^-n
-        T raw_scale = abs_max / quant_max;
-        // scale >= raw_scale
-        exp2_inv =
-            static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));  // floor instead of ceil
-        scale = std::pow(2.0, -exp2_inv);
+        float raw_scale = abs_max / quant_max;
+        exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+        scale = std::pow(2.0f, -exp2_inv);
         aligned_max = scale * quant_max;
         aligned_min = -aligned_max;
     } else {
-        // 非对称量化
-        T range = orig_max - orig_min;
-        range = std::max(range, static_cast<T>(1e-9));
+        float range = std::max(orig_max - orig_min, 1e-9f);
+        float raw_scale = range / (static_cast<float>(quant_max) - quant_min);
 
-        // 使用浮点数计算避免 int32_t 溢出
-        T raw_scale = range / (static_cast<T>(quant_max) - static_cast<T>(quant_min));
-
-        // scale >= raw_scale 对齐到 2^-n（使用 floor 保证不溢出）
-        exp2_inv = static_cast<int32_t>(std::floor(std::log2(1.0 / raw_scale)));
-        scale = std::pow(2.0, -exp2_inv);  // 取2的负exp2_inv次方
+        exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+        scale = std::pow(2.0f, -exp2_inv);
 
         aligned_min = std::floor(orig_min / scale) * scale;
         aligned_max = std::ceil(orig_max / scale) * scale;
 
-        // 计算 zero-point
-        T zp_fp = quant_min - aligned_min / scale;
-        zp = std::round(zp_fp);
-        //        zp = std::clamp(zp, quant_min, quant_max);
+        zp = static_cast<int32_t>(std::round(quant_min - aligned_min / scale));
     }
 
-    // 可选调试打印
 #ifdef DEBUG
-    if (!name.empty() &&
-        (name == "scale_z_out" || name == "scale_r_out" || name == "scale_g_out")) {
-        printf(
-            "[DEBUG][QuantParam][%s] "
-            "orig_min=%f, orig_max=%f, "
-            "aligned_min=%f, aligned_max=%f, scale=%f, "
-            "exp2_inv=%d, zp=%d, is_symmetric=%d\n",
-            name.c_str(), static_cast<double>(orig_min), static_cast<double>(orig_max),
-            static_cast<double>(aligned_min), static_cast<double>(aligned_max),
-            static_cast<double>(scale), static_cast<int>(exp2_inv), static_cast<int>(zp),
-            static_cast<int>(is_symmetric));
+    if (!name.empty()) {
+        printf("[DEBUG][QuantParam][%s] bits=%d, signed=%d, orig=[%.4f,%.4f], "
+               "aligned=[%.4f,%.4f], scale=%.6f, exp2_inv=%d, zp=%d\n",
+               name.c_str(), bw.bits_, bw.is_signed_, orig_min, orig_max,
+               aligned_min, aligned_max, scale, exp2_inv, zp);
     }
 #endif
 }
 
 /**
- * @brief 单值量化（Host 端）
+ * @brief 单值量化（任意位宽版本）
  *
  * q = clamp(round(src / scale + zp), qmin, qmax)
  *
- * @tparam QuantT 量化类型
  * @param src 浮点输入
  * @param exp2_inv 缩放因子指数
  * @param zp 零点
- * @return 量化值
+ * @param bw 位宽配置
+ * @return 量化值（int32_t 存储）
+ */
+inline int32_t quantize(float src, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    float scale = (exp2_inv >= 0) ? (1.0f / static_cast<float>(1 << exp2_inv))
+                                  : static_cast<float>(1 << (-exp2_inv));
+    float shifted = src / scale + static_cast<float>(zp);
+    int32_t q = static_cast<int32_t>(std::round(shifted));
+    return clamp_by_bitwidth(q, bw);
+}
+
+/**
+ * @brief 单值量化（模板版本，兼容旧代码）
  */
 template <typename QuantT>
 inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
@@ -538,7 +511,7 @@ inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
  * x = (q - zp) * scale
  */
 template <typename QuantT>
-inline __host__ __device__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
+__host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
     int32_t v = static_cast<int32_t>(q) - zp;
     if (exp2_inv >= 0) {
         return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);
@@ -547,12 +520,21 @@ inline __host__ __device__ float dequantize(QuantT q, int8_t exp2_inv, int32_t z
     }
 }
 
-/// @brief 批量量化（Host 端，OpenMP 并行）
+/// @brief 批量量化（任意位宽版本，输出 int32_t）
+inline void quantification(const float *data, int32_t *quant_data, size_t size, 
+                           int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+#pragma omp parallel for
+    for (size_t i = 0; i < size; ++i) {
+        quant_data[i] = quantize(data[i], exp2_inv, zp, bw);
+    }
+}
+
+/// @brief 批量量化（模板版本，兼容旧代码）
 template <typename T, typename QuantT>
 inline void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv,
                            int32_t zp) {
 #pragma omp parallel for
-    for (int i = 0; i < size; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
     }
 }
