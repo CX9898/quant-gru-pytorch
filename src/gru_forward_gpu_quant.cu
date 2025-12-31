@@ -203,10 +203,10 @@ __device__ __forceinline__ int32_t computeZ(const int channel_idx, const int32_t
     const int32_t z_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_z_pre_;
 
-    // 调用门专用函数，根据方向选择 LUT
+    // 调用门专用函数，使用参数中的 LUT（避免全局 LUT 覆盖问题）
     const auto &bw_cfg = rescale_params.bitwidth_config_;
-    const int32_t z = dev::sigmoid_z(z_pre_i32, bw_cfg.z_pre_, bw_cfg.z_out_, 
-                                      rescale_params.is_reverse_);
+    const int32_t z = dev::sigmoid_z(z_pre_i32, rescale_params.sigmoid_z_lut_,
+                                      bw_cfg.z_pre_, bw_cfg.z_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -255,10 +255,10 @@ __device__ __forceinline__ int32_t computeR(const int channel_idx, const int32_t
     const int32_t r_pre_i32 =
         Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale_params.zp_r_pre_;
 
-    // 调用门专用函数，自动选择 LUT
+    // 调用门专用函数，使用参数中的 LUT（避免全局 LUT 覆盖问题）
     const auto &bw_cfg = rescale_params.bitwidth_config_;
-    const int32_t r = dev::sigmoid_r(r_pre_i32, bw_cfg.r_pre_, bw_cfg.r_out_,
-                                      rescale_params.is_reverse_);
+    const int32_t r = dev::sigmoid_r(r_pre_i32, rescale_params.sigmoid_r_lut_,
+                                      bw_cfg.r_pre_, bw_cfg.r_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -318,10 +318,10 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
 
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale_params.zp_g_pre_;
 
-    // 调用门专用函数，自动选择 LUT
+    // 调用门专用函数，使用参数中的 LUT（避免全局 LUT 覆盖问题）
     const auto &bw_cfg = rescale_params.bitwidth_config_;
-    const int32_t g = dev::tanh_g(g_pre_i32, bw_cfg.g_pre_, bw_cfg.g_out_,
-                                   rescale_params.is_reverse_);
+    const int32_t g = dev::tanh_g(g_pre_i32, rescale_params.tanh_g_lut_,
+                                   bw_cfg.g_pre_, bw_cfg.g_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -1018,8 +1018,11 @@ void ForwardPassQuant<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativePara
     // 保存位宽配置（用于运行时选择正确的 kernel 实例）
     rescale_param_.bitwidth_config_ = parms.bitwidth_config_;
 
-    // 是否为反向方向（双向 GRU 使用反向 LUT）
-    rescale_param_.is_reverse_ = parms.is_reverse_;
+    // 复制 LUT 表（从 GRUQuantitativeParameters 复制到 QuantGRUReScale）
+    // 这样每层 GRU 使用自己的 LUT，避免全局 __constant__ LUT 覆盖问题
+    rescale_param_.sigmoid_z_lut_ = parms.sigmoid_z_lut_;
+    rescale_param_.sigmoid_r_lut_ = parms.sigmoid_r_lut_;
+    rescale_param_.tanh_g_lut_ = parms.tanh_g_lut_;
 
 #ifdef DEBUG
     // 调试用：保存完整的量化参数

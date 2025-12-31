@@ -100,8 +100,10 @@ struct GRUQuantitativeParameters {
     int8_t exp2_inv_old_contrib_;   ///< z*h 的缩放因子
     int32_t zp_old_contrib_;        ///< z*h 的零点
 
-    // -------------------- 双向 GRU 支持 --------------------
-    bool is_reverse_ = false;  ///< 是否为反向方向（使用反向 LUT）
+    // -------------------- LUT 表（每层独立，在 finalize_calibration 时生成）--------------------
+    SigmoidLUT sigmoid_z_lut_;  ///< z 门 Sigmoid LUT
+    SigmoidLUT sigmoid_r_lut_;  ///< r 门 Sigmoid LUT
+    SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
 };
 
 /**
@@ -175,7 +177,11 @@ struct QuantGRUReScale {
 
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（运行时选择 kernel）
-    bool is_reverse_ = false;              ///< 是否为反向方向（双向 GRU）
+
+    // -------------------- LUT 表--------------------
+    SigmoidLUT sigmoid_z_lut_;  ///< z 门 Sigmoid LUT
+    SigmoidLUT sigmoid_r_lut_;  ///< r 门 Sigmoid LUT
+    SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
 
 #ifdef DEBUG
     // -------------------- 调试参数 --------------------
@@ -193,10 +199,20 @@ struct QuantGRUReScale {
  *
  * @param params GRU 量化参数，包含各门的缩放因子和零点
  *
- * @note 自动根据 params.is_reverse_ 选择初始化前向或反向 LUT
  * @note 输入范围从量化参数自动计算：x_min = (quant_min - zp) * scale
+ * @deprecated 多层 GRU 会互相覆盖全局 LUT，建议使用 generate_piecewise_linear_lut_to_params
  */
 void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params);
+
+/**
+ * @brief 生成分段线性量化查找表并存储到参数中（推荐方式）
+ *
+ * 将 LUT 存储到 GRUQuantitativeParameters 中，避免全局 __constant__ 内存覆盖问题。
+ * 在 finalize_calibration 时调用一次，然后在 setRescaleParam 时复制到 QuantGRUReScale。
+ *
+ * @param params GRU 量化参数，会被修改以存储生成的 LUT
+ */
+void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params);
 
 // ============================================================================
 // Part 2: CPU/GPU 共用基础运算函数

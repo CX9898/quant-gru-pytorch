@@ -22,7 +22,13 @@
 // ==================== 配置 ====================
 
 // 全局配置：选择校准方式 (SQNR 或 PERCENTILE)
-constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::PERCENTILE;
+// enum class CalibrationMethod : int8_t {
+//     NONE = 0,        // 不校准，正常 forward
+//     MINMAX = 1,      // 收集 min/max 范围
+//     SQNR = 2,        // 收集直方图，使用 SQNR 优化
+//     PERCENTILE = 3   // 收集直方图，使用百分位裁剪
+// };
+constexpr CalibrationMethod CALIBRATION_METHOD = CalibrationMethod::MINMAX;
 
 // 默认参数（可通过命令行覆盖）
 int g_batch_size = 64;

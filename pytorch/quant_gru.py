@@ -904,8 +904,6 @@ class QuantGRU(nn.Module):
                     raise RuntimeError("双向 GRU 反向校准数据异常")
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
                     quant_ranges=self.quant_ranges_reverse, bitwidth_config=cpp_config)
-            # 标记为反向方向，初始化反向 LUT
-            self.quant_params_reverse.is_reverse_ = True
             gru_ops.initialize_quantization_lut(quant_params=self.quant_params_reverse)
 
         self._calibration_dirty = False
@@ -1627,6 +1625,8 @@ class QuantGRU(nn.Module):
                 h0_reverse = ensure_cuda_float32(hx[1], device)
 
         # 前向方向
+        # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到 QuantGRUReScale
+        # 不再需要每次 forward 前重新初始化全局 LUT
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
@@ -1635,6 +1635,7 @@ class QuantGRU(nn.Module):
 
         if self.bidirectional:
             # 反向方向
+            # LUT 存储在 quant_params_reverse 中，不再需要每次 forward 前初始化
             output_reverse, h_n_reverse = GRUFunction.apply(
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,

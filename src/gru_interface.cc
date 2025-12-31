@@ -249,6 +249,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
             quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_, "scale_old_contrib");
     });
 
+    // 生成 LUT 并存储到参数中（避免全局 LUT 覆盖问题）
+    generate_piecewise_linear_lut_to_params(quant_params);
+
     return quant_params;
 }
 
@@ -1343,6 +1346,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         }
     }  // end omp parallel
 
+    // 生成 LUT 并存储到参数中（避免全局 LUT 覆盖问题）
+    generate_piecewise_linear_lut_to_params(quant_params);
+
     return quant_params;
 }
 
@@ -1443,6 +1449,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
             gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
             getBits(bitwidth_config.br_), quant_params.exp2_inv_br_);
     }
+    
+    // 生成 LUT 并存储到参数中（避免全局 LUT 覆盖问题）
+    generate_piecewise_linear_lut_to_params(quant_params);
     
     return quant_params;
 }
