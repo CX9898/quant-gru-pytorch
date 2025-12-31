@@ -145,11 +145,11 @@ run_test() {
     
     if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
         # 检查余弦相似度
-        if awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}"; then
+        if awk -v cos="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(cos >= threshold)}'; then
             cos_ok=true
         fi
         # 检查 MSE
-        if awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+        if awk -v mse="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(mse <= threshold)}'; then
             mse_ok=true
         fi
         
@@ -356,7 +356,7 @@ if [ $FAIL_COUNT -gt 0 ]; then
     tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name z_pre z_out r_pre r_out g_pre g_out z_pre_sym z_out_sym r_pre_sym r_out_sym g_pre_sym g_out_sym mse cos; do
         if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
             # 检查是否不满足阈值
-            if ! awk "BEGIN {exit !($cos >= $COSINE_THRESHOLD)}" || ! awk "BEGIN {exit !($mse <= $MSE_THRESHOLD)}"; then
+            if ! awk -v cos="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(cos >= threshold)}' || ! awk -v mse="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(mse <= threshold)}'; then
                 printf "     | %-40s | %-15s | %-12s\n" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
             fi
         fi
