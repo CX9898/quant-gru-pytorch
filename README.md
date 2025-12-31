@@ -369,10 +369,12 @@ class QuantGRU(nn.Module):
         self,
         input_size: int,              # 输入特征维度
         hidden_size: int,             # 隐藏状态维度
-        num_layers: int = 1,          # 层数（目前仅支持 1）
+        num_layers: int = 1,          # 层数（仅支持 1）
         bias: bool = True,            # 是否使用偏置
-        batch_first: bool = False,    # 输入格式
-        bidirectional: bool = False   # 是否双向
+        batch_first: bool = False,    # 输入格式：True=[B,T,I], False=[T,B,I]
+        dropout: float = 0.0,         # 暂不支持，必须为 0
+        bidirectional: bool = False,  # 是否双向
+        use_quantization: bool = False # 是否启用量化
     )
     
     # 重要属性（可在创建后设置）
@@ -386,12 +388,12 @@ class QuantGRU(nn.Module):
 
 | 属性 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `use_quantization` | bool | False | 是否启用量化推理 |
-| `calibrating` | bool | False | 校准模式（True 时 forward 会收集校准数据） |
-| `calibration_method` | str | 'sqnr' | 校准方法：'sqnr'（高精度）、'percentile'（百分位）或 'minmax'（快速） |
-| `percentile_value` | float | 99.99 | 百分位值（仅 `calibration_method='percentile'` 时使用） |
-| `export_mode` | bool | False | ONNX 导出模式（True 时使用纯 PyTorch 实现） |
-| `export_format` | str | 'float' | 导出格式：'float'（浮点）或 'qdq'（伪量化，需先校准） |
+| `use_quantization` | bool | False | 量化开关 |
+| `calibrating` | bool | False | 校准模式开关，True 时 forward 会收集校准数据 |
+| `calibration_method` | str | 'sqnr' | 校准方法：'sqnr'（高精度）/ 'percentile'（百分位）/ 'minmax'（快速） |
+| `percentile_value` | float | 99.99 | 百分位值，仅 'percentile' 方法使用 |
+| `export_mode` | bool | False | ONNX 导出模式，True 时使用纯 PyTorch 实现 |
+| `export_format` | str | 'float' | 导出格式：'float'（浮点）/ 'qdq'（伪量化，需先校准） |
 
 ### 主要方法
 
