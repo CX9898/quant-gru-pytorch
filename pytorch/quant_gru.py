@@ -916,7 +916,14 @@ class QuantGRU(nn.Module):
         for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
             if json_key in op_config:
                 op_cfg = op_config[json_key]
-                setattr(self._bitwidth_config, bw_attr, op_cfg.get('bitwidth', 8))
+                bitwidth = op_cfg.get('bitwidth', 8)
+                # 验证位宽范围 (1-32)
+                if not (1 <= bitwidth <= 32):
+                    raise ValueError(
+                        f"Invalid bitwidth {bitwidth} for '{json_key}'. "
+                        f"Must be in range [1, 32]."
+                    )
+                setattr(self._bitwidth_config, bw_attr, bitwidth)
                 setattr(self._bitwidth_config, sym_attr, op_cfg.get('is_symmetric', True))
             else:
                 missing_fields.append(json_key)
@@ -940,12 +947,12 @@ class QuantGRU(nn.Module):
         设置所有算子统一的位宽和对称量化配置（2 层设计：直接操作 C++ 对象）
         
         Args:
-            bitwidth: 位宽 (8/16/32)
+            bitwidth: 位宽 (1-32)
             is_symmetric: 是否对称量化(仅对激活值生效，权重/偏置始终对称)
             verbose: 是否打印信息
         """
-        if bitwidth not in (8, 16, 32):
-            raise ValueError(f"bitwidth must be 8, 16 or 32, got {bitwidth}")
+        if not (1 <= bitwidth <= 32):
+            raise ValueError(f"bitwidth must be in range [1, 32], got {bitwidth}")
 
         # 设置所有位宽属性（使用模块级常量）
         for attr in _VALID_BITWIDTH_ATTRS:

@@ -287,10 +287,11 @@ void runQuantInferenceCPUWrapper(int time_steps, int batch_size, int input_size,
                                   const GRUQuantitativeParameters &quant_params,
                                   std::vector<float> &h) {
     const auto &config = quant_params.bitwidth_config_;
-    bool w8 = (config.W_ == QuantBitWidth::INT8);
-    bool a8 = (config.x_ == QuantBitWidth::INT8);
+    bool w8 = config.W_.fitsInt8();
+    bool a8 = config.x_.fitsInt8();
     
-    printf("CPU Quant Inference: W%dA%d\n", w8 ? 8 : 16, a8 ? 8 : 16);
+    printf("CPU Quant Inference: W%dA%d (actual bits: W=%d, x=%d)\n", 
+           w8 ? 8 : 16, a8 ? 8 : 16, config.W_.bits_, config.x_.bits_);
     
     if (w8 && a8) {
         runQuantInferenceCPU<int8_t, int8_t>(time_steps, batch_size, input_size, hidden_size,

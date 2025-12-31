@@ -350,7 +350,7 @@ __device__ __forceinline__ int32_t computeG(const int channel_idx, const int32_t
                debug_idx, g_pre_i32, g_pre_fp, g, g_quant_fp, g_theory, error);
 
         // 打印 tanh LUT 参数
-        if (rescale_params.bitwidth_config_.g_out_ == QuantBitWidth::INT16) {
+        if (rescale_params.bitwidth_config_.g_out_.bits_ > 8) {
             printf(
                 "[G LUT] idx=%d shift_x=%d zp_x=%d shift_y=%d zp_y=%d | exp2_inv_g_pre=%d "
                 "exp2_inv_g_out=%d\n",

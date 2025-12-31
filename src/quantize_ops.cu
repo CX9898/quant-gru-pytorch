@@ -521,15 +521,9 @@ std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int n
  */
 SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
                                  int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
-    // 根据输入位宽确定量化范围
-    int32_t quant_min, quant_max;
-    if (input_bw == QuantBitWidth::INT16) {
-        quant_min = -32768;
-        quant_max = 32767;
-    } else {  // INT8 或其他
-        quant_min = -128;
-        quant_max = 127;
-    }
+    // 根据输入位宽确定量化范围（任意位宽支持）
+    int32_t quant_min = input_bw.qmin();
+    int32_t quant_max = input_bw.qmax();
 
     float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
@@ -591,9 +585,8 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
     // 根据输出位宽选择正确的 shift_bits 精度
-    // 8bit 输出用 INT8 精度，16bit 输出用 INT16 精度
     int8_t shift_bits_b, shift_bits_c;
-    bool is_8bit_output = (output_bw == QuantBitWidth::INT8 || output_bw == QuantBitWidth::UINT8);
+    bool is_8bit_output = (output_bw.bits_ <= 8);
     if (is_8bit_output) {
         shift_bits_b = determine_shift_bits_int8(b_abs_max);
         shift_bits_c = determine_shift_bits_int8(c_abs_max);
@@ -603,8 +596,8 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     }
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: output_bw=%d, is_8bit=%d, shift_bits_b=%d, shift_bits_c=%d\n",
-           static_cast<int>(output_bw), is_8bit_output, shift_bits_b, shift_bits_c);
+    printf("[DEBUG] generate_sigmoid_lut: output_bw.bits_=%d, is_8bit=%d, shift_bits_b=%d, shift_bits_c=%d\n",
+           output_bw.bits_, is_8bit_output, shift_bits_b, shift_bits_c);
 #endif
 
     // 第三遍扫描：量化每段
@@ -620,14 +613,10 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
 
         int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
 
-        // threshold 根据输入位宽量化，存储为 int16_t
-        int16_t threshold;
-        if (input_bw == QuantBitWidth::INT16) {
-            threshold = quantize_input_int16(coeff.x_end, shift_bits_x, zp_x);
-        } else {
-            // INT8 输入：clamp 到 [-128, 127]
-            threshold = static_cast<int16_t>(quantize_input_int8(coeff.x_end, shift_bits_x, zp_x));
-        }
+        // threshold 量化（任意位宽支持，存储为 int32_t）
+        float scale = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+        int32_t threshold = static_cast<int32_t>(std::round(coeff.x_end / scale + zp_x));
+        threshold = clamp_by_bitwidth(threshold, input_bw);
 
         lut.segments[i].q_b = q_b;
         lut.segments[i].n_BX_total = n_BX_total;
@@ -649,15 +638,9 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
  */
 SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
                               int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
-    // 根据输入位宽确定量化范围
-    int32_t quant_min, quant_max;
-    if (input_bw == QuantBitWidth::INT16) {
-        quant_min = -32768;
-        quant_max = 32767;
-    } else {
-        quant_min = -128;
-        quant_max = 127;
-    }
+    // 根据输入位宽确定量化范围（任意位宽支持）
+    int32_t quant_min = input_bw.qmin();
+    int32_t quant_max = input_bw.qmax();
 
     float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
@@ -716,9 +699,8 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
     // 根据输出位宽选择正确的 shift_bits 精度
-    // 8bit 输出用 INT8 精度，16bit 输出用 INT16 精度
     int8_t shift_bits_b, shift_bits_c;
-    bool is_8bit_output = (output_bw == QuantBitWidth::INT8 || output_bw == QuantBitWidth::UINT8);
+    bool is_8bit_output = (output_bw.bits_ <= 8);
     if (is_8bit_output) {
         shift_bits_b = determine_shift_bits_int8(b_abs_max);
         shift_bits_c = determine_shift_bits_int8(c_abs_max);
@@ -728,8 +710,8 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     }
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: output_bw=%d, is_8bit=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
-           static_cast<int>(output_bw), is_8bit_output, b_abs_max, shift_bits_b, shift_bits_c);
+    printf("[DEBUG] generate_tanh_lut: output_bw.bits_=%d, is_8bit=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
+           output_bw.bits_, is_8bit_output, b_abs_max, shift_bits_b, shift_bits_c);
 #endif
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
@@ -744,13 +726,10 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
 
         int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
         
-        // threshold 根据输入位宽量化
-        int16_t threshold;
-        if (input_bw == QuantBitWidth::INT16) {
-            threshold = quantize_input_int16(coeff.x_end, shift_bits_x, zp_x);
-        } else {
-            threshold = static_cast<int16_t>(quantize_input_int8(coeff.x_end, shift_bits_x, zp_x));
-        }
+        // threshold 量化（任意位宽支持，存储为 int32_t）
+        float scale = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+        int32_t threshold = static_cast<int32_t>(std::round(coeff.x_end / scale + zp_x));
+        threshold = clamp_by_bitwidth(threshold, input_bw);
 
         lut.segments[i].q_b = q_b;
         lut.segments[i].n_BX_total = n_BX_total;

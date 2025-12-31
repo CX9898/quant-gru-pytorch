@@ -35,7 +35,7 @@ struct SegmentParams {
     int32_t q_b;                 ///< 量化斜率（INT32，避免截断误差）
     int8_t n_BX_total;           ///< 融合移位量 = shift_b + shift_x - shift_y（可能为负）
     int32_t term_c_precomputed;  ///< 预计算截距项（已含输出零点）
-    int16_t threshold;           ///< 分段上界阈值（q_x < threshold 则属于此段）
+    int32_t threshold;           ///< 分段上界阈值（q_x < threshold 则属于此段），支持任意位宽
 };
 
 // ============================================================================

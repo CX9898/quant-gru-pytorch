@@ -44,45 +44,21 @@ inline CalibrationMethod stringToCalibMethod(const std::string &method) {
 //
 // ============================================================================
 
-inline QuantBitWidth bitwidthToQuantType_early(int8_t bitwidth) {
-    switch (bitwidth) {
-        case 8:
-            return QuantBitWidth::INT8;
-        case 16:
-            return QuantBitWidth::INT16;
-        case 32:
-            return QuantBitWidth::INT32;
-        default:
-            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth));
+/// 位宽转换：Python 端的位宽数值 → C++ QuantBitWidth 结构体
+inline QuantBitWidth bitwidthToSigned(int8_t bitwidth) {
+    if (bitwidth < 1 || bitwidth > 32) {
+        throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
+                                    ". Must be 1-32.");
     }
+    return QuantBitWidth(bitwidth, true);  // 有符号
 }
 
-inline QuantBitWidth bitwidthToUnsignedQuantType_early(int8_t bitwidth) {
-    switch (bitwidth) {
-        case 8:
-            return QuantBitWidth::UINT8;
-        case 16:
-            return QuantBitWidth::UINT16;
-        case 32:
-            return QuantBitWidth::INT32;
-        default:
-            throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth));
+inline QuantBitWidth bitwidthToUnsigned(int8_t bitwidth) {
+    if (bitwidth < 1 || bitwidth > 32) {
+        throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
+                                    ". Must be 1-32.");
     }
-}
-
-inline int8_t quantTypeToBitwidth_early(QuantBitWidth bw) {
-    switch (bw) {
-        case QuantBitWidth::INT8:
-        case QuantBitWidth::UINT8:
-            return 8;
-        case QuantBitWidth::INT16:
-        case QuantBitWidth::UINT16:
-            return 16;
-        case QuantBitWidth::INT32:
-            return 32;
-        default:
-            return 8;
-    }
+    return QuantBitWidth(bitwidth, false);  // 无符号
 }
 
 // ============================================================================
@@ -116,24 +92,25 @@ struct OperatorQuantConfigPy {
 
     OperatorQuantConfig to_cpp() const {
         OperatorQuantConfig cfg;
-        cfg.x_ = bitwidthToQuantType_early(x_);
-        cfg.h_ = bitwidthToQuantType_early(h_);
-        cfg.W_ = bitwidthToQuantType_early(W_);
-        cfg.R_ = bitwidthToQuantType_early(R_);
-        cfg.bx_ = bitwidthToQuantType_early(bx_);
-        cfg.br_ = bitwidthToQuantType_early(br_);
-        cfg.Wx_ = bitwidthToQuantType_early(Wx_);
-        cfg.Rh_ = bitwidthToQuantType_early(Rh_);
-        cfg.z_pre_ = bitwidthToQuantType_early(z_pre_);
-        cfg.z_out_ = bitwidthToUnsignedQuantType_early(z_out_);  // sigmoid → UINT
-        cfg.r_pre_ = bitwidthToQuantType_early(r_pre_);
-        cfg.r_out_ = bitwidthToUnsignedQuantType_early(r_out_);  // sigmoid → UINT
-        cfg.g_pre_ = bitwidthToQuantType_early(g_pre_);
-        cfg.g_out_ = bitwidthToQuantType_early(g_out_);
-        cfg.Rh_add_br_ = bitwidthToQuantType_early(Rh_add_br_);
-        cfg.rRh_ = bitwidthToQuantType_early(rRh_);
-        cfg.old_contrib_ = bitwidthToQuantType_early(old_contrib_);
-        cfg.new_contrib_ = bitwidthToQuantType_early(new_contrib_);
+        // 位宽配置（sigmoid 输出为无符号，其他有符号）
+        cfg.x_ = bitwidthToSigned(x_);
+        cfg.h_ = bitwidthToSigned(h_);
+        cfg.W_ = bitwidthToSigned(W_);
+        cfg.R_ = bitwidthToSigned(R_);
+        cfg.bx_ = bitwidthToSigned(bx_);
+        cfg.br_ = bitwidthToSigned(br_);
+        cfg.Wx_ = bitwidthToSigned(Wx_);
+        cfg.Rh_ = bitwidthToSigned(Rh_);
+        cfg.z_pre_ = bitwidthToSigned(z_pre_);
+        cfg.z_out_ = bitwidthToUnsigned(z_out_);  // sigmoid → unsigned
+        cfg.r_pre_ = bitwidthToSigned(r_pre_);
+        cfg.r_out_ = bitwidthToUnsigned(r_out_);  // sigmoid → unsigned
+        cfg.g_pre_ = bitwidthToSigned(g_pre_);
+        cfg.g_out_ = bitwidthToSigned(g_out_);
+        cfg.Rh_add_br_ = bitwidthToSigned(Rh_add_br_);
+        cfg.rRh_ = bitwidthToSigned(rRh_);
+        cfg.old_contrib_ = bitwidthToSigned(old_contrib_);
+        cfg.new_contrib_ = bitwidthToSigned(new_contrib_);
         // 对称量化配置
         cfg.x_symmetric_ = x_symmetric_;
         cfg.h_symmetric_ = h_symmetric_;
@@ -157,24 +134,25 @@ struct OperatorQuantConfigPy {
     }
 
     void from_cpp(const OperatorQuantConfig &cfg) {
-        x_ = quantTypeToBitwidth_early(cfg.x_);
-        h_ = quantTypeToBitwidth_early(cfg.h_);
-        W_ = quantTypeToBitwidth_early(cfg.W_);
-        R_ = quantTypeToBitwidth_early(cfg.R_);
-        bx_ = quantTypeToBitwidth_early(cfg.bx_);
-        br_ = quantTypeToBitwidth_early(cfg.br_);
-        Wx_ = quantTypeToBitwidth_early(cfg.Wx_);
-        Rh_ = quantTypeToBitwidth_early(cfg.Rh_);
-        z_pre_ = quantTypeToBitwidth_early(cfg.z_pre_);
-        z_out_ = quantTypeToBitwidth_early(cfg.z_out_);
-        r_pre_ = quantTypeToBitwidth_early(cfg.r_pre_);
-        r_out_ = quantTypeToBitwidth_early(cfg.r_out_);
-        g_pre_ = quantTypeToBitwidth_early(cfg.g_pre_);
-        g_out_ = quantTypeToBitwidth_early(cfg.g_out_);
-        Rh_add_br_ = quantTypeToBitwidth_early(cfg.Rh_add_br_);
-        rRh_ = quantTypeToBitwidth_early(cfg.rRh_);
-        old_contrib_ = quantTypeToBitwidth_early(cfg.old_contrib_);
-        new_contrib_ = quantTypeToBitwidth_early(cfg.new_contrib_);
+        // 直接从 C++ 结构体读取位宽（忽略 is_signed，Python 端不关心）
+        x_ = cfg.x_.bits_;
+        h_ = cfg.h_.bits_;
+        W_ = cfg.W_.bits_;
+        R_ = cfg.R_.bits_;
+        bx_ = cfg.bx_.bits_;
+        br_ = cfg.br_.bits_;
+        Wx_ = cfg.Wx_.bits_;
+        Rh_ = cfg.Rh_.bits_;
+        z_pre_ = cfg.z_pre_.bits_;
+        z_out_ = cfg.z_out_.bits_;
+        r_pre_ = cfg.r_pre_.bits_;
+        r_out_ = cfg.r_out_.bits_;
+        g_pre_ = cfg.g_pre_.bits_;
+        g_out_ = cfg.g_out_.bits_;
+        Rh_add_br_ = cfg.Rh_add_br_.bits_;
+        rRh_ = cfg.rRh_.bits_;
+        old_contrib_ = cfg.old_contrib_.bits_;
+        new_contrib_ = cfg.new_contrib_.bits_;
         // 对称量化配置
         x_symmetric_ = cfg.x_symmetric_;
         h_symmetric_ = cfg.h_symmetric_;
