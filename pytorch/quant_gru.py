@@ -886,7 +886,6 @@ class QuantGRU(nn.Module):
         else:
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges, bitwidth_config=cpp_config)
-        gru_ops.initialize_quantization_lut(quant_params=self.quant_params)
 
         # 反向方向（双向时）
         if self.bidirectional:
@@ -904,7 +903,6 @@ class QuantGRU(nn.Module):
                     raise RuntimeError("双向 GRU 反向校准数据异常")
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
                     quant_ranges=self.quant_ranges_reverse, bitwidth_config=cpp_config)
-            gru_ops.initialize_quantization_lut(quant_params=self.quant_params_reverse)
 
         self._calibration_dirty = False
 

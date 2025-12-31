@@ -572,8 +572,7 @@ int main(int argc, char *argv[]) {
                                                 bx_dev.data(), br_dev.data(), x_dev.data(),
                                                 bitwidth_config);
         }
-        
-        initialize_quantization_lut(quant_params);
+        // LUT 已在校准函数中自动生成
     }
     
     printParms(quant_params);

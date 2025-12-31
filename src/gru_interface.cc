@@ -602,26 +602,6 @@ template void quantGRUForward<int16_t, int16_t>(
     const cublasHandle_t &g_blas_handle, float *h, float *v);
 
 // =====================================================================
-// LUT 初始化实现
-// =====================================================================
-
-void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params) {
-    generate_piecewise_linear_lut(quant_params);
-
-    // 同步 CUDA 操作
-    cudaDeviceSynchronize();
-
-    // 检查 CUDA 错误
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in initialize_quantization_lut: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in initialize_quantization_lut: ") +
-                                 err_str);
-    }
-}
-
-// =====================================================================
 // AIMET 风格的真正直方图校准实现
 // =====================================================================
 
