@@ -1397,10 +1397,9 @@ class QuantGRU(nn.Module):
         纯 PyTorch 实现的 GRU 前向传播（用于 ONNX 导出）
 
         支持单向和双向模式
+        
+        Note: batch_first 转换已在 forward() 中统一处理
         """
-        if self.batch_first:
-            input = input.transpose(0, 1).contiguous()
-
         T, B, I = input.shape
         H = self.hidden_size
         device = input.device
@@ -1445,9 +1444,6 @@ class QuantGRU(nn.Module):
             output = output_forward
             h_n = h_n_forward
 
-        if self.batch_first:
-            output = output.transpose(0, 1).contiguous()
-
         return output, h_n
 
     # -------------------- 校准模式 forward --------------------
@@ -1461,10 +1457,9 @@ class QuantGRU(nn.Module):
         带校准数据收集的前向传播
         
         在 forward 过程中同时收集校准数据，避免额外的前向传播
+        
+        Note: batch_first 转换已在 forward() 中统一处理
         """
-        if self.batch_first:
-            input = input.transpose(0, 1).contiguous()
-
         time_steps, batch_size, input_size = input.shape
         hidden_size = self.hidden_size
 
@@ -1551,9 +1546,6 @@ class QuantGRU(nn.Module):
         # 标记校准数据已更新
         self._calibration_dirty = True
 
-        if self.batch_first:
-            output = output.transpose(0, 1).contiguous()
-
         return output, h_n
 
     # -------------------- 主 forward 方法 --------------------
@@ -1578,17 +1570,39 @@ class QuantGRU(nn.Module):
             - export_mode=False (默认): 使用 CUDA C++ 实现（高性能）
             - export_mode=True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
         """
-        # ===== ONNX 导出模式：使用纯 PyTorch 实现 =====
+        # ===== 统一处理 batch_first 输入转换（唯一入口）=====
+        if self.batch_first:
+            input = input.transpose(0, 1).contiguous()
+
+        # ===== 根据模式选择执行路径 =====
         if self.export_mode:
-            return self._forward_python(input, hx)
+            # ONNX 导出模式：使用纯 PyTorch 实现
+            output, h_n = self._forward_python(input, hx)
+        elif self.calibrating:
+            # 校准模式：在 forward 过程中收集校准数据
+            self._ensure_cublas_initialized()
+            output, h_n = self._forward_with_calibration(input, hx)
+        else:
+            # 正常/量化推理模式：使用 CUDA C++ 实现
+            self._ensure_cublas_initialized()
+            output, h_n = self._forward_cuda(input, hx)
 
-        # ===== 正常模式：使用 CUDA C++ 实现 =====
-        self._ensure_cublas_initialized()
+        # ===== 统一处理 batch_first 输出转换（唯一出口）=====
+        if self.batch_first:
+            output = output.transpose(0, 1).contiguous()
 
-        # ===== 校准模式：在 forward 过程中收集校准数据 =====
-        if self.calibrating:
-            return self._forward_with_calibration(input, hx)
+        return output, h_n
 
+    def _forward_cuda(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        CUDA C++ 实现的前向传播（正常/量化推理模式）
+        
+        Note: batch_first 转换已在 forward() 中统一处理
+        """
         # 量化模式下检查校准状态
         if self.use_quantization:
             if self._calibration_dirty:
@@ -1601,9 +1615,6 @@ class QuantGRU(nn.Module):
                     self.finalize_calibration()
                 else:
                     raise RuntimeError("量化已启用但未校准，请先设置 calibrating=True 并调用 forward()")
-
-        if self.batch_first:
-            input = input.transpose(0, 1).contiguous()
 
         seq_len, batch_size, input_size = input.shape
         hidden_size = self.hidden_size
@@ -1649,9 +1660,6 @@ class QuantGRU(nn.Module):
         else:
             output = output_forward
             h_n = h_n_forward
-
-        if self.batch_first:
-            output = output.transpose(0, 1).contiguous()
 
         return output, h_n
 
