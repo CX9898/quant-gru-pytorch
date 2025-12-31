@@ -46,12 +46,13 @@ COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改 GEMM 结果位宽 (Wx_, Rh_)
+# 新格式: Wx_{bits, true}
 modify_gemm_bitwidth() {
     local Wx_bits=$1
     local Rh_bits=$2
     
-    sed -i "s/QuantBitWidth Wx_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth Wx_ = QuantBitWidth::INT${Wx_bits};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth Rh_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth Rh_ = QuantBitWidth::INT${Rh_bits};/" "$CONFIG_FILE"
+    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${Wx_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${Rh_bits}, true}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改偏置位宽 (bx_, br_)
@@ -59,8 +60,8 @@ modify_bias_bitwidth() {
     local bx_bits=$1
     local br_bits=$2
     
-    sed -i "s/QuantBitWidth bx_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth bx_ = QuantBitWidth::INT${bx_bits};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth br_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth br_ = QuantBitWidth::INT${br_bits};/" "$CONFIG_FILE"
+    sed -i "s/bx_{[0-9]*, [a-z]*}/bx_{${bx_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/br_{[0-9]*, [a-z]*}/br_{${br_bits}, true}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改中间运算位宽
@@ -70,10 +71,10 @@ modify_intermediate_bitwidth() {
     local old_contrib_bits=$3
     local new_contrib_bits=$4
     
-    sed -i "s/QuantBitWidth Rh_add_br_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth Rh_add_br_ = QuantBitWidth::INT${Rh_add_br_bits};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth rRh_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth rRh_ = QuantBitWidth::INT${rRh_bits};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth old_contrib_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth old_contrib_ = QuantBitWidth::INT${old_contrib_bits};/" "$CONFIG_FILE"
-    sed -i "s/QuantBitWidth new_contrib_ = QuantBitWidth::[A-Z0-9]*;/QuantBitWidth new_contrib_ = QuantBitWidth::INT${new_contrib_bits};/" "$CONFIG_FILE"
+    sed -i "s/Rh_add_br_{[0-9]*, [a-z]*}/Rh_add_br_{${Rh_add_br_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/rRh_{[0-9]*, [a-z]*}/rRh_{${rRh_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/old_contrib_{[0-9]*, [a-z]*}/old_contrib_{${old_contrib_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/new_contrib_{[0-9]*, [a-z]*}/new_contrib_{${new_contrib_bits}, true}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改 GEMM 结果对称配置
