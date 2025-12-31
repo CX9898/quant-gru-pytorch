@@ -2,17 +2,19 @@
 QuantGRU - 支持量化的 GRU 实现
 
 功能特性:
-    - 兼容 nn.GRU 接口（支持 batch_first、bidirectional 等参数）
-    - 支持 INT8/INT16/INT32 量化推理
+    - 兼容 nn.GRU 接口(支持 batch_first、bidirectional 等参数)
+    - 支持 INT8/INT16/INT32 混合精度量化推理
     - 支持 MinMax / SQNR / Percentile 校准方法
+    - 支持 JSON 配置文件指定各算子的位宽和对称量化设置
     - 延迟初始化设计，支持 pickle/deepcopy 序列化
-    - 支持 ONNX 导出（使用纯 PyTorch 实现）
+    - 支持 ONNX 导出(float / QDQ 两种格式)
 
 关键属性:
-    - use_quantization: 是否启用量化（默认 False）
-    - calibrating: 是否在 forward 中收集校准数据（默认 False）
-    - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'（默认 'sqnr'）
-    - export_mode: 是否使用 ONNX 导出模式（默认 False）
+    - use_quantization: 是否启用量化(默认 False)
+    - calibrating: 是否在 forward 中收集校准数据(默认 False)
+    - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'(默认 'sqnr')
+    - export_mode: 是否使用 ONNX 导出模式(默认 False)
+    - export_format: ONNX 导出格式 'float'|'qdq'(默认 'float')
 
 典型用法:
     >>> from quant_gru import QuantGRU
@@ -20,17 +22,21 @@ QuantGRU - 支持量化的 GRU 实现
     >>> # 创建模型
     >>> gru = QuantGRU(64, 128, batch_first=True).cuda()
     >>>
-    >>> # 校准（在 forward 中收集校准数据）
+    >>> # 加载位宽配置(可选)
+    >>> gru.load_bitwidth_config("config.json", verbose=True)
+    >>>
+    >>> # 校准(在 forward 中收集校准数据)
     >>> gru.calibrating = True
     >>> output = gru(calibration_data)  # 同时返回输出并收集校准数据
     >>> gru.calibrating = False
     >>>
-    >>> # 量化推理（自动调用 finalize_calibration）
+    >>> # 量化推理(自动调用 finalize_calibration)
     >>> gru.use_quantization = True
     >>> output = gru(x)
-    
+
 ONNX 导出:
     >>> gru.export_mode = True
+    >>> gru.export_format = 'float'  # 或 'qdq' (可选)
     >>> torch.onnx.export(gru, x, "model.onnx")
     >>> gru.export_mode = False
 """
@@ -46,7 +52,6 @@ except ImportError:
     raise ImportError(
         "gru_interface_binding 模块未找到，请先运行 setup.py 编译 C++ 扩展"
     )
-
 
 # ============================================================
 #                      位宽配置工具函数
@@ -76,43 +81,13 @@ _BITWIDTH_FIELD_MAP = {
 
 
 def _get_bitwidth_value(op_cfg: dict) -> int:
-    """从配置中获取位宽值（8/16/32），默认 8"""
+    """从配置中获取位宽值(8/16/32)，默认 8"""
     return op_cfg.get('bitwidth', 8)
 
 
 def _get_symmetric_value(op_cfg: dict) -> bool:
     """从配置中获取是否对称量化，默认 True"""
     return op_cfg.get('is_symmetric', True)
-
-
-def load_bitwidth_config(config_file: str) -> gru_ops.OperatorQuantConfig:
-    """
-    从 JSON 文件加载量化配置
-    
-    Args:
-        config_file: 配置文件路径
-        
-    Returns:
-        OperatorQuantConfig 对象
-    """
-    with open(config_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    config = gru_ops.OperatorQuantConfig()
-    gru_config = data.get('GRU_config', {})
-    op_config = gru_config.get('operator_config', {})
-
-    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
-        if json_key in op_config:
-            op_cfg = op_config[json_key]
-            # 设置位宽
-            bw_val = _get_bitwidth_value(op_cfg)
-            setattr(config, bw_attr, bw_val)
-            # 设置对称量化配置
-            sym_val = _get_symmetric_value(op_cfg)
-            setattr(config, sym_attr, sym_val)
-
-    return config
 
 
 def _format_bitwidth(val: int) -> str:
@@ -125,68 +100,58 @@ def _format_symmetric(is_symmetric: bool) -> str:
     return "对称" if is_symmetric else "非对称"
 
 
-def apply_bitwidth_config(config: gru_ops.OperatorQuantConfig,
-                          config_file: str,
-                          verbose: bool = False) -> int:
+def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
+                          config_file: str = None,
+                          verbose: bool = True) -> None:
     """
-    从 JSON 文件应用配置到现有 OperatorQuantConfig 对象
+    打印 OperatorQuantConfig 的配置详情
     
     Args:
-        config: 要更新的配置对象
-        config_file: 配置文件路径
-        verbose: 是否打印配置详情
-        
-    Returns:
-        配置的字段数量
+        config: 配置对象
+        config_file: 配置文件路径(可选，仅用于显示来源)
+        verbose: 是否打印详情(默认 True)
     """
-    loaded = load_bitwidth_config(config_file)
+    if not verbose:
+        return
 
-    # 位宽配置字段（18 个）
+    # 位宽配置字段数量(用于统计)
     bitwidth_attrs = ['x_', 'h_', 'W_', 'R_', 'bx_', 'br_', 'Wx_', 'Rh_',
                       'z_pre_', 'z_out_', 'r_pre_', 'r_out_', 'g_pre_', 'g_out_',
                       'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_']
-    for attr in bitwidth_attrs:
-        setattr(config, attr, getattr(loaded, attr))
-
-    # 对称量化配置字段（18 个）
     symmetric_attrs = ['x_symmetric_', 'h_symmetric_', 'W_symmetric_', 'R_symmetric_',
                        'bx_symmetric_', 'br_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
                        'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
                        'g_pre_symmetric_', 'g_out_symmetric_', 'Rh_add_br_symmetric_', 'rRh_symmetric_',
                        'old_contrib_symmetric_', 'new_contrib_symmetric_']
-    for attr in symmetric_attrs:
-        setattr(config, attr, getattr(loaded, attr))
 
-    if verbose:
-        print("\n" + "=" * 70)
-        print("🔧 应用 GRU 量化配置（位宽 + 对称量化）")
-        print("=" * 70)
-        print(f"📄 配置文件: {config_file}")
-        print("-" * 70)
-        print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
-        print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
-        print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
-        print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
-        print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
-        print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
-        print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
-        print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")
-        print(f"  [门控]  z_pre: {_format_bitwidth(config.z_pre_):6s} ({_format_symmetric(config.z_pre_symmetric_)})")
-        print(f"          z_out: {_format_bitwidth(config.z_out_):6s} ({_format_symmetric(config.z_out_symmetric_)})")
-        print(f"          r_pre: {_format_bitwidth(config.r_pre_):6s} ({_format_symmetric(config.r_pre_symmetric_)})")
-        print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
-        print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
-        print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
-        print(
-            f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
-        print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
-        print(
-            f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
-        print(
-            f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
-        print("=" * 70 + "\n")
-
-    return len(bitwidth_attrs) + len(symmetric_attrs)  # 36 个字段
+    print("\n" + "=" * 70)
+    print("🔧 GRU 量化配置(位宽 + 对称量化)")
+    print("=" * 70)
+    if config_file:
+        print(f"📄 配置来源: {config_file}")
+    print("-" * 70)
+    print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
+    print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+    print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
+    print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
+    print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
+    print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
+    print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
+    print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")
+    print(f"  [门控]  z_pre: {_format_bitwidth(config.z_pre_):6s} ({_format_symmetric(config.z_pre_symmetric_)})")
+    print(f"          z_out: {_format_bitwidth(config.z_out_):6s} ({_format_symmetric(config.z_out_symmetric_)})")
+    print(f"          r_pre: {_format_bitwidth(config.r_pre_):6s} ({_format_symmetric(config.r_pre_symmetric_)})")
+    print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
+    print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
+    print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
+    print(
+        f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
+    print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
+    print(
+        f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
+    print(
+        f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
+    print("=" * 70 + "\n")
 
 
 # ============================================================
@@ -255,7 +220,7 @@ def convert_weights_to_haste_format(
         device: torch.device
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    将 PyTorch GRU 权重转换为 Haste 格式（独立工具函数）
+    将 PyTorch GRU 权重转换为 Haste 格式(独立工具函数)
     
     PyTorch 格式: (r, z, n)
     Haste 格式:   (z, r, n)
@@ -265,7 +230,7 @@ def convert_weights_to_haste_format(
         weight_hh: [3*H, H] 循环权重 (PyTorch 格式)
         bias_ih: [3*H] 输入偏置 或 None
         bias_hh: [3*H] 循环偏置 或 None
-        hidden_size: 隐藏层大小（用于创建零偏置）
+        hidden_size: 隐藏层大小(用于创建零偏置)
         device: 目标设备
         
     Returns:
@@ -280,7 +245,7 @@ def convert_weights_to_haste_format(
     weight_hh = ensure_cuda_float32(weight_hh, device)
     W = reorder_weights_pytorch_to_haste(weight_ih).t().contiguous()
     R = reorder_weights_pytorch_to_haste(weight_hh).t().contiguous()
-    
+
     # 偏置处理
     if bias_ih is not None and bias_hh is not None:
         bias_ih = ensure_cuda_float32(bias_ih, device)
@@ -290,7 +255,7 @@ def convert_weights_to_haste_format(
     else:
         bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
         br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
-    
+
     return W, R, bx, br
 
 
@@ -303,7 +268,7 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
                   bitwidth: int = 8, symmetric: bool = True,
                   is_unsigned: bool = False) -> torch.Tensor:
     """
-    伪量化（Fake Quantize）: 量化后立即反量化，保持浮点格式
+    伪量化(Fake Quantize): 量化后立即反量化，保持浮点格式
     
     用于 ONNX 导出，推理引擎会识别 QDQ 模式并优化
     
@@ -325,7 +290,7 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
         scale = 1.0 / (1 << exp2_inv)
     else:
         scale = float(1 << (-exp2_inv))
-    
+
     # 确定量化范围：由 is_unsigned 决定 INT/UINT
     if bitwidth == 8:
         qmin, qmax = (0, 255) if is_unsigned else (-128, 127)
@@ -333,21 +298,21 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
         qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
     else:
         qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
-    
+
     # 量化: q = clamp(round(x / scale) + zp, qmin, qmax)
     # 注意: torch.round 使用银行家舍入，与 CUDA 的 round half up 略有差异
     # 但实际影响极小 (随机数据差异率 < 0.001%)
     q = torch.clamp(torch.round(x / scale) + zp, qmin, qmax)
-    
+
     # 反量化: x' = (q - zp) * scale
     x_dequant = (q - zp) * scale
-    
+
     return x_dequant
 
 
 def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
-                               bitwidth: int = 8, symmetric: bool = True,
-                               is_unsigned: bool = False) -> torch.Tensor:
+                              bitwidth: int = 8, symmetric: bool = True,
+                              is_unsigned: bool = False) -> torch.Tensor:
     """
     Per-channel 伪量化
     
@@ -369,21 +334,21 @@ def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
         qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
     else:
         qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
-    
+
     device = x.device
     result = torch.zeros_like(x)
     channel_size = len(exp2_invs)
-    
+
     for c in range(channel_size):
         exp2_inv = exp2_invs[c]
         if exp2_inv >= 0:
             scale = 1.0 / (1 << exp2_inv)
         else:
             scale = float(1 << (-exp2_inv))
-        
+
         q = torch.clamp(torch.round(x[..., c] / scale) + zp, qmin, qmax)
         result[..., c] = (q - zp) * scale
-    
+
     return result
 
 
@@ -431,7 +396,7 @@ class GRUFunction(torch.autograd.Function):
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
 
-        # 权重格式转换（使用统一工具函数）
+        # 权重格式转换(使用统一工具函数)
         W, R, bx, br = convert_weights_to_haste_format(
             weight_ih, weight_hh, bias_ih, bias_hh, hidden_size, device
         )
@@ -502,18 +467,18 @@ class GRUFunction(torch.autograd.Function):
 
         # 构建隐藏状态梯度
         # C++ 接口需要 [T+1, B, H] 格式
-        # dh_new[0] 是初始状态梯度（保持为 0），dh_new[1:] 是时间步梯度
+        # dh_new[0] 是初始状态梯度(保持为 0)，dh_new[1:] 是时间步梯度
         dh_new = torch.zeros(
             (time_steps + 1, batch_size, hidden_size),
             device=device, dtype=grad_output.dtype
         )
         dh_new[1:] = grad_output
 
-        # 累加最终状态梯度（output[-1] 和 h_n[0] 指向同一时间步）
+        # 累加最终状态梯度(output[-1] 和 h_n[0] 指向同一时间步)
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
-        # 调用 C++ 反向接口（绑定层会处理格式转换）
+        # 调用 C++ 反向接口(绑定层会处理格式转换)
         dx, dW, dR, dbx, dbr, dh = gru_ops.haste_gru_backward(
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
@@ -528,7 +493,7 @@ class GRUFunction(torch.autograd.Function):
         dbr_pytorch = reorder_weights_haste_to_pytorch(dbr).contiguous() if not ctx.bias_hh_is_none else None
         grad_h0 = None if ctx.h0_is_none else dh
 
-        # 返回梯度（对应 forward 的 9 个参数）
+        # 返回梯度(对应 forward 的 9 个参数)
         return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None
 
 
@@ -549,7 +514,7 @@ class QuantGRU(nn.Module):
     量化流程:
         1. gru.load_bitwidth_config("config.json")  # 可选
         2. gru.calibrating = True
-        3. output = gru(data)  # 收集校准数据（可多次调用累积）
+        3. output = gru(data)  # 收集校准数据(可多次调用累积)
         4. gru.calibrating = False
         5. gru.use_quantization = True
         6. output = gru(input)  # 自动完成校准并进行量化推理
@@ -560,23 +525,23 @@ class QuantGRU(nn.Module):
         3. gru.export_mode = False  # 恢复 CUDA 模式
     
     高级：指定导出格式:
-        gru.export_format = 'float'      # 浮点（默认，与 Haste 一致）
-        gru.export_format = 'qdq'        # QDQ 伪量化（量化模型推荐）
+        gru.export_format = 'float'      # 浮点(默认，与 Haste 一致)
+        gru.export_format = 'qdq'        # QDQ 伪量化(量化模型推荐)
 
     Args:
         input_size: 输入特征维度
         hidden_size: 隐藏状态维度
-        num_layers: 层数（仅支持 1）
+        num_layers: 层数(仅支持 1)
         bias: 是否使用偏置
         batch_first: True 时输入为 [B, T, I]
         dropout: 暂不支持
         bidirectional: 是否双向
     
     Attributes:
-        use_quantization: 量化开关（默认 False）
+        use_quantization: 量化开关(默认 False)
         calibration_method: 校准方法 ('minmax'/'sqnr'/'percentile')
-        percentile_value: 百分位值（仅 'percentile' 方法使用，默认 99.99）
-        export_mode: ONNX 导出模式（默认 False，使用 CUDA；True 时使用纯 PyTorch）
+        percentile_value: 百分位值(仅 'percentile' 方法使用，默认 99.99)
+        export_mode: ONNX 导出模式(默认 False，使用 CUDA；True 时使用纯 PyTorch)
     """
 
     def __init__(
@@ -610,12 +575,12 @@ class QuantGRU(nn.Module):
 
         # ONNX 导出开关：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
         self.export_mode = False
-        # 导出格式（高级选项，仅在 export_mode=True 时有效）
-        # 'float': 浮点（默认，与 Haste GRU 行为一致）
-        # 'qdq': QDQ 伪量化（推荐用于量化模型）
+        # 导出格式(高级选项，仅在 export_mode=True 时有效)
+        # 'float': 浮点(默认，与 Haste GRU 行为一致)
+        # 'qdq': QDQ 伪量化(推荐用于量化模型)
         self._export_format = 'float'
 
-        # 权重参数（命名与 nn.GRU 一致）
+        # 权重参数(命名与 nn.GRU 一致)
         self.weight_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size, input_size))
         self.weight_hh_l0 = nn.Parameter(torch.empty(3 * hidden_size, hidden_size))
         if bias:
@@ -625,7 +590,7 @@ class QuantGRU(nn.Module):
             self.register_parameter('bias_ih_l0', None)
             self.register_parameter('bias_hh_l0', None)
 
-        # 反向权重（双向时）
+        # 反向权重(双向时)
         if bidirectional:
             self.weight_ih_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size, input_size))
             self.weight_hh_l0_reverse = nn.Parameter(torch.empty(3 * hidden_size, hidden_size))
@@ -638,7 +603,7 @@ class QuantGRU(nn.Module):
 
         self.reset_parameters()
 
-        # 量化状态（延迟创建）
+        # 量化状态(延迟创建)
         self.quant_ranges = None  # calibrate() 时创建
         self.quant_params = None  # finalize_calibration() 时创建
         if bidirectional:
@@ -646,19 +611,19 @@ class QuantGRU(nn.Module):
             self.quant_params_reverse = None
 
         self._calibration_dirty = False  # 校准数据更新标志
-        self._bitwidth_config_dict = None  # 位宽配置（Python 字典，可序列化）
+        self._bitwidth_config_dict = None  # 位宽配置(Python 字典，可序列化)
         self._cublas_initialized = False  # CUDA 延迟初始化标志
 
         # 校准方法:
-        #   - 'minmax': 使用 min/max 范围（快速，无直方图）
-        #   - 'sqnr': SQNR 优化搜索最优 scale（基于直方图，高精度）
-        #   - 'percentile': 百分位裁剪（基于直方图）
+        #   - 'minmax': 使用 min/max 范围(快速，无直方图)
+        #   - 'sqnr': SQNR 优化搜索最优 scale(基于直方图，高精度)
+        #   - 'percentile': 百分位裁剪(基于直方图)
         self.calibration_method = 'sqnr'
-        
-        # Percentile 配置（仅 calibration_method='percentile' 时使用）
+
+        # Percentile 配置(仅 calibration_method='percentile' 时使用)
         self.percentile_value = 99.99
 
-        # 直方图收集器（sqnr/percentile 方法使用）
+        # 直方图收集器(sqnr/percentile 方法使用)
         self.hist_collectors = None
         if bidirectional:
             self.hist_collectors_reverse = None
@@ -667,7 +632,7 @@ class QuantGRU(nn.Module):
         self.calibrating = False
 
     def reset_parameters(self):
-        """权重初始化（与 nn.GRU 相同的均匀分布）"""
+        """权重初始化(与 nn.GRU 相同的均匀分布)"""
         stdv = 1.0 / (self.hidden_size ** 0.5)
         for param in self.parameters():
             nn.init.uniform_(param, -stdv, stdv)
@@ -714,17 +679,17 @@ class QuantGRU(nn.Module):
         return config
 
     def _use_histogram_collection(self) -> bool:
-        """判断是否使用直方图收集（sqnr/percentile 都需要）"""
+        """判断是否使用直方图收集(sqnr/percentile 都需要)"""
         return self.calibration_method in ('sqnr', 'percentile')
 
     def _ensure_calibration_collectors(self, hidden_size: int, reverse: bool = False):
         """
-        确保校准收集器已初始化（统一接口）
+        确保校准收集器已初始化(统一接口)
         
         根据 calibration_method 自动选择正确的收集器类型
         """
         use_histogram = self._use_histogram_collection()
-        
+
         if reverse:
             if use_histogram:
                 if self.hist_collectors_reverse is None:
@@ -742,7 +707,7 @@ class QuantGRU(nn.Module):
 
     def _get_calibration_args(self, reverse: bool = False) -> tuple:
         """
-        获取校准参数（统一接口）
+        获取校准参数(统一接口)
         
         Returns:
             (hist_collectors, quant_ranges) - 根据校准方法返回正确的收集器
@@ -767,12 +732,12 @@ class QuantGRU(nn.Module):
             to_cuda: bool = False
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        解析初始隐藏状态（统一接口）
+        解析初始隐藏状态(统一接口)
         
         Args:
             hx: 初始隐藏状态，形状 [num_directions, B, H] 或 None
             batch_size: 批次大小
-            device: 目标设备（to_cuda=True 时使用）
+            device: 目标设备(to_cuda=True 时使用)
             to_cuda: 是否转换为 CUDA float32
             
         Returns:
@@ -797,12 +762,12 @@ class QuantGRU(nn.Module):
             h_n_reverse: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        合并双向 GRU 输出（统一接口）
+        合并双向 GRU 输出(统一接口)
         
         Args:
             output_forward: 前向输出 [T, B, H]
             h_n_forward: 前向最终状态 [1, B, H]
-            output_reverse: 反向输出 [T, B, H]（已翻转或未翻转均可）
+            output_reverse: 反向输出 [T, B, H](已翻转或未翻转均可)
             h_n_reverse: 反向最终状态 [1, B, H]
             
         Returns:
@@ -825,7 +790,7 @@ class QuantGRU(nn.Module):
         self._load_bitwidth_config_to_dict(config_file)
         if verbose:
             cpp_config = self._get_cpp_bitwidth_config()
-            apply_bitwidth_config(cpp_config, config_file, verbose=True)
+            print_bitwidth_config(cpp_config, config_file)
             print(f"  [全局]  use_quantization: {self.use_quantization}")
 
     def set_all_bitwidth(self, bitwidth: int = 8, is_symmetric: bool = True, verbose: bool = False):
@@ -834,7 +799,7 @@ class QuantGRU(nn.Module):
         
         Args:
             bitwidth: 位宽 (8/16/32)
-            is_symmetric: 是否对称量化（仅对激活值生效，权重/偏置始终对称）
+            is_symmetric: 是否对称量化(仅对激活值生效，权重/偏置始终对称)
             verbose: 是否打印信息
         """
         if bitwidth not in (8, 16, 32):
@@ -851,12 +816,12 @@ class QuantGRU(nn.Module):
             'Rh_add_br_', 'rRh_', 'old_contrib_', 'new_contrib_'
         ]
 
-        # 权重/偏置对称量化属性（始终为 True，不可配置）
+        # 权重/偏置对称量化属性(始终为 True，不可配置)
         weight_symmetric_attrs = [
             'W_symmetric_', 'R_symmetric_', 'bx_symmetric_', 'br_symmetric_'
         ]
 
-        # 激活值对称量化属性（可配置）
+        # 激活值对称量化属性(可配置)
         activation_symmetric_attrs = [
             'x_symmetric_', 'h_symmetric_', 'Wx_symmetric_', 'Rh_symmetric_',
             'z_pre_symmetric_', 'z_out_symmetric_', 'r_pre_symmetric_', 'r_out_symmetric_',
@@ -929,7 +894,7 @@ class QuantGRU(nn.Module):
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters(
                 quant_ranges=self.quant_ranges, bitwidth_config=cpp_config)
 
-        # 反向方向（双向时）
+        # 反向方向(双向时)
         if self.bidirectional:
             if use_histogram:
                 if self.hist_collectors_reverse is None or not self.hist_collectors_reverse.is_valid():
@@ -982,18 +947,18 @@ class QuantGRU(nn.Module):
     @property
     def export_format(self) -> str:
         """
-        获取导出格式（高级选项，仅在 export_mode=True 时有效）
+        获取导出格式(高级选项，仅在 export_mode=True 时有效)
         
         Returns:
-            'float': 浮点格式（默认，与 Haste GRU 行为一致）
-            'qdq': QDQ 伪量化格式（推荐用于量化模型 ONNX 导出）
+            'float': 浮点格式(默认，与 Haste GRU 行为一致)
+            'qdq': QDQ 伪量化格式(推荐用于量化模型 ONNX 导出)
         """
         return self._export_format
-    
+
     @export_format.setter
     def export_format(self, mode: str):
         """
-        设置导出格式（高级用法，大多数用户不需要修改）
+        设置导出格式(高级用法，大多数用户不需要修改)
         
         Args:
             mode: 'qdq' | 'float'
@@ -1014,9 +979,9 @@ class QuantGRU(nn.Module):
             quant_params
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        纯 PyTorch 实现的单向 GRU 前向传播（可被 ONNX 追踪）
+        纯 PyTorch 实现的单向 GRU 前向传播(可被 ONNX 追踪)
 
-        GRU 公式（Haste 格式，门顺序为 z, r, g）：
+        GRU 公式(Haste 格式，门顺序为 z, r, g)：
             z = sigmoid(W_z @ x + R_z @ h + bx_z + br_z)  # update gate
             r = sigmoid(W_r @ x + R_r @ h + bx_r + br_r)  # reset gate
             g = tanh(W_g @ x + r * (R_g @ h + br_g) + bx_g)  # candidate gate
@@ -1024,7 +989,7 @@ class QuantGRU(nn.Module):
 
         量化模式下根据 ONNX 导出模式选择实现：
             - 'qdq': QDQ 格式，使用标准算子 + 伪量化
-            - 'float': 标准浮点计算（Haste 格式）
+            - 'float': 标准浮点计算(Haste 格式)
 
         Args:
             input: [T, B, I] 输入序列
@@ -1033,7 +998,7 @@ class QuantGRU(nn.Module):
             weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部自动转换)
             bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部自动转换)
             bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部自动转换)
-            quant_params: 量化参数（来自 finalize_calibration）
+            quant_params: 量化参数(来自 finalize_calibration)
 
         Returns:
             output: [T, B, H] 输出序列
@@ -1045,20 +1010,20 @@ class QuantGRU(nn.Module):
             return self._forward_python_float_single_direction(
                 input, h0, weight_ih, weight_hh, bias_ih, bias_hh
             )
-        
+
         # qdq 需要量化参数
         if quant_params is None:
             raise RuntimeError(
                 f"export_format='{self._export_format}' 需要量化参数，"
                 f"请先设置 calibrating=True 并调用 forward()"
             )
-        
+
         if self._export_format == 'qdq':
             return self._forward_onnx_qdq_single_direction(
                 input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
             )
-        
-        # 理论上不会执行到这里（setter 已限制值），但为了健壮性抛出异常
+
+        # 理论上不会执行到这里(setter 已限制值)，但为了健壮性抛出异常
         raise ValueError(f"未知的 export_format: '{self._export_format}'")
 
     def _forward_python_float_single_direction(
@@ -1071,12 +1036,12 @@ class QuantGRU(nn.Module):
             bias_hh: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        浮点实现的单向 GRU 前向传播（Haste 格式）
+        浮点实现的单向 GRU 前向传播(Haste 格式)
         
         与 HasteGRU CUDA 浮点推理行为一致
         门控顺序：Haste 格式 (z, r, g)
         
-        公式（与 gru_forward_gpu.cu 一致）：
+        公式(与 gru_forward_gpu.cu 一致)：
             z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
             r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
             g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
@@ -1119,7 +1084,7 @@ class QuantGRU(nn.Module):
         else:
             br = reorder_weights_pytorch_to_haste(bias_hh)
 
-        # ========== 循环外一次性计算 Wx GEMM（与 CUDA 一致）==========
+        # ========== 循环外一次性计算 Wx GEMM(与 CUDA 一致)==========
         # input: [T, B, I] -> x_flat: [T*B, I]
         # W: [3*H, I] -> W.t(): [I, 3*H]
         # Wx_all: [T*B, 3*H] -> reshape: [T, B, 3*H]
@@ -1127,20 +1092,20 @@ class QuantGRU(nn.Module):
         Wx_all = torch.mm(x_flat, W.t())  # [T*B, 3*H]
         Wx_all = Wx_all.reshape(T, B, 3 * H)  # [T, B, 3*H]
 
-        # 预分割偏置（循环外完成）
+        # 预分割偏置(循环外完成)
         bx_z, bx_r, bx_g = bx.chunk(3)
         br_z, br_r, br_g = br.chunk(3)
 
         outputs = []
 
         for t in range(T):
-            # 获取当前时间步的 Wx（已在循环外计算好）
+            # 获取当前时间步的 Wx(已在循环外计算好)
             Wx = Wx_all[t]  # [B, 3*H]
-            
-            # Rh = h @ R.T, shape [B, 3H]（依赖上一步的 h，必须在循环内）
+
+            # Rh = h @ R.T, shape [B, 3H](依赖上一步的 h，必须在循环内)
             Rh = torch.mm(h, R.t())
 
-            # 分割门控（Haste 格式：z, r, g）
+            # 分割门控(Haste 格式：z, r, g)
             Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)
             Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)
 
@@ -1165,8 +1130,8 @@ class QuantGRU(nn.Module):
 
         return output, h_n
 
-    # -------------------- ONNX 导出版本（QDQ 格式）--------------------
-    
+    # -------------------- ONNX 导出版本(QDQ 格式)--------------------
+
     def _forward_onnx_qdq_single_direction(
             self,
             input: torch.Tensor,
@@ -1180,20 +1145,20 @@ class QuantGRU(nn.Module):
         """
         用于 ONNX 导出的 QDQ 格式前向传播
         
-        使用伪量化（Fake Quantize）在关键点插入 Q/DQ 操作，
+        使用伪量化(Fake Quantize)在关键点插入 Q/DQ 操作，
         推理引擎会识别 QDQ 模式并自动优化为量化算子。
         
         设计原则：
         ==========
         [与 CUDA 一致]
-          - 量化参数（scale/zp）完全一致
-          - 计算图结构一致（门顺序、计算顺序）
+          - 量化参数(scale/zp)完全一致
+          - 计算图结构一致(门顺序、计算顺序)
           - 权重/偏置的 per-channel 量化参数一致
           
         [ONNX 兼容 - 与 CUDA 实现不同]
-          - GEMM: 使用标准 torch.mm（推理引擎会用 MatMulInteger）
-          - sigmoid/tanh: 使用标准 torch.sigmoid/tanh（推理引擎会优化）
-          - rescale: 通过 QDQ 实现（不用显式 rshift_round）
+          - GEMM: 使用标准 torch.mm(推理引擎会用 MatMulInteger)
+          - sigmoid/tanh: 使用标准 torch.sigmoid/tanh(推理引擎会优化)
+          - rescale: 通过 QDQ 实现(不用显式 rshift_round)
         
         Args:
             input: [T, B, I] 输入序列
@@ -1212,7 +1177,7 @@ class QuantGRU(nn.Module):
         H = self.hidden_size
         device = input.device
         dtype = input.dtype
-        
+
         # ========== 量化参数提取 ==========
         # [与 CUDA 一致] 使用相同的量化参数
         exp2_x = quant_params.exp2_inv_x_
@@ -1223,44 +1188,44 @@ class QuantGRU(nn.Module):
         zp_Wx = quant_params.zp_Wx_
         exp2_Rh = quant_params.exp2_inv_Rh_
         zp_Rh = quant_params.zp_Rh_
-        
+
         # 激活函数量化参数
         exp2_z_pre = quant_params.exp2_inv_z_pre_
         zp_z_pre = quant_params.zp_z_pre_
         exp2_z_out = quant_params.exp2_inv_z_out_
         zp_z_out = quant_params.zp_z_out_
-        
+
         exp2_r_pre = quant_params.exp2_inv_r_pre_
         zp_r_pre = quant_params.zp_r_pre_
         exp2_r_out = quant_params.exp2_inv_r_out_
         zp_r_out = quant_params.zp_r_out_
-        
+
         exp2_g_pre = quant_params.exp2_inv_g_pre_
         zp_g_pre = quant_params.zp_g_pre_
         exp2_g_out = quant_params.exp2_inv_g_out_
         zp_g_out = quant_params.zp_g_out_
-        
+
         # per-channel 量化参数
         exp2_W = list(quant_params.exp2_inv_W_)
         exp2_R = list(quant_params.exp2_inv_R_)
         exp2_bx = list(quant_params.exp2_inv_bx_)
         exp2_br = list(quant_params.exp2_inv_br_)
-        
+
         # ========== 权重重排序 ==========
         # [与 CUDA 一致] PyTorch 格式 (r, z, n) -> Haste 格式 (z, r, n)
         W_reordered = reorder_weights_pytorch_to_haste(weight_ih)  # [3*H, I]
         R_reordered = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
-        
+
         if bias_ih is not None:
             bx_reordered = reorder_weights_pytorch_to_haste(bias_ih)  # [3*H]
         else:
             bx_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
-            
+
         if bias_hh is not None:
             br_reordered = reorder_weights_pytorch_to_haste(bias_hh)  # [3*H]
         else:
             br_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
-        
+
         # ========== 权重伪量化 ==========
         # [与 CUDA 一致] per-channel 量化
         # [ONNX 兼容] 使用 fake_quantize 保持浮点格式
@@ -1270,167 +1235,167 @@ class QuantGRU(nn.Module):
         R_q = fake_quantize_per_channel(R_reordered.t(), exp2_R, zp=0,
                                         bitwidth=self._get_bitwidth('R'),
                                         symmetric=self._get_symmetric('R')).t()
-        # 偏置使用配置的位宽（注意：偏置始终使用对称量化）
+        # 偏置使用配置的位宽(注意：偏置始终使用对称量化)
         bx_q = fake_quantize_per_channel(bx_reordered.unsqueeze(0), exp2_bx, zp=0,
                                          bitwidth=self._get_bitwidth('bx'),
                                          symmetric=self._get_symmetric('bx')).squeeze(0)
         br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), exp2_br, zp=0,
                                          bitwidth=self._get_bitwidth('br'),
                                          symmetric=self._get_symmetric('br')).squeeze(0)
-        
-        # 分割偏置（Haste 格式：z, r, g）
+
+        # 分割偏置(Haste 格式：z, r, g)
         bx_z, bx_r, bx_g = bx_q.chunk(3)  # 各 [H]
         br_z, br_r, br_g = br_q.chunk(3)  # 各 [H]
-        
+
         # ========== 初始化隐藏状态 ==========
         if h0 is None:
             h = torch.zeros(B, H, device=device, dtype=dtype)
         else:
             h = h0
-        
+
         # [与 CUDA 一致] 量化初始状态
         h = fake_quantize(h, exp2_h, zp_h, bitwidth=self._get_bitwidth('h'),
                           symmetric=self._get_symmetric('h'))
-        
+
         # ========== 输入伪量化 ==========
         # [与 CUDA 一致] 所有时间步一起量化
         x_q = fake_quantize(input, exp2_x, zp_x, bitwidth=self._get_bitwidth('x'),
                             symmetric=self._get_symmetric('x'))
-        
-        # ========== Wx GEMM（循环外一次性计算）==========
+
+        # ========== Wx GEMM(循环外一次性计算)==========
         # [与 CUDA 一致] 计算顺序一致
         # [ONNX 兼容] 使用标准 matmul，推理引擎会替换为 MatMulInteger
         # x_q: [T, B, I], W_q: [3*H, I] -> Wx: [T, B, 3*H]
         Wx_all = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
-        
+
         # [与 CUDA 一致] GEMM 输出量化
         Wx_all = fake_quantize(Wx_all, exp2_Wx, zp_Wx, bitwidth=self._get_bitwidth('Wx'),
                                symmetric=self._get_symmetric('Wx'))
-        
-        # 预分配输出张量（ONNX 友好，避免动态列表）
+
+        # 预分配输出张量(ONNX 友好，避免动态列表)
         outputs = torch.zeros(T, B, H, device=device, dtype=dtype)
-        
+
         for t in range(T):
             Wx = Wx_all[t]  # [B, 3*H]
-            
+
             # ========== Rh GEMM ==========
             # [与 CUDA 一致] 每个时间步计算 Rh
             # [ONNX 兼容] 使用标准 matmul
             Rh = torch.mm(h, R_q.t())  # [B, 3*H]
-            
+
             # [与 CUDA 一致] GEMM 输出量化
             Rh = fake_quantize(Rh, exp2_Rh, zp_Rh, bitwidth=self._get_bitwidth('Rh'),
                                symmetric=self._get_symmetric('Rh'))
-            
+
             # ========== 分割门控 ==========
             # [与 CUDA 一致] Haste 格式 (z, r, g)
             Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)  # 各 [B, H]
             Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)  # 各 [B, H]
-            
-            # ========== z 门（Update Gate）==========
+
+            # ========== z 门(Update Gate)==========
             # [与 CUDA 一致] z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
             z_pre = Wx_z + Rh_z + bx_z.unsqueeze(0) + br_z.unsqueeze(0)
-            
+
             # [与 CUDA 一致] 激活前量化
             z_pre = fake_quantize(z_pre, exp2_z_pre, zp_z_pre,
                                   bitwidth=self._get_bitwidth('z_pre'),
                                   symmetric=self._get_symmetric('z_pre'))
-            
-            # [ONNX 兼容] 使用标准 sigmoid（推理引擎会用量化版本或 LUT）
+
+            # [ONNX 兼容] 使用标准 sigmoid(推理引擎会用量化版本或 LUT)
             z = torch.sigmoid(z_pre)
-            
+
             # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
             # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
             z = fake_quantize(z, exp2_z_out, zp_z_out,
                               bitwidth=self._get_bitwidth('z_out'),
                               symmetric=self._get_symmetric('z_out'),
                               is_unsigned=True)
-            
-            # ========== r 门（Reset Gate）==========
+
+            # ========== r 门(Reset Gate)==========
             # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
             r_pre = Wx_r + Rh_r + bx_r.unsqueeze(0) + br_r.unsqueeze(0)
-            
+
             r_pre = fake_quantize(r_pre, exp2_r_pre, zp_r_pre,
                                   bitwidth=self._get_bitwidth('r_pre'),
                                   symmetric=self._get_symmetric('r_pre'))
-            
+
             # [ONNX 兼容] 使用标准 sigmoid
             r = torch.sigmoid(r_pre)
-            
+
             # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
             # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
             r = fake_quantize(r, exp2_r_out, zp_r_out,
                               bitwidth=self._get_bitwidth('r_out'),
                               symmetric=self._get_symmetric('r_out'),
                               is_unsigned=True)
-            
-            # ========== g 门（New Gate / Candidate）==========
+
+            # ========== g 门(New Gate / Candidate)==========
             # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
             Rh_add_br = Rh_g + br_g.unsqueeze(0)
-            
-            # [与 CUDA 一致] 中间结果量化（从配置读取位宽）
+
+            # [与 CUDA 一致] 中间结果量化(从配置读取位宽)
             Rh_add_br = fake_quantize(Rh_add_br, quant_params.exp2_inv_Rh_add_br_,
                                       quant_params.zp_Rh_add_br_,
                                       bitwidth=self._get_bitwidth('Rh_add_br'),
                                       symmetric=self._get_symmetric('Rh_add_br'))
-            
+
             rRh = r * Rh_add_br
-            
-            # [与 CUDA 一致] 乘积量化（从配置读取位宽）
+
+            # [与 CUDA 一致] 乘积量化(从配置读取位宽)
             rRh = fake_quantize(rRh, quant_params.exp2_inv_rRh_,
                                 quant_params.zp_rRh_,
                                 bitwidth=self._get_bitwidth('rRh'),
                                 symmetric=self._get_symmetric('rRh'))
-            
+
             g_pre = Wx_g + rRh + bx_g.unsqueeze(0)
-            
+
             g_pre = fake_quantize(g_pre, exp2_g_pre, zp_g_pre,
                                   bitwidth=self._get_bitwidth('g_pre'),
                                   symmetric=self._get_symmetric('g_pre'))
-            
+
             # [ONNX 兼容] 使用标准 tanh
             g = torch.tanh(g_pre)
-            
+
             # [与 CUDA 一致] 激活后量化，对称性从配置读取
             g = fake_quantize(g, exp2_g_out, zp_g_out,
                               bitwidth=self._get_bitwidth('g_out'),
                               symmetric=self._get_symmetric('g_out'))
-            
+
             # ========== 新隐藏状态 ==========
             # [与 CUDA 一致] h_new = z * h + (1 - z) * g
             # CUDA computeH 分别计算并量化 old_contrib 和 new_contrib
-            
-            # old_contrib = z * h（从配置读取位宽）
+
+            # old_contrib = z * h(从配置读取位宽)
             old_contrib = z * h
             old_contrib = fake_quantize(old_contrib, quant_params.exp2_inv_old_contrib_,
                                         quant_params.zp_old_contrib_,
                                         bitwidth=self._get_bitwidth('old_contrib'),
                                         symmetric=self._get_symmetric('old_contrib'))
-            
-            # new_contrib = (1 - z) * g（从配置读取位宽）
+
+            # new_contrib = (1 - z) * g(从配置读取位宽)
             new_contrib = (1 - z) * g
             new_contrib = fake_quantize(new_contrib, quant_params.exp2_inv_new_contrib_,
                                         quant_params.zp_new_contrib_,
                                         bitwidth=self._get_bitwidth('new_contrib'),
                                         symmetric=self._get_symmetric('new_contrib'))
-            
+
             # h_new = old_contrib + new_contrib
             h_new = old_contrib + new_contrib
-            
+
             # [与 CUDA 一致] 输出量化
             h_new = fake_quantize(h_new, exp2_h, zp_h,
                                   bitwidth=self._get_bitwidth('h'),
                                   symmetric=self._get_symmetric('h'))
-            
+
             h = h_new
-            
-            # 使用索引赋值存储（ONNX 友好）
+
+            # 使用索引赋值存储(ONNX 友好)
             outputs[t] = h
-        
+
         # ========== 输出 ==========
         output = outputs  # [T, B, H]，已预分配
         h_n = h.unsqueeze(0)  # [1, B, H]
-        
+
         return output, h_n
 
     def _forward_python(
@@ -1439,13 +1404,13 @@ class QuantGRU(nn.Module):
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        纯 PyTorch 实现的 GRU 前向传播（用于 ONNX 导出）
+        纯 PyTorch 实现的 GRU 前向传播(用于 ONNX 导出)
 
         支持单向和双向模式
         
         Note: batch_first 转换已在 forward() 中统一处理
         """
-        # ===== QDQ 模式提前校验（快速失败）=====
+        # ===== QDQ 模式提前校验(快速失败)=====
         if self._export_format == 'qdq':
             if self.quant_params is None:
                 raise RuntimeError(
@@ -1457,10 +1422,10 @@ class QuantGRU(nn.Module):
                     "双向 GRU 的 export_format='qdq' 需要反向量化参数，"
                     "请先设置 calibrating=True 进行校准"
                 )
-        
+
         T, B, I = input.shape
 
-        # 初始状态处理（统一接口）
+        # 初始状态处理(统一接口)
         h0_forward, h0_reverse = self._parse_initial_state(hx, B, to_cuda=False)
 
         # 前向方向
@@ -1472,7 +1437,7 @@ class QuantGRU(nn.Module):
             self.quant_params
         )
 
-        # 反向方向（双向时）
+        # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
         if self.bidirectional:
             output_reverse, h_n_reverse = self._forward_python_single_direction(
@@ -1485,7 +1450,7 @@ class QuantGRU(nn.Module):
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
 
-        # 合并双向输出（统一接口）
+        # 合并双向输出(统一接口)
         return self._combine_bidirectional_outputs(
             output_forward, h_n_forward, output_reverse, h_n_reverse
         )
@@ -1518,14 +1483,14 @@ class QuantGRU(nn.Module):
             for buffer in self.buffers():
                 buffer.data = buffer.data.to(device)
 
-        # 初始状态处理（统一接口）
+        # 初始状态处理(统一接口)
         h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
-        # 初始化校准收集器（统一接口）
+        # 初始化校准收集器(统一接口)
         self._ensure_calibration_collectors(hidden_size, reverse=False)
         hist_collectors, quant_ranges = self._get_calibration_args(reverse=False)
 
-        # 准备权重（使用统一工具函数）
+        # 准备权重(使用统一工具函数)
         W, R, bx, br = convert_weights_to_haste_format(
             self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
@@ -1534,7 +1499,7 @@ class QuantGRU(nn.Module):
         )
         dummy_quant_params = gru_ops.GRUQuantitativeParameters()
 
-        # 前向传播 + 校准数据收集（统一的 forward_interface 调用）
+        # 前向传播 + 校准数据收集(统一的 forward_interface 调用)
         h, v = gru_ops.forward_interface(
             is_training=True,
             is_quant=False,
@@ -1553,7 +1518,7 @@ class QuantGRU(nn.Module):
         h_n_forward = h[-1:].unsqueeze(0) if h.dim() == 2 else h[-1:].contiguous()  # [1, B, H]
 
         if self.bidirectional:
-            # 初始化反向校准收集器（统一接口）
+            # 初始化反向校准收集器(统一接口)
             self._ensure_calibration_collectors(hidden_size, reverse=True)
             hist_collectors_rev, quant_ranges_rev = self._get_calibration_args(reverse=True)
 
@@ -1578,7 +1543,7 @@ class QuantGRU(nn.Module):
                 quant_ranges=quant_ranges_rev
             )
 
-            # 提取反向输出（已翻转）
+            # 提取反向输出(已翻转)
             output_reverse = h_rev[1:].flip(0).contiguous()  # [T, B, H]
             h_n_reverse = h_rev[-1:].contiguous()  # [1, B, H]
         else:
@@ -1587,7 +1552,7 @@ class QuantGRU(nn.Module):
         # 标记校准数据已更新
         self._calibration_dirty = True
 
-        # 合并双向输出（统一接口）
+        # 合并双向输出(统一接口)
         return self._combine_bidirectional_outputs(
             output_forward, h_n_forward, output_reverse, h_n_reverse
         )
@@ -1611,10 +1576,10 @@ class QuantGRU(nn.Module):
             h_n: [1, B, H] 或 [2, B, H] (双向)
 
         Note:
-            - export_mode=False (默认): 使用 CUDA C++ 实现（高性能）
-            - export_mode=True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
+            - export_mode=False (默认): 使用 CUDA C++ 实现(高性能)
+            - export_mode=True: 使用纯 PyTorch 实现(可被 ONNX 追踪)
         """
-        # ===== 统一处理 batch_first 输入转换（唯一入口）=====
+        # ===== 统一处理 batch_first 输入转换(唯一入口)=====
         if self.batch_first:
             input = input.transpose(0, 1).contiguous()
 
@@ -1631,7 +1596,7 @@ class QuantGRU(nn.Module):
             self._ensure_cublas_initialized()
             output, h_n = self._forward_cuda(input, hx)
 
-        # ===== 统一处理 batch_first 输出转换（唯一出口）=====
+        # ===== 统一处理 batch_first 输出转换(唯一出口)=====
         if self.batch_first:
             output = output.transpose(0, 1).contiguous()
 
@@ -1643,7 +1608,7 @@ class QuantGRU(nn.Module):
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        CUDA C++ 实现的前向传播（正常/量化推理模式）
+        CUDA C++ 实现的前向传播(正常/量化推理模式)
         
         Note: batch_first 转换已在 forward() 中统一处理
         """
@@ -1653,7 +1618,7 @@ class QuantGRU(nn.Module):
                 # 校准数据已更新，需要重新计算量化参数
                 self.finalize_calibration()
             elif not self.is_calibrated():
-                # 检查是否有未完成的校准数据（支持 minmax/histogram/percentile）
+                # 检查是否有未完成的校准数据(支持 minmax/histogram/percentile)
                 if self.quant_ranges is not None or self.hist_collectors is not None:
                     # 已累积数据但未完成校准，自动调用 finalize
                     self.finalize_calibration()
@@ -1665,7 +1630,7 @@ class QuantGRU(nn.Module):
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
 
-        # 初始状态处理（统一接口）
+        # 初始状态处理(统一接口)
         h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
         # 前向方向
@@ -1676,7 +1641,7 @@ class QuantGRU(nn.Module):
             self.bias_hh_l0 if self.bias else None,
             h0_forward, self.training, self.use_quantization, self.quant_params)
 
-        # 反向方向（双向时）
+        # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
         if self.bidirectional:
             # LUT 存储在 quant_params_reverse 中
@@ -1688,7 +1653,7 @@ class QuantGRU(nn.Module):
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
 
-        # 合并双向输出（统一接口）
+        # 合并双向输出(统一接口)
         return self._combine_bidirectional_outputs(
             output_forward, h_n_forward, output_reverse, h_n_reverse
         )
@@ -1746,7 +1711,7 @@ def print_quant_ranges(gru: QuantGRU):
     打印 QuantGRU 的量化范围
 
     Args:
-        gru: 已完成校准的 QuantGRU 实例（calibrating=True 后调用过 forward）
+        gru: 已完成校准的 QuantGRU 实例(calibrating=True 后调用过 forward)
     """
     if gru.quant_ranges is None:
         raise RuntimeError("请先设置 calibrating=True 并调用 forward()")
