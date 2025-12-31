@@ -586,14 +586,6 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
     return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
 }
 
-// 初始化量化 LUT 表的包装函数
-// 将 Python 绑定层的参数转换为 C++ 接口层的参数
-void initialize_quantization_lut_wrapper(const GRUQuantitativeParametersPy &quant_params) {
-    // 转换为 C++ 结构体并调用 gru_interface 中的函数
-    GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
-    initialize_quantization_lut(cpp_params);
-}
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
 
@@ -793,11 +785,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
           py::arg("x"), py::arg("dh_new"), py::arg("h"),
           py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbx, dbr, dh) 元组
-
-    // 初始化量化 LUT 表（向后兼容，新实现使用参数内存储的 LUT）
-    // 接收量化参数对象，内部根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
-    m.def("initialize_quantization_lut", &initialize_quantization_lut_wrapper,
-          "Initialize quantization LUT tables from quantization parameters. "
-          "(Legacy: LUTs are now stored per-layer in params, this writes to global constant memory for backward compatibility)",
-          py::arg("quant_params"));
 }

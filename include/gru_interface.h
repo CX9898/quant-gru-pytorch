@@ -73,10 +73,6 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     bool use_percentile = false,
     float percentile_value = 99.99f);
 
-// 初始化量化 LUT 表
-// 根据 bitwidth_config_ 自动选择相应的 LUT 初始化方法
-void initialize_quantization_lut(const GRUQuantitativeParameters &quant_params);
-
 // =====================================================================
 // 权重量化接口
 // =====================================================================

@@ -5,9 +5,8 @@
 // ============================================================================
 //
 // 本文件包含：
-//   1. CUDA 常量内存中的 LUT 声明（前向/反向）
-//   2. GPU 专用优化函数（使用 CUDA 内置函数）
-//   3. GRU 各门的激活函数封装
+//   1. GPU 专用优化函数（使用 CUDA 内置函数）
+//   2. GRU 各门的激活函数封装
 //
 // 依赖关系：
 //   - quantize_lut_types.h: LUT 结构体定义
@@ -22,22 +21,6 @@
 #include "quantize_bitwidth_config.h"
 #include "quantize_lut_types.h"
 #include "quantize_ops_helper.h"
-
-// ============================================================================
-// CUDA 常量内存声明
-// ============================================================================
-// LUT 存储在常量内存中，供所有线程高速访问
-
-// 全局 LUT（已废弃，保留用于向后兼容）
-// ⚠️ 多层 GRU 会互相覆盖全局 LUT，建议使用参数传递的 LUT
-extern __constant__ SigmoidLUT d_sigmoid_z_lut;   ///< z 门 Sigmoid LUT
-extern __constant__ SigmoidLUT d_sigmoid_r_lut;   ///< r 门 Sigmoid LUT
-extern __constant__ SigmoidLUT d_tanh_lut;        ///< g 门 Tanh LUT
-
-// 反向方向 LUT（已废弃，保留用于向后兼容）
-extern __constant__ SigmoidLUT d_sigmoid_z_lut_reverse;  ///< 反向 z 门 Sigmoid LUT
-extern __constant__ SigmoidLUT d_sigmoid_r_lut_reverse;  ///< 反向 r 门 Sigmoid LUT
-extern __constant__ SigmoidLUT d_tanh_lut_reverse;       ///< 反向 g 门 Tanh LUT
 
 // ============================================================================
 // GPU 专用优化函数

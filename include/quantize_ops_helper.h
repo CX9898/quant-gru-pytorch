@@ -192,20 +192,7 @@ struct QuantGRUReScale {
 };
 
 /**
- * @brief 生成分段线性量化查找表（LUT）
- *
- * 根据 GRUQuantitativeParameters 中的量化参数，为 Sigmoid（z/r 门）和 Tanh（g 门）
- * 生成分段线性近似的查找表。
- *
- * @param params GRU 量化参数，包含各门的缩放因子和零点
- *
- * @note 输入范围从量化参数自动计算：x_min = (quant_min - zp) * scale
- * @deprecated 多层 GRU 会互相覆盖全局 LUT，建议使用 generate_piecewise_linear_lut_to_params
- */
-void generate_piecewise_linear_lut(const GRUQuantitativeParameters &params);
-
-/**
- * @brief 生成分段线性量化查找表并存储到参数中（推荐方式）
+ * @brief 生成分段线性量化查找表并存储到参数中
  *
  * 将 LUT 存储到 GRUQuantitativeParameters 中，避免全局 __constant__ 内存覆盖问题。
  * 在 finalize_calibration 时调用一次，然后在 setRescaleParam 时复制到 QuantGRUReScale。
