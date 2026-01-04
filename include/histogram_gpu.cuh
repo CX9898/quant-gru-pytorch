@@ -16,6 +16,7 @@
 
 #include "dev_vector.h"
 #include "parallel_algorithm.h"  // for dev::fill_n
+#include "quantize_bitwidth_config.h"  // for QuantBitWidth
 
 // ============================================================================
 // GPU 直方图结构体
@@ -172,8 +173,10 @@ class GPUHistogramCollector {
  */
 struct PerChannelHistogramBatch {
     dev::vector<float> counts;      // [channel_size * num_bins] 连续内存
-    std::vector<float> mins;        // [channel_size] CPU 端元数据
-    std::vector<float> maxs;        // [channel_size] CPU 端元数据
+    std::vector<float> mins;        // [channel_size] CPU 端元数据（可能被范围扩展修改）
+    std::vector<float> maxs;        // [channel_size] CPU 端元数据（可能被范围扩展修改）
+    std::vector<float> original_mins;  // [channel_size] 原始 min（未被范围扩展修改）
+    std::vector<float> original_maxs;  // [channel_size] 原始 max（未被范围扩展修改）
     int channel_size = 0;
     int num_bins = 0;
     int64_t per_channel_count = 0;  // 每个 channel 的样本数
@@ -188,6 +191,8 @@ struct PerChannelHistogramBatch {
         counts.zero();
         mins.assign(channels, 0.0f);
         maxs.assign(channels, 0.0f);
+        original_mins.assign(channels, 0.0f);
+        original_maxs.assign(channels, 0.0f);
     }
 
     bool is_valid() const { return channel_size > 0 && per_channel_count > 0; }
@@ -390,7 +395,7 @@ struct GPUSqnrConfig {
 
 void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val, 
                               int num_bins, int64_t total_count,
-                              bool is_symmetric, int quant_bits, bool is_unsigned,
+                              bool is_symmetric, QuantBitWidth bw,
                               int8_t& out_exp2_inv, int32_t& out_zp,
                               const GPUSqnrConfig& config = GPUSqnrConfig(),
                               cudaStream_t stream = 0);
@@ -407,7 +412,7 @@ void compute_sqnr_params_batch_gpu(
     int num_bins,
     const std::vector<int64_t>& total_counts,
     const std::vector<bool>& is_symmetric,
-    int quant_bits,
+    QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
     std::vector<int32_t>& out_zp,
     cudaStream_t stream = 0);
@@ -419,7 +424,7 @@ void compute_sqnr_params_batch_gpu(
  */
 void compute_sqnr_per_channel_gpu(
     const PerChannelHistogramBatch& batch,
-    bool is_symmetric, int quant_bits,
+    bool is_symmetric, QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
     const GPUSqnrConfig& config = GPUSqnrConfig(),
     cudaStream_t stream = 0);

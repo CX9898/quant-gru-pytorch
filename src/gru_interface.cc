@@ -1054,7 +1054,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
         gpu_hist::compute_sqnr_params_gpu(
             hist.counts.data(), hist.min_val, hist.max_val,
             hist.num_bins, hist.total_count,
-            is_symmetric, quant_bw.bits_, !quant_bw.is_signed_, out_exp2_inv, out_zp);
+            is_symmetric, quant_bw, out_exp2_inv, out_zp);
         
         if (verbose && name) {
             printf("[GPU-SQNR][%s] bits=%d range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
@@ -1099,22 +1099,22 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
     if (gpu_collectors.W_batch.is_valid()) {
         gpu_hist::compute_sqnr_per_channel_gpu(
             gpu_collectors.W_batch, bitwidth_config.W_symmetric_, 
-            bitwidth_config.W_.bits_, quant_params.exp2_inv_W_);
+            bitwidth_config.W_, quant_params.exp2_inv_W_);
     }
     if (gpu_collectors.R_batch.is_valid()) {
         gpu_hist::compute_sqnr_per_channel_gpu(
             gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
-            bitwidth_config.R_.bits_, quant_params.exp2_inv_R_);
+            bitwidth_config.R_, quant_params.exp2_inv_R_);
     }
     if (gpu_collectors.bx_batch.is_valid()) {
         gpu_hist::compute_sqnr_per_channel_gpu(
             gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
-            bitwidth_config.bx_.bits_, quant_params.exp2_inv_bx_);
+            bitwidth_config.bx_, quant_params.exp2_inv_bx_);
     }
     if (gpu_collectors.br_batch.is_valid()) {
         gpu_hist::compute_sqnr_per_channel_gpu(
             gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
-            bitwidth_config.br_.bits_, quant_params.exp2_inv_br_);
+            bitwidth_config.br_, quant_params.exp2_inv_br_);
     }
     
     // 生成 LUT 并存储到参数中（避免全局 LUT 覆盖问题）
