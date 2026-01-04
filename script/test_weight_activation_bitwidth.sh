@@ -18,8 +18,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_DIR/include/quantize_bitwidth_config.h"
 BUILD_DIR="$PROJECT_DIR/build"
 
-# 保存原始配置
-cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+# 保存原始配置内容（不创建备份文件）
+ORIGINAL_CONFIG=$(cat "$CONFIG_FILE")
 
 # 结果文件
 RESULT_FILE="$PROJECT_DIR/test_weight_activation_results.txt"
@@ -203,20 +203,41 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 echo ""
-echo "==================== 第一部分：支持的配置 ===================="
+echo "==================== 第一部分：标准位宽配置 (8/16位) ===================="
 echo ""
-echo "==================== 第一部分：支持的配置 ====================" >> "$RESULT_FILE"
+echo "==================== 第一部分：标准位宽配置 ====================" >> "$RESULT_FILE"
 
-# 测试支持的配置
+# 测试标准位宽配置
 run_test "W8A8" 8 8 "pass"
 run_test "W8A16" 8 16 "pass"
 run_test "W16A8" 16 8 "pass"
 run_test "W16A16" 16 16 "pass"
 
 echo ""
-echo "==================== 第二部分：Wx/Rh 位宽测试 ===================="
+echo "==================== 第二部分：扩展位宽配置 (4/10/12/24位) ===================="
 echo ""
-echo "==================== 第二部分：Wx/Rh 位宽测试 ====================" >> "$RESULT_FILE"
+echo "==================== 第二部分：扩展位宽配置 ====================" >> "$RESULT_FILE"
+
+# 测试低位宽配置
+run_test "W4A4" 4 4 "pass"
+run_test "W4A8" 4 8 "pass"
+run_test "W8A4" 8 4 "pass"
+
+# 测试非标准位宽配置
+run_test "W10A10" 10 10 "pass"
+run_test "W12A12" 12 12 "pass"
+run_test "W10A8" 10 8 "pass"
+run_test "W8A10" 8 10 "pass"
+
+# 测试高位宽配置
+run_test "W24A24" 24 24 "pass"
+run_test "W16A24" 16 24 "pass"
+run_test "W24A16" 24 16 "pass"
+
+echo ""
+echo "==================== 第三部分：Wx/Rh 位宽测试 ===================="
+echo ""
+echo "==================== 第三部分：Wx/Rh 位宽测试 ====================" >> "$RESULT_FILE"
 
 # 测试 GEMM 结果（Wx_, Rh_）使用不同精度
 # W8A8 但 Wx/Rh 用 16 位 - 更高精度的 GEMM 中间结果
@@ -228,9 +249,14 @@ run_test "W8A16_GEMM8" 8 16 "pass" 8
 # W16A16 但 Wx/Rh 用 8 位 - 精度损失但支持
 run_test "W16A16_GEMM8" 16 16 "pass" 8
 
+# 扩展 GEMM 位宽测试
+run_test "W8A8_GEMM12" 8 8 "pass" 12
+run_test "W10A10_GEMM16" 10 10 "pass" 16
+run_test "W4A4_GEMM8" 4 4 "pass" 8
+run_test "W12A12_GEMM24" 12 12 "pass" 24
+
 # 恢复原始配置
-cp "$CONFIG_FILE.backup" "$CONFIG_FILE"
-rm -f "$CONFIG_FILE.backup"
+echo "$ORIGINAL_CONFIG" > "$CONFIG_FILE"
 echo ""
 echo "原始配置已恢复"
 

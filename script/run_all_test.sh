@@ -1,3 +1,4 @@
+bash run_test.sh
 bash test_intermediate_ops_bitwidth.sh
 bash test_sigmoid_bitwidth_configs.sh
 bash test_weight_activation_bitwidth.sh
