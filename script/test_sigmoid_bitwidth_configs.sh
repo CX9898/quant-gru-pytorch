@@ -179,26 +179,41 @@ run_test() {
     echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,$mse,$cos" >> "$CSV_FILE"
 }
 
-# ==================== 第一部分：标准64种位宽配置（对称使用默认值 false）====================
+# ==================== 第一部分：8-16位完整基准测试 ====================
 echo ""
-echo "==================== 第一部分：标准64种激活位宽配置 (8/16位) ===================="
+echo "==================== 第一部分：8-16位完整基准测试 ===================="
 echo ""
-echo "==================== 第一部分：标准64种激活位宽配置 ====================" >> "$RESULT_FILE"
+echo "==================== 第一部分：8-16位完整基准测试 ====================" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
 # 位宽选项
+BITWIDTHS_8_TO_16=(8 9 10 11 12 13 14 15 16)
 BITWIDTHS_STANDARD=(8 16)
 BITWIDTHS_EXTENDED=(4 10 12 24)
 
 # 计算总测试数
-# 标准64种位宽配置 + 扩展位宽测试(约30种) + 64种对称配置（使用最佳位宽）+ 16种典型组合
-TOTAL_TESTS=$((64 + 30 + 64 + 16))
+# 8-16位基准测试(9) + 标准64种位宽配置 + 扩展位宽测试(约20种) + 64种对称配置 + 16种典型组合
+TOTAL_TESTS=$((9 + 64 + 20 + 64 + 16))
 
 echo "预计总测试数: $TOTAL_TESTS"
 echo ""
 
 # 设置默认对称配置（全部非对称）
 modify_symmetric false false false false false false
+
+# 测试 8-16 位之间所有位宽的统一配置
+for bits in "${BITWIDTHS_8_TO_16[@]}"; do
+    config_name="BW_FULL${bits}"
+    modify_bitwidth $bits $bits $bits $bits $bits $bits
+    run_test "$config_name" $bits $bits $bits $bits $bits $bits false false false false false false
+done
+
+# ==================== 第1.1部分：标准64种位宽配置 ====================
+echo ""
+echo "==================== 第1.1部分：标准64种激活位宽配置 (8/16位) ===================="
+echo ""
+echo "==================== 第1.1部分：标准64种激活位宽配置 ====================" >> "$RESULT_FILE"
+echo "" >> "$RESULT_FILE"
 
 # 枚举所有64种标准位宽配置 (8/16位)
 for z_pre in "${BITWIDTHS_STANDARD[@]}"; do
