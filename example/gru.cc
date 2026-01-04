@@ -216,9 +216,8 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
                      CalibrationMethod::NONE, nullptr, nullptr, h, nullptr);
 }
 
-// ==================== CPU 量化推理 ====================
+// ==================== CPU 量化推理（统一 int32_t 存储） ====================
 
-template <typename WeightT, typename ActivationT>
 void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hidden_size,
                           const std::vector<float> &W_fp, const std::vector<float> &R_fp,
                           const std::vector<float> &bx_fp, const std::vector<float> &br_fp,
@@ -226,49 +225,49 @@ void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hi
                           const GRUQuantitativeParameters &quant_params,
                           std::vector<float> &h_out) {
     const int hidden3 = hidden_size * 3;
+    const auto &bw_cfg = quant_params.bitwidth_config_;
     
-    // 量化权重 (per-channel)
-    std::vector<WeightT> W_quant(input_size * hidden3);
-    std::vector<WeightT> R_quant(hidden_size * hidden3);
+    // 所有量化值统一使用 int32_t 存储，通过 clamp_by_bitwidth 限制到实际位宽
+    std::vector<int32_t> W_quant(input_size * hidden3);
+    std::vector<int32_t> R_quant(hidden_size * hidden3);
     
     for (int k = 0; k < input_size; k++) {
         for (int m = 0; m < hidden3; m++) {
             int idx = k * hidden3 + m;
-            W_quant[idx] = quantize<WeightT>(W_fp[idx], quant_params.exp2_inv_W_[m], 0);
+            W_quant[idx] = quantize(W_fp[idx], quant_params.exp2_inv_W_[m], 0, bw_cfg.W_);
         }
     }
     
     for (int k = 0; k < hidden_size; k++) {
         for (int m = 0; m < hidden3; m++) {
             int idx = k * hidden3 + m;
-            R_quant[idx] = quantize<WeightT>(R_fp[idx], quant_params.exp2_inv_R_[m], 0);
+            R_quant[idx] = quantize(R_fp[idx], quant_params.exp2_inv_R_[m], 0, bw_cfg.R_);
         }
     }
     
-    // 量化 bias (per-channel, int32)
+    // 量化 bias (per-channel)
     std::vector<int32_t> bx_quant(hidden3), br_quant(hidden3);
     for (int m = 0; m < hidden3; m++) {
-        bx_quant[m] = quantize<int32_t>(bx_fp[m], quant_params.exp2_inv_bx_[m], 0);
-        br_quant[m] = quantize<int32_t>(br_fp[m], quant_params.exp2_inv_br_[m], 0);
+        bx_quant[m] = quantize(bx_fp[m], quant_params.exp2_inv_bx_[m], 0, bw_cfg.bx_);
+        br_quant[m] = quantize(br_fp[m], quant_params.exp2_inv_br_[m], 0, bw_cfg.br_);
     }
     
     // 量化输入
     const int x_size = time_steps * batch_size * input_size;
-    std::vector<ActivationT> x_quant(x_size);
+    std::vector<int32_t> x_quant(x_size);
     for (int i = 0; i < x_size; i++) {
-        x_quant[i] = quantize<ActivationT>(x_fp[i], quant_params.exp2_inv_x_, quant_params.zp_x_);
+        x_quant[i] = quantize(x_fp[i], quant_params.exp2_inv_x_, quant_params.zp_x_, bw_cfg.x_);
     }
     
     // 分配输出并初始化 h0
     const int h_size = (time_steps + 1) * batch_size * hidden_size;
-    std::vector<ActivationT> h_quant(h_size);
+    std::vector<int32_t> h_quant(h_size);
     for (int i = 0; i < batch_size * hidden_size; i++) {
-        h_quant[i] = static_cast<ActivationT>(quant_params.zp_h_);
+        h_quant[i] = quant_params.zp_h_;
     }
     
-    // 运行 CPU 量化前向传播
-    cpu::ForwardPassQuantCPU<ActivationT, ActivationT, WeightT, WeightT> forward(
-        false, batch_size, input_size, hidden_size);
+    // 运行 CPU 量化前向传播（非模板类，统一 int32_t 存储）
+    cpu::ForwardPassQuantCPU forward(false, batch_size, input_size, hidden_size);
     forward.setRescaleParam(quant_params);
     forward.Run(time_steps, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(),
                 x_quant.data(), h_quant.data(), nullptr, 0.0f, nullptr);
@@ -287,25 +286,13 @@ void runQuantInferenceCPUWrapper(int time_steps, int batch_size, int input_size,
                                   const GRUQuantitativeParameters &quant_params,
                                   std::vector<float> &h) {
     const auto &config = quant_params.bitwidth_config_;
-    bool w8 = config.W_.fitsInt8();
-    bool a8 = config.x_.fitsInt8();
     
-    printf("CPU Quant Inference: W%dA%d (actual bits: W=%d, x=%d)\n", 
-           w8 ? 8 : 16, a8 ? 8 : 16, config.W_.bits_, config.x_.bits_);
+    printf("CPU Quant Inference: W%d A%d (统一 int32 存储, 实际位宽通过 clamp 控制)\n", 
+           config.W_.bits_, config.x_.bits_);
     
-    if (w8 && a8) {
-        runQuantInferenceCPU<int8_t, int8_t>(time_steps, batch_size, input_size, hidden_size,
-                                             W, R, bx, br, x, quant_params, h);
-    } else if (w8) {
-        runQuantInferenceCPU<int8_t, int16_t>(time_steps, batch_size, input_size, hidden_size,
-                                              W, R, bx, br, x, quant_params, h);
-    } else if (!a8) {
-        runQuantInferenceCPU<int16_t, int16_t>(time_steps, batch_size, input_size, hidden_size,
-                                               W, R, bx, br, x, quant_params, h);
-    } else {
-        runQuantInferenceCPU<int16_t, int8_t>(time_steps, batch_size, input_size, hidden_size,
-                                              W, R, bx, br, x, quant_params, h);
-    }
+    // 非模板调用，统一使用 int32_t 存储
+    runQuantInferenceCPU(time_steps, batch_size, input_size, hidden_size,
+                         W, R, bx, br, x, quant_params, h);
 }
 
 // ==================== 直方图收集性能比较 ====================

@@ -132,6 +132,9 @@ void fill_n(int8_t *first, size_t size, int8_t val) {
 void fill_n(int16_t *first, size_t size, int16_t val) {
     thrust::fill_n(thrust::device, first, size, val);
 }
+void fill_n(int32_t *first, size_t size, int32_t val) {
+    thrust::fill_n(thrust::device, first, size, val);
+}
 void fill_n(uint8_t *first, size_t size, uint8_t val) {
     thrust::fill_n(thrust::device, first, size, val);
 }

@@ -118,6 +118,18 @@ __global__ void quantification(const T *data, QuantT *quant_data, size_t size, i
     quant_data[idx] = dev::quantize<QuantT>(data[idx], exp2_inv, zp);
 }
 
+// 统一 int32_t 输出，使用位宽配置进行 clamp
+template <typename T>
+__global__ void quantificationBitwidth(const T *data, int32_t *quant_data, size_t size, 
+                                        int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) {
+        return;
+    }
+
+    quant_data[idx] = dev::quantize(data[idx], exp2_inv, zp, bw);
+}
+
 template <typename T, typename QuantT>
 __global__ void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv,
                                  int32_t zp) {
@@ -194,6 +206,22 @@ __global__ void quantificationPerChannel(const T *src, QuantT *quant_data, size_
     quant_data[idx] = dev::quantize<QuantT>(src[idx], exp2_inv, 0);
 }
 
+// 统一 int32_t 输出，使用位宽配置进行 clamp
+template <typename T>
+__global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_data, size_t input_size,
+                                                  size_t channel_size, const int8_t *exp2_invs,
+                                                  QuantBitWidth bw) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    if (channel_idx >= channel_size || input_idx >= input_size) {
+        return;
+    }
+
+    const int8_t exp2_inv = exp2_invs[channel_idx];
+    const size_t idx = input_idx * channel_size + channel_idx;
+    quant_data[idx] = dev::quantize(src[idx], exp2_inv, 0, bw);
+}
+
 template <typename T, typename QuantT>
 __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
                                            size_t channel_size, const int8_t *exp2_invs) {
@@ -263,6 +291,15 @@ template void computeWeightSumMulzp<int16_t>(const int16_t *W_q, int32_t *weight
                                              const int8_t *__restrict__ n, int out_dim, int in_dim,
                                              cudaStream_t stream);
 
+// int32_t 权重版本显式实例化（统一 int32 存储方案）
+template void computeWeightSumMulzp<int32_t>(const int32_t *W_q, int64_t *weight_sum, int x_zp,
+                                             const int8_t *__restrict__ n, int out_dim, int in_dim,
+                                             cudaStream_t stream);
+
+template void computeWeightSumMulzp<int32_t>(const int32_t *W_q, int32_t *weight_sum, int x_zp,
+                                             const int8_t *__restrict__ n, int out_dim, int in_dim,
+                                             cudaStream_t stream);
+
 namespace dev {
 
 template <typename T, typename QuantT>
@@ -283,6 +320,19 @@ template void quantification<float, int16_t>(const float *data, int16_t *quant_d
                                              int8_t exp2_inv, int32_t zp);
 template void quantification<float, int32_t>(const float *data, int32_t *quant_data, size_t size,
                                              int8_t exp2_inv, int32_t zp);
+
+// 统一 int32_t 输出，使用位宽配置进行 clamp
+void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size, 
+                             int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::quantificationBitwidth<<<grid, block>>>(data, quant_data, size, exp2_inv, zp, bw);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
 
 template <typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp) {
@@ -351,6 +401,19 @@ template void quantificationPerChannel<float, int16_t>(const float *src, int16_t
 template void quantificationPerChannel<float, int32_t>(const float *src, int32_t *quant_data,
                                                        size_t input_size, size_t channel_size,
                                                        const dev::vector<int8_t> &exp2_invs);
+
+// 统一 int32_t 输出，使用位宽配置进行 clamp
+void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
+                                       size_t channel_size, const dev::vector<int8_t> &exp2_invs,
+                                       QuantBitWidth bw) {
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+
+    kernel::quantificationPerChannelBitwidth<<<gridDim, blockDim>>>(src, quant_data, input_size,
+                                                                     channel_size, exp2_invs.data(), bw);
+    cudaDeviceSynchronize();
+}
 
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,

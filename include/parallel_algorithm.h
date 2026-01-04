@@ -40,6 +40,7 @@ void computeRowNNZCountsFromOffsets(size_t num, uint32_t *offsets, uint32_t *res
 namespace dev {
 void fill_n(int8_t *first, size_t size, int8_t val);
 void fill_n(int16_t *first, size_t size, int16_t val);
+void fill_n(int32_t *first, size_t size, int32_t val);
 void fill_n(uint8_t *first, size_t size, uint8_t val);
 void fill_n(uint16_t *first, size_t size, uint16_t val);
 void fill_n(uint32_t *first, size_t size, uint32_t val);

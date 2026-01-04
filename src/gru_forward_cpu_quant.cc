@@ -4,6 +4,7 @@
 //
 // 设计原则:
 //   - 与 GPU 版本保持数值一致性
+//   - 所有量化值使用 int32_t 统一存储，通过 bitwidth_config_ 控制实际位宽
 //   - 复用 quantize_lut_types.h 中的 LUT 结构和 generate_*_lut 函数
 //   - 复用 quantize_ops_helper.h 中的通用函数
 //   - 支持 OpenMP 并行加速
@@ -92,8 +93,8 @@ int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val
     return piecewise_linear(g_pre_i32, rescale.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
 }
 
-template <typename HT>
-HT computeH(int32_t z, int32_t g, HT h_old, const QuantGRUReScaleCPU &rescale) {
+// computeH: 统一使用 int32_t 存储，通过位宽配置控制实际范围
+int32_t computeH(int32_t z, int32_t g, int32_t h_old, const QuantGRUReScaleCPU &rescale) {
     const int64_t z_diff = static_cast<int64_t>(z) - rescale.zp_z_out_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - rescale.zp_h_;
     const int64_t old_contrib_mul_i64 = z_diff * h_diff;
@@ -117,7 +118,8 @@ HT computeH(int32_t z, int32_t g, HT h_old, const QuantGRUReScaleCPU &rescale) {
         rshift_round(new_contrib - rescale.zp_new_contrib_, rescale.n_new_contrib_div_h_) +
         rescale.zp_h_;
 
-    return clamp_to_type<HT>(h_i32);
+    // 根据 h 的位宽配置进行 clamp
+    return clamp_by_bitwidth(h_i32, rescale.bitwidth_config_.h_);
 }
 
 }  // namespace
@@ -126,17 +128,15 @@ HT computeH(int32_t z, int32_t g, HT h_old, const QuantGRUReScaleCPU &rescale) {
 // 3. ForwardPassQuantCPU 实现
 // ============================================================================
 
-template <typename XT, typename HT, typename WT, typename RT>
-struct ForwardPassQuantCPU<XT, HT, WT, RT>::PrivateData {
+struct ForwardPassQuantCPU::PrivateData {
     bool training;
     int batch_size;
     int input_size;
     int hidden_size;
 };
 
-template <typename XT, typename HT, typename WT, typename RT>
-ForwardPassQuantCPU<XT, HT, WT, RT>::ForwardPassQuantCPU(bool training, int batch_size,
-                                                          int input_size, int hidden_size)
+ForwardPassQuantCPU::ForwardPassQuantCPU(bool training, int batch_size,
+                                         int input_size, int hidden_size)
     : data_(std::make_unique<PrivateData>()) {
     data_->training = training;
     data_->batch_size = batch_size;
@@ -144,11 +144,9 @@ ForwardPassQuantCPU<XT, HT, WT, RT>::ForwardPassQuantCPU(bool training, int batc
     data_->hidden_size = hidden_size;
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-ForwardPassQuantCPU<XT, HT, WT, RT>::~ForwardPassQuantCPU() = default;
+ForwardPassQuantCPU::~ForwardPassQuantCPU() = default;
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
+void ForwardPassQuantCPU::EnsureBuffersAllocated(int steps) {
     if (steps <= max_steps_) return;
 
     const int batch_size = data_->batch_size;
@@ -167,8 +165,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::EnsureBuffersAllocated(int steps) {
     weight_sums_computed_ = false;
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::PrecomputeWeightSums(const WT *W, const RT *R) {
+void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *R) {
     if (cached_W_ != W || cached_R_ != R) {
         weight_sums_computed_ = false;
         cached_W_ = W;
@@ -204,8 +201,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::PrecomputeWeightSums(const WT *W, cons
     weight_sums_computed_ = true;
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::ComputeWx(const WT *W, const XT *x, int steps) {
+void ForwardPassQuantCPU::ComputeWx(const int32_t *W, const int32_t *x, int steps) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -229,8 +225,7 @@ OMP_PARALLEL_FOR_2D
     }
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
+void ForwardPassQuantCPU::ComputeRh(const int32_t *R, const int32_t *h) {
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
     const int hidden3 = hidden_size * 3;
@@ -252,13 +247,12 @@ OMP_PARALLEL_FOR_2D
     }
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::IterateInternal(const RT *R, const int32_t *bx,
-                                                           const int32_t *br, const HT *h,
-                                                           HT *h_out, int32_t *v,
-                                                           const int32_t *cur_Wx,
-                                                           float zoneout_prob,
-                                                           const HT *zoneout_mask) {
+void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *bx,
+                                          const int32_t *br, const int32_t *h,
+                                          int32_t *h_out, int32_t *v,
+                                          const int32_t *cur_Wx,
+                                          float zoneout_prob,
+                                          const int32_t *zoneout_mask) {
     const bool training = data_->training;
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
@@ -294,7 +288,7 @@ OMP_PARALLEL_FOR_2D
                 v[base_v_idx + 3 * hidden_size] = Rh_add_br_g;
             }
 
-            HT cur_h = computeH<HT>(z, g, h[output_idx], rescale_param_);
+            int32_t cur_h = computeH(z, g, h[output_idx], rescale_param_);
 
             if (zoneout_prob > 0.0f && zoneout_mask != nullptr) {
                 if (zoneout_mask[output_idx] != 0) cur_h = h[output_idx];
@@ -306,8 +300,7 @@ OMP_PARALLEL_FOR_2D
 }
 
 // setRescaleParam: 直接复用 quantize_lut_types.h 中声明的 generate_*_lut 函数
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeParameters &parms) {
+void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms) {
     const int channel = parms.hidden_ * 3;
 
     std::vector<int8_t> n_W_mul_x_div_Wx(channel);
@@ -387,11 +380,10 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeP
         parms.bitwidth_config_.g_pre_, parms.bitwidth_config_.g_out_);
 }
 
-template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::Run(int steps, const WT *W, const RT *R,
-                                               const int32_t *bx, const int32_t *br, const XT *x,
-                                               HT *h, int32_t *v, float zoneout_prob,
-                                               const HT *zoneout_mask) {
+void ForwardPassQuantCPU::Run(int steps, const int32_t *W, const int32_t *R,
+                               const int32_t *bx, const int32_t *br, const int32_t *x,
+                               int32_t *h, int32_t *v, float zoneout_prob,
+                               const int32_t *zoneout_mask) {
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
 
@@ -409,11 +401,5 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::Run(int steps, const WT *W, const RT *
                         zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
 }
-
-// 显式实例化
-template class ForwardPassQuantCPU<int8_t, int8_t, int8_t, int8_t>;
-template class ForwardPassQuantCPU<int16_t, int16_t, int8_t, int8_t>;
-template class ForwardPassQuantCPU<int8_t, int8_t, int16_t, int16_t>;
-template class ForwardPassQuantCPU<int16_t, int16_t, int16_t, int16_t>;
 
 }  // namespace cpu

@@ -77,45 +77,88 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
 // 权重量化接口
 // =====================================================================
 
-// 量化权重矩阵和偏置
+// 量化权重矩阵和偏置（统一 int32_t 存储）
+// 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
 // 输入（浮点）:
 //   W:  [C, H*3]   输入权重矩阵
 //   R:  [H, H*3]   循环权重矩阵
 //   bx: [H*3]      输入偏置
 //   br: [H*3]      循环偏置
-// 输出（量化）:
+// 输出（量化，int32_t 存储）:
 //   W_quant:  [C, H*3]   量化后的输入权重
 //   R_quant:  [H, H*3]   量化后的循环权重
-//   bx_quant: [H*3]      量化后的输入偏置（int32）
-//   br_quant: [H*3]      量化后的循环偏置（int32）
-template <typename QuantT>
+//   bx_quant: [H*3]      量化后的输入偏置
+//   br_quant: [H*3]      量化后的循环偏置
 void quantitativeWeight(const int input_size, const int hidden_size,
                         const float *W, const float *R, const float *bx, const float *br,
                         const GRUQuantitativeParameters &quant_parms,
-                        QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant);
+                        int32_t *W_quant, int32_t *R_quant, int32_t *bx_quant, int32_t *br_quant);
 
 // =====================================================================
-// 前向传播接口
+// GPU 量化 GRU 前向传播接口
 // =====================================================================
 
-// 量化 GRU 前向传播
-// 输入（量化权重）:
-//   W:  [C, H*3]   量化后的输入权重
-//   R:  [H, H*3]   量化后的循环权重
-//   bx: [H*3]      量化后的输入偏置
-//   br: [H*3]      量化后的循环偏置
+// GPU 量化 GRU 前向传播（统一 int32_t 存储）
+// 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
+// 输入:
+//   W:  [C, H*3]   量化后的输入权重（int32_t 存储）
+//   R:  [H, H*3]   量化后的循环权重（int32_t 存储）
+//   bx: [H*3]      量化后的输入偏置（int32_t）
+//   br: [H*3]      量化后的循环偏置（int32_t）
 //   x:  [T, B, I]  浮点输入序列（内部会量化）
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
 // 输出:
-//   h:  [(T+1), B, H]  所有时间步的隐藏状态（包含 h0）
+//   h:  [(T+1), B, H]  所有时间步的隐藏状态（反量化后的浮点值）
 //   v:  [T, B, H*4]    中间值（训练时需要，推理时可为 nullptr）
-template <typename QuantT>
 void quantGRUForward(
     bool is_training,
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const QuantT *W, const QuantT *R, const int32_t *bx, const int32_t *br, const float *x,
+    const int32_t *W, const int32_t *R, const int32_t *bx, const int32_t *br, const float *x,
     const float *h0,
     const GRUQuantitativeParameters &quant_parms, const cublasHandle_t &g_blas_handle,
+    float *h, float *v);
+
+// =====================================================================
+// CPU 量化 GRU 前向传播接口
+// =====================================================================
+
+// CPU 量化 GRU 前向传播（统一 int32_t 存储）
+// 纯 CPU 实现，不依赖 CUDA，可在任意平台运行
+// 输入:
+//   W:  [C, H*3]   量化后的输入权重（int32_t 存储）
+//   R:  [H, H*3]   量化后的循环权重（int32_t 存储）
+//   bx: [H*3]      量化后的输入偏置（int32_t）
+//   br: [H*3]      量化后的循环偏置（int32_t）
+//   x:  [T, B, I]  浮点输入序列（内部会量化）
+//   h0: [B, H]     初始隐藏状态（可为 nullptr）
+// 输出:
+//   h:  [(T+1), B, H]  所有时间步的隐藏状态（反量化后的浮点值）
+//   v:  [T, B, H*4]    中间值（训练时需要，推理时可为 nullptr）
+void quantGRUForwardCPU(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const int32_t *W, const int32_t *R, const int32_t *bx, const int32_t *br,
+    const float *x, const float *h0,
+    const GRUQuantitativeParameters &quant_parms,
+    float *h, float *v);
+
+// CPU 量化 GRU 前向传播（从浮点权重开始，内部量化）
+// 输入:
+//   W:  [C, H*3]   浮点输入权重
+//   R:  [H, H*3]   浮点循环权重
+//   bx: [H*3]      浮点输入偏置
+//   br: [H*3]      浮点循环偏置
+//   x:  [T, B, I]  浮点输入序列
+//   h0: [B, H]     初始隐藏状态（可为 nullptr）
+// 输出:
+//   h:  [(T+1), B, H]  所有时间步的隐藏状态（反量化后的浮点值）
+//   v:  [T, B, H*4]    中间值（训练时需要，推理时可为 nullptr）
+void quantGRUForwardCPU(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br,
+    const float *x, const float *h0,
+    const GRUQuantitativeParameters &quant_parms,
     float *h, float *v);
 
 // 浮点 GRU 前向传播
