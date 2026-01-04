@@ -34,15 +34,28 @@ __device__ __forceinline__ int32_t round(float val) {
 }
 
 /**
- * @brief GPU 优化的量化函数
+ * @brief GPU 优化的量化函数（统一 int32_t 输出，通过位宽配置 clamp）
  *
  * 使用 __fdividef 进行快速除法优化。
+ * 所有量化值统一使用 int32_t 存储，通过 clamp_by_bitwidth 限制实际值范围。
  *
- * @tparam QuantT 量化类型
  * @param src 浮点输入
  * @param exp2_inv 缩放因子指数
  * @param zp 零点
- * @return 量化值
+ * @param bw 位宽配置
+ * @return 量化值（int32_t 存储，实际值在位宽范围内）
+ */
+inline __device__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    float scale = (exp2_inv >= 0) ? __fdividef(1.0f, static_cast<float>(1 << exp2_inv))
+                                  : static_cast<float>(1 << (-exp2_inv));
+    float shifted = src / scale + static_cast<float>(zp);
+    int32_t q = round(shifted);
+    return clamp_by_bitwidth(q, bw);
+}
+
+/**
+ * @brief GPU 优化的量化函数（兼容旧接口，使用模板类型推断 clamp 范围）
+ * @deprecated 建议使用 quantize(float, int8_t, int32_t, QuantBitWidth) 版本
  */
 template <typename QuantT>
 inline __device__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {

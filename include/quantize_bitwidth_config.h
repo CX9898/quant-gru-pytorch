@@ -61,6 +61,13 @@ struct QuantBitWidth {
     bool operator!=(const QuantBitWidth& other) const {
         return !(*this == other);
     }
+    
+    // ==================== 常用位宽工厂方法 ====================
+    static QuantBitWidth INT8() { return QuantBitWidth(8, true); }
+    static QuantBitWidth INT16() { return QuantBitWidth(16, true); }
+    static QuantBitWidth INT32() { return QuantBitWidth(32, true); }
+    static QuantBitWidth UINT8() { return QuantBitWidth(8, false); }
+    static QuantBitWidth UINT16() { return QuantBitWidth(16, false); }
 };
 
 // ==================== 算子量化配置结构 ====================

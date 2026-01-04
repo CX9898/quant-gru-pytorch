@@ -17,6 +17,7 @@
 // 设计说明:
 //   - 完全不依赖 CUDA，可在任意 CPU 平台运行
 //   - 与 GPU 版本保持数值一致性（用于验证和部署）
+//   - 所有量化值使用 int32_t 统一存储，通过 bitwidth_config_ 控制实际位宽
 //   - 复用 quantize_lut_types.h 中的 LUT 结构和生成函数
 //   - 复用 quantize_ops_helper.h 中的通用函数
 //
@@ -95,8 +96,7 @@ struct QuantGRUReScaleCPU {
 
 // ==================== 前向传播类声明 ====================
 
-/// @brief CPU 版本量化 GRU 前向传播类
-template <typename XT, typename HT, typename WT, typename RT>
+/// @brief CPU 版本量化 GRU 前向传播类（非模板，统一 int32_t 存储）
 class ForwardPassQuantCPU {
    public:
     ForwardPassQuantCPU(bool training, int batch_size, int input_size, int hidden_size);
@@ -105,9 +105,10 @@ class ForwardPassQuantCPU {
     /// @brief 设置量化 rescale 参数（使用 quantize_ops_helper.h 中定义的通用结构）
     void setRescaleParam(const GRUQuantitativeParameters &params);
 
-    /// @brief 执行前向传播
-    void Run(int steps, const WT *W, const RT *R, const int32_t *bx, const int32_t *br,
-             const XT *x, HT *h, int32_t *v, float zoneout_prob, const HT *zoneout_mask);
+    /// @brief 执行前向传播（所有量化值使用 int32_t 存储）
+    void Run(int steps, const int32_t *W, const int32_t *R, const int32_t *bx, const int32_t *br,
+             const int32_t *x, int32_t *h, int32_t *v, float zoneout_prob,
+             const int32_t *zoneout_mask);
 
    private:
     struct PrivateData;
@@ -121,16 +122,16 @@ class ForwardPassQuantCPU {
     std::vector<int64_t> W_sum_mul_x_zp_;
     std::vector<int64_t> R_sum_mul_h_zp_;
     bool weight_sums_computed_ = false;
-    const WT *cached_W_ = nullptr;
-    const RT *cached_R_ = nullptr;
+    const int32_t *cached_W_ = nullptr;
+    const int32_t *cached_R_ = nullptr;
 
     void EnsureBuffersAllocated(int steps);
-    void PrecomputeWeightSums(const WT *W, const RT *R);
-    void ComputeWx(const WT *W, const XT *x, int steps);
-    void ComputeRh(const RT *R, const HT *h);
-    void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h, HT *h_out,
-                         int32_t *v, const int32_t *cur_Wx, float zoneout_prob,
-                         const HT *zoneout_mask);
+    void PrecomputeWeightSums(const int32_t *W, const int32_t *R);
+    void ComputeWx(const int32_t *W, const int32_t *x, int steps);
+    void ComputeRh(const int32_t *R, const int32_t *h);
+    void IterateInternal(const int32_t *R, const int32_t *bx, const int32_t *br, const int32_t *h,
+                         int32_t *h_out, int32_t *v, const int32_t *cur_Wx, float zoneout_prob,
+                         const int32_t *zoneout_mask);
 };
 
 }  // namespace cpu

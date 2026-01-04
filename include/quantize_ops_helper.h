@@ -539,7 +539,22 @@ inline void quantification(const T *data, QuantT *quant_data, size_t size, int8_
     }
 }
 
+/// @brief Per-channel 批量量化（Host 端，统一 int32_t 输出，使用位宽配置）
+inline void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
+                                              size_t channel_size, const std::vector<int8_t> &exp2_invs,
+                                              QuantBitWidth bw) {
+#pragma omp parallel for
+    for (size_t i = 0; i < channel_size; ++i) {
+        const int8_t exp2_inv = exp2_invs[i];
+        for (size_t j = 0; j < input_size; ++j) {
+            const size_t idx = j * channel_size + i;
+            quant_data[idx] = quantize(src[idx], exp2_inv, 0, bw);
+        }
+    }
+}
+
 /// @brief Per-channel 批量量化（Host 端，用于权重矩阵）
+/// @deprecated 建议使用 quantificationPerChannelBitwidth
 template <typename T, typename QuantT>
 inline void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
                                      size_t channel_size, const std::vector<int8_t> &exp2_invs) {
@@ -574,7 +589,22 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
                        int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
                        int32_t zp_Rh_add_br);
 
+/// @brief GPU 量化（统一 int32_t 输出，使用位宽配置）
+void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size,
+                             int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+
+/// @brief GPU Per-channel 量化（统一 int32_t 输出，使用位宽配置）
+void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
+                                       size_t channel_size, const dev::vector<int8_t> &exp2_invs,
+                                       QuantBitWidth bw);
+
+/// @brief GPU 量化
+/// @deprecated 建议使用 quantificationBitwidth
+template <typename T, typename QuantT>
+void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv, int32_t zp);
+
 /// @brief GPU Per-channel 量化
+/// @deprecated 建议使用 quantificationPerChannelBitwidth
 template <typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
                               size_t channel_size, const dev::vector<int8_t> &exp2_invs);
