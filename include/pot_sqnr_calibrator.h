@@ -176,6 +176,16 @@ class AimetPotSqnrCalibrator {
         // 阶段 2：round 到最近的 POT（AIMET 方式）
         auto [po2_scale, n] = roundToPowerOfTwo(optimal_scale);
         
+        // 位宽约束：确保量化值不超出范围
+        // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
+        float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+        if (max_abs > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(quant_max) / max_abs)));
+            n = std::min(n, max_exp2_inv);
+            po2_scale = std::pow(2.0f, -static_cast<float>(n));
+        }
+        
         out_exp2_inv = n;
         
         // 阶段 3：计算 zp
@@ -197,6 +207,9 @@ class AimetPotSqnrCalibrator {
 
     /**
      * 阶段 1：AIMET 风格连续 scale 搜索
+     * 
+     * 搜索空间与 AIMET 一致：从 max_delta/N 到 max_delta
+     * 对称量化添加了 clamp 机制（类似非对称量化的 _clamp_delta_offset_values）
      */
     template <typename QuantT>
     static ContinuousCalibrationResult computeOptimalContinuousScale(
@@ -215,8 +228,11 @@ class AimetPotSqnrCalibrator {
             ? 2.0f * std::max(max_val, -min_val) / num_steps
             : (max_val - min_val) / num_steps;
         
+        // 观察到的绝对值最大范围（用于对称量化的 clamp）
+        float observed_max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+        
         return is_symmetric 
-            ? searchSymmetric(hist, max_delta, num_steps, config)
+            ? searchSymmetric(hist, max_delta, num_steps, observed_max_abs, config)
             : searchAsymmetric(hist, min_val, max_val, max_delta, num_steps, config);
     }
 
@@ -243,21 +259,37 @@ class AimetPotSqnrCalibrator {
     HistogramCollector collector_;
 
     /**
-     * 对称量化搜索
+     * 对称量化搜索（带 clamp 机制，类似 AIMET 非对称量化的 _clamp_delta_offset_values）
+     * 
+     * 搜索空间与 AIMET 一致：从 max_delta/N 到 max_delta
+     * 但添加了 clamp 机制：将量化范围 clamp 到观察范围后重新计算 delta
+     * 
+     * 这确保了：即使初始 delta 很小，最终选出的 delta 也能覆盖观察范围
      */
     static ContinuousCalibrationResult searchSymmetric(
-        const Histogram& hist, float max_delta, int64_t num_steps, const HistogramCalibrationConfig& config) {
+        const Histogram& hist, float max_delta, int64_t num_steps, float observed_max_abs,
+        const HistogramCalibrationConfig& config) {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
         // 对称量化：offset = (-num_steps) // 2（Python floor division）
-        // Python: (-255) // 2 = -128（向下取整）
-        // C++:    (-255) / 2 = -127（向零取整）
-        // 等价于: -((num_steps + 1) / 2) 对于奇数 num_steps
         const float offset = -static_cast<float>((num_steps + 1) / 2);
+        const float num_pos_steps = static_cast<float>(num_steps / 2);
         
+        // AIMET 风格的搜索空间：从 max_delta/N 到 max_delta
         for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
             float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
             delta = std::max(delta, 1e-8f);
+            
+            // ===== 关键改进：类似 AIMET _clamp_delta_offset_values 的 clamp 机制 =====
+            // 对称量化的范围：[-delta * num_pos_steps, delta * num_pos_steps]
+            // 如果这个范围小于观察范围 [-observed_max_abs, observed_max_abs]
+            // 则需要将 delta 调整到能覆盖观察范围的最小值
+            float quant_max_abs = delta * num_pos_steps;
+            if (quant_max_abs < observed_max_abs) {
+                // 量化范围无法覆盖观察范围，调整 delta
+                delta = observed_max_abs / num_pos_steps;
+            }
+            // ==========================================================================
             
             float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
             
@@ -434,6 +466,16 @@ inline void calibrateQuantParamsFromHistogram(const Histogram& hist, QuantBitWid
 
     // Round to POT
     auto [po2_scale, n] = AimetPotSqnrCalibrator::roundToPowerOfTwo(optimal_scale);
+    
+    // 位宽约束：确保量化值不超出范围（作为 round 的安全网）
+    float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+    if (max_abs > 1e-10f) {
+        int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+            std::log2(static_cast<float>(quant_max) / max_abs)));
+        n = std::min(n, max_exp2_inv);
+        po2_scale = std::pow(2.0f, -static_cast<float>(n));
+    }
+    
     exp2_inv = n;
 
     // Compute zero-point

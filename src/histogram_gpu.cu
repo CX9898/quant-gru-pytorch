@@ -550,6 +550,10 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
     
+    // 保存原始 min/max（用于位宽约束检查）
+    batch.original_mins = batch.mins;
+    batch.original_maxs = batch.maxs;
+    
     // 3. 范围扩展：与 CPU HistogramCollector::collect() 完全一致
     // 必须在构建直方图之前进行，以确保 bin 分布一致
     const float minimum_scale = get_minimum_scale(num_bins);
@@ -773,16 +777,20 @@ namespace {
 // SQNR 配置现在从 GPUSqnrConfig 参数传入
 
 /**
- * @brief SQNR 噪声计算 Kernel（对称量化）
+ * @brief SQNR 噪声计算 Kernel（对称量化，带 clamp 机制）
  *
  * 每个 block 处理一个 delta 候选
  * block 内线程并行计算各 bin 的噪声，然后 reduction
+ * 
+ * clamp 机制（类似 AIMET _clamp_delta_offset_values）：
+ * 如果当前 delta 无法覆盖观察范围，则调整到能覆盖的最小值
  */
 __global__ void sqnr_noise_symmetric_kernel(
     const float* __restrict__ counts,
     float min_val, float bin_width, int num_bins,
     float max_delta, int num_delta_candidates,
     int64_t num_steps, float offset,
+    float observed_max_abs,  // 观察到的绝对值最大范围
     float gamma, float p,
     float* __restrict__ noise_out)  // [num_delta_candidates]
 {
@@ -792,6 +800,14 @@ __global__ void sqnr_noise_symmetric_kernel(
     // 计算当前 delta
     float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
     delta = fmaxf(delta, 1e-8f);
+    
+    // ===== clamp 机制：确保 delta 能覆盖观察范围 =====
+    const float num_pos_steps = static_cast<float>(num_steps / 2);
+    float quant_max_abs = delta * num_pos_steps;
+    if (quant_max_abs < observed_max_abs) {
+        delta = observed_max_abs / num_pos_steps;
+    }
+    // =================================================
     
     // Shared memory for reduction
     extern __shared__ float shared_noise[];
@@ -950,43 +966,45 @@ namespace gpu_hist {
 
 void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val,
                               int num_bins, int64_t total_count,
-                              bool is_symmetric, int quant_bits, bool is_unsigned,
+                              bool is_symmetric, QuantBitWidth bw,
                               int8_t& out_exp2_inv, int32_t& out_zp,
                               const GPUSqnrConfig& config,
                               cudaStream_t stream) {
     
-    // 计算量化范围（区分有符号/无符号）
-    int64_t quant_min, quant_max;
-    if (is_unsigned) {
-        quant_min = 0;
-        quant_max = (quant_bits == 8) ? 255 : 65535;
-    } else {
-        quant_min = (quant_bits == 8) ? -128 : -32768;
-        quant_max = (quant_bits == 8) ? 127 : 32767;
-    }
+    // 从 QuantBitWidth 获取量化范围（支持任意位宽）
+    const int64_t quant_min = bw.qmin();
+    const int64_t quant_max = bw.qmax();
     const int64_t num_steps = quant_max - quant_min;
     
     // 确保范围包含 0
-    min_val = std::min(min_val, 0.0f);
-    max_val = std::max(max_val, 0.0f);
-    max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+    min_val = (min_val < 0.0f) ? min_val : 0.0f;
+    max_val = (max_val > 0.0f) ? max_val : 0.0f;
+    float min_range_limit = min_val + 1e-8f * static_cast<float>(num_steps);
+    max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
     
     float bin_width = (max_val - min_val) / num_bins;
     if (bin_width < 1e-9f) bin_width = 1e-9f;
     
     float optimal_scale, optimal_min;
     
+    // 观察到的绝对值最大范围（用于对称量化的 clamp 机制）
+    float abs_min_val = std::abs(min_val);
+    float abs_max_val = std::abs(max_val);
+    float observed_max_abs = (abs_min_val > abs_max_val) ? abs_min_val : abs_max_val;
+    
     if (is_symmetric) {
         // 对称量化
-        float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+        float abs_max_for_delta = (max_val > -min_val) ? max_val : -min_val;
+        float max_delta = 2.0f * abs_max_for_delta / static_cast<float>(num_steps);
         float offset = -static_cast<float>((num_steps + 1) / 2);
+        const float num_pos_steps = static_cast<float>(num_steps / 2);
         
         const int num_candidates = config.symmetric_delta_candidates;
         
         // 分配噪声缓冲区
         dev::vector<float> noise_dev(num_candidates);
         
-        // 启动 kernel
+        // 启动 kernel（带 clamp 机制）
         const int threads = 256;
         const int blocks = num_candidates;
         size_t shared_mem = threads * sizeof(float);
@@ -994,7 +1012,7 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         sqnr_noise_symmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
             counts_dev, min_val, bin_width, num_bins,
             max_delta, num_candidates,
-            num_steps, offset, config.gamma, config.p, noise_dev.data());
+            num_steps, offset, observed_max_abs, config.gamma, config.p, noise_dev.data());
         
         // 找最小噪声
         dev::vector<int> min_idx_dev(1);
@@ -1008,18 +1026,25 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         cudaMemcpyAsync(&best_idx, min_idx_dev.data(), sizeof(int), cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
         
+        // 计算 optimal_scale，需要应用与 kernel 相同的 clamp 机制
         optimal_scale = max_delta * (best_idx + 1) / (num_candidates - 1);
         optimal_scale = std::max(optimal_scale, 1e-8f);
+        // clamp 机制：确保能覆盖观察范围
+        float quant_max_abs = optimal_scale * num_pos_steps;
+        if (quant_max_abs < observed_max_abs) {
+            optimal_scale = observed_max_abs / num_pos_steps;
+        }
         optimal_min = offset * optimal_scale;
         
     } else {
         // 非对称量化
-        float max_delta = (max_val - min_val) / num_steps;
+        float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
         
         const int num_delta_candidates = config.asymmetric_delta_candidates;
         
         // 生成 offset 候选
-        const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
+        int num_offsets_limit = static_cast<int>(num_steps + 2);
+        const int num_offsets = (num_offsets_limit < config.offset_candidates) ? num_offsets_limit : config.offset_candidates;
         std::vector<float> h_offsets(num_offsets);
         float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
         for (int o = 0; o < num_offsets - 1; ++o) {
@@ -1060,18 +1085,33 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         int best_offset_idx = best_idx % num_offsets;
         
         float delta = max_delta * (best_delta_idx + 1) / (num_delta_candidates - 1);
-        delta = std::max(delta, 1e-8f);
+        delta = (delta > 1e-8f) ? delta : 1e-8f;
         float offset = h_offsets[best_offset_idx];
         
-        float test_min = std::max(min_val, delta * offset);
-        float test_max = std::min(max_val, test_min + delta * num_steps);
-        optimal_scale = std::max((test_max - test_min) / num_steps, 1e-8f);
+        float test_min_calc = delta * offset;
+        float test_min = (min_val > test_min_calc) ? min_val : test_min_calc;
+        float test_max_calc = test_min + delta * static_cast<float>(num_steps);
+        float test_max = (max_val < test_max_calc) ? max_val : test_max_calc;
+        float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
+        optimal_scale = (scale_calc > 1e-8f) ? scale_calc : 1e-8f;
         optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
     }
     
     // 转换到 POT
     float n = -std::log2(optimal_scale);
     int8_t n_rounded = static_cast<int8_t>(std::round(n));
+    
+    // 位宽约束：确保量化值不超出范围
+    // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
+    float abs_min_for_constraint = std::abs(min_val);
+    float abs_max_for_constraint = std::abs(max_val);
+    float max_abs = (abs_min_for_constraint > abs_max_for_constraint) ? abs_min_for_constraint : abs_max_for_constraint;
+    if (max_abs > 1e-10f) {
+        int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+            std::log2(static_cast<float>(quant_max) / max_abs)));
+        n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
+    }
+    
     float po2_scale = std::pow(2.0f, -static_cast<float>(n_rounded));
     
     out_exp2_inv = n_rounded;
@@ -1092,7 +1132,7 @@ void compute_sqnr_params_batch_gpu(
     int num_bins,
     const std::vector<int64_t>& total_counts,
     const std::vector<bool>& is_symmetric,
-    int quant_bits,
+    QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
     std::vector<int32_t>& out_zp,
     cudaStream_t stream) {
@@ -1108,13 +1148,13 @@ void compute_sqnr_params_batch_gpu(
     for (int i = 0; i < n; ++i) {
         compute_sqnr_params_gpu(
             counts_ptrs[i], mins[i], maxs[i], num_bins, total_counts[i],
-            is_symmetric[i], quant_bits, false, out_exp2_inv[i], out_zp[i], config, stream);
+            is_symmetric[i], bw, out_exp2_inv[i], out_zp[i], config, stream);
     }
 }
 
 void compute_sqnr_per_channel_gpu(
     const PerChannelHistogramBatch& batch,
-    bool is_symmetric, int quant_bits,
+    bool is_symmetric, QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
     const GPUSqnrConfig& config,
     cudaStream_t stream) {
@@ -1152,9 +1192,9 @@ void compute_sqnr_per_channel_gpu(
         val_buffers[i].resize(1);
     }
     
-    // 非对称量化需要的 offset 数组
-    const int64_t quant_min = (quant_bits == 8) ? -128 : -32768;
-    const int64_t quant_max = (quant_bits == 8) ? 127 : 32767;
+    // 从 QuantBitWidth 获取量化范围（支持任意位宽）
+    const int64_t quant_min = bw.qmin();
+    const int64_t quant_max = bw.qmax();
     const int64_t num_steps = quant_max - quant_min;
     
     std::vector<std::vector<float>> h_offsets_all;
@@ -1165,10 +1205,11 @@ void compute_sqnr_per_channel_gpu(
         offsets_dev_all.resize(n);
         
         for (int c = 0; c < n; ++c) {
-            float max_delta = (batch.maxs[c] - batch.mins[c]) / num_steps;
+            float max_delta = (batch.maxs[c] - batch.mins[c]) / static_cast<float>(num_steps);
             if (max_delta < 1e-8f) max_delta = 1e-8f;
             
-            const int num_offsets = std::min(static_cast<int>(num_steps + 2), offset_candidates);
+            int num_offsets_limit = static_cast<int>(num_steps + 2);
+            const int num_offsets = (num_offsets_limit < offset_candidates) ? num_offsets_limit : offset_candidates;
             h_offsets_all[c].resize(num_offsets);
             float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
             for (int o = 0; o < num_offsets - 1; ++o) {
@@ -1196,15 +1237,23 @@ void compute_sqnr_per_channel_gpu(
         // 注意：不对 bin_width 做 clamp，保持与 CPU 一致（允许为 0）
         
         // 计算搜索用的 min_val/max_val（确保包含 0）
-        float min_val = std::min(hist_min, 0.0f);
-        float max_val = std::max(hist_max, 0.0f);
-        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        float min_val = (hist_min < 0.0f) ? hist_min : 0.0f;
+        float max_val = (hist_max > 0.0f) ? hist_max : 0.0f;
+        float min_range = min_val + 1e-8f * static_cast<float>(num_steps);
+        max_val = (max_val > min_range) ? max_val : min_range;
         
         const float* counts_ptr = batch.channel_counts(c);
         
         if (is_symmetric) {
-            float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+            float abs_max_val = (max_val > -min_val) ? max_val : -min_val;
+            float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
             float offset = -static_cast<float>((num_steps + 1) / 2);
+            
+            // 观察到的绝对值最大范围（用于 clamp 机制）
+            // 使用原始直方图范围，不是扩展后的 min_val/max_val
+            float abs_orig_min = std::abs(batch.original_mins[c]);
+            float abs_orig_max = std::abs(batch.original_maxs[c]);
+            float observed_max_abs = (abs_orig_min > abs_orig_max) ? abs_orig_min : abs_orig_max;
             
             const int threads = 256;
             size_t shared_mem = threads * sizeof(float);
@@ -1213,7 +1262,7 @@ void compute_sqnr_per_channel_gpu(
             sqnr_noise_symmetric_kernel<<<sym_candidates, threads, shared_mem, s>>>(
                 counts_ptr, hist_min, bin_width, batch.num_bins,
                 max_delta, sym_candidates,
-                num_steps, offset, config.gamma, config.p, noise_buffers[stream_id].data());
+                num_steps, offset, observed_max_abs, config.gamma, config.p, noise_buffers[stream_id].data());
             
             find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), s>>>(
                 noise_buffers[stream_id].data(), sym_candidates,
@@ -1253,19 +1302,31 @@ void compute_sqnr_per_channel_gpu(
         int best_idx;
         cudaMemcpy(&best_idx, idx_buffers[stream_id].data(), sizeof(int), cudaMemcpyDeviceToHost);
         
-        float min_val = std::min(batch.mins[c], 0.0f);
-        float max_val = std::max(batch.maxs[c], 0.0f);
-        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        float min_val = (batch.mins[c] < 0.0f) ? batch.mins[c] : 0.0f;
+        float max_val = (batch.maxs[c] > 0.0f) ? batch.maxs[c] : 0.0f;
+        float min_range = min_val + 1e-8f * static_cast<float>(num_steps);
+        max_val = (max_val > min_range) ? max_val : min_range;
         
         float optimal_scale;
         
         if (is_symmetric) {
-            float max_delta = 2.0f * std::max(max_val, -min_val) / num_steps;
+            float abs_max_val = (max_val > -min_val) ? max_val : -min_val;
+            float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
+            const float num_pos_steps = static_cast<float>(num_steps / 2);
             
             optimal_scale = max_delta * (best_idx + 1) / (sym_candidates - 1);
-            optimal_scale = std::max(optimal_scale, 1e-8f);
+            optimal_scale = (optimal_scale > 1e-8f) ? optimal_scale : 1e-8f;
+            
+            // clamp 机制：确保能覆盖观察范围（使用原始 min/max）
+            float abs_orig_min = std::abs(batch.original_mins[c]);
+            float abs_orig_max = std::abs(batch.original_maxs[c]);
+            float observed_max_abs = (abs_orig_min > abs_orig_max) ? abs_orig_min : abs_orig_max;
+            float quant_max_abs = optimal_scale * num_pos_steps;
+            if (quant_max_abs < observed_max_abs) {
+                optimal_scale = observed_max_abs / num_pos_steps;
+            }
         } else {
-            float max_delta = (max_val - min_val) / num_steps;
+            float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             max_delta = std::max(max_delta, 1e-8f);
             
             const int num_offsets = h_offsets_all[c].size();
@@ -1276,14 +1337,31 @@ void compute_sqnr_per_channel_gpu(
             delta = std::max(delta, 1e-8f);
             float offset = h_offsets_all[c][best_offset_idx];
             
-            float test_min = std::max(min_val, delta * offset);
-            float test_max = std::min(max_val, test_min + delta * num_steps);
-            optimal_scale = std::max((test_max - test_min) / num_steps, 1e-8f);
+            float test_min_calc = delta * offset;
+            float test_min = (min_val > test_min_calc) ? min_val : test_min_calc;
+            float test_max_calc = test_min + delta * static_cast<float>(num_steps);
+            float test_max = (max_val < test_max_calc) ? max_val : test_max_calc;
+            float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
+            optimal_scale = (scale_calc > 1e-8f) ? scale_calc : 1e-8f;
         }
         
         // 转换到 POT
         float n_val = -std::log2(optimal_scale);
-        out_exp2_inv[c] = static_cast<int8_t>(std::round(n_val));
+        int8_t n_rounded = static_cast<int8_t>(std::round(n_val));
+        
+        // 位宽约束：使用原始 min/max（未被范围扩展修改的值）
+        // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
+        float orig_min = batch.original_mins[c];
+        float orig_max = batch.original_maxs[c];
+        float max_abs = std::max(std::abs(orig_min), std::abs(orig_max));
+        if (max_abs > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(quant_max) / max_abs)));
+            if (max_exp2_inv < n_rounded) {
+                n_rounded = max_exp2_inv;
+            }
+        }
+        out_exp2_inv[c] = n_rounded;
     }
     
     // 清理 streams
