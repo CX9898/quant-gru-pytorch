@@ -203,57 +203,70 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 echo ""
-echo "==================== 第一部分：标准位宽配置 (8/16位) ===================="
+echo "==================== 第一部分：8-16位完整位宽测试 ===================="
 echo ""
-echo "==================== 第一部分：标准位宽配置 ====================" >> "$RESULT_FILE"
+echo "==================== 第一部分：8-16位完整位宽测试 ====================" >> "$RESULT_FILE"
 
-# 测试标准位宽配置
-run_test "W8A8" 8 8 "pass"
+# 测试 8-16 位之间所有对称位宽配置（W=A）
+for bits in 8 9 10 11 12 13 14 15 16; do
+    run_test "W${bits}A${bits}" $bits $bits "pass"
+done
+
+echo ""
+echo "==================== 第二部分：8-16位混合位宽测试 ===================="
+echo ""
+echo "==================== 第二部分：8-16位混合位宽测试 ====================" >> "$RESULT_FILE"
+
+# 测试 8-16 位之间的混合配置
 run_test "W8A16" 8 16 "pass"
 run_test "W16A8" 16 8 "pass"
-run_test "W16A16" 16 16 "pass"
+run_test "W8A12" 8 12 "pass"
+run_test "W12A8" 12 8 "pass"
+run_test "W10A14" 10 14 "pass"
+run_test "W14A10" 14 10 "pass"
+run_test "W9A15" 9 15 "pass"
+run_test "W15A9" 15 9 "pass"
+run_test "W11A13" 11 13 "pass"
+run_test "W13A11" 13 11 "pass"
 
 echo ""
-echo "==================== 第二部分：扩展位宽配置 (4/10/12/24位) ===================="
+echo "==================== 第三部分：低位宽测试 (4-7位) ===================="
 echo ""
-echo "==================== 第二部分：扩展位宽配置 ====================" >> "$RESULT_FILE"
+echo "==================== 第三部分：低位宽测试 ====================" >> "$RESULT_FILE"
 
 # 测试低位宽配置
 run_test "W4A4" 4 4 "pass"
+run_test "W5A5" 5 5 "pass"
+run_test "W6A6" 6 6 "pass"
+run_test "W7A7" 7 7 "pass"
 run_test "W4A8" 4 8 "pass"
 run_test "W8A4" 8 4 "pass"
 
-# 测试非标准位宽配置
-run_test "W10A10" 10 10 "pass"
-run_test "W12A12" 12 12 "pass"
-run_test "W10A8" 10 8 "pass"
-run_test "W8A10" 8 10 "pass"
+echo ""
+echo "==================== 第四部分：高位宽测试 (17-24位) ===================="
+echo ""
+echo "==================== 第四部分：高位宽测试 ====================" >> "$RESULT_FILE"
 
 # 测试高位宽配置
+run_test "W17A17" 17 17 "pass"
+run_test "W18A18" 18 18 "pass"
+run_test "W20A20" 20 20 "pass"
 run_test "W24A24" 24 24 "pass"
 run_test "W16A24" 16 24 "pass"
 run_test "W24A16" 24 16 "pass"
 
 echo ""
-echo "==================== 第三部分：Wx/Rh 位宽测试 ===================="
+echo "==================== 第五部分：Wx/Rh 位宽测试 ===================="
 echo ""
-echo "==================== 第三部分：Wx/Rh 位宽测试 ====================" >> "$RESULT_FILE"
+echo "==================== 第五部分：Wx/Rh 位宽测试 ====================" >> "$RESULT_FILE"
 
 # 测试 GEMM 结果（Wx_, Rh_）使用不同精度
-# W8A8 但 Wx/Rh 用 16 位 - 更高精度的 GEMM 中间结果
 run_test "W8A8_GEMM16" 8 8 "pass" 16
-
-# W8A16 但 Wx/Rh 用 8 位 - 精度损失但支持
 run_test "W8A16_GEMM8" 8 16 "pass" 8
-
-# W16A16 但 Wx/Rh 用 8 位 - 精度损失但支持
 run_test "W16A16_GEMM8" 16 16 "pass" 8
-
-# 扩展 GEMM 位宽测试
 run_test "W8A8_GEMM12" 8 8 "pass" 12
 run_test "W10A10_GEMM16" 10 10 "pass" 16
-run_test "W4A4_GEMM8" 4 4 "pass" 8
-run_test "W12A12_GEMM24" 12 12 "pass" 24
+run_test "W12A12_GEMM16" 12 12 "pass" 16
 
 # 恢复原始配置
 echo "$ORIGINAL_CONFIG" > "$CONFIG_FILE"

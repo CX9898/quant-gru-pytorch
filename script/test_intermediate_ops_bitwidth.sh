@@ -282,37 +282,38 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 # 位宽选项
+BITWIDTHS_8_TO_16=(8 9 10 11 12 13 14 15 16)
 BITWIDTHS_STANDARD=(8 16)
 BITWIDTHS_EXTENDED=(4 10 12 24)
 SYMMETRICS=(false true)
 
-# 计算总测试数
-# 第一部分：基准测试 (4: 4/8/16/24位)
+# 计算总测试数（动态计算）
+# 第一部分：8-16位完整基准测试 (9)
 # 第二部分：GEMM 结果位宽 (4)
 # 第三部分：偏置位宽 (4)
-# 第四部分：中间运算位宽单独测试 (8: 4/10/12/16/24位)
+# 第四部分：中间运算位宽单独测试 (8)
 # 第五部分：关键路径测试 (12)
 # 第六部分：对称配置测试 (64)
 # 第七部分：典型组合测试 (20)
-# 第八部分：扩展位宽测试 (16)
-TOTAL_TESTS=$((4 + 4 + 4 + 8 + 12 + 64 + 20 + 16))
+# 第八部分：低/高位宽测试 (8)
+TOTAL_TESTS=$((9 + 4 + 4 + 8 + 12 + 64 + 20 + 8))
 
 echo "预计测试数: $TOTAL_TESTS"
 echo ""
 
-# ==================== 第一部分：基准测试 ====================
+# ==================== 第一部分：8-16位完整基准测试 ====================
 echo ""
-echo "==================== 第一部分：基准测试 ===================="
+echo "==================== 第一部分：8-16位完整基准测试 ===================="
 echo ""
-echo "==================== 第一部分：基准测试 ====================" >> "$RESULT_FILE"
+echo "==================== 第一部分：8-16位完整基准测试 ====================" >> "$RESULT_FILE"
 
 # 设置默认对称配置
 set_all_symmetric false false false false false false
 
-run_bitwidth_test "BASELINE_INT4" 4 4 4 4 4 4 4 4
-run_bitwidth_test "BASELINE_INT8" 8 8 8 8 8 8 8 8
-run_bitwidth_test "BASELINE_INT16" 16 16 16 16 16 16 16 16
-run_bitwidth_test "BASELINE_INT24" 24 24 24 24 24 24 24 24
+# 测试 8-16 位之间所有位宽
+for bits in "${BITWIDTHS_8_TO_16[@]}"; do
+    run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits
+done
 
 # ==================== 第二部分：GEMM 结果位宽测试 ====================
 echo ""
