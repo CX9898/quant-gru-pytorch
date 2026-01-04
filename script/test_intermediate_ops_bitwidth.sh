@@ -21,8 +21,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_DIR/include/quantize_bitwidth_config.h"
 BUILD_DIR="$PROJECT_DIR/build"
 
-# 保存原始配置
-cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+# 保存原始配置内容（不创建备份文件）
+ORIGINAL_CONFIG=$(cat "$CONFIG_FILE")
 
 # 结果文件
 RESULT_FILE="$PROJECT_DIR/test_intermediate_ops_results.txt"
@@ -282,19 +282,20 @@ if [ ! -d "$BUILD_DIR" ]; then
 fi
 
 # 位宽选项
-BITWIDTHS=(8 16)
+BITWIDTHS_STANDARD=(8 16)
+BITWIDTHS_EXTENDED=(4 10 12 24)
 SYMMETRICS=(false true)
 
 # 计算总测试数
-# 第一部分：基准测试 (2)
+# 第一部分：基准测试 (4: 4/8/16/24位)
 # 第二部分：GEMM 结果位宽 (4)
 # 第三部分：偏置位宽 (4)
-# 第四部分：中间运算位宽单独测试 (4)
-# 第五部分：关键路径测试 (8)
+# 第四部分：中间运算位宽单独测试 (8: 4/10/12/16/24位)
+# 第五部分：关键路径测试 (12)
 # 第六部分：对称配置测试 (64)
-# 第七部分：典型组合测试 (16)
-# 第八部分：全位宽组合测试 (256) - 可选，耗时较长
-TOTAL_TESTS=$((2 + 4 + 4 + 4 + 8 + 64 + 16))
+# 第七部分：典型组合测试 (20)
+# 第八部分：扩展位宽测试 (16)
+TOTAL_TESTS=$((4 + 4 + 4 + 8 + 12 + 64 + 20 + 16))
 
 echo "预计测试数: $TOTAL_TESTS"
 echo ""
@@ -308,8 +309,10 @@ echo "==================== 第一部分：基准测试 ====================" >> 
 # 设置默认对称配置
 set_all_symmetric false false false false false false
 
+run_bitwidth_test "BASELINE_INT4" 4 4 4 4 4 4 4 4
 run_bitwidth_test "BASELINE_INT8" 8 8 8 8 8 8 8 8
 run_bitwidth_test "BASELINE_INT16" 16 16 16 16 16 16 16 16
+run_bitwidth_test "BASELINE_INT24" 24 24 24 24 24 24 24 24
 
 # ==================== 第二部分：GEMM 结果位宽测试 ====================
 echo ""
@@ -318,8 +321,8 @@ echo ""
 echo "==================== 第二部分：GEMM 结果位宽测试 ====================" >> "$RESULT_FILE"
 
 # 其他固定为 8 位，测试 GEMM 结果的不同组合
-for Wx in "${BITWIDTHS[@]}"; do
-    for Rh in "${BITWIDTHS[@]}"; do
+for Wx in "${BITWIDTHS_STANDARD[@]}"; do
+    for Rh in "${BITWIDTHS_STANDARD[@]}"; do
         config_name="GEMM_Wx${Wx}_Rh${Rh}"
         run_bitwidth_test "$config_name" $Wx $Rh 8 8 8 8 8 8
     done
@@ -332,8 +335,8 @@ echo ""
 echo "==================== 第三部分：偏置位宽测试 ====================" >> "$RESULT_FILE"
 
 # 其他固定为 8 位，测试偏置的不同组合
-for bx in "${BITWIDTHS[@]}"; do
-    for br in "${BITWIDTHS[@]}"; do
+for bx in "${BITWIDTHS_STANDARD[@]}"; do
+    for br in "${BITWIDTHS_STANDARD[@]}"; do
         config_name="BIAS_bx${bx}_br${br}"
         run_bitwidth_test "$config_name" 8 8 $bx $br 8 8 8 8
     done
@@ -345,10 +348,14 @@ echo "==================== 第四部分：中间运算位宽单独测试 =======
 echo ""
 echo "==================== 第四部分：中间运算位宽单独测试 ====================" >> "$RESULT_FILE"
 
-# 每个中间算子单独升级到 16 位
+# 每个中间算子单独升级到不同位宽
+run_bitwidth_test "INTER_Rh_add_br_4" 8 8 8 8 4 8 8 8
 run_bitwidth_test "INTER_Rh_add_br_16" 8 8 8 8 16 8 8 8
+run_bitwidth_test "INTER_rRh_4" 8 8 8 8 8 4 8 8
 run_bitwidth_test "INTER_rRh_16" 8 8 8 8 8 16 8 8
+run_bitwidth_test "INTER_old_contrib_4" 8 8 8 8 8 8 4 8
 run_bitwidth_test "INTER_old_contrib_16" 8 8 8 8 8 8 16 8
+run_bitwidth_test "INTER_new_contrib_4" 8 8 8 8 8 8 8 4
 run_bitwidth_test "INTER_new_contrib_16" 8 8 8 8 8 8 8 16
 
 # ==================== 第五部分：关键路径位宽测试 ====================
@@ -380,6 +387,18 @@ run_bitwidth_test "PATH_GEMM16_OUTPUT16" 16 16 8 8 8 8 16 16
 
 # 全链路高精度
 run_bitwidth_test "PATH_FULL_HIGH_PREC" 16 16 16 16 16 16 16 16
+
+# 扩展：低位宽路径测试
+run_bitwidth_test "PATH_GEMM4_INTER8" 4 4 4 4 8 8 8 8
+
+# 扩展：12位路径测试
+run_bitwidth_test "PATH_GEMM12_INTER12" 12 12 12 12 12 12 12 12
+
+# 扩展：24位高精度路径测试
+run_bitwidth_test "PATH_GEMM24_INTER24" 24 24 24 24 24 24 24 24
+
+# 扩展：混合位宽测试
+run_bitwidth_test "PATH_GEMM10_INTER16" 10 10 10 10 16 16 16 16
 
 # ==================== 第六部分：对称配置测试 ====================
 echo ""
@@ -443,6 +462,12 @@ TYPICAL_CONFIGS=(
     "16 8 16 8 8 8 16 16 false false false false false false WX_OUTPUT_16"
     "8 8 16 16 16 16 16 16 false false false false false false BIAS_INTER_16"
     "16 16 8 8 16 16 16 16 false false false false false false GEMM16_INTER16"
+    
+    # 扩展位宽组合测试
+    "4 4 4 4 8 8 8 8 false false false false false false LOW4_INTER8"
+    "10 10 10 10 10 10 10 10 false false false false false false FULL10"
+    "12 12 12 12 12 12 12 12 false false false false false false FULL12"
+    "24 24 24 24 24 24 24 24 false false false false false false FULL24"
 )
 
 for config in "${TYPICAL_CONFIGS[@]}"; do
@@ -452,8 +477,7 @@ for config in "${TYPICAL_CONFIGS[@]}"; do
 done
 
 # 恢复原始配置
-cp "$CONFIG_FILE.backup" "$CONFIG_FILE"
-rm -f "$CONFIG_FILE.backup"
+echo "$ORIGINAL_CONFIG" > "$CONFIG_FILE"
 echo ""
 echo "原始配置已恢复"
 

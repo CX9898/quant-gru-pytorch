@@ -12,8 +12,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_DIR/include/quantize_bitwidth_config.h"
 BUILD_DIR="$PROJECT_DIR/build"
 
-# 保存原始配置
-cp "$CONFIG_FILE" "$CONFIG_FILE.backup"
+# 保存原始配置内容（不创建备份文件）
+ORIGINAL_CONFIG=$(cat "$CONFIG_FILE")
 
 # 结果文件
 RESULT_FILE="$PROJECT_DIR/test_sigmoid_results_full.txt"
@@ -179,33 +179,34 @@ run_test() {
     echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,$mse,$cos" >> "$CSV_FILE"
 }
 
-# ==================== 第一部分：所有64种位宽配置（对称使用默认值 false）====================
+# ==================== 第一部分：标准64种位宽配置（对称使用默认值 false）====================
 echo ""
-echo "==================== 第一部分：所有64种激活位宽配置 ===================="
+echo "==================== 第一部分：标准64种激活位宽配置 (8/16位) ===================="
 echo ""
-echo "==================== 第一部分：所有64种激活位宽配置 ====================" >> "$RESULT_FILE"
+echo "==================== 第一部分：标准64种激活位宽配置 ====================" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
+# 位宽选项
+BITWIDTHS_STANDARD=(8 16)
+BITWIDTHS_EXTENDED=(4 10 12 24)
+
 # 计算总测试数
-# 64种位宽配置 + 64种对称配置（使用最佳位宽）+ 16种典型组合
-TOTAL_TESTS=$((64 + 64 + 16))
+# 标准64种位宽配置 + 扩展位宽测试(约30种) + 64种对称配置（使用最佳位宽）+ 16种典型组合
+TOTAL_TESTS=$((64 + 30 + 64 + 16))
 
 echo "预计总测试数: $TOTAL_TESTS"
 echo ""
 
-# 位宽选项
-BITWIDTHS=(8 16)
-
 # 设置默认对称配置（全部非对称）
 modify_symmetric false false false false false false
 
-# 枚举所有64种位宽配置
-for z_pre in "${BITWIDTHS[@]}"; do
-    for z_out in "${BITWIDTHS[@]}"; do
-        for r_pre in "${BITWIDTHS[@]}"; do
-            for r_out in "${BITWIDTHS[@]}"; do
-                for g_pre in "${BITWIDTHS[@]}"; do
-                    for g_out in "${BITWIDTHS[@]}"; do
+# 枚举所有64种标准位宽配置 (8/16位)
+for z_pre in "${BITWIDTHS_STANDARD[@]}"; do
+    for z_out in "${BITWIDTHS_STANDARD[@]}"; do
+        for r_pre in "${BITWIDTHS_STANDARD[@]}"; do
+            for r_out in "${BITWIDTHS_STANDARD[@]}"; do
+                for g_pre in "${BITWIDTHS_STANDARD[@]}"; do
+                    for g_out in "${BITWIDTHS_STANDARD[@]}"; do
                         config_name="BW_z${z_pre}${z_out}_r${r_pre}${r_out}_g${g_pre}${g_out}"
                         modify_bitwidth $z_pre $z_out $r_pre $r_out $g_pre $g_out
                         run_test "$config_name" $z_pre $z_out $r_pre $r_out $g_pre $g_out false false false false false false
@@ -215,6 +216,74 @@ for z_pre in "${BITWIDTHS[@]}"; do
         done
     done
 done
+
+# ==================== 第1.5部分：扩展位宽配置测试 ====================
+echo ""
+echo "==================== 第1.5部分：扩展位宽配置 (4/10/12/24位) ===================="
+echo ""
+echo "==================== 第1.5部分：扩展位宽配置 ====================" >> "$RESULT_FILE"
+echo "" >> "$RESULT_FILE"
+
+# 低位宽测试 (4位)
+for gate_bits in 4 8 16; do
+    config_name="BW_LOW4_gate${gate_bits}"
+    modify_bitwidth 4 4 4 4 $gate_bits $gate_bits
+    run_test "$config_name" 4 4 4 4 $gate_bits $gate_bits false false false false false false
+done
+
+# 非标准位宽测试 (10位)
+for gate_bits in 8 10 16; do
+    config_name="BW_MID10_gate${gate_bits}"
+    modify_bitwidth 10 10 10 10 $gate_bits $gate_bits
+    run_test "$config_name" 10 10 10 10 $gate_bits $gate_bits false false false false false false
+done
+
+# 12位位宽测试
+for gate_bits in 8 12 16; do
+    config_name="BW_MID12_gate${gate_bits}"
+    modify_bitwidth 12 12 12 12 $gate_bits $gate_bits
+    run_test "$config_name" 12 12 12 12 $gate_bits $gate_bits false false false false false false
+done
+
+# 高位宽测试 (24位)
+for gate_bits in 16 24; do
+    config_name="BW_HIGH24_gate${gate_bits}"
+    modify_bitwidth 24 24 24 24 $gate_bits $gate_bits
+    run_test "$config_name" 24 24 24 24 $gate_bits $gate_bits false false false false false false
+done
+
+# 混合扩展位宽测试
+# z/r 用 4 位，g 用 16 位
+modify_bitwidth 4 4 4 4 16 16
+run_test "BW_ZR4_G16" 4 4 4 4 16 16 false false false false false false
+
+# z/r 用 10 位，g 用 8 位
+modify_bitwidth 10 10 10 10 8 8
+run_test "BW_ZR10_G8" 10 10 10 10 8 8 false false false false false false
+
+# z/r 用 12 位，g 用 12 位
+modify_bitwidth 12 12 12 12 12 12
+run_test "BW_FULL12" 12 12 12 12 12 12 false false false false false false
+
+# 预激活高精度，输出低精度
+modify_bitwidth 16 8 16 8 16 8
+run_test "BW_PRE16_OUT8" 16 8 16 8 16 8 false false false false false false
+
+# 预激活低精度，输出高精度
+modify_bitwidth 8 16 8 16 8 16
+run_test "BW_PRE8_OUT16" 8 16 8 16 8 16 false false false false false false
+
+# 4-8-16 渐进位宽
+modify_bitwidth 4 8 4 8 8 16
+run_test "BW_PROGRESSIVE_4_8_16" 4 8 4 8 8 16 false false false false false false
+
+# 全 4 位极限测试
+modify_bitwidth 4 4 4 4 4 4
+run_test "BW_FULL4" 4 4 4 4 4 4 false false false false false false
+
+# 全 24 位高精度测试
+modify_bitwidth 24 24 24 24 24 24
+run_test "BW_FULL24" 24 24 24 24 24 24 false false false false false false
 
 # ==================== 第二部分：所有64种对称配置（使用全16位位宽）====================
 echo ""
@@ -298,8 +367,7 @@ for config in "${TYPICAL_CONFIGS[@]}"; do
 done
 
 # 恢复原始配置
-cp "$CONFIG_FILE.backup" "$CONFIG_FILE"
-rm -f "$CONFIG_FILE.backup"
+echo "$ORIGINAL_CONFIG" > "$CONFIG_FILE"
 echo ""
 echo "原始配置已恢复"
 
