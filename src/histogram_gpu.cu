@@ -16,6 +16,7 @@
 #include "histogram_gpu.cuh"
 #include "histogram_collector.h"  // for Histogram struct and get_minimum_scale
 #include "parallel_algorithm.h"   // for dev::fill_n
+#include "gru_quantization_ranges.h"  // for GRUQuantizationRanges
 
 // ============================================================================
 // CUDA Kernels
@@ -271,6 +272,59 @@ __global__ void compute_batch_minmax_kernel(
     s_max[threadIdx.x] = local_max;
     __syncthreads();
     
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            s_min[threadIdx.x] = fminf(s_min[threadIdx.x], s_min[threadIdx.x + stride]);
+            s_max[threadIdx.x] = fmaxf(s_max[threadIdx.x], s_max[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    
+    if (threadIdx.x == 0) {
+        mins[arr_idx] = s_min[0];
+        maxs[arr_idx] = s_max[0];
+    }
+}
+
+/**
+ * @brief 批量计算连续存储的多个数组的 min/max
+ *
+ * 数据布局: data[num_arrays * array_size]（连续存储）
+ * 每个 block 处理一个数组
+ * 用于 per-step EMA 场景
+ */
+__global__ void compute_contiguous_batch_minmax_kernel(
+    const float* __restrict__ data,    // 连续数据 [num_arrays, array_size]
+    float* __restrict__ mins,          // 输出 min [num_arrays]
+    float* __restrict__ maxs,          // 输出 max [num_arrays]
+    int array_size,                    // 每个数组的大小
+    int num_arrays) {                  // 数组数量
+    
+    const int arr_idx = blockIdx.x;
+    if (arr_idx >= num_arrays) return;
+    
+    // 定位到当前数组的起始位置
+    const float* my_data = data + arr_idx * array_size;
+    
+    extern __shared__ float shared_mem[];
+    float* s_min = shared_mem;
+    float* s_max = shared_mem + blockDim.x;
+    
+    float local_min = FLT_MAX;
+    float local_max = -FLT_MAX;
+    
+    // 每个线程处理多个元素
+    for (int i = threadIdx.x; i < array_size; i += blockDim.x) {
+        float val = my_data[i];
+        local_min = fminf(local_min, val);
+        local_max = fmaxf(local_max, val);
+    }
+    
+    s_min[threadIdx.x] = local_min;
+    s_max[threadIdx.x] = local_max;
+    __syncthreads();
+    
+    // Block-level reduction
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (threadIdx.x < stride) {
             s_min[threadIdx.x] = fminf(s_min[threadIdx.x], s_min[threadIdx.x + stride]);
@@ -1370,6 +1424,270 @@ void compute_sqnr_per_channel_gpu(
     }
 }
 
+// ============================================================================
+// GPU MINMAX 量化范围计算实现
+// ============================================================================
+
+void compute_minmax_dev(const float* data_dev, size_t size, float& min_out, float& max_out,
+                        cudaStream_t stream) {
+    if (size == 0) {
+        min_out = 0.0f;
+        max_out = 0.0f;
+        return;
+    }
+    
+    // 直接使用已有的 compute_minmax 函数
+    compute_minmax(data_dev, size, min_out, max_out, stream);
+}
+
+void compute_minmax_per_step_ema_gpu(const float* data_dev, int steps, int step_size,
+                                      float& min_out, float& max_out, float decay,
+                                      cudaStream_t stream) {
+    if (steps <= 0 || step_size <= 0) return;
+    
+    // 分配 GPU 端 min/max 数组
+    dev::vector<float> all_mins(steps);
+    dev::vector<float> all_maxs(steps);
+    
+    // 一次 kernel 调用计算所有时间步的 min/max
+    {
+        const int threads = 256;
+        const int blocks = steps;
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_contiguous_batch_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, all_mins.data(), all_maxs.data(), step_size, steps);
+    }
+    cudaStreamSynchronize(stream);
+    
+    // 拷贝到 CPU
+    std::vector<float> h_mins(steps), h_maxs(steps);
+    cudaMemcpy(h_mins.data(), all_mins.data(), steps * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_maxs.data(), all_maxs.data(), steps * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // CPU 端做 EMA 融合（计算量很小）
+    bool initialized = !(min_out == std::numeric_limits<float>::max() && 
+                         max_out == std::numeric_limits<float>::lowest());
+    
+    for (int t = 0; t < steps; ++t) {
+        if (!initialized) {
+            min_out = h_mins[t];
+            max_out = h_maxs[t];
+            initialized = true;
+        } else {
+            min_out = decay * min_out + (1.0f - decay) * h_mins[t];
+            max_out = decay * max_out + (1.0f - decay) * h_maxs[t];
+        }
+    }
+}
+
+void compute_minmax_per_channel_gpu(const float* data_dev, size_t input_size, size_t channel_size,
+                                     std::vector<float>& min_out, std::vector<float>& max_out,
+                                     cudaStream_t stream) {
+    if (input_size == 0 || channel_size == 0) return;
+    
+    // 分配 GPU 端缓冲区
+    dev::vector<float> d_mins(channel_size);
+    dev::vector<float> d_maxs(channel_size);
+    
+    // 批量计算所有 channel 的 min/max
+    {
+        const int threads = 256;
+        const int blocks = static_cast<int>(channel_size);
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_per_channel_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, d_mins.data(), d_maxs.data(), static_cast<int>(input_size),
+            static_cast<int>(channel_size));
+    }
+    cudaStreamSynchronize(stream);
+    
+    // 拷贝到 CPU
+    std::vector<float> h_mins(channel_size), h_maxs(channel_size);
+    cudaMemcpy(h_mins.data(), d_mins.data(), channel_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_maxs.data(), d_maxs.data(), channel_size * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // 更新输出（取并集）
+#pragma omp parallel for
+    for (size_t c = 0; c < channel_size; ++c) {
+        min_out[c] = std::min(min_out[c], h_mins[c]);
+        max_out[c] = std::max(max_out[c], h_maxs[c]);
+    }
+}
+
+void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t steps,
+                               size_t hidden_size, size_t batch_size,
+                               float& min_z_out, float& max_z_out,
+                               float& min_r_out, float& max_r_out,
+                               float& min_g_out, float& max_g_out,
+                               float& min_Rh_add_br, float& max_Rh_add_br,
+                               float& min_rRh, float& max_rRh,
+                               float& min_new_contrib, float& max_new_contrib,
+                               float& min_old_contrib, float& max_old_contrib,
+                               cudaStream_t stream) {
+    const size_t total_size = steps * batch_size * hidden_size;
+    if (total_size == 0) return;
+    
+    // 分配临时 GPU 缓冲区
+    dev::vector<float> z_out_dev(total_size);
+    dev::vector<float> r_out_dev(total_size);
+    dev::vector<float> g_out_dev(total_size);
+    dev::vector<float> Rh_add_br_dev(total_size);
+    dev::vector<float> rRh_dev(total_size);
+    dev::vector<float> new_contrib_dev(total_size);
+    dev::vector<float> old_contrib_dev(total_size);
+    
+    // 在 GPU 上提取并计算所有门值
+    const int threads = 256;
+    const int blocks = (total_size + threads - 1) / threads;
+    
+    extract_gate_values_kernel<<<blocks, threads, 0, stream>>>(
+        v_dev, h_dev, z_out_dev.data(), r_out_dev.data(), g_out_dev.data(), 
+        Rh_add_br_dev.data(), rRh_dev.data(), new_contrib_dev.data(), 
+        old_contrib_dev.data(), 
+        static_cast<int>(steps), static_cast<int>(batch_size), 
+        static_cast<int>(hidden_size));
+    
+    // 不需要同步，直接使用批量 kernel
+    
+    // 构建指针数组和大小数组（在 GPU 上）
+    const float* h_data_ptrs[7] = {
+        z_out_dev.data(), r_out_dev.data(), g_out_dev.data(),
+        Rh_add_br_dev.data(), rRh_dev.data(), 
+        new_contrib_dev.data(), old_contrib_dev.data()
+    };
+    size_t h_sizes[7] = {total_size, total_size, total_size, 
+                         total_size, total_size, total_size, total_size};
+    
+    // 拷贝到 GPU
+    dev::vector<const float*> d_data_ptrs(7);
+    dev::vector<size_t> d_sizes(7);
+    dev::vector<float> d_mins(7);
+    dev::vector<float> d_maxs(7);
+    
+    cudaMemcpyAsync(d_data_ptrs.data(), h_data_ptrs, 7 * sizeof(float*), 
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_sizes.data(), h_sizes, 7 * sizeof(size_t), 
+                    cudaMemcpyHostToDevice, stream);
+    
+    // 一次 kernel 调用计算所有 7 个数组的 minmax
+    {
+        const int threads = 256;
+        const int blocks = 7;  // 7 个数组
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_batch_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            d_data_ptrs.data(), d_sizes.data(), d_mins.data(), d_maxs.data(), 7);
+    }
+    
+    // 拷贝结果回 CPU
+    float mins[7], maxs[7];
+    cudaMemcpy(mins, d_mins.data(), 7 * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(maxs, d_maxs.data(), 7 * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // 更新输出范围（取并集）
+    auto update_range = [](float& min_out, float& max_out, float new_min, float new_max) {
+        min_out = std::min(min_out, new_min);
+        max_out = std::max(max_out, new_max);
+    };
+    
+    update_range(min_z_out, max_z_out, mins[0], maxs[0]);
+    update_range(min_r_out, max_r_out, mins[1], maxs[1]);
+    update_range(min_g_out, max_g_out, mins[2], maxs[2]);
+    update_range(min_Rh_add_br, max_Rh_add_br, mins[3], maxs[3]);
+    update_range(min_rRh, max_rRh, mins[4], maxs[4]);
+    update_range(min_new_contrib, max_new_contrib, mins[5], maxs[5]);
+    update_range(min_old_contrib, max_old_contrib, mins[6], maxs[6]);
+}
+
 }  // namespace gpu_hist
+
+// ============================================================================
+// GPU MINMAX 量化范围更新实现
+// ============================================================================
+
+void updateGRUQuantizationRangesGPU(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float* W, const float* R, const float* bx, const float* br,
+    const float* x, const float* h, const float* v,
+    const float* tmp_Wx, const float* tmp_Rh,
+    const float* z_pres, const float* r_pres, const float* g_pres,
+    size_t pres_size,
+    GRUQuantizationRanges& quant_ranges,
+    cudaStream_t stream) {
+    
+    const int NH = batch_size * hidden_size;
+    const int NI = batch_size * input_size;
+    const int channel_size = hidden_size * 3;
+    
+    // 设置 hidden_ 维度（确保 per-channel 向量已分配）
+    if (quant_ranges.hidden_ != hidden_size) {
+        quant_ranges.reset(hidden_size);
+    }
+    
+    // =====================================================================
+    // 1. 标量范围：使用 GPU minmax + EMA
+    // =====================================================================
+    
+    // 输入 x 的范围（分时间步 EMA）
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_, 0.9f, stream);
+    
+    // 隐藏状态 h 的范围（跳过 h0）
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_, 0.9f, stream);
+    
+    // Wx 结果的范围
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        tmp_Wx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_, 0.9f, stream);
+    
+    // Rh 结果的范围
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        tmp_Rh, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, 0.9f, stream);
+    
+    // z 门预激活值
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        z_pres, time_steps, NH, quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, 0.9f, stream);
+    
+    // r 门预激活值
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        r_pres, time_steps, NH, quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, 0.9f, stream);
+    
+    // g 门预激活值
+    gpu_hist::compute_minmax_per_step_ema_gpu(
+        g_pres, time_steps, NH, quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, 0.9f, stream);
+    
+    // =====================================================================
+    // 2. Per-channel 范围：使用 GPU 批量 kernel
+    // =====================================================================
+    
+    // 权重 W [I, H*3]
+    gpu_hist::compute_minmax_per_channel_gpu(
+        W, input_size, channel_size, quant_ranges.min_W_, quant_ranges.max_W_, stream);
+    
+    // 权重 R [H, H*3]
+    gpu_hist::compute_minmax_per_channel_gpu(
+        R, hidden_size, channel_size, quant_ranges.min_R_, quant_ranges.max_R_, stream);
+    
+    // 偏置 bx [1, H*3]
+    gpu_hist::compute_minmax_per_channel_gpu(
+        bx, 1, channel_size, quant_ranges.min_bx_, quant_ranges.max_bx_, stream);
+    
+    // 偏置 br [1, H*3]
+    gpu_hist::compute_minmax_per_channel_gpu(
+        br, 1, channel_size, quant_ranges.min_br_, quant_ranges.max_br_, stream);
+    
+    // =====================================================================
+    // 3. 从 v 提取中间值范围：使用 GPU kernel
+    // =====================================================================
+    
+    gpu_hist::update_ranges_from_v_gpu(
+        h, v, time_steps, hidden_size, batch_size,
+        quant_ranges.min_z_out_, quant_ranges.max_z_out_,
+        quant_ranges.min_r_out_, quant_ranges.max_r_out_,
+        quant_ranges.min_g_out_, quant_ranges.max_g_out_,
+        quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
+        quant_ranges.min_rRh_, quant_ranges.max_rRh_,
+        quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_,
+        quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_,
+        stream);
+}
 
 

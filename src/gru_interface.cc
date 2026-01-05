@@ -709,8 +709,8 @@ void forwardWithCalibrationGPU(
     // ========== 后处理（根据校准方法分发）==========
     
     if (calib_method == CalibrationMethod::MINMAX) {
-        // MINMAX: 原地更新量化范围
-        updateGRUQuantizationRanges(
+        // MINMAX: 使用 GPU 版本原地更新量化范围（避免大量 D2H 传输）
+        updateGRUQuantizationRangesGPU(
             time_steps, batch_size, input_size, hidden_size,
             W, R, bx, br, x, h, v,
             tmp_Wx_dev.data(), tmp_Rh_dev.data(),

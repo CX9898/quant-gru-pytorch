@@ -260,19 +260,22 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
 }
 
 // =====================================================================
-// MINMAX 量化范围更新函数
+// MINMAX 量化范围更新函数（CPU 版本，需要 GPU→CPU 数据传输）
 // =====================================================================
 
-/// 根据前向传播的中间数据更新量化范围
+/// 根据前向传播的中间数据更新量化范围（CPU 版本）
+/// 注意：此函数会将 GPU 数据拷贝到 CPU 进行计算，可能有性能开销
+/// 推荐使用 GPU 版本 updateGRUQuantizationRangesGPU()
+/// 
 /// 输入:
 ///   time_steps, batch_size, input_size, hidden_size: 维度参数
-///   W, R, bx, br: 权重和偏置
-///   x: [T, B, I] 输入序列
-///   h: [(T+1), B, H] 隐藏状态
-///   v: [T, B, H*4] 中间值
-///   tmp_Wx: [T, B, H*3] Wx 计算结果
-///   tmp_Rh: [T, B, H*3] Rh 计算结果
-///   z_pres, r_pres, g_pres: [T*B*H] 预激活值
+///   W, R, bx, br: 权重和偏置（GPU 端）
+///   x: [T, B, I] 输入序列（GPU 端）
+///   h: [(T+1), B, H] 隐藏状态（GPU 端）
+///   v: [T, B, H*4] 中间值（GPU 端）
+///   tmp_Wx: [T, B, H*3] Wx 计算结果（GPU 端）
+///   tmp_Rh: [T, B, H*3] Rh 计算结果（GPU 端）
+///   z_pres, r_pres, g_pres: [T*B*H] 预激活值（GPU 端）
 ///   pres_size: 预激活值数组大小
 /// 输出:
 ///   quant_ranges: 更新后的量化范围（原地更新）
