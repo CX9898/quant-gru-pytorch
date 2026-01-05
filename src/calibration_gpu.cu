@@ -13,7 +13,7 @@
 #include <cmath>
 #include <limits>
 
-#include "histogram_gpu.cuh"
+#include "calibration_gpu.cuh"
 #include "histogram_collector.h"  // for Histogram struct and get_minimum_scale
 #include "parallel_algorithm.h"   // for dev::fill_n
 #include "gru_quantization_ranges.h"  // for GRUQuantizationRanges

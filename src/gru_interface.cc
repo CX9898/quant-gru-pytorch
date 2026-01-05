@@ -14,7 +14,7 @@
 #include "gru_quant_cpu.h"
 #include "histogram_calibration_utils.h"
 #include "histogram_collector.h"
-#include "histogram_gpu.cuh"
+#include "calibration_gpu.cuh"
 #include "parallel_algorithm.h"
 #include "pot_sqnr_calibrator.h"
 #include "quantize_ops_helper.h"

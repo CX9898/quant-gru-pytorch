@@ -7,7 +7,7 @@
 #include "gru_interface.h"
 #include "gru_quantization_ranges.h"
 #include "histogram_collector.h"
-#include "histogram_gpu.cuh"
+#include "calibration_gpu.cuh"
 #include "quantize_ops_helper.h"
 
 // 全局 cublas handle

@@ -14,7 +14,7 @@
 #include "dev_vector.h"
 #include "gru_interface.h"
 #include "histogram_collector.h"
-#include "histogram_gpu.cuh"
+#include "calibration_gpu.cuh"
 #include "quantized_unit_testing.cuh"
 #include "tensor_utils.h"
 

@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "histogram_collector.h"
-#include "histogram_gpu.cuh"
+#include "calibration_gpu.cuh"
 
 // =====================================================================
 // 模板辅助函数（从 GPU 数据收集直方图）
