@@ -397,8 +397,7 @@ __global__ void build_per_channel_histogram_kernel(
 
 namespace gpu_hist {
 
-void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val,
-                    cudaStream_t stream) {
+void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val) {
     if (size == 0) {
         min_val = 0;
         max_val = 0;
@@ -407,7 +406,7 @@ void compute_minmax(const float* data_dev, size_t size, float& min_val, float& m
 
     thrust::device_ptr<const float> data_ptr(data_dev);
     
-    // 使用 Thrust 计算 min/max
+    // 使用 Thrust 计算 min/max（同步操作，使用默认 stream）
     auto minmax_pair = thrust::minmax_element(thrust::device, data_ptr, data_ptr + size);
     
     // 拷贝结果到 Host
@@ -481,39 +480,32 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
         rRh_dev.data(), new_contrib_dev.data(), old_contrib_dev.data(), time_steps, batch_size,
         hidden_size);
 
-    // 等待 kernel 完成
+    // 等待 extract kernel 完成
     cudaStreamSynchronize(stream);
 
-    // 计算所有 7 个数组的 minmax
-    float mins[7], maxs[7];
-    const float* data_ptrs[7] = {z_out_dev.data(), r_out_dev.data(), g_out_dev.data(),
-                                  Rh_add_br_dev.data(), rRh_dev.data(), new_contrib_dev.data(),
-                                  old_contrib_dev.data()};
+    // 计算 minmax 并构建直方图
+    float min_val, max_val;
+
+    compute_minmax(z_out_dev.data(), total_size, min_val, max_val);
+    collectors.z_out_hist.collectWithKnownRange(z_out_dev.data(), total_size, min_val, max_val, stream);
     
-    for (int i = 0; i < 7; ++i) {
-        compute_minmax(data_ptrs[i], total_size, mins[i], maxs[i], stream);
-    }
-
-    // 用已知范围并行构建直方图
-    constexpr int NUM_STREAMS = 7;
-    cudaStream_t streams[NUM_STREAMS];
-    for (int i = 0; i < NUM_STREAMS; ++i) {
-        cudaStreamCreate(&streams[i]);
-    }
-
-    collectors.z_out_hist.collectWithKnownRange(z_out_dev.data(), total_size, mins[0], maxs[0], streams[0]);
-    collectors.r_out_hist.collectWithKnownRange(r_out_dev.data(), total_size, mins[1], maxs[1], streams[1]);
-    collectors.g_out_hist.collectWithKnownRange(g_out_dev.data(), total_size, mins[2], maxs[2], streams[2]);
-    collectors.Rh_add_br_g_hist.collectWithKnownRange(Rh_add_br_dev.data(), total_size, mins[3], maxs[3], streams[3]);
-    collectors.rRh_hist.collectWithKnownRange(rRh_dev.data(), total_size, mins[4], maxs[4], streams[4]);
-    collectors.new_contrib_hist.collectWithKnownRange(new_contrib_dev.data(), total_size, mins[5], maxs[5], streams[5]);
-    collectors.old_contrib_hist.collectWithKnownRange(old_contrib_dev.data(), total_size, mins[6], maxs[6], streams[6]);
-
-    // 等待所有 streams 完成
-    for (int i = 0; i < NUM_STREAMS; ++i) {
-        cudaStreamSynchronize(streams[i]);
-        cudaStreamDestroy(streams[i]);
-    }
+    compute_minmax(r_out_dev.data(), total_size, min_val, max_val);
+    collectors.r_out_hist.collectWithKnownRange(r_out_dev.data(), total_size, min_val, max_val, stream);
+    
+    compute_minmax(g_out_dev.data(), total_size, min_val, max_val);
+    collectors.g_out_hist.collectWithKnownRange(g_out_dev.data(), total_size, min_val, max_val, stream);
+    
+    compute_minmax(Rh_add_br_dev.data(), total_size, min_val, max_val);
+    collectors.Rh_add_br_g_hist.collectWithKnownRange(Rh_add_br_dev.data(), total_size, min_val, max_val, stream);
+    
+    compute_minmax(rRh_dev.data(), total_size, min_val, max_val);
+    collectors.rRh_hist.collectWithKnownRange(rRh_dev.data(), total_size, min_val, max_val, stream);
+    
+    compute_minmax(new_contrib_dev.data(), total_size, min_val, max_val);
+    collectors.new_contrib_hist.collectWithKnownRange(new_contrib_dev.data(), total_size, min_val, max_val, stream);
+    
+    compute_minmax(old_contrib_dev.data(), total_size, min_val, max_val);
+    collectors.old_contrib_hist.collectWithKnownRange(old_contrib_dev.data(), total_size, min_val, max_val, stream);
 }
 
 void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collectors,
@@ -655,7 +647,7 @@ void GPUHistogramCollector::collect(const float* data_dev, size_t size, cudaStre
 
     // 在 GPU 上计算 min/max
     float data_min, data_max;
-    gpu_hist::compute_minmax(data_dev, size, data_min, data_max, stream);
+    gpu_hist::compute_minmax(data_dev, size, data_min, data_max);
 
     // 处理特殊情况
     float minimum_scale = get_minimum_scale(config_.num_bins);
@@ -1437,7 +1429,7 @@ void compute_minmax_dev(const float* data_dev, size_t size, float& min_out, floa
     }
     
     // 直接使用已有的 compute_minmax 函数
-    compute_minmax(data_dev, size, min_out, max_out, stream);
+    compute_minmax(data_dev, size, min_out, max_out);
 }
 
 void compute_minmax_per_step_ema_gpu(const float* data_dev, int steps, int step_size,
@@ -1546,55 +1538,39 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
         static_cast<int>(steps), static_cast<int>(batch_size), 
         static_cast<int>(hidden_size));
     
-    // 不需要同步，直接使用批量 kernel
+    // 等待 extract kernel 完成
+    cudaStreamSynchronize(stream);
     
-    // 构建指针数组和大小数组（在 GPU 上）
-    const float* h_data_ptrs[7] = {
-        z_out_dev.data(), r_out_dev.data(), g_out_dev.data(),
-        Rh_add_br_dev.data(), rRh_dev.data(), 
-        new_contrib_dev.data(), old_contrib_dev.data()
-    };
-    size_t h_sizes[7] = {total_size, total_size, total_size, 
-                         total_size, total_size, total_size, total_size};
+    // 计算 minmax 并更新范围
+    float new_min, new_max;
     
-    // 拷贝到 GPU
-    dev::vector<const float*> d_data_ptrs(7);
-    dev::vector<size_t> d_sizes(7);
-    dev::vector<float> d_mins(7);
-    dev::vector<float> d_maxs(7);
+    compute_minmax(z_out_dev.data(), total_size, new_min, new_max);
+    min_z_out = std::min(min_z_out, new_min);
+    max_z_out = std::max(max_z_out, new_max);
     
-    cudaMemcpyAsync(d_data_ptrs.data(), h_data_ptrs, 7 * sizeof(float*), 
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_sizes.data(), h_sizes, 7 * sizeof(size_t), 
-                    cudaMemcpyHostToDevice, stream);
+    compute_minmax(r_out_dev.data(), total_size, new_min, new_max);
+    min_r_out = std::min(min_r_out, new_min);
+    max_r_out = std::max(max_r_out, new_max);
     
-    // 一次 kernel 调用计算所有 7 个数组的 minmax
-    {
-        const int threads = 256;
-        const int blocks = 7;  // 7 个数组
-        const size_t shared_mem = 2 * threads * sizeof(float);
-        compute_batch_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
-            d_data_ptrs.data(), d_sizes.data(), d_mins.data(), d_maxs.data(), 7);
-    }
+    compute_minmax(g_out_dev.data(), total_size, new_min, new_max);
+    min_g_out = std::min(min_g_out, new_min);
+    max_g_out = std::max(max_g_out, new_max);
     
-    // 拷贝结果回 CPU
-    float mins[7], maxs[7];
-    cudaMemcpy(mins, d_mins.data(), 7 * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(maxs, d_maxs.data(), 7 * sizeof(float), cudaMemcpyDeviceToHost);
+    compute_minmax(Rh_add_br_dev.data(), total_size, new_min, new_max);
+    min_Rh_add_br = std::min(min_Rh_add_br, new_min);
+    max_Rh_add_br = std::max(max_Rh_add_br, new_max);
     
-    // 更新输出范围（取并集）
-    auto update_range = [](float& min_out, float& max_out, float new_min, float new_max) {
-        min_out = std::min(min_out, new_min);
-        max_out = std::max(max_out, new_max);
-    };
+    compute_minmax(rRh_dev.data(), total_size, new_min, new_max);
+    min_rRh = std::min(min_rRh, new_min);
+    max_rRh = std::max(max_rRh, new_max);
     
-    update_range(min_z_out, max_z_out, mins[0], maxs[0]);
-    update_range(min_r_out, max_r_out, mins[1], maxs[1]);
-    update_range(min_g_out, max_g_out, mins[2], maxs[2]);
-    update_range(min_Rh_add_br, max_Rh_add_br, mins[3], maxs[3]);
-    update_range(min_rRh, max_rRh, mins[4], maxs[4]);
-    update_range(min_new_contrib, max_new_contrib, mins[5], maxs[5]);
-    update_range(min_old_contrib, max_old_contrib, mins[6], maxs[6]);
+    compute_minmax(new_contrib_dev.data(), total_size, new_min, new_max);
+    min_new_contrib = std::min(min_new_contrib, new_min);
+    max_new_contrib = std::max(max_new_contrib, new_max);
+    
+    compute_minmax(old_contrib_dev.data(), total_size, new_min, new_max);
+    min_old_contrib = std::min(min_old_contrib, new_min);
+    max_old_contrib = std::max(max_old_contrib, new_max);
 }
 
 }  // namespace gpu_hist
