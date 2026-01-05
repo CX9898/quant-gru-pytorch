@@ -425,7 +425,7 @@ class GRUFunction(torch.autograd.Function):
     GRU 自定义 autograd Function
     
     职责：
-        - forward: 权重格式转换 → 调用 gru_ops.forward_interface → 返回输出
+        - forward: 权重格式转换 → 调用 gru_ops.forward → 返回输出
         - backward: 梯度格式转换 → 调用 gru_ops.haste_gru_backward → 返回梯度
     """
 
@@ -479,7 +479,7 @@ class GRUFunction(torch.autograd.Function):
             quant_params = gru_ops.GRUQuantitativeParameters()
 
         # 调用 C++ 前向接口
-        output_full, v = gru_ops.forward_interface(
+        output_full, v = gru_ops.forward(
             is_training=is_training,
             is_quant=use_quantization,
             time_steps=time_steps,
@@ -782,48 +782,6 @@ class QuantGRU(nn.Module):
     def _use_histogram_collection(self) -> bool:
         """判断是否使用直方图收集(sqnr/percentile 都需要)"""
         return self.calibration_method in ('sqnr', 'percentile')
-
-    def _ensure_calibration_collectors(self, hidden_size: int, reverse: bool = False):
-        """
-        确保校准收集器已初始化(统一接口)
-        
-        根据 calibration_method 自动选择正确的收集器类型
-        """
-        use_histogram = self._use_histogram_collection()
-
-        if reverse:
-            if use_histogram:
-                if self.hist_collectors_reverse is None:
-                    self.hist_collectors_reverse = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
-            else:
-                if self.quant_ranges_reverse is None:
-                    self.quant_ranges_reverse = gru_ops.GRUQuantizationRanges(hidden_size)
-        else:
-            if use_histogram:
-                if self.hist_collectors is None:
-                    self.hist_collectors = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
-            else:
-                if self.quant_ranges is None:
-                    self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
-
-    def _get_calibration_args(self, reverse: bool = False) -> tuple:
-        """
-        获取校准参数(统一接口)
-        
-        Returns:
-            (hist_collectors, quant_ranges) - 根据校准方法返回正确的收集器
-        """
-        use_histogram = self._use_histogram_collection()
-        if reverse:
-            return (
-                self.hist_collectors_reverse if use_histogram else None,
-                self.quant_ranges_reverse if not use_histogram else None
-            )
-        else:
-            return (
-                self.hist_collectors if use_histogram else None,
-                self.quant_ranges if not use_histogram else None
-            )
 
     def _parse_initial_state(
             self,
@@ -1617,6 +1575,43 @@ class QuantGRU(nn.Module):
 
     # -------------------- 校准模式 forward --------------------
 
+    def _ensure_calibration_collector(self, hidden_size: int, reverse: bool = False):
+        """
+        确保校准收集器已初始化（统一接口）
+        
+        根据 calibration_method 自动选择并初始化正确的收集器类型
+        """
+        if self._use_histogram_collection():
+            # SQNR/Percentile: 使用直方图收集器
+            if reverse:
+                if self.hist_collectors_reverse is None:
+                    self.hist_collectors_reverse = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
+            else:
+                if self.hist_collectors is None:
+                    self.hist_collectors = gru_ops.GRUHistogramCollectors(hidden_size, num_bins=2048)
+        else:
+            # MINMAX: 使用量化范围收集器
+            if reverse:
+                if self.quant_ranges_reverse is None:
+                    self.quant_ranges_reverse = gru_ops.GRUQuantizationRanges(hidden_size)
+            else:
+                if self.quant_ranges is None:
+                    self.quant_ranges = gru_ops.GRUQuantizationRanges(hidden_size)
+
+    def _get_calibration_collectors(self, reverse: bool = False):
+        """
+        获取校准收集器（统一接口）
+        
+        Returns:
+            (quant_ranges, hist_collectors): 根据校准方法返回对应的收集器
+        """
+        if self._use_histogram_collection():
+            collectors = self.hist_collectors_reverse if reverse else self.hist_collectors
+            return None, collectors
+        else:
+            collectors = self.quant_ranges_reverse if reverse else self.quant_ranges
+            return collectors, None
+
     def _forward_with_calibration(
             self,
             input: torch.Tensor,
@@ -1625,7 +1620,7 @@ class QuantGRU(nn.Module):
         """
         带校准数据收集的前向传播
         
-        在 forward 过程中同时收集校准数据，避免额外的前向传播
+        在 forward 过程中同时收集校准数据，校准数据通过指针参数原地累积
         
         Note: batch_first 转换已在 forward() 中统一处理
         """
@@ -1643,44 +1638,41 @@ class QuantGRU(nn.Module):
             for buffer in self.buffers():
                 buffer.data = buffer.data.to(device)
 
-        # 初始状态处理(统一接口)
+        # 初始状态处理
         h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
-        # 初始化校准收集器(统一接口)
-        self._ensure_calibration_collectors(hidden_size, reverse=False)
-        hist_collectors, quant_ranges = self._get_calibration_args(reverse=False)
+        # 初始化校准收集器
+        self._ensure_calibration_collector(hidden_size, reverse=False)
+        quant_ranges, hist_collectors = self._get_calibration_collectors(reverse=False)
 
-        # 准备权重(使用统一工具函数)
+        # 准备权重
         W, R, bx, br = convert_weights_to_haste_format(
             self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
             self.bias_hh_l0 if self.bias else None,
             self.hidden_size, device
         )
-        dummy_quant_params = gru_ops.GRUQuantitativeParameters()
 
-        # 前向传播 + 校准数据收集(统一的 forward_interface 调用)
-        h, v = gru_ops.forward_interface(
+        # 前向传播 + 校准数据收集（原地累积）
+        h, v = gru_ops.forward_calibrate(
             is_training=True,
-            is_quant=False,
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
             W=W, R=R, bx=bx, br=br, x=input,
             h0=h0_forward if h0_forward is not None else torch.empty(0, device=device),
-            quant_params=dummy_quant_params,
             calib_method=self.calibration_method,
-            hist_collectors=hist_collectors,
-            quant_ranges=quant_ranges
+            quant_ranges=quant_ranges,
+            hist_collectors=hist_collectors
         )
 
-        # 提取输出: h 形状 [T+1, B, H]，输出取 h[1:] 即 [T, B, H]
-        output_forward = h[1:].contiguous()  # [T, B, H]
-        h_n_forward = h[-1:].unsqueeze(0) if h.dim() == 2 else h[-1:].contiguous()  # [1, B, H]
+        # 提取输出
+        output_forward = h[1:].contiguous()
+        h_n_forward = h[-1:].unsqueeze(0) if h.dim() == 2 else h[-1:].contiguous()
 
         if self.bidirectional:
-            # 初始化反向校准收集器(统一接口)
-            self._ensure_calibration_collectors(hidden_size, reverse=True)
-            hist_collectors_rev, quant_ranges_rev = self._get_calibration_args(reverse=True)
+            # 初始化反向校准收集器
+            self._ensure_calibration_collector(hidden_size, reverse=True)
+            quant_ranges_rev, hist_collectors_rev = self._get_calibration_collectors(reverse=True)
 
             W_rev, R_rev, bx_rev, br_rev = convert_weights_to_haste_format(
                 self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
@@ -1690,29 +1682,25 @@ class QuantGRU(nn.Module):
             )
             input_reversed = input.flip(0).contiguous()
 
-            h_rev, v_rev = gru_ops.forward_interface(
+            h_rev, v_rev = gru_ops.forward_calibrate(
                 is_training=True,
-                is_quant=False,
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W=W_rev, R=R_rev, bx=bx_rev, br=br_rev, x=input_reversed,
                 h0=h0_reverse if h0_reverse is not None else torch.empty(0, device=device),
-                quant_params=dummy_quant_params,
                 calib_method=self.calibration_method,
-                hist_collectors=hist_collectors_rev,
-                quant_ranges=quant_ranges_rev
+                quant_ranges=quant_ranges_rev,
+                hist_collectors=hist_collectors_rev
             )
 
-            # 提取反向输出(已翻转)
-            output_reverse = h_rev[1:].flip(0).contiguous()  # [T, B, H]
-            h_n_reverse = h_rev[-1:].contiguous()  # [1, B, H]
+            output_reverse = h_rev[1:].flip(0).contiguous()
+            h_n_reverse = h_rev[-1:].contiguous()
         else:
             output_reverse, h_n_reverse = None, None
 
-        # 标记量化参数需要更新（校准数据已收集）
+        # 标记量化参数需要更新
         self._quant_params_dirty = True
 
-        # 合并双向输出(统一接口)
         return self._combine_bidirectional_outputs(
             output_forward, h_n_forward, output_reverse, h_n_reverse
         )

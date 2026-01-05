@@ -18,6 +18,7 @@
 
 #include <vector>
 
+#include "calibration_utils.h"
 #include "gru.h"
 #include "gru_quant.h"
 #include "gru_quantization_ranges.h"
@@ -180,39 +181,23 @@ void hasteGRUForward(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v);
 
-// 统一前向传播接口（根据 is_quant 和 calib_method 自动选择实现）
-// calib_method: 校准方法，NONE 表示正常推理
+// 统一前向传播接口（推理/训练）
+// 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
 void forwardInterface(
     bool is_training, bool is_quant,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bx, const float *br, const float *x,
     const float *h0,
     const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
-    CalibrationMethod calib_method,
-    GRUHistogramCollectors *hist_collectors,
-    GRUQuantizationRanges *quant_ranges,
-    float *h, float *v);
-
-// 带校准的前向传播（内部使用，职责分明）
-// 专门用于校准模式，会设置 calibration_mode 并收集数据
-void forwardWithCalibration(
-    bool is_training,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
-    const float *h0,
-    const cublasHandle_t &g_blas_handle,
-    CalibrationMethod calib_method,
-    GRUHistogramCollectors *hist_collectors,
-    GRUQuantizationRanges *quant_ranges,
     float *h, float *v);
 
 // =====================================================================
-// GPU 加速直方图收集接口
+// 统一校准前向传播（GPU）
 // =====================================================================
 
-// GPU 加速版本：带校准的前向传播
-// 直方图在 GPU 上直接构建，避免大量 GPU->CPU 数据传输
-// 注意：小数据量时可能不如 CPU 版本快，建议数据量 > 100K 时使用
+// 根据 calib_method 自动选择 MINMAX 或 Histogram 校准
+// - MINMAX: 使用 quant_ranges（原地累积更新）
+// - SQNR/Percentile: 使用 gpu_hist_collectors（原地累积更新）
 void forwardWithCalibrationGPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
@@ -220,8 +205,19 @@ void forwardWithCalibrationGPU(
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     CalibrationMethod calib_method,
-    GRUGPUHistogramCollectors *gpu_hist_collectors,
-    GRUQuantizationRanges *quant_ranges,
+    GRUQuantizationRanges *quant_ranges,              // MINMAX 时必须非空
+    GRUGPUHistogramCollectors *gpu_hist_collectors,   // SQNR/Percentile 时必须非空
+    float *h, float *v);
+
+// CPU 直方图收集（用于性能对比）
+// 前向传播在 GPU 上执行，直方图收集在 CPU 上执行
+void forwardWithHistogramCPU(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *h0,
+    const cublasHandle_t &g_blas_handle,
+    GRUHistogramCollectors *hist_collectors,
     float *h, float *v);
 
 // 将 GPU 直方图收集器转换为 CPU 版本
@@ -234,6 +230,13 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
     bool verbose = false);
+
+// =====================================================================
+// MINMAX 范围更新接口
+// =====================================================================
+// 
+// updateGRUQuantizationRanges 定义在 include/calibration_utils.h 中
+// 此处只是为了 API 文档完整性而保留注释
 
 // =====================================================================
 // 反向传播接口

@@ -396,36 +396,26 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histogram
     return py_params;
 }
 
-// forwardInterface 的包装函数（统一接口，默认使用 GPU 加速直方图收集）
-// 支持校准模式：calib_method 指定校准方式（字符串: 'none', 'minmax', 'sqnr', 'percentile'）
-std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
-    bool is_training,  // 是否开启训练模式，true为训练，false为推理
-    bool is_quant, int time_steps, int batch_size, int input_size, int hidden_size,
+// =====================================================================
+// forward: 正常前向传播（推理/训练）
+// =====================================================================
+// 返回: (h, v)
+//   h: [T+1, B, H] 隐藏状态序列（包含初始状态）
+//   v: [T, B, H*4] 中间值（训练时需要，推理时可忽略）
+std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
+    bool is_training,  // 是否开启训练模式
+    bool is_quant,     // 是否使用量化推理
+    int time_steps, int batch_size, int input_size, int hidden_size,
     const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
-    const GRUQuantitativeParametersPy &quant_params,
-    const std::string &calib_method_str = "none",  // 校准方法字符串
-    GRUHistogramCollectorsPy *hist_collectors = nullptr,  // 直方图收集器（SQNR/Percentile）
-    GRUQuantizationRangesPy *quant_ranges = nullptr) {  // 量化范围（MINMAX）
+    const GRUQuantitativeParametersPy &quant_params) {
     
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
     TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-
-    // 字符串转枚举（内部处理）
-    CalibrationMethod calib_method = stringToCalibMethod(calib_method_str);
-    
-    // 验证校准参数
-    if (calib_method == CalibrationMethod::MINMAX) {
-        TORCH_CHECK(quant_ranges != nullptr, "quant_ranges is required for MINMAX calibration");
-    } else if (calib_method == CalibrationMethod::SQNR || 
-               calib_method == CalibrationMethod::PERCENTILE) {
-        TORCH_CHECK(hist_collectors != nullptr, 
-                    "hist_collectors is required for SQNR/Percentile calibration");
-    }
 
     // h0 可以为空张量（未提供初始状态）
     const float *h0_ptr = nullptr;
@@ -442,38 +432,96 @@ std::tuple<torch::Tensor, torch::Tensor> forward_interface_wrapper(
         init_gru_cublas(g_blas_handle);
     }
 
-    // 创建输出张量，包含初始状态，大小为 (time_steps + 1) * batch_size * hidden_size
+    // 创建输出张量
     auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
-
-    // 创建v输出张量，大小为 time_steps * batch_size * hidden_size * 4
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
     GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
     
-    if (calib_method != CalibrationMethod::NONE) {
-        // 校准模式：使用 GPU 加速直方图收集
-        GRUGPUHistogramCollectors *gpu_hist = 
-            hist_collectors ? &(hist_collectors->gpu_collectors) : nullptr;
-        GRUQuantizationRanges *cpp_ranges = 
-            quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr;
-        
-        forwardWithCalibrationGPU(is_training, time_steps, batch_size, input_size, hidden_size,
-                                  W.data_ptr<float>(), R.data_ptr<float>(), 
-                                  bx.data_ptr<float>(), br.data_ptr<float>(), 
-                                  x.data_ptr<float>(), h0_ptr, g_blas_handle,
-                                  calib_method, gpu_hist, cpp_ranges,
-                                  h.data_ptr<float>(), v.data_ptr<float>());
+    forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
+                     W.data_ptr<float>(), R.data_ptr<float>(), 
+                     bx.data_ptr<float>(), br.data_ptr<float>(), 
+                     x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
+                     h.data_ptr<float>(), v.data_ptr<float>());
+
+    return std::make_tuple(h, v);
+}
+
+// =====================================================================
+// forward_calibrate: 校准前向传播（统一接口）
+// =====================================================================
+// 返回: (h, v)
+//   h: [T+1, B, H] 隐藏状态序列
+//   v: [T, B, H*4] 中间值
+//
+// 校准数据通过指针参数原地累积更新：
+// - MINMAX: quant_ranges 被原地更新
+// - SQNR/Percentile: hist_collectors 被原地更新
+std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
+    const torch::Tensor &br, const torch::Tensor &x,
+    const torch::Tensor &h0,
+    const std::string &calib_method_str,  // 校准方法: 'minmax', 'sqnr', 'percentile'
+    GRUQuantizationRangesPy *quant_ranges = nullptr,      // MINMAX 需要
+    GRUHistogramCollectorsPy *hist_collectors = nullptr) {  // SQNR/Percentile 需要
+    
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // 字符串转枚举
+    CalibrationMethod calib_method = stringToCalibMethod(calib_method_str);
+    
+    // 校准模式不能是 NONE
+    TORCH_CHECK(calib_method != CalibrationMethod::NONE,
+                "forward_calibrate requires a calibration method ('minmax', 'sqnr', 'percentile')");
+    
+    // 验证校准参数
+    if (calib_method == CalibrationMethod::MINMAX) {
+        TORCH_CHECK(quant_ranges != nullptr, 
+                    "quant_ranges is required for MINMAX calibration");
     } else {
-        // 非校准模式：使用普通前向传播
-        forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
-                         W.data_ptr<float>(), R.data_ptr<float>(), 
-                         bx.data_ptr<float>(), br.data_ptr<float>(), 
-                         x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
-                         CalibrationMethod::NONE, nullptr, nullptr,
-                         h.data_ptr<float>(), v.data_ptr<float>());
+        TORCH_CHECK(hist_collectors != nullptr, 
+                    "hist_collectors is required for SQNR/Percentile calibration");
     }
+
+    // h0 可以为空张量
+    const float *h0_ptr = nullptr;
+    if (h0.defined() && h0.numel() > 0) {
+        TORCH_CHECK(h0.is_cuda() && h0.dtype() == torch::kFloat32,
+                    "h0 must be CUDA float32 tensor");
+        TORCH_CHECK(h0.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
+                    "h0 must have shape [batch_size, hidden_size]");
+        h0_ptr = h0.data_ptr<float>();
+    }
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 创建输出张量
+    auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    
+    // 统一调用校准前向传播
+    forwardWithCalibrationGPU(
+        is_training, time_steps, batch_size, input_size, hidden_size,
+        W.data_ptr<float>(), R.data_ptr<float>(), 
+        bx.data_ptr<float>(), br.data_ptr<float>(), 
+        x.data_ptr<float>(), h0_ptr, g_blas_handle,
+        calib_method,
+        quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr,
+        hist_collectors ? &(hist_collectors->gpu_collectors) : nullptr,
+        h.data_ptr<float>(), v.data_ptr<float>());
 
     return std::make_tuple(h, v);
 }
@@ -739,23 +787,72 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("use_percentile") = false,
           py::arg("percentile_value") = 99.99f);
 
-    // forwardInterface 统一接口
-    // 支持校准模式：calib_method 指定校准方式（字符串）
-    m.def("forward_interface", &forward_interface_wrapper,
-          "Unified GRU forward interface supporting both quantized/non-quantized modes and calibration.\n"
-          "When calib_method != 'none', calibration data is collected during forward pass.\n"
-          "  calib_method: 'none', 'minmax', 'sqnr', 'percentile'\n"
-          "  hist_collectors: Required for 'sqnr'/'percentile' calibration\n"
-          "  quant_ranges: Required for 'minmax' calibration",
-          py::arg("is_training"),  // 是否开启训练模式，true为训练，false为推理
-          py::arg("is_quant"), py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
-          py::arg("x"),
-          py::arg("h0") = torch::Tensor(),  // 初始隐藏状态，可选
-          py::arg("quant_params"),
-          py::arg("calib_method") = "none",  // 校准方法字符串，默认 none
-          py::arg("hist_collectors") = nullptr,  // 直方图收集器
-          py::arg("quant_ranges") = nullptr);  // 量化范围
+    // =====================================================================
+    // forward: 正常前向传播（推理/训练）
+    // =====================================================================
+    m.def("forward", &forward_wrapper,
+          "GRU forward pass for inference/training.\n"
+          "\n"
+          "Args:\n"
+          "  is_training: Enable training mode (saves intermediate values)\n"
+          "  is_quant: Use quantized inference (requires quant_params)\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bx, br: Weight matrices and biases\n"
+          "  x: Input tensor [T, B, I]\n"
+          "  h0: Initial hidden state [B, H], optional\n"
+          "  quant_params: Quantization parameters (used when is_quant=True)\n"
+          "\n"
+          "Returns:\n"
+          "  tuple(h, v)\n"
+          "  - h: Hidden states [T+1, B, H]\n"
+          "  - v: Intermediate values [T, B, H*4]",
+          py::arg("is_training"), py::arg("is_quant"),
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("h0") = torch::Tensor(),
+          py::arg("quant_params"));
+
+    // =====================================================================
+    // forward_calibrate: 校准前向传播（统一接口，原地累积）
+    // =====================================================================
+    m.def("forward_calibrate", &forward_calibrate_wrapper,
+          "GRU forward pass for quantization calibration.\n"
+          "Calibration data is accumulated in-place via pointer parameters.\n"
+          "\n"
+          "Args:\n"
+          "  is_training: Enable training mode\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bx, br: Weight matrices and biases (float)\n"
+          "  x: Input tensor [T, B, I]\n"
+          "  h0: Initial hidden state [B, H], optional\n"
+          "  calib_method: Calibration method ('minmax', 'sqnr', 'percentile')\n"
+          "  quant_ranges: Required for 'minmax' mode (updated in-place)\n"
+          "  hist_collectors: Required for 'sqnr'/'percentile' mode (updated in-place)\n"
+          "\n"
+          "Returns:\n"
+          "  tuple(h, v)\n"
+          "  - h: Hidden states [T+1, B, H]\n"
+          "  - v: Intermediate values [T, B, H*4]\n"
+          "\n"
+          "Usage:\n"
+          "  # MINMAX calibration:\n"
+          "  ranges = GRUQuantizationRanges(hidden_size)\n"
+          "  for batch in batches:\n"
+          "      h, v = forward_calibrate(..., 'minmax', ranges)\n"
+          "  params = calculate_gru_quantitative_parameters(ranges)\n"
+          "  \n"
+          "  # SQNR/Percentile calibration:\n"
+          "  hist = GRUHistogramCollectors(hidden_size)\n"
+          "  for batch in batches:\n"
+          "      h, v = forward_calibrate(..., 'sqnr', None, hist)\n"
+          "  params = calculate_gru_quantitative_parameters_from_histograms(hist)",
+          py::arg("is_training"),
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("h0") = torch::Tensor(),
+          py::arg("calib_method"),
+          py::arg("quant_ranges") = nullptr,
+          py::arg("hist_collectors") = nullptr);
 
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",
