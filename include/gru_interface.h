@@ -224,9 +224,8 @@ void forwardWithHistogramCPU(
 // 用于与 calculateGRUQuantitativeParametersFromHistograms 配合使用
 GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors &gpu_collectors);
 
-// 从 GPU 直方图收集器计算量化参数
-// 内部流程：GPU→CPU 传输直方图 + CPU 计算 SQNR
-// 说明：CPU SQNR 计算比 GPU 快 100x+，因此采用混合策略
+// 从 GPU 直方图收集器直接计算量化参数（GPU 加速 SQNR）
+// 避免 GPU→CPU 传输，直接在 GPU 上计算 SQNR
 GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
