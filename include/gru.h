@@ -24,8 +24,6 @@ class ForwardPass {
     // Blocks until all iterations have completed executing on the GPU.
     ~ForwardPass();
 
-    const GRUQuantizationRanges &getGRUQuantizationRanges() const { return quant_ranges_; }
-
     // Performs one forward iteration of the GRU cell.
     //
     // W: [C,H*3] the input weight matrix.
@@ -59,9 +57,9 @@ class ForwardPass {
     void Run(const int steps, const T *W, const T *R, const T *bx, const T *br, const T *x, T *h,
              T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob, const T *zoneout_mask);
 
-    void setCalibrationMode(bool calibration_mode, GRUQuantizationRanges &quant_ranges) {
+    // 设置校准模式：启用后会收集预激活值 (z_pres_, r_pres_, g_pres_)
+    void setCalibrationMode(bool calibration_mode) {
         calibration_mode_ = calibration_mode;
-        quant_ranges_ = quant_ranges;
     }
 
     // 获取预激活值（用于直方图收集）
@@ -79,7 +77,6 @@ class ForwardPass {
     private_data *data_;
 
     bool calibration_mode_ = false;
-    GRUQuantizationRanges quant_ranges_;
     dev::vector<T> z_pres_;
     dev::vector<T> r_pres_;
     dev::vector<T> g_pres_;

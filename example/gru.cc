@@ -13,7 +13,6 @@
 #include "check_data.h"
 #include "dev_vector.h"
 #include "gru_interface.h"
-#include "gru_quant_cpu.h"
 #include "histogram_collector.h"
 #include "histogram_gpu.cuh"
 #include "quantized_unit_testing.cuh"
@@ -212,87 +211,19 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
                        const float *x, const GRUQuantitativeParameters &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU):");
     forwardInterface(false, true, time_steps, batch_size, input_size, hidden_size,
-                     W, R, bx, br, x, nullptr, quant_params, g_blas_handle,
-                     CalibrationMethod::NONE, nullptr, nullptr, h, nullptr);
+                     W, R, bx, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
 }
 
-// ==================== CPU 量化推理（统一 int32_t 存储） ====================
+// ==================== CPU 量化推理 ====================
 
 void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hidden_size,
-                          const std::vector<float> &W_fp, const std::vector<float> &R_fp,
-                          const std::vector<float> &bx_fp, const std::vector<float> &br_fp,
-                          const std::vector<float> &x_fp,
-                          const GRUQuantitativeParameters &quant_params,
-                          std::vector<float> &h_out) {
-    const int hidden3 = hidden_size * 3;
-    const auto &bw_cfg = quant_params.bitwidth_config_;
-    
-    // 所有量化值统一使用 int32_t 存储，通过 clamp_by_bitwidth 限制到实际位宽
-    std::vector<int32_t> W_quant(input_size * hidden3);
-    std::vector<int32_t> R_quant(hidden_size * hidden3);
-    
-    for (int k = 0; k < input_size; k++) {
-        for (int m = 0; m < hidden3; m++) {
-            int idx = k * hidden3 + m;
-            W_quant[idx] = quantize(W_fp[idx], quant_params.exp2_inv_W_[m], 0, bw_cfg.W_);
-        }
-    }
-    
-    for (int k = 0; k < hidden_size; k++) {
-        for (int m = 0; m < hidden3; m++) {
-            int idx = k * hidden3 + m;
-            R_quant[idx] = quantize(R_fp[idx], quant_params.exp2_inv_R_[m], 0, bw_cfg.R_);
-        }
-    }
-    
-    // 量化 bias (per-channel)
-    std::vector<int32_t> bx_quant(hidden3), br_quant(hidden3);
-    for (int m = 0; m < hidden3; m++) {
-        bx_quant[m] = quantize(bx_fp[m], quant_params.exp2_inv_bx_[m], 0, bw_cfg.bx_);
-        br_quant[m] = quantize(br_fp[m], quant_params.exp2_inv_br_[m], 0, bw_cfg.br_);
-    }
-    
-    // 量化输入
-    const int x_size = time_steps * batch_size * input_size;
-    std::vector<int32_t> x_quant(x_size);
-    for (int i = 0; i < x_size; i++) {
-        x_quant[i] = quantize(x_fp[i], quant_params.exp2_inv_x_, quant_params.zp_x_, bw_cfg.x_);
-    }
-    
-    // 分配输出并初始化 h0
-    const int h_size = (time_steps + 1) * batch_size * hidden_size;
-    std::vector<int32_t> h_quant(h_size);
-    for (int i = 0; i < batch_size * hidden_size; i++) {
-        h_quant[i] = quant_params.zp_h_;
-    }
-    
-    // 运行 CPU 量化前向传播（非模板类，统一 int32_t 存储）
-    cpu::ForwardPassQuantCPU forward(false, batch_size, input_size, hidden_size);
-    forward.setRescaleParam(quant_params);
-    forward.Run(time_steps, W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(),
-                x_quant.data(), h_quant.data(), nullptr, 0.0f, nullptr);
-    
-    // 反量化输出
-    h_out.resize(h_size);
-    for (int i = 0; i < h_size; i++) {
-        h_out[i] = dequantize(h_quant[i], quant_params.exp2_inv_h_, quant_params.zp_h_);
-    }
-}
-
-void runQuantInferenceCPUWrapper(int time_steps, int batch_size, int input_size, int hidden_size,
-                                  const std::vector<float> &W, const std::vector<float> &R,
-                                  const std::vector<float> &bx, const std::vector<float> &br,
-                                  const std::vector<float> &x,
-                                  const GRUQuantitativeParameters &quant_params,
-                                  std::vector<float> &h) {
-    const auto &config = quant_params.bitwidth_config_;
-    
-    printf("CPU Quant Inference: W%d A%d (统一 int32 存储, 实际位宽通过 clamp 控制)\n", 
-           config.W_.bits_, config.x_.bits_);
-    
-    // 非模板调用，统一使用 int32_t 存储
-    runQuantInferenceCPU(time_steps, batch_size, input_size, hidden_size,
-                         W, R, bx, br, x, quant_params, h);
+                          const float *W, const float *R, const float *bx, const float *br,
+                          const float *x, const GRUQuantitativeParameters &quant_params,
+                          float *h) {
+    ScopeTimer t("QuantInference (CPU):");
+    // 使用浮点权重版本的接口，内部会自动量化
+    quantGRUForwardCPU(false, time_steps, batch_size, input_size, hidden_size,
+                       W, R, bx, br, x, nullptr, quant_params, h, nullptr);
 }
 
 // ==================== 直方图收集性能比较 ====================
@@ -301,7 +232,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
                                             int hidden_size, const float *W_dev, const float *R_dev,
                                             const float *bx_dev, const float *br_dev,
                                             const float *x_dev, int num_runs = 5) {
-    printf("\n========== Histogram Collection Performance ==========\n");
+    printf("\n========== Histogram Collection Performance (CPU vs GPU) ==========\n");
     printf("Config: T=%d, B=%d, I=%d, H=%d, runs=%d\n",
            time_steps, batch_size, input_size, hidden_size, num_runs);
 
@@ -309,7 +240,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
     dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
     CudaTimer timer;
 
-    // CPU 直方图收集
+    // CPU 直方图收集（前向传播在 GPU，直方图收集在 CPU）
     printf("\n----- CPU Histogram Collection -----\n");
     float cpu_total_ms = 0.0f;
     for (int run = 0; run < num_runs; ++run) {
@@ -317,10 +248,9 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
         h_dev.zero();
         
         timer.start();
-        forwardWithCalibration(true, time_steps, batch_size, input_size, hidden_size,
-                               W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                               CalibrationMethod::SQNR, &cpu_hist, nullptr,
-                               h_dev.data(), v_dev.data());
+        forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
+                                W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                                &cpu_hist, h_dev.data(), v_dev.data());
         float elapsed = timer.stop();
         cpu_total_ms += elapsed;
         if (run == 0) printf("  Run 1: %.3f ms\n", elapsed);
@@ -338,7 +268,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
         timer.start();
         forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
                                   W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                                  CalibrationMethod::SQNR, &gpu_hist, nullptr,
+                                  CalibrationMethod::SQNR, nullptr, &gpu_hist,
                                   h_dev.data(), v_dev.data());
         float elapsed = timer.stop();
         gpu_total_ms += elapsed;
@@ -358,14 +288,14 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
     GRUGPUHistogramCollectors gpu_hist(hidden_size);
     
     h_dev.zero();
-    forwardWithCalibration(true, time_steps, batch_size, input_size, hidden_size,
-                           W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                           CalibrationMethod::SQNR, &cpu_hist, nullptr, h_dev.data(), v_dev.data());
+    forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
+                            W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                            &cpu_hist, h_dev.data(), v_dev.data());
     
     h_dev.zero();
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
                               W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                              CalibrationMethod::SQNR, &gpu_hist, nullptr, h_dev.data(), v_dev.data());
+                              CalibrationMethod::SQNR, nullptr, &gpu_hist, h_dev.data(), v_dev.data());
     
     GRUHistogramCollectors gpu_hist_cpu = convertGPUHistogramsToCPU(gpu_hist);
     
@@ -403,7 +333,7 @@ GRUQuantitativeParameters calibrateWithHistogram(
     timer.start();
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
                               W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                              CalibrationMethod::SQNR, &gpu_hist, nullptr,
+                              CalibrationMethod::SQNR, nullptr, &gpu_hist,
                               h_dev.data(), v_dev.data());
     printf("  [Step 2] Forward + GPU histogram: %.3f ms\n", timer.stop());
 
@@ -487,9 +417,10 @@ GRUQuantitativeParameters calibrateWithMinMax(
     dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
     h_dev.zero();
     
-    forwardWithCalibration(true, time_steps, batch_size, input_size, hidden_size,
-                           W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                           CalibrationMethod::MINMAX, nullptr, &ranges, h_dev.data(), v_dev.data());
+    forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
+                              W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                              CalibrationMethod::MINMAX, &ranges, nullptr,
+                              h_dev.data(), v_dev.data());
     
     return calculateGRUQuantitativeParameters(ranges, bitwidth_config);
 }
@@ -570,7 +501,6 @@ int main(int argc, char *argv[]) {
     
     dev::vector<float> h_float((T + 1) * B * H);
     dev::vector<float> h_quant_gpu((T + 1) * B * H);
-    std::vector<float> h_quant_cpu;
 
     runFloatInference(T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
                       x_dev.data(), h_float.data());
@@ -578,10 +508,9 @@ int main(int argc, char *argv[]) {
     runQuantInference(T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
                       x_dev.data(), quant_params, h_quant_gpu.data());
     
-    {
-        ScopeTimer t("QuantInference (CPU):");
-        runQuantInferenceCPUWrapper(T, B, I, H, W, R, bx, br, x, quant_params, h_quant_cpu);
-    }
+    std::vector<float> h_quant_cpu_vec((T + 1) * B * H);
+    runQuantInferenceCPU(T, B, I, H, W.data(), R.data(), bx.data(), br.data(),
+                         x.data(), quant_params, h_quant_cpu_vec.data());
 
     // 比较结果
     std::vector<float> h_float_cpu, h_quant_gpu_cpu;
@@ -590,8 +519,8 @@ int main(int argc, char *argv[]) {
 
     printf("\n----- Comparison Results -----\n");
     compareHValues(h_float_cpu, h_quant_gpu_cpu, T, B, H, "Float vs Quant(GPU)");
-    compareHValues(h_float_cpu, h_quant_cpu, T, B, H, "Float vs Quant(CPU)");
-    compareHValues(h_quant_gpu_cpu, h_quant_cpu, T, B, H, "Quant(GPU) vs Quant(CPU)");
+    compareHValues(h_float_cpu, h_quant_cpu_vec, T, B, H, "Float vs Quant(CPU)");
+    compareHValues(h_quant_gpu_cpu, h_quant_cpu_vec, T, B, H, "Quant(GPU) vs Quant(CPU)");
 
     printf("CUDA Error: %s\n", cudaGetErrorString(cudaGetLastError()));
 
@@ -677,7 +606,6 @@ int main(int argc, char *argv[]) {
             ScopeTimer t("QuantTraining Forward:");
             forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(),
                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                             CalibrationMethod::NONE, nullptr, nullptr,
                              h_train.data(), v_train.data());
         }
 
