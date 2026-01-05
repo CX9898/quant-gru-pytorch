@@ -302,10 +302,9 @@ namespace gpu_hist {
 /**
  * @brief 在 GPU 上计算 float 数组的 min/max
  *
- * 使用 Thrust 实现高效并行归约
+ * 使用 Thrust 实现高效并行归约（同步操作，使用默认 stream）
  */
-void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val,
-                    cudaStream_t stream = 0);
+void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val);
 
 /**
  * @brief 在 GPU 上构建直方图
