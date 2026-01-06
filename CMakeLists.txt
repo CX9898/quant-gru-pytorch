@@ -36,13 +36,13 @@ find_package(OpenMP REQUIRED)
 # ------------------------------
 # 编译静态库和动态库
 # ------------------------------
-add_library(gru_quant_static STATIC ${SRC_FILES})
+#add_library(gru_quant_static STATIC ${SRC_FILES})
 add_library(gru_quant_shared SHARED ${SRC_FILES})
 
 # 输出目录
-set_target_properties(gru_quant_static PROPERTIES
-        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
-)
+#set_target_properties(gru_quant_static PROPERTIES
+#        ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
+#)
 set_target_properties(gru_quant_shared PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
         CUDA_SEPARABLE_COMPILATION ON
@@ -74,7 +74,7 @@ target_link_libraries(gru_example PRIVATE gru_quant_shared)
 # ------------------------------
 # 包含目录
 # ------------------------------
-target_include_directories(gru_quant_static PUBLIC ${INCLUDE_DIR})
+#target_include_directories(gru_quant_static PUBLIC ${INCLUDE_DIR})
 target_include_directories(gru_quant_shared PUBLIC ${INCLUDE_DIR})
 target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
 
@@ -91,10 +91,10 @@ target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
 # ------------------------------
 # 链接库
 # ------------------------------
-target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
+#target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_quant_shared PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_example PRIVATE CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 
 # 可选：CUDA优化
-set_target_properties(gru_quant_static PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+#set_target_properties(gru_quant_static PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 set_target_properties(gru_quant_shared PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
