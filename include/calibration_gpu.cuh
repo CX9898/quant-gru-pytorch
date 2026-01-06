@@ -370,50 +370,54 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
                                            const float* data_dev, int input_size,
                                            cudaStream_t stream = 0);
 
-/**
- * @brief GPU 加速的 SQNR 量化参数计算
- *
- * 输入：直方图 counts (GPU), min_val, max_val, num_bins
- * 输出：最优 exp2_inv 和 zp
- *
- * 算法：
- * 1. 对称量化：搜索 201 个 delta 候选
- * 2. 非对称量化：搜索 35×31 = 1085 个 (delta, offset) 组合
- * 3. 每个候选并行计算所有 bin 的噪声，reduction 求和
- */
-void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val, 
-                              int num_bins, int64_t total_count,
-                              bool is_symmetric, QuantBitWidth bw,
-                              int8_t& out_exp2_inv, int32_t& out_zp,
-                              const SqnrConfig& config = SqnrConfig(),
-                              cudaStream_t stream = 0);
+// ============================================================================
+// GPU SQNR 搜索（只返回连续 scale，POT 转换统一在 CPU）
+// ============================================================================
 
 /**
- * @brief 批量 GPU SQNR 计算（处理多个直方图）
+ * @brief GPU 加速的 SQNR 连续 scale 搜索
  *
- * 一次调用计算多个直方图的量化参数
+ * 只做计算密集的 SQNR 搜索，返回连续 scale 结果
+ * POT 转换统一使用 CPU 的 convertToPot() 函数
+ *
+ * @param counts_dev GPU 端直方图 counts
+ * @param hist_min 直方图最小值
+ * @param hist_max 直方图最大值
+ * @param num_bins bin 数量
+ * @param num_steps 量化级数 (quant_max - quant_min)
+ * @param is_symmetric 是否对称量化
+ * @param config SQNR 搜索配置
+ * @param stream CUDA 流
+ * @return ContinuousScaleResult 连续 scale 结果
  */
-void compute_sqnr_params_batch_gpu(
-    const std::vector<const float*>& counts_ptrs,  // GPU 端 counts 指针数组
-    const std::vector<float>& mins,
-    const std::vector<float>& maxs,
-    int num_bins,
-    const std::vector<int64_t>& total_counts,
-    const std::vector<bool>& is_symmetric,
-    QuantBitWidth bw,
-    std::vector<int8_t>& out_exp2_inv,
-    std::vector<int32_t>& out_zp,
+ContinuousScaleResult searchSqnrGpu(
+    const float* counts_dev,
+    float hist_min, float hist_max,
+    int num_bins, int64_t num_steps,
+    bool is_symmetric,
+    const SqnrConfig& config = SqnrConfig(),
     cudaStream_t stream = 0);
 
 /**
- * @brief 从 PerChannelHistogramBatch 计算 per-channel SQNR 参数
- *
- * 一次调用计算所有 channel 的量化参数
+ * @brief 批量 GPU SQNR 搜索
  */
-void compute_sqnr_per_channel_gpu(
+void searchSqnrBatchGpu(
+    const std::vector<const float*>& counts_ptrs,
+    const std::vector<float>& mins,
+    const std::vector<float>& maxs,
+    int num_bins, int64_t num_steps,
+    const std::vector<bool>& is_symmetric,
+    std::vector<ContinuousScaleResult>& out_results,
+    const SqnrConfig& config = SqnrConfig(),
+    cudaStream_t stream = 0);
+
+/**
+ * @brief 从 PerChannelHistogramBatch 进行 per-channel SQNR 搜索
+ */
+void searchSqnrPerChannelGpu(
     const PerChannelHistogramBatch& batch,
-    bool is_symmetric, QuantBitWidth bw,
-    std::vector<int8_t>& out_exp2_inv,
+    int64_t num_steps, bool is_symmetric,
+    std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config = SqnrConfig(),
     cudaStream_t stream = 0);
 

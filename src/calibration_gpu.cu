@@ -1042,7 +1042,7 @@ __global__ void sqnr_noise_symmetric_kernel(
         float x_recon = (q + offset) * delta;
         
         float error = powf(fabsf(x_recon - x), p);
-        if (clipped) error *= gamma;
+        if (clipped && gamma != 1.0f) error *= gamma;  // 与 AIMET 和 CPU 一致
         
         local_noise += error * count;
     }
@@ -1124,7 +1124,7 @@ __global__ void sqnr_noise_asymmetric_kernel(
         float x_recon = (q + clamped_offset) * clamped_delta;
         
         float error = powf(fabsf(x_recon - x), p);
-        if (clipped) error *= gamma;
+        if (clipped && gamma != 1.0f) error *= gamma;  // 与 AIMET 和 CPU 一致
         
         local_noise += error * count;
     }
@@ -1189,33 +1189,24 @@ __global__ void find_min_noise_kernel(
 
 namespace gpu_hist {
 
-void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val,
-                              int num_bins, int64_t total_count,
-                              bool is_symmetric, QuantBitWidth bw,
-                              int8_t& out_exp2_inv, int32_t& out_zp,
-                              const SqnrConfig& config,
-                              cudaStream_t stream) {
-    
-    // 从 QuantBitWidth 获取量化范围（支持任意位宽）
-    const int64_t quant_min = bw.qmin();
-    const int64_t quant_max = bw.qmax();
-    const int64_t num_steps = quant_max - quant_min;
+ContinuousScaleResult searchSqnrGpu(
+    const float* counts_dev,
+    float hist_min, float hist_max,
+    int num_bins, int64_t num_steps,
+    bool is_symmetric,
+    const SqnrConfig& config,
+    cudaStream_t stream) {
     
     // 最小 delta（与 AIMET minimum_scale 一致）
     const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
     
-    // ===== 关键修复：保存原始直方图范围用于计算 bin_width =====
-    // bin_width 必须基于直方图收集时的原始范围，而不是扩展后的范围
-    // 这与 AIMET 的 _estimate_clip_and_quant_noise 中使用 stat.bin_edges 一致
-    const float hist_min = min_val;
-    const float hist_max = max_val;
+    // bin_width 基于直方图原始范围
     float bin_width = (hist_max - hist_min) / num_bins;
     if (bin_width < 1e-9f) bin_width = 1e-9f;
     
     // 与 AIMET _pick_test_candidates 完全一致的范围预处理
-    min_val = (min_val < 0.0f) ? min_val : 0.0f;
-    max_val = (max_val > 0.0f) ? max_val : 0.0f;
-    // 与 AIMET 745 行一致：max_vals = torch.max(max_vals, min_vals + minimum_scale * num_steps)
+    float min_val = (hist_min < 0.0f) ? hist_min : 0.0f;
+    float max_val = (hist_max > 0.0f) ? hist_max : 0.0f;
     float min_range_limit = min_val + minimum_scale * static_cast<float>(num_steps);
     max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
     
@@ -1329,57 +1320,46 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
     }
     
-    // 使用 POT 转换函数（复用 CPU 实现，避免重复代码）
-    PotScaleResult pot_result = convertToPot(
-        optimal_scale, optimal_min,
-        hist_min, hist_max,  // 原始直方图范围用于位宽约束
-        bw, is_symmetric);
-    
-    out_exp2_inv = pot_result.exp2_inv;
-    out_zp = pot_result.zero_point;
+    // 返回连续 scale 结果，POT 转换由调用者完成
+    return ContinuousScaleResult{optimal_scale, optimal_min, 
+                                  optimal_min + optimal_scale * static_cast<float>(num_steps), 0.0f};
 }
 
-void compute_sqnr_params_batch_gpu(
+void searchSqnrBatchGpu(
     const std::vector<const float*>& counts_ptrs,
     const std::vector<float>& mins,
     const std::vector<float>& maxs,
-    int num_bins,
-    const std::vector<int64_t>& total_counts,
+    int num_bins, int64_t num_steps,
     const std::vector<bool>& is_symmetric,
-    QuantBitWidth bw,
-    std::vector<int8_t>& out_exp2_inv,
-    std::vector<int32_t>& out_zp,
+    std::vector<ContinuousScaleResult>& out_results,
+    const SqnrConfig& config,
     cudaStream_t stream) {
     
     const int n = counts_ptrs.size();
-    out_exp2_inv.resize(n);
-    out_zp.resize(n);
+    out_results.resize(n);
     
-    SqnrConfig config;  // 使用默认配置
-    
-    // 简单实现：串行处理每个直方图
-    // TODO: 可以进一步优化为真正的批量并行
+    // 串行处理每个直方图
     for (int i = 0; i < n; ++i) {
-        compute_sqnr_params_gpu(
-            counts_ptrs[i], mins[i], maxs[i], num_bins, total_counts[i],
-            is_symmetric[i], bw, out_exp2_inv[i], out_zp[i], config, stream);
+        out_results[i] = searchSqnrGpu(
+            counts_ptrs[i], mins[i], maxs[i], num_bins, num_steps,
+            is_symmetric[i], config, stream);
     }
 }
 
-void compute_sqnr_per_channel_gpu(
+void searchSqnrPerChannelGpu(
     const PerChannelHistogramBatch& batch,
-    bool is_symmetric, QuantBitWidth bw,
-    std::vector<int8_t>& out_exp2_inv,
+    int64_t num_steps, bool is_symmetric,
+    std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config,
     cudaStream_t stream) {
     
     const int n = batch.channel_size;
     if (n == 0 || !batch.is_valid()) {
-        out_exp2_inv.clear();
+        out_results.clear();
         return;
     }
     
-    out_exp2_inv.resize(n);
+    out_results.resize(n);
     
     // 使用多个 CUDA stream 并行计算
     constexpr int NUM_STREAMS = 8;
@@ -1405,11 +1385,6 @@ void compute_sqnr_per_channel_gpu(
         idx_buffers[i].resize(1);
         val_buffers[i].resize(1);
     }
-    
-    // 从 QuantBitWidth 获取量化范围（支持任意位宽）
-    const int64_t quant_min = bw.qmin();
-    const int64_t quant_max = bw.qmax();
-    const int64_t num_steps = quant_max - quant_min;
     
     // 最小 delta（与 AIMET minimum_scale 一致）
     const float minimum_scale_all = get_minimum_scale(static_cast<int>(num_steps));
@@ -1530,7 +1505,7 @@ void compute_sqnr_per_channel_gpu(
         cudaStreamSynchronize(streams[i]);
     }
     
-    // 拷贝最小索引到 host 并计算最终参数
+    // 拷贝最小索引到 host 并计算连续 scale
     for (int c = 0; c < n; ++c) {
         int stream_id = c % NUM_STREAMS;
         int best_idx;
@@ -1538,54 +1513,46 @@ void compute_sqnr_per_channel_gpu(
         
         float min_val = (batch.mins[c] < 0.0f) ? batch.mins[c] : 0.0f;
         float max_val = (batch.maxs[c] > 0.0f) ? batch.maxs[c] : 0.0f;
-        // 与 AIMET 745 行一致
         float min_range = min_val + minimum_scale_all * static_cast<float>(num_steps);
         max_val = (max_val > min_range) ? max_val : min_range;
         
-        float optimal_scale;
+        float optimal_scale, optimal_min;
         
         if (is_symmetric) {
             float abs_max_val = (max_val > -min_val) ? max_val : -min_val;
             float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
-            
-            // 最小 delta（与 AIMET minimum_scale 一致）
             const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
             
-            // 与 AIMET 完全一致，无 clamp 机制
             optimal_scale = max_delta * (best_idx + 1) / (sym_candidates - 1);
             optimal_scale = std::max(optimal_scale, minimum_scale);
+            float offset = -static_cast<float>((num_steps + 1) / 2);
+            optimal_min = offset * optimal_scale;
         } else {
             float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             max_delta = std::max(max_delta, 1e-8f);
-            
-            // 最小 delta（与 AIMET minimum_scale 一致）
             const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
             
             const int num_offsets = h_offsets_all[c].size();
             int best_delta_idx = best_idx / num_offsets;
             int best_offset_idx = best_idx % num_offsets;
             
-            // 与 AIMET _clamp_delta_offset_values 完全一致的 clamp 逻辑
             float delta = max_delta * (best_delta_idx + 1) / (asym_delta_candidates - 1);
-            delta = std::max(delta, minimum_scale);  // 与 AIMET 一致
+            delta = std::max(delta, minimum_scale);
             float offset = h_offsets_all[c][best_offset_idx];
             
             float test_min_calc = delta * offset;
             float test_max_calc = test_min_calc + delta * static_cast<float>(num_steps);
-            float test_min = std::max(observed_mins[c], test_min_calc);  // 与 AIMET 一致
-            float test_max = std::min(observed_maxs[c], test_max_calc);  // 与 AIMET 一致
-            float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
-            optimal_scale = std::max(scale_calc, minimum_scale);  // 与 AIMET 一致
+            float test_min = std::max(observed_mins[c], test_min_calc);
+            float test_max = std::min(observed_maxs[c], test_max_calc);
+            optimal_scale = (test_max - test_min) / static_cast<float>(num_steps);
+            optimal_scale = std::max(optimal_scale, minimum_scale);
+            optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
         }
         
-        // 使用 POT 转换函数（复用 CPU 实现，避免重复代码）
-        auto [po2_scale, n_rounded] = roundScaleToPowerOfTwo(optimal_scale);
-        
-        // 应用位宽约束：使用原始 min/max（未被范围扩展修改的值）
-        float orig_min = batch.original_mins[c];
-        float orig_max = batch.original_maxs[c];
-        out_exp2_inv[c] = applyBitwidthConstraint(
-            n_rounded, orig_min, orig_max, quant_max, num_steps, is_symmetric);
+        // 返回连续 scale 结果
+        out_results[c] = ContinuousScaleResult{
+            optimal_scale, optimal_min, 
+            optimal_min + optimal_scale * static_cast<float>(num_steps), 0.0f};
     }
     
     // 清理 streams
