@@ -179,12 +179,28 @@ class HistogramCollector {
     void collect(const float* data, size_t size) {
         if (size == 0) return;
 
-        // 计算数据范围
-        float data_min = data[0];
-        float data_max = data[0];
-        for (size_t i = 1; i < size; ++i) {
-            data_min = std::min(data_min, data[i]);
-            data_max = std::max(data_max, data[i]);
+        // 计算数据范围（与 AIMET _get_min_max 一致：过滤 inf/NaN 值）
+        float data_min = std::numeric_limits<float>::max();
+        float data_max = std::numeric_limits<float>::lowest();
+        for (size_t i = 0; i < size; ++i) {
+            float val = data[i];
+            if (std::isfinite(val)) {  // 过滤 inf 和 NaN
+                data_min = std::min(data_min, val);
+                data_max = std::max(data_max, val);
+            }
+        }
+        
+        // 如果所有值都是 inf/NaN，使用默认范围
+        if (data_min > data_max) {
+            data_min = 0.0f;
+            data_max = 0.0f;
+        }
+
+        // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
+        // 这是为了兼容 PyTorch 的 torch.histc 实现
+        if (data_min == data_max) {
+            data_min = data_min - 0.5f;
+            data_max = data_max + 0.5f;
         }
 
         // 与 AIMET minimum_scale 逻辑完全一致
@@ -192,8 +208,8 @@ class HistogramCollector {
         float minimum_range = minimum_scale * config_.num_bins;
         float input_range = data_max - data_min;
         
-        // 如果范围太小（包括 min == max），使用最小范围并确保 0 在范围内
-        // 与 AIMET zero_range_mask 处理一致
+        // 如果范围太小，使用最小范围并确保 0 在范围内
+        // 与 AIMET merge_stats 中的 zero_range_mask 处理一致
         if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
             // 确保 0 在范围内
             data_min = std::min(data_min, 0.0f);
@@ -240,27 +256,52 @@ class HistogramCollector {
     }
 
     /**
-     * 合并另一个直方图（类似 AIMET 的 merge_stats）
+     * 合并另一个直方图（与 AIMET merge_stats 行为一致）
+     * - 首次合并：设置范围限制
+     * - 后续合并：应用范围限制，支持范围扩展
      */
     void merge(const Histogram& other) {
         if (!other.is_valid()) return;
 
         if (!hist_.is_valid()) {
-            // 直接复制
+            // 首次合并：复制直方图并设置范围限制
             hist_ = other;
+            
+            // 设置范围限制（与 collect 一致）
+            float input_range = other.max_val - other.min_val;
+            
+            // 处理零范围情况
+            float minimum_scale = get_minimum_scale(config_.num_bins);
+            float minimum_range = minimum_scale * config_.num_bins;
+            if (input_range < minimum_range) {
+                input_range = minimum_range;
+            }
+            
+            range_limit_min_ = other.min_val - input_range * config_.growth_limit / 2.0f;
+            range_limit_max_ = other.max_val + input_range * config_.growth_limit / 2.0f;
+            range_limit_set_ = true;
             return;
         }
 
-        // 计算合并后的范围
-        float new_min = std::min(hist_.min_val, other.min_val);
-        float new_max = std::max(hist_.max_val, other.max_val);
+        // 后续合并：应用范围限制（与 collect 一致）
+        float updated_min = hist_.min_val;
+        float updated_max = hist_.max_val;
+        
+        if (range_limit_set_) {
+            // 应用范围限制（与 AIMET clamp 逻辑一致）
+            updated_min = std::max(range_limit_min_, std::min(other.min_val, hist_.min_val));
+            updated_max = std::min(range_limit_max_, std::max(other.max_val, hist_.max_val));
+        } else {
+            updated_min = std::min(other.min_val, hist_.min_val);
+            updated_max = std::max(other.max_val, hist_.max_val);
+        }
 
-        if (new_min == hist_.min_val && new_max == hist_.max_val) {
+        if (updated_min == hist_.min_val && updated_max == hist_.max_val) {
             // 范围相同，直接合并
             _merge_same_range(other);
         } else {
             // 范围不同，需要重新分配
-            _merge_different_range(other, new_min, new_max);
+            _merge_different_range(other, updated_min, updated_max);
         }
     }
 
