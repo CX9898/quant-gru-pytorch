@@ -994,37 +994,33 @@ namespace {
 // SQNR 配置现在从 GPUSqnrConfig 参数传入
 
 /**
- * @brief SQNR 噪声计算 Kernel（对称量化，带 clamp 机制）
+ * @brief SQNR 噪声计算 Kernel（对称量化，与 AIMET 完全一致）
  *
  * 每个 block 处理一个 delta 候选
  * block 内线程并行计算各 bin 的噪声，然后 reduction
  * 
- * clamp 机制（类似 AIMET _clamp_delta_offset_values）：
- * 如果当前 delta 无法覆盖观察范围，则调整到能覆盖的最小值
+ * AIMET 对称量化特点：
+ * - 没有 clamp 机制（与非对称量化不同）
+ * - 通过 gamma 参数控制 clipping 惩罚
+ * - 让搜索自动平衡量化精度与覆盖范围
  */
 __global__ void sqnr_noise_symmetric_kernel(
     const float* __restrict__ counts,
     float min_val, float bin_width, int num_bins,
     float max_delta, int num_delta_candidates,
     int64_t num_steps, float offset,
-    float observed_max_abs,  // 观察到的绝对值最大范围
+    float minimum_scale,  // 最小 delta（与 AIMET 一致）
     float gamma, float p,
     float* __restrict__ noise_out)  // [num_delta_candidates]
 {
     const int delta_idx = blockIdx.x;
     if (delta_idx >= num_delta_candidates) return;
     
-    // 计算当前 delta
+    // 计算当前 delta（与 AIMET _pick_test_candidates_symmetric 完全一致）
     float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
-    delta = fmaxf(delta, 1e-8f);
+    delta = fmaxf(delta, minimum_scale);  // 与 AIMET min_delta 一致
     
-    // ===== clamp 机制：确保 delta 能覆盖观察范围 =====
-    const float num_pos_steps = static_cast<float>(num_steps / 2);
-    float quant_max_abs = delta * num_pos_steps;
-    if (quant_max_abs < observed_max_abs) {
-        delta = observed_max_abs / num_pos_steps;
-    }
-    // =================================================
+    // 注意：AIMET 对称量化没有 clamp 机制，完全依赖 gamma 控制 clipping 惩罚
     
     // Shared memory for reduction
     extern __shared__ float shared_noise[];
@@ -1217,23 +1213,21 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     
     float optimal_scale, optimal_min;
     
-    // 观察到的绝对值最大范围（用于对称量化的 clamp 机制）
-    // 注意：必须使用原始直方图范围，而不是扩展后的 min_val/max_val
-    float observed_max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
+    // 最小 delta（与 AIMET minimum_scale 一致）
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
     
     if (is_symmetric) {
-        // 对称量化
+        // 对称量化（与 AIMET _pick_test_candidates_symmetric 完全一致）
         float abs_max_for_delta = (max_val > -min_val) ? max_val : -min_val;
         float max_delta = 2.0f * abs_max_for_delta / static_cast<float>(num_steps);
         float offset = -static_cast<float>((num_steps + 1) / 2);
-        const float num_pos_steps = static_cast<float>(num_steps / 2);
         
         const int num_candidates = config.symmetric_delta_candidates;
         
         // 分配噪声缓冲区
         dev::vector<float> noise_dev(num_candidates);
         
-        // 启动 kernel（带 clamp 机制）
+        // 启动 kernel（与 AIMET 完全一致，无 clamp 机制）
         const int threads = 256;
         const int blocks = num_candidates;
         size_t shared_mem = threads * sizeof(float);
@@ -1242,7 +1236,7 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         sqnr_noise_symmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
             counts_dev, hist_min, bin_width, num_bins,
             max_delta, num_candidates,
-            num_steps, offset, observed_max_abs, config.gamma, config.p, noise_dev.data());
+            num_steps, offset, minimum_scale, config.gamma, config.p, noise_dev.data());
         
         // 找最小噪声
         dev::vector<int> min_idx_dev(1);
@@ -1256,14 +1250,9 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         cudaMemcpyAsync(&best_idx, min_idx_dev.data(), sizeof(int), cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
         
-        // 计算 optimal_scale，需要应用与 kernel 相同的 clamp 机制
+        // 计算 optimal_scale（与 AIMET 完全一致，无 clamp 机制）
         optimal_scale = max_delta * (best_idx + 1) / (num_candidates - 1);
-        optimal_scale = std::max(optimal_scale, 1e-8f);
-        // clamp 机制：确保能覆盖观察范围
-        float quant_max_abs = optimal_scale * num_pos_steps;
-        if (quant_max_abs < observed_max_abs) {
-            optimal_scale = observed_max_abs / num_pos_steps;
-        }
+        optimal_scale = std::max(optimal_scale, minimum_scale);
         optimal_min = offset * optimal_scale;
         
     } else {
@@ -1480,20 +1469,18 @@ void compute_sqnr_per_channel_gpu(
             float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
             float offset = -static_cast<float>((num_steps + 1) / 2);
             
-            // 观察到的绝对值最大范围（用于 clamp 机制）
-            // 使用原始直方图范围，不是扩展后的 min_val/max_val
-            float abs_orig_min = std::abs(batch.original_mins[c]);
-            float abs_orig_max = std::abs(batch.original_maxs[c]);
-            float observed_max_abs = (abs_orig_min > abs_orig_max) ? abs_orig_min : abs_orig_max;
+            // 最小 delta（与 AIMET minimum_scale 一致）
+            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
             
             const int threads = 256;
             size_t shared_mem = threads * sizeof(float);
             
-            // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 一致）
+            // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 和 AIMET 一致）
+            // 注意：AIMET 对称量化没有 clamp 机制，完全依赖 gamma 控制 clipping 惩罚
             sqnr_noise_symmetric_kernel<<<sym_candidates, threads, shared_mem, s>>>(
                 counts_ptr, hist_min, bin_width, batch.num_bins,
                 max_delta, sym_candidates,
-                num_steps, offset, observed_max_abs, config.gamma, config.p, noise_buffers[stream_id].data());
+                num_steps, offset, minimum_scale, config.gamma, config.p, noise_buffers[stream_id].data());
             
             find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), s>>>(
                 noise_buffers[stream_id].data(), sym_candidates,
@@ -1544,19 +1531,13 @@ void compute_sqnr_per_channel_gpu(
         if (is_symmetric) {
             float abs_max_val = (max_val > -min_val) ? max_val : -min_val;
             float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
-            const float num_pos_steps = static_cast<float>(num_steps / 2);
             
+            // 最小 delta（与 AIMET minimum_scale 一致）
+            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            
+            // 与 AIMET 完全一致，无 clamp 机制
             optimal_scale = max_delta * (best_idx + 1) / (sym_candidates - 1);
-            optimal_scale = (optimal_scale > 1e-8f) ? optimal_scale : 1e-8f;
-            
-            // clamp 机制：确保能覆盖观察范围（使用原始 min/max）
-            float abs_orig_min = std::abs(batch.original_mins[c]);
-            float abs_orig_max = std::abs(batch.original_maxs[c]);
-            float observed_max_abs = (abs_orig_min > abs_orig_max) ? abs_orig_min : abs_orig_max;
-            float quant_max_abs = optimal_scale * num_pos_steps;
-            if (quant_max_abs < observed_max_abs) {
-                optimal_scale = observed_max_abs / num_pos_steps;
-            }
+            optimal_scale = std::max(optimal_scale, minimum_scale);
         } else {
             float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             max_delta = std::max(max_delta, 1e-8f);
