@@ -79,13 +79,18 @@ __global__ void histogram_kernel_shared(const float* __restrict__ data, size_t s
 }
 
 /**
- * @brief 直方图重分配 Kernel
+ * @brief 直方图重分配 Kernel（与 AIMET _HistogramObserver.merge_stats 逻辑一致）
  *
  * 将源直方图按比例分配到新范围的目标直方图
+ * 
+ * 算法：对于每个源 bin，计算其落入目标 bin 的比例：
+ *   - split_ratio = (dest_bin_end - src_bin_start) / src_bin_width
+ *   - 第一个目标 bin 获得 round(split_ratio * count)
+ *   - 剩余部分分配到下一个目标 bin
  */
 __global__ void redistribute_histogram_kernel(const float* __restrict__ src_counts, float src_min,
                                                float src_bin_width, float* __restrict__ dst_counts,
-                                               float dst_min, float dst_inv_bin_width,
+                                               float dst_min, float dst_bin_width,
                                                int num_bins) {
     const int src_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (src_idx >= num_bins) return;
@@ -93,17 +98,21 @@ __global__ void redistribute_histogram_kernel(const float* __restrict__ src_coun
     float count = src_counts[src_idx];
     if (count <= 0) return;
 
+    // 计算 inv_bin_width 用于索引计算
+    float dst_inv_bin_width = 1.0f / dst_bin_width;
+
     // 源 bin 的起始位置
     float src_bin_start = src_min + src_idx * src_bin_width;
 
-    // 计算落入的目标 bin 索引
+    // 计算落入的目标 bin 索引（与 AIMET _get_bin_num 一致）
     int dst_idx = static_cast<int>((src_bin_start - dst_min) * dst_inv_bin_width);
     dst_idx = max(0, min(dst_idx, num_bins - 1));
 
-    // 目标 bin 的结束位置
-    float dst_bin_end = dst_min + (dst_idx + 1) / dst_inv_bin_width;
+    // 目标 bin 的结束位置（与 CPU 版本一致：dst_min + dst_bin_width * (dst_idx + 1)）
+    float dst_bin_end = dst_min + dst_bin_width * (dst_idx + 1);
 
-    // 计算分割比例
+    // 计算分割比例（与 AIMET split_hist_value 逻辑一致）
+    // 源 bin 落入第一个目标 bin 的比例
     float overlap_ratio = (dst_bin_end - src_bin_start) / src_bin_width;
     overlap_ratio = fmaxf(0.0f, fminf(1.0f, overlap_ratio));
 
@@ -113,7 +122,7 @@ __global__ void redistribute_histogram_kernel(const float* __restrict__ src_coun
     // 添加到第一个目标 bin
     atomicAdd(&dst_counts[dst_idx], first_bin_count);
 
-    // 剩余部分添加到下一个 bin
+    // 剩余部分添加到下一个 bin（与 AIMET other_bin_updates 一致）
     float remaining = count - first_bin_count;
     if (remaining > 0 && dst_idx + 1 < num_bins) {
         atomicAdd(&dst_counts[dst_idx + 1], remaining);
@@ -187,6 +196,7 @@ __global__ void extract_channel_kernel(const float* __restrict__ data,
  * 输出: mins[channel_size], maxs[channel_size]
  * 
  * 使用 shared memory 做 per-block reduction，然后 atomic 更新全局结果
+ * 与 AIMET _get_min_max 一致：过滤 inf/NaN 值
  */
 __global__ void compute_per_channel_minmax_kernel(
     const float* __restrict__ data,
@@ -208,11 +218,13 @@ __global__ void compute_per_channel_minmax_kernel(
     float local_min = FLT_MAX;
     float local_max = -FLT_MAX;
     
-    // 每个线程处理多个元素
+    // 每个线程处理多个元素（与 AIMET _get_min_max 一致：过滤 inf/NaN）
     for (int i = threadIdx.x; i < input_size; i += blockDim.x) {
         float val = data[i * channel_size + channel];
-        local_min = fminf(local_min, val);
-        local_max = fmaxf(local_max, val);
+        if (isfinite(val)) {  // 过滤 inf 和 NaN
+            local_min = fminf(local_min, val);
+            local_max = fmaxf(local_max, val);
+        }
     }
     
     // 存入 shared memory
@@ -229,7 +241,7 @@ __global__ void compute_per_channel_minmax_kernel(
         __syncthreads();
     }
     
-    // 写入全局结果
+    // 写入全局结果（如果所有值都是 inf/NaN，min > max，后续会处理）
     if (threadIdx.x == 0) {
         mins[channel] = s_min[0];
         maxs[channel] = s_max[0];
@@ -241,6 +253,7 @@ __global__ void compute_per_channel_minmax_kernel(
  *
  * 每个 block 处理一个数组，使用 shared memory reduction
  * 用于 gate histograms 等场景（7 个独立数组）
+ * 与 AIMET _get_min_max 一致：过滤 inf/NaN 值
  */
 __global__ void compute_batch_minmax_kernel(
     const float* const* __restrict__ data_ptrs,  // 数组指针数组
@@ -262,10 +275,13 @@ __global__ void compute_batch_minmax_kernel(
     float local_min = FLT_MAX;
     float local_max = -FLT_MAX;
     
+    // 与 AIMET _get_min_max 一致：过滤 inf/NaN
     for (size_t i = threadIdx.x; i < size; i += blockDim.x) {
         float val = data[i];
-        local_min = fminf(local_min, val);
-        local_max = fmaxf(local_max, val);
+        if (isfinite(val)) {  // 过滤 inf 和 NaN
+            local_min = fminf(local_min, val);
+            local_max = fmaxf(local_max, val);
+        }
     }
     
     s_min[threadIdx.x] = local_min;
@@ -292,6 +308,7 @@ __global__ void compute_batch_minmax_kernel(
  * 数据布局: data[num_arrays * array_size]（连续存储）
  * 每个 block 处理一个数组
  * 用于 per-step EMA 场景
+ * 与 AIMET _get_min_max 一致：过滤 inf/NaN 值
  */
 __global__ void compute_contiguous_batch_minmax_kernel(
     const float* __restrict__ data,    // 连续数据 [num_arrays, array_size]
@@ -313,11 +330,13 @@ __global__ void compute_contiguous_batch_minmax_kernel(
     float local_min = FLT_MAX;
     float local_max = -FLT_MAX;
     
-    // 每个线程处理多个元素
+    // 每个线程处理多个元素（与 AIMET _get_min_max 一致：过滤 inf/NaN）
     for (int i = threadIdx.x; i < array_size; i += blockDim.x) {
         float val = my_data[i];
-        local_min = fminf(local_min, val);
-        local_max = fmaxf(local_max, val);
+        if (isfinite(val)) {  // 过滤 inf 和 NaN
+            local_min = fminf(local_min, val);
+            local_max = fmaxf(local_max, val);
+        }
     }
     
     s_min[threadIdx.x] = local_min;
@@ -397,6 +416,29 @@ __global__ void build_per_channel_histogram_kernel(
 
 namespace gpu_hist {
 
+// 用于过滤 inf/NaN 的自定义 min/max 二元操作（与 AIMET _get_min_max 一致）
+struct finite_min_op {
+    __host__ __device__ float operator()(float a, float b) const {
+        bool a_finite = isfinite(a);
+        bool b_finite = isfinite(b);
+        if (!a_finite && !b_finite) return FLT_MAX;  // 都无效，返回最大值
+        if (!a_finite) return b;
+        if (!b_finite) return a;
+        return fminf(a, b);
+    }
+};
+
+struct finite_max_op {
+    __host__ __device__ float operator()(float a, float b) const {
+        bool a_finite = isfinite(a);
+        bool b_finite = isfinite(b);
+        if (!a_finite && !b_finite) return -FLT_MAX;  // 都无效，返回最小值
+        if (!a_finite) return b;
+        if (!b_finite) return a;
+        return fmaxf(a, b);
+    }
+};
+
 void compute_minmax(const float* data_dev, size_t size, float& min_val, float& max_val) {
     if (size == 0) {
         min_val = 0;
@@ -406,12 +448,15 @@ void compute_minmax(const float* data_dev, size_t size, float& min_val, float& m
 
     thrust::device_ptr<const float> data_ptr(data_dev);
     
-    // 使用 Thrust 计算 min/max（同步操作，使用默认 stream）
-    auto minmax_pair = thrust::minmax_element(thrust::device, data_ptr, data_ptr + size);
+    // 使用 Thrust reduce 计算 min/max，过滤 inf/NaN（与 AIMET _get_min_max 一致）
+    min_val = thrust::reduce(thrust::device, data_ptr, data_ptr + size, FLT_MAX, finite_min_op());
+    max_val = thrust::reduce(thrust::device, data_ptr, data_ptr + size, -FLT_MAX, finite_max_op());
     
-    // 拷贝结果到 Host
-    cudaMemcpy(&min_val, minmax_pair.first.get(), sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&max_val, minmax_pair.second.get(), sizeof(float), cudaMemcpyDeviceToHost);
+    // 如果所有值都是 inf/NaN，使用默认范围
+    if (min_val > max_val) {
+        min_val = 0.0f;
+        max_val = 0.0f;
+    }
 }
 
 void build_histogram(const float* data_dev, size_t size, float* counts_dev, float min_val,
@@ -447,13 +492,12 @@ void redistribute_histogram(const float* src_counts_dev, float src_min, float sr
     float src_bin_width = (src_max - src_min) / num_bins;
     float dst_bin_width = (dst_max - dst_min) / num_bins;
     if (dst_bin_width < 1e-9f) dst_bin_width = 1e-9f;
-    float dst_inv_bin_width = 1.0f / dst_bin_width;
 
     const int threads = 256;
     const int blocks = (num_bins + threads - 1) / threads;
 
     redistribute_histogram_kernel<<<blocks, threads, 0, stream>>>(
-        src_counts_dev, src_min, src_bin_width, dst_counts_dev, dst_min, dst_inv_bin_width,
+        src_counts_dev, src_min, src_bin_width, dst_counts_dev, dst_min, dst_bin_width,
         num_bins);
 }
 
@@ -483,29 +527,14 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
     // 等待 extract kernel 完成
     cudaStreamSynchronize(stream);
 
-    // 计算 minmax 并构建直方图
-    float min_val, max_val;
-
-    compute_minmax(z_out_dev.data(), total_size, min_val, max_val);
-    collectors.z_out_hist.collectWithKnownRange(z_out_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(r_out_dev.data(), total_size, min_val, max_val);
-    collectors.r_out_hist.collectWithKnownRange(r_out_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(g_out_dev.data(), total_size, min_val, max_val);
-    collectors.g_out_hist.collectWithKnownRange(g_out_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(Rh_add_br_dev.data(), total_size, min_val, max_val);
-    collectors.Rh_add_br_g_hist.collectWithKnownRange(Rh_add_br_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(rRh_dev.data(), total_size, min_val, max_val);
-    collectors.rRh_hist.collectWithKnownRange(rRh_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(new_contrib_dev.data(), total_size, min_val, max_val);
-    collectors.new_contrib_hist.collectWithKnownRange(new_contrib_dev.data(), total_size, min_val, max_val, stream);
-    
-    compute_minmax(old_contrib_dev.data(), total_size, min_val, max_val);
-    collectors.old_contrib_hist.collectWithKnownRange(old_contrib_dev.data(), total_size, min_val, max_val, stream);
+    // 收集直方图（使用 collect 函数，与 AIMET 行为一致：支持多批次范围扩展）
+    collectors.z_out_hist.collect(z_out_dev.data(), total_size, stream);
+    collectors.r_out_hist.collect(r_out_dev.data(), total_size, stream);
+    collectors.g_out_hist.collect(g_out_dev.data(), total_size, stream);
+    collectors.Rh_add_br_g_hist.collect(Rh_add_br_dev.data(), total_size, stream);
+    collectors.rRh_hist.collect(rRh_dev.data(), total_size, stream);
+    collectors.new_contrib_hist.collect(new_contrib_dev.data(), total_size, stream);
+    collectors.old_contrib_hist.collect(old_contrib_dev.data(), total_size, stream);
 }
 
 void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collectors,
@@ -521,7 +550,7 @@ void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collecto
     dev::vector<float> all_counts(channel_size * num_bins);
     all_counts.zero();
     
-    // 2. 批量计算所有 channel 的 min/max
+    // 2. 批量计算所有 channel 的 min/max（已过滤 inf/NaN）
     {
         const int threads = 256;
         const int blocks = channel_size;
@@ -530,17 +559,7 @@ void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collecto
             data_dev, all_mins.data(), all_maxs.data(), input_size, channel_size);
     }
     
-    // 3. 批量构建所有 channel 的直方图
-    {
-        const int threads = 256;
-        const int blocks = channel_size;
-        const size_t shared_mem = num_bins * sizeof(float);
-        build_per_channel_histogram_kernel<<<blocks, threads, shared_mem, stream>>>(
-            data_dev, all_counts.data(), all_mins.data(), all_maxs.data(),
-            input_size, channel_size, num_bins);
-    }
-    
-    // 4. 只拷贝 min/max 元数据到 CPU（很小，只有 channel_size * 8B）
+    // 3. 拷贝 min/max 到 CPU 进行范围预处理（与 AIMET 一致）
     std::vector<float> h_mins(channel_size);
     std::vector<float> h_maxs(channel_size);
     cudaMemcpyAsync(h_mins.data(), all_mins.data(), channel_size * sizeof(float),
@@ -549,7 +568,50 @@ void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collecto
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
     
-    // 5. 纯 D2D 拷贝 counts 到各 collector（不经过 CPU）
+    // 4. 范围预处理：与 CPU HistogramCollector::collect() 和 AIMET 完全一致
+    const float minimum_scale = get_minimum_scale(num_bins);
+    const float minimum_range = minimum_scale * num_bins;
+    for (int c = 0; c < channel_size; ++c) {
+        // 处理所有值都是 inf/NaN 的情况（min > max）
+        if (h_mins[c] > h_maxs[c]) {
+            h_mins[c] = 0.0f;
+            h_maxs[c] = 0.0f;
+        }
+        
+        // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
+        if (h_mins[c] == h_maxs[c]) {
+            h_mins[c] = h_mins[c] - 0.5f;
+            h_maxs[c] = h_maxs[c] + 0.5f;
+        }
+        
+        float input_range = h_maxs[c] - h_mins[c];
+        if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
+            // 确保 0 在范围内（与 CPU 一致）
+            h_mins[c] = std::min(h_mins[c], 0.0f);
+            h_maxs[c] = std::max(h_maxs[c], 0.0f);
+            // 基于 min 扩展范围
+            h_maxs[c] = h_mins[c] + minimum_range;
+        }
+    }
+    
+    // 5. 将预处理后的范围拷贝回 GPU
+    cudaMemcpyAsync(all_mins.data(), h_mins.data(), channel_size * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(all_maxs.data(), h_maxs.data(), channel_size * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+    
+    // 6. 使用预处理后的范围构建直方图
+    {
+        const int threads = 256;
+        const int blocks = channel_size;
+        const size_t shared_mem = num_bins * sizeof(float);
+        build_per_channel_histogram_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, all_counts.data(), all_mins.data(), all_maxs.data(),
+            input_size, channel_size, num_bins);
+    }
+    cudaStreamSynchronize(stream);
+    
+    // 7. 设置各 collector 的直方图元数据和计数
     for (int c = 0; c < channel_size; ++c) {
         GPUHistogram& hist = collectors[c].histogram();
         hist.min_val = h_mins[c];
@@ -600,11 +662,23 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
     batch.original_mins = batch.mins;
     batch.original_maxs = batch.maxs;
     
-    // 3. 范围扩展：与 CPU HistogramCollector::collect() 完全一致
+    // 3. 范围扩展：与 CPU HistogramCollector::collect() 和 AIMET 完全一致
     // 必须在构建直方图之前进行，以确保 bin 分布一致
     const float minimum_scale = get_minimum_scale(num_bins);
     const float minimum_range = minimum_scale * num_bins;
     for (int c = 0; c < channel_size; ++c) {
+        // 处理所有值都是 inf/NaN 的情况（min > max）
+        if (batch.mins[c] > batch.maxs[c]) {
+            batch.mins[c] = 0.0f;
+            batch.maxs[c] = 0.0f;
+        }
+        
+        // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
+        if (batch.mins[c] == batch.maxs[c]) {
+            batch.mins[c] = batch.mins[c] - 0.5f;
+            batch.maxs[c] = batch.maxs[c] + 0.5f;
+        }
+        
         float input_range = batch.maxs[c] - batch.mins[c];
         if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
             // 确保 0 在范围内（与 CPU 一致）
@@ -645,15 +719,24 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
 void GPUHistogramCollector::collect(const float* data_dev, size_t size, cudaStream_t stream) {
     if (size == 0) return;
 
-    // 在 GPU 上计算 min/max
+    // 在 GPU 上计算 min/max（过滤 inf/NaN）
     float data_min, data_max;
     gpu_hist::compute_minmax(data_dev, size, data_min, data_max);
+
+    // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
+    // 这是为了兼容 PyTorch 的 torch.histc 实现
+    if (data_min == data_max) {
+        data_min = data_min - 0.5f;
+        data_max = data_max + 0.5f;
+    }
 
     // 处理特殊情况
     float minimum_scale = get_minimum_scale(config_.num_bins);
     float minimum_range = minimum_scale * config_.num_bins;
     float input_range = data_max - data_min;
 
+    // 如果范围太小，使用最小范围并确保 0 在范围内
+    // 与 AIMET merge_stats 中的 zero_range_mask 处理一致
     if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
         data_min = std::min(data_min, 0.0f);
         data_max = std::max(data_max, 0.0f);
@@ -700,6 +783,12 @@ void GPUHistogramCollector::collectWithKnownRange(const float* data_dev, size_t 
                                                    cudaStream_t stream) {
     if (size == 0) return;
 
+    // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
+    if (known_min == known_max) {
+        known_min = known_min - 0.5f;
+        known_max = known_max + 0.5f;
+    }
+
     // 使用已知范围，跳过 minmax 计算
     float minimum_scale = get_minimum_scale(config_.num_bins);
     float minimum_range = minimum_scale * config_.num_bins;
@@ -713,14 +802,37 @@ void GPUHistogramCollector::collectWithKnownRange(const float* data_dev, size_t 
     }
 
     if (!hist_.is_valid()) {
+        // 首次收集：初始化直方图
         hist_.reset(config_.num_bins);
         hist_.min_val = known_min;
         hist_.max_val = known_max;
         _add_to_histogram_gpu(data_dev, size, stream);
-        range_limit_set_ = false;  // 已知范围模式不使用范围限制
+
+        // 设置范围限制（与 collect 一致）
+        range_limit_min_ = known_min - input_range * config_.growth_limit / 2.0f;
+        range_limit_max_ = known_max + input_range * config_.growth_limit / 2.0f;
+        range_limit_set_ = true;
     } else {
-        // 直接添加（假设范围已经正确设置）
-        _add_to_histogram_gpu(data_dev, size, stream);
+        // 后续收集：与 collect 函数逻辑一致，支持范围扩展
+        float updated_min = hist_.min_val;
+        float updated_max = hist_.max_val;
+
+        if (range_limit_set_) {
+            // 应用范围限制（与 AIMET clamp 逻辑一致）
+            updated_min = std::max(range_limit_min_, std::min(known_min, hist_.min_val));
+            updated_max = std::min(range_limit_max_, std::max(known_max, hist_.max_val));
+        } else {
+            updated_min = std::min(known_min, hist_.min_val);
+            updated_max = std::max(known_max, hist_.max_val);
+        }
+
+        if (updated_min == hist_.min_val && updated_max == hist_.max_val) {
+            // 范围不变，直接添加
+            _add_to_histogram_gpu(data_dev, size, stream);
+        } else {
+            // 需要扩展范围
+            _merge_with_extended_range_gpu(data_dev, size, updated_min, updated_max, stream);
+        }
     }
 }
 
@@ -765,15 +877,39 @@ void GPUHistogramCollector::merge(const GPUHistogram& other) {
     if (!other.is_valid()) return;
 
     if (!hist_.is_valid()) {
-        // 直接复制
+        // 首次合并：复制直方图并设置范围限制（与 CPU 版本和 AIMET 一致）
         hist_ = other;
+        
+        // 设置范围限制（与 collect 一致）
+        float input_range = other.max_val - other.min_val;
+        
+        // 处理零范围情况
+        float minimum_scale = get_minimum_scale(config_.num_bins);
+        float minimum_range = minimum_scale * config_.num_bins;
+        if (input_range < minimum_range) {
+            input_range = minimum_range;
+        }
+        
+        range_limit_min_ = other.min_val - input_range * config_.growth_limit / 2.0f;
+        range_limit_max_ = other.max_val + input_range * config_.growth_limit / 2.0f;
+        range_limit_set_ = true;
         return;
     }
 
-    float new_min = std::min(hist_.min_val, other.min_val);
-    float new_max = std::max(hist_.max_val, other.max_val);
+    // 后续合并：应用范围限制（与 CPU 版本和 AIMET 一致）
+    float updated_min = hist_.min_val;
+    float updated_max = hist_.max_val;
+    
+    if (range_limit_set_) {
+        // 应用范围限制（与 AIMET clamp 逻辑一致）
+        updated_min = std::max(range_limit_min_, std::min(other.min_val, hist_.min_val));
+        updated_max = std::min(range_limit_max_, std::max(other.max_val, hist_.max_val));
+    } else {
+        updated_min = std::min(other.min_val, hist_.min_val);
+        updated_max = std::max(other.max_val, hist_.max_val);
+    }
 
-    if (new_min == hist_.min_val && new_max == hist_.max_val) {
+    if (updated_min == hist_.min_val && updated_max == hist_.max_val) {
         // 范围相同，直接累加
         // 使用 Thrust 进行向量加法
         thrust::device_ptr<float> dst_ptr(hist_.counts.data());
@@ -788,15 +924,15 @@ void GPUHistogramCollector::merge(const GPUHistogram& other) {
 
         // 重新分配当前直方图
         gpu_hist::redistribute_histogram(hist_.counts.data(), hist_.min_val, hist_.max_val,
-                                         new_counts.data(), new_min, new_max, config_.num_bins, 0);
+                                         new_counts.data(), updated_min, updated_max, config_.num_bins, 0);
 
         // 重新分配另一个直方图
         gpu_hist::redistribute_histogram(other.counts.data(), other.min_val, other.max_val,
-                                         new_counts.data(), new_min, new_max, config_.num_bins, 0);
+                                         new_counts.data(), updated_min, updated_max, config_.num_bins, 0);
 
         hist_.counts = std::move(new_counts);
-        hist_.min_val = new_min;
-        hist_.max_val = new_max;
+        hist_.min_val = updated_min;
+        hist_.max_val = updated_max;
         hist_.total_count += other.total_count;
     }
 }
