@@ -328,14 +328,35 @@ class HistogramCollector {
 
    private:
     /**
-     * 将数据添加到当前直方图（假设范围已设置）
+     * 将数据添加到当前直方图（与 AIMET 完全一致）
+     * - 先构建直方图（只处理范围内的值）
+     * - 再额外统计边界外的值并加到边界 bin
+     * - inf/NaN 被忽略（与 AIMET torch.histc 行为一致）
      */
     void _add_to_histogram(const float* data, size_t size) {
         float bin_width = hist_.bin_width();
+        float inv_bin_width = 1.0f / bin_width;
+        
+        // 与 AIMET torch.histc + 边界外统计完全一致
         for (size_t i = 0; i < size; ++i) {
-            int bin_idx = static_cast<int>((data[i] - hist_.min_val) / bin_width);
-            bin_idx = std::max(0, std::min(bin_idx, hist_.num_bins - 1));
-            hist_.counts[bin_idx] += 1.0f;
+            float val = data[i];
+            
+            // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+            if (!std::isfinite(val)) continue;
+            
+            // 计算 bin 索引
+            int bin_idx = static_cast<int>((val - hist_.min_val) * inv_bin_width);
+            
+            // 与 AIMET 一致：边界外的值加到边界 bin
+            if (val < hist_.min_val) {
+                hist_.counts[0] += 1.0f;  // histogram[0] += sum(input < bin_edges[0])
+            } else if (val > hist_.max_val) {
+                hist_.counts[hist_.num_bins - 1] += 1.0f;  // histogram[-1] += sum(input > bin_edges[-1])
+            } else {
+                // 范围内的值：与 AIMET _get_bin_num 一致（只有上界 clamp）
+                bin_idx = std::min(bin_idx, hist_.num_bins - 1);
+                hist_.counts[bin_idx] += 1.0f;
+            }
         }
         hist_.total_count += size;
     }
@@ -358,7 +379,7 @@ class HistogramCollector {
             // 旧直方图不可用（基于常数值），直接丢弃
             // 稍后用新数据重建
         } else {
-            // 重新分配旧直方图的计数（与 AIMET 精确比例分配一致）
+            // 重新分配旧直方图的计数（与 AIMET 完全一致）
             for (int src_idx = 0; src_idx < hist_.num_bins; ++src_idx) {
                 if (hist_.counts[src_idx] <= 0) continue;
 
@@ -367,37 +388,53 @@ class HistogramCollector {
                 // 源 bin 的起始位置
                 float src_bin_start = hist_.min_val + src_idx * src_bin_width;
                 
-                // 计算落入的目标 bin 索引
+                // 计算落入的目标 bin 索引（与 AIMET _get_bin_num 完全一致：只有上界 clamp）
                 int dest_bin_index = static_cast<int>((src_bin_start - new_min) / dest_bin_width);
-                dest_bin_index = std::max(0, std::min(dest_bin_index, config_.num_bins - 1));
+                dest_bin_index = std::min(dest_bin_index, config_.num_bins - 1);
                 
                 // 目标 bin 的结束位置
                 float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
                 
-                // 计算分割比例（与 AIMET split_hist_value 逻辑一致）
-                // 源 bin 落入第一个目标 bin 的比例
-                float overlap_ratio = (dest_bin_end - src_bin_start) / src_bin_width;
-                overlap_ratio = std::max(0.0f, std::min(1.0f, overlap_ratio));
-                
-                float first_bin_count = std::round(overlap_ratio * count);
-                first_bin_count = std::min(first_bin_count, count);
+                // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
+                float split_hist_value = std::round(
+                    ((dest_bin_end - src_bin_start) / src_bin_width) * count
+                );
+                float first_bin_count = std::min(split_hist_value, count);
                 
                 // 添加到第一个目标 bin
                 new_counts[dest_bin_index] += first_bin_count;
                 
-                // 如果有剩余部分，添加到下一个 bin（与 AIMET other_bin_updates 一致）
+                // 如果有剩余部分，添加到下一个 bin（与 AIMET other_bin_updates 完全一致）
                 float remaining_count = count - first_bin_count;
-                if (remaining_count > 0 && dest_bin_index + 1 < config_.num_bins) {
-                    new_counts[dest_bin_index + 1] += remaining_count;
+                if (remaining_count > 0) {
+                    // 与 AIMET 一致：使用 _get_bin_num 计算 other_bin_index
+                    int other_bin_index = static_cast<int>((src_bin_start + dest_bin_width - new_min) / dest_bin_width);
+                    other_bin_index = std::min(other_bin_index, config_.num_bins - 1);
+                    new_counts[other_bin_index] += remaining_count;
                 }
             }
         }
 
-        // 添加新数据（超出范围的值裁剪到边界 bin，与 AIMET 一致）
+        // 添加新数据（与 AIMET torch.histc + 边界外统计完全一致）
+        float inv_dest_bin_width = 1.0f / dest_bin_width;
         for (size_t i = 0; i < size; ++i) {
-            int bin_idx = static_cast<int>((data[i] - new_min) / dest_bin_width);
-            bin_idx = std::max(0, std::min(bin_idx, config_.num_bins - 1));
-            new_counts[bin_idx] += 1.0f;
+            float val = data[i];
+            
+            // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+            if (!std::isfinite(val)) continue;
+            
+            // 计算 bin 索引
+            int bin_idx = static_cast<int>((val - new_min) * inv_dest_bin_width);
+            
+            // 与 AIMET 一致：边界外的值加到边界 bin
+            if (val < new_min) {
+                new_counts[0] += 1.0f;
+            } else if (val > new_max) {
+                new_counts[config_.num_bins - 1] += 1.0f;
+            } else {
+                bin_idx = std::min(bin_idx, config_.num_bins - 1);
+                new_counts[bin_idx] += 1.0f;
+            }
         }
 
         // 更新直方图
@@ -439,7 +476,7 @@ class HistogramCollector {
 
     /**
      * 将直方图重新分配到新的 bin
-     * 与 AIMET 精确比例分配逻辑完全一致
+     * 与 AIMET 完全一致
      */
     void _redistribute_histogram(const Histogram& src, std::vector<float>& dst, float new_min,
                                  float dest_bin_width) {
@@ -457,27 +494,29 @@ class HistogramCollector {
             float count = src.counts[src_idx];
             float src_bin_start = src.min_val + src_idx * src_bin_width;
             
-            // 计算落入的目标 bin 索引
+            // 计算落入的目标 bin 索引（与 AIMET _get_bin_num 完全一致：只有上界 clamp）
             int dest_bin_index = static_cast<int>((src_bin_start - new_min) / dest_bin_width);
-            dest_bin_index = std::max(0, std::min(dest_bin_index, config_.num_bins - 1));
+            dest_bin_index = std::min(dest_bin_index, config_.num_bins - 1);
             
             // 目标 bin 的结束位置
             float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
             
-            // 计算分割比例（与 AIMET 一致）
-            float overlap_ratio = (dest_bin_end - src_bin_start) / src_bin_width;
-            overlap_ratio = std::max(0.0f, std::min(1.0f, overlap_ratio));
-            
-            float first_bin_count = std::round(overlap_ratio * count);
-            first_bin_count = std::min(first_bin_count, count);
+            // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
+            float split_hist_value = std::round(
+                ((dest_bin_end - src_bin_start) / src_bin_width) * count
+            );
+            float first_bin_count = std::min(split_hist_value, count);
             
             // 添加到第一个目标 bin
             dst[dest_bin_index] += first_bin_count;
             
-            // 剩余部分添加到下一个 bin
+            // 剩余部分添加到下一个 bin（与 AIMET other_bin_updates 完全一致）
             float remaining_count = count - first_bin_count;
-            if (remaining_count > 0 && dest_bin_index + 1 < config_.num_bins) {
-                dst[dest_bin_index + 1] += remaining_count;
+            if (remaining_count > 0) {
+                // 与 AIMET 一致：使用 _get_bin_num 计算 other_bin_index
+                int other_bin_index = static_cast<int>((src_bin_start + dest_bin_width - new_min) / dest_bin_width);
+                other_bin_index = std::min(other_bin_index, config_.num_bins - 1);
+                dst[other_bin_index] += remaining_count;
             }
         }
     }
