@@ -1064,23 +1064,25 @@ __global__ void sqnr_noise_symmetric_kernel(
 }
 
 /**
- * @brief SQNR 噪声计算 Kernel（非对称量化）
+ * @brief SQNR 噪声计算 Kernel（非对称量化，与 AIMET _clamp_delta_offset_values 完全一致）
  *
  * 每个 block 处理一个 (delta_idx, offset_idx) 组合
  * 
  * 参数说明（与 AIMET 一致）：
  * - hist_min: 直方图原始 min，用于计算 bin 中点
- * - search_min/search_max: 搜索范围（已扩展确保包含 0），用于 clamp 操作
+ * - observed_min/observed_max: 量化对齐的范围（与 AIMET _clamp_delta_offset_values 一致）
+ * - minimum_scale: 与 AIMET _get_minimum_scale(num_steps) 一致
  */
 __global__ void sqnr_noise_asymmetric_kernel(
     const float* __restrict__ counts,
     float hist_min,        // 直方图原始 min（用于 bin 中点计算）
-    float search_min,      // 搜索范围 min（用于 clamp，与 AIMET observed_min 类似）
-    float search_max,      // 搜索范围 max（用于 clamp，与 AIMET observed_max 类似）
+    float observed_min,    // 量化对齐的 min（与 AIMET observed_min 一致）
+    float observed_max,    // 量化对齐的 max（与 AIMET observed_max 一致）
     float bin_width, int num_bins,
     float max_delta, int num_delta_candidates, int num_offset_candidates,
     int64_t num_steps,
     const float* __restrict__ offsets,  // [num_offset_candidates]
+    float minimum_scale,   // 与 AIMET _get_minimum_scale 一致
     float gamma, float p,
     float* __restrict__ noise_out)  // [num_delta_candidates * num_offset_candidates]
 {
@@ -1091,15 +1093,17 @@ __global__ void sqnr_noise_asymmetric_kernel(
     const int delta_idx = combo_idx / num_offset_candidates;
     const int offset_idx = combo_idx % num_offset_candidates;
     
-    // 计算 delta
+    // 计算 delta（与 AIMET 一致）
     float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
-    delta = fmaxf(delta, 1e-8f);
+    delta = fmaxf(delta, minimum_scale);
     
-    // 获取 offset 并 clamp（使用搜索范围，与 AIMET _clamp_delta_offset_values 一致）
+    // 获取 offset 并 clamp（与 AIMET _clamp_delta_offset_values 完全一致）
     float offset = offsets[offset_idx];
-    float test_min = fmaxf(search_min, delta * offset);
-    float test_max = fminf(search_max, test_min + delta * num_steps);
-    float clamped_delta = fmaxf((test_max - test_min) / num_steps, 1e-8f);
+    float test_min = delta * offset;
+    float test_max = test_min + delta * num_steps;
+    test_min = fmaxf(observed_min, test_min);
+    test_max = fminf(observed_max, test_max);
+    float clamped_delta = fmaxf((test_max - test_min) / num_steps, minimum_scale);
     float clamped_offset = roundf(test_min / clamped_delta);
     
     // Shared memory for reduction
@@ -1197,6 +1201,9 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     const int64_t quant_max = bw.qmax();
     const int64_t num_steps = quant_max - quant_min;
     
+    // 最小 delta（与 AIMET minimum_scale 一致）
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    
     // ===== 关键修复：保存原始直方图范围用于计算 bin_width =====
     // bin_width 必须基于直方图收集时的原始范围，而不是扩展后的范围
     // 这与 AIMET 的 _estimate_clip_and_quant_noise 中使用 stat.bin_edges 一致
@@ -1205,16 +1212,14 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     float bin_width = (hist_max - hist_min) / num_bins;
     if (bin_width < 1e-9f) bin_width = 1e-9f;
     
-    // 确保搜索范围包含 0（用于 SQNR 搜索，与 AIMET _pick_test_candidates 一致）
+    // 与 AIMET _pick_test_candidates 完全一致的范围预处理
     min_val = (min_val < 0.0f) ? min_val : 0.0f;
     max_val = (max_val > 0.0f) ? max_val : 0.0f;
-    float min_range_limit = min_val + 1e-8f * static_cast<float>(num_steps);
+    // 与 AIMET 745 行一致：max_vals = torch.max(max_vals, min_vals + minimum_scale * num_steps)
+    float min_range_limit = min_val + minimum_scale * static_cast<float>(num_steps);
     max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
     
     float optimal_scale, optimal_min;
-    
-    // 最小 delta（与 AIMET minimum_scale 一致）
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
     
     if (is_symmetric) {
         // 对称量化（与 AIMET _pick_test_candidates_symmetric 完全一致）
@@ -1256,8 +1261,13 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         optimal_min = offset * optimal_scale;
         
     } else {
-        // 非对称量化
+        // 非对称量化（与 AIMET _pick_test_candidates_asymmetric 完全一致）
         float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
+        
+        // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
+        float observed_offset = std::round(min_val / max_delta);
+        float observed_min = max_delta * observed_offset;
+        float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
         
         const int num_delta_candidates = config.asymmetric_delta_candidates;
         
@@ -1269,7 +1279,7 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         for (int o = 0; o < num_offsets - 1; ++o) {
             h_offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
         }
-        h_offsets[num_offsets - 1] = std::round(min_val / max_delta);
+        h_offsets[num_offsets - 1] = observed_offset;  // 与 AIMET 一致：直接用 observed_offset
         
         dev::vector<float> offsets_dev(num_offsets);
         cudaMemcpyAsync(offsets_dev.data(), h_offsets.data(), num_offsets * sizeof(float),
@@ -1285,11 +1295,11 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         size_t shared_mem = threads * sizeof(float);
         
         // 传入原始 hist_min 和 bin_width（与 CPU estimateNoise 和 AIMET 一致）
-        // search_min/search_max 用于 clamp 操作（已扩展确保包含 0）
+        // observed_min/observed_max 用于 clamp（与 AIMET _clamp_delta_offset_values 一致）
         sqnr_noise_asymmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
-            counts_dev, hist_min, min_val, max_val, bin_width, num_bins,
+            counts_dev, hist_min, observed_min, observed_max, bin_width, num_bins,
             max_delta, num_delta_candidates, num_offsets,
-            num_steps, offsets_dev.data(), config.gamma, config.p, noise_dev.data());
+            num_steps, offsets_dev.data(), minimum_scale, config.gamma, config.p, noise_dev.data());
         
         // 找最小噪声
         dev::vector<int> min_idx_dev(1);
@@ -1305,16 +1315,17 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         int best_delta_idx = best_idx / num_offsets;
         int best_offset_idx = best_idx % num_offsets;
         
+        // 与 AIMET _clamp_delta_offset_values 完全一致的 clamp 逻辑
         float delta = max_delta * (best_delta_idx + 1) / (num_delta_candidates - 1);
-        delta = (delta > 1e-8f) ? delta : 1e-8f;
+        delta = std::max(delta, minimum_scale);  // 与 AIMET 一致
         float offset = h_offsets[best_offset_idx];
         
         float test_min_calc = delta * offset;
-        float test_min = (min_val > test_min_calc) ? min_val : test_min_calc;
-        float test_max_calc = test_min + delta * static_cast<float>(num_steps);
-        float test_max = (max_val < test_max_calc) ? max_val : test_max_calc;
+        float test_max_calc = test_min_calc + delta * static_cast<float>(num_steps);
+        float test_min = std::max(observed_min, test_min_calc);
+        float test_max = std::min(observed_max, test_max_calc);
         float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
-        optimal_scale = (scale_calc > 1e-8f) ? scale_calc : 1e-8f;
+        optimal_scale = std::max(scale_calc, minimum_scale);  // 与 AIMET 一致
         optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
     }
     
@@ -1323,13 +1334,23 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     int8_t n_rounded = static_cast<int8_t>(std::round(n));
     
     // 位宽约束：确保量化值不超出范围
-    // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
+    // 对称量化：max(|val|) / scale <= qmax
+    // 非对称量化：data_range / scale <= num_steps
     // 注意：使用原始直方图范围进行约束，而不是扩展后的范围
-    float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
-    if (max_abs > 1e-10f) {
-        int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-            std::log2(static_cast<float>(quant_max) / max_abs)));
-        n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
+    if (is_symmetric) {
+        float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
+        if (max_abs > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(quant_max) / max_abs)));
+            n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
+        }
+    } else {
+        float data_range = hist_max - hist_min;
+        if (data_range > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(num_steps) / data_range)));
+            n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
+        }
     }
     
     float po2_scale = std::pow(2.0f, -static_cast<float>(n_rounded));
@@ -1417,16 +1438,33 @@ void compute_sqnr_per_channel_gpu(
     const int64_t quant_max = bw.qmax();
     const int64_t num_steps = quant_max - quant_min;
     
+    // 最小 delta（与 AIMET minimum_scale 一致）
+    const float minimum_scale_all = get_minimum_scale(static_cast<int>(num_steps));
+    
     std::vector<std::vector<float>> h_offsets_all;
     std::vector<dev::vector<float>> offsets_dev_all;
+    
+    // 为非对称量化预计算 observed_min/observed_max（与 AIMET 完全一致）
+    std::vector<float> observed_mins(n), observed_maxs(n), observed_offsets(n);
     
     if (!is_symmetric) {
         h_offsets_all.resize(n);
         offsets_dev_all.resize(n);
         
         for (int c = 0; c < n; ++c) {
-            float max_delta = (batch.maxs[c] - batch.mins[c]) / static_cast<float>(num_steps);
-            if (max_delta < 1e-8f) max_delta = 1e-8f;
+            // 与 AIMET _pick_test_candidates 完全一致的范围预处理
+            float min_val = std::min(batch.mins[c], 0.0f);
+            float max_val = std::max(batch.maxs[c], 0.0f);
+            // 与 AIMET 745 行一致
+            float min_range = min_val + minimum_scale_all * static_cast<float>(num_steps);
+            max_val = std::max(max_val, min_range);
+            
+            float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
+            
+            // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
+            observed_offsets[c] = std::round(min_val / max_delta);
+            observed_mins[c] = max_delta * observed_offsets[c];
+            observed_maxs[c] = observed_mins[c] + max_delta * static_cast<float>(num_steps);
             
             int num_offsets_limit = static_cast<int>(num_steps + 2);
             const int num_offsets = (num_offsets_limit < offset_candidates) ? num_offsets_limit : offset_candidates;
@@ -1435,7 +1473,7 @@ void compute_sqnr_per_channel_gpu(
             for (int o = 0; o < num_offsets - 1; ++o) {
                 h_offsets_all[c][o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
             }
-            h_offsets_all[c][num_offsets - 1] = std::round(batch.mins[c] / max_delta);
+            h_offsets_all[c][num_offsets - 1] = observed_offsets[c];  // 与 AIMET 一致
             
             offsets_dev_all[c].resize(num_offsets);
             cudaMemcpyAsync(offsets_dev_all[c].data(), h_offsets_all[c].data(), 
@@ -1456,10 +1494,11 @@ void compute_sqnr_per_channel_gpu(
         float bin_width = (hist_max - hist_min) / batch.num_bins;
         // 注意：不对 bin_width 做 clamp，保持与 CPU 一致（允许为 0）
         
-        // 计算搜索用的 min_val/max_val（确保包含 0）
+        // 与 AIMET _pick_test_candidates 完全一致的范围预处理
         float min_val = (hist_min < 0.0f) ? hist_min : 0.0f;
         float max_val = (hist_max > 0.0f) ? hist_max : 0.0f;
-        float min_range = min_val + 1e-8f * static_cast<float>(num_steps);
+        // 与 AIMET 745 行一致
+        float min_range = min_val + minimum_scale_all * static_cast<float>(num_steps);
         max_val = (max_val > min_range) ? max_val : min_range;
         
         const float* counts_ptr = batch.channel_counts(c);
@@ -1490,6 +1529,9 @@ void compute_sqnr_per_channel_gpu(
             float max_delta = (max_val - min_val) / num_steps;
             max_delta = std::max(max_delta, 1e-8f);
             
+            // 最小 delta（与 AIMET minimum_scale 一致）
+            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            
             const int num_offsets = h_offsets_all[c].size();
             const int total_combos = asym_delta_candidates * num_offsets;
             
@@ -1497,11 +1539,11 @@ void compute_sqnr_per_channel_gpu(
             size_t shared_mem = threads * sizeof(float);
             
             // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 一致）
-            // search_min/search_max 用于 clamp 操作（已扩展确保包含 0）
+            // observed_min/observed_max 用于 clamp（与 AIMET _clamp_delta_offset_values 完全一致）
             sqnr_noise_asymmetric_kernel<<<total_combos, threads, shared_mem, s>>>(
-                counts_ptr, hist_min, min_val, max_val, bin_width, batch.num_bins,
+                counts_ptr, hist_min, observed_mins[c], observed_maxs[c], bin_width, batch.num_bins,
                 max_delta, asym_delta_candidates, num_offsets,
-                num_steps, offsets_dev_all[c].data(), config.gamma, config.p,
+                num_steps, offsets_dev_all[c].data(), minimum_scale, config.gamma, config.p,
                 noise_buffers[stream_id].data());
             
             find_min_noise_kernel<<<1, 256, 256 * (sizeof(float) + sizeof(int)), s>>>(
@@ -1523,7 +1565,8 @@ void compute_sqnr_per_channel_gpu(
         
         float min_val = (batch.mins[c] < 0.0f) ? batch.mins[c] : 0.0f;
         float max_val = (batch.maxs[c] > 0.0f) ? batch.maxs[c] : 0.0f;
-        float min_range = min_val + 1e-8f * static_cast<float>(num_steps);
+        // 与 AIMET 745 行一致
+        float min_range = min_val + minimum_scale_all * static_cast<float>(num_steps);
         max_val = (max_val > min_range) ? max_val : min_range;
         
         float optimal_scale;
@@ -1542,20 +1585,24 @@ void compute_sqnr_per_channel_gpu(
             float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             max_delta = std::max(max_delta, 1e-8f);
             
+            // 最小 delta（与 AIMET minimum_scale 一致）
+            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            
             const int num_offsets = h_offsets_all[c].size();
             int best_delta_idx = best_idx / num_offsets;
             int best_offset_idx = best_idx % num_offsets;
             
+            // 与 AIMET _clamp_delta_offset_values 完全一致的 clamp 逻辑
             float delta = max_delta * (best_delta_idx + 1) / (asym_delta_candidates - 1);
-            delta = std::max(delta, 1e-8f);
+            delta = std::max(delta, minimum_scale);  // 与 AIMET 一致
             float offset = h_offsets_all[c][best_offset_idx];
             
             float test_min_calc = delta * offset;
-            float test_min = (min_val > test_min_calc) ? min_val : test_min_calc;
-            float test_max_calc = test_min + delta * static_cast<float>(num_steps);
-            float test_max = (max_val < test_max_calc) ? max_val : test_max_calc;
+            float test_max_calc = test_min_calc + delta * static_cast<float>(num_steps);
+            float test_min = std::max(observed_mins[c], test_min_calc);  // 与 AIMET 一致
+            float test_max = std::min(observed_maxs[c], test_max_calc);  // 与 AIMET 一致
             float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
-            optimal_scale = (scale_calc > 1e-8f) ? scale_calc : 1e-8f;
+            optimal_scale = std::max(scale_calc, minimum_scale);  // 与 AIMET 一致
         }
         
         // 转换到 POT
@@ -1563,15 +1610,27 @@ void compute_sqnr_per_channel_gpu(
         int8_t n_rounded = static_cast<int8_t>(std::round(n_val));
         
         // 位宽约束：使用原始 min/max（未被范围扩展修改的值）
-        // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
+        // 对称量化：max(|val|) / scale <= qmax
+        // 非对称量化：data_range / scale <= num_steps
         float orig_min = batch.original_mins[c];
         float orig_max = batch.original_maxs[c];
-        float max_abs = std::max(std::abs(orig_min), std::abs(orig_max));
-        if (max_abs > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(quant_max) / max_abs)));
-            if (max_exp2_inv < n_rounded) {
-                n_rounded = max_exp2_inv;
+        if (is_symmetric) {
+            float max_abs = std::max(std::abs(orig_min), std::abs(orig_max));
+            if (max_abs > 1e-10f) {
+                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                    std::log2(static_cast<float>(quant_max) / max_abs)));
+                if (max_exp2_inv < n_rounded) {
+                    n_rounded = max_exp2_inv;
+                }
+            }
+        } else {
+            float data_range = orig_max - orig_min;
+            if (data_range > 1e-10f) {
+                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                    std::log2(static_cast<float>(num_steps) / data_range)));
+                if (max_exp2_inv < n_rounded) {
+                    n_rounded = max_exp2_inv;
+                }
             }
         }
         out_exp2_inv[c] = n_rounded;

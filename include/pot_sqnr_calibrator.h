@@ -177,13 +177,24 @@ class AimetPotSqnrCalibrator {
         auto [po2_scale, n] = roundToPowerOfTwo(optimal_scale);
         
         // 位宽约束：确保量化值不超出范围
-        // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
-        float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
-        if (max_abs > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(quant_max) / max_abs)));
-            n = std::min(n, max_exp2_inv);
-            po2_scale = std::pow(2.0f, -static_cast<float>(n));
+        // 对称量化：max(|val|) / scale <= qmax
+        // 非对称量化：data_range / scale <= num_steps
+        if (is_symmetric) {
+            float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+            if (max_abs > 1e-10f) {
+                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                    std::log2(static_cast<float>(quant_max) / max_abs)));
+                n = std::min(n, max_exp2_inv);
+                po2_scale = std::pow(2.0f, -static_cast<float>(n));
+            }
+        } else {
+            float data_range = hist.max_val - hist.min_val;
+            if (data_range > 1e-10f) {
+                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                    std::log2(static_cast<float>(num_steps) / data_range)));
+                n = std::min(n, max_exp2_inv);
+                po2_scale = std::pow(2.0f, -static_cast<float>(n));
+            }
         }
         
         out_exp2_inv = n;
@@ -219,10 +230,14 @@ class AimetPotSqnrCalibrator {
         const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
         const int64_t num_steps = quant_max - quant_min;
 
+        // 与 AIMET _pick_test_candidates 完全一致的范围预处理
+        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+        
         // 确保范围包含 0
         float min_val = std::min(hist.min_val, 0.0f);
         float max_val = std::max(hist.max_val, 0.0f);
-        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
+        // 与 AIMET 745 行一致：max_vals = torch.max(max_vals, min_vals + minimum_scale * num_steps)
+        max_val = std::max(max_val, min_val + minimum_scale * static_cast<float>(num_steps));
         
         float max_delta = is_symmetric 
             ? 2.0f * std::max(max_val, -min_val) / num_steps
@@ -301,7 +316,11 @@ class AimetPotSqnrCalibrator {
     }
 
     /**
-     * 非对称量化搜索
+     * 非对称量化搜索（与 AIMET _pick_test_candidates_asymmetric 完全一致）
+     * 
+     * AIMET 的关键细节：
+     * 1. clamp 用的是 observed_min/observed_max（量化对齐后的范围），不是原始 min_val/max_val
+     * 2. observed_offset 作为额外的候选加入搜索
      */
     static ContinuousCalibrationResult searchAsymmetric(
         const Histogram& hist, float min_val, float max_val, float max_delta,
@@ -309,25 +328,37 @@ class AimetPotSqnrCalibrator {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
         
+        // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
+        float observed_offset = std::round(min_val / max_delta);
+        float observed_min = max_delta * observed_offset;
+        float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
+        
+        // 最小 delta（与 AIMET minimum_scale 一致）
+        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+        
         const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
         std::vector<float> offsets(num_offsets);
         float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
         for (int o = 0; o < num_offsets - 1; ++o) {
             offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
         }
-        offsets[num_offsets - 1] = std::round(min_val / max_delta);  // observed offset
+        offsets[num_offsets - 1] = observed_offset;  // 与 AIMET 一致：加入 observed_offset
         
         for (int d = 1; d <= config.asymmetric_delta_candidates; ++d) {
             float delta = max_delta * d / (config.asymmetric_delta_candidates - 1);
-            delta = std::max(delta, 1e-8f);
+            delta = std::max(delta, minimum_scale);  // 与 AIMET 一致
             
             for (int o = 0; o < num_offsets; ++o) {
                 float offset = offsets[o];
                 
-                // Clamp to observed range
-                float test_min = std::max(min_val, delta * offset);
-                float test_max = std::min(max_val, test_min + delta * num_steps);
-                float clamped_delta = std::max((test_max - test_min) / num_steps, 1e-8f);
+                // 与 AIMET _clamp_delta_offset_values 完全一致：
+                // 用 observed_min/observed_max 做 clamp，不是原始 min_val/max_val
+                float test_min = delta * offset;
+                float test_max = test_min + delta * static_cast<float>(num_steps);
+                test_min = std::max(observed_min, test_min);
+                test_max = std::min(observed_max, test_max);
+                float clamped_delta = (test_max - test_min) / static_cast<float>(num_steps);
+                clamped_delta = std::max(clamped_delta, minimum_scale);
                 float clamped_offset = std::round(test_min / clamped_delta);
                 
                 float noise = estimateNoise(hist, clamped_delta, clamped_offset, num_steps,
@@ -460,12 +491,24 @@ inline void calibrateQuantParamsFromHistogram(const Histogram& hist, QuantBitWid
     auto [po2_scale, n] = AimetPotSqnrCalibrator::roundToPowerOfTwo(optimal_scale);
     
     // 位宽约束：确保量化值不超出范围（作为 round 的安全网）
-    float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
-    if (max_abs > 1e-10f) {
-        int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-            std::log2(static_cast<float>(quant_max) / max_abs)));
-        n = std::min(n, max_exp2_inv);
-        po2_scale = std::pow(2.0f, -static_cast<float>(n));
+    // 对称量化：max(|val|) / scale <= qmax
+    // 非对称量化：data_range / scale <= num_steps
+    if (is_symmetric) {
+        float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+        if (max_abs > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(quant_max) / max_abs)));
+            n = std::min(n, max_exp2_inv);
+            po2_scale = std::pow(2.0f, -static_cast<float>(n));
+        }
+    } else {
+        float data_range = hist.max_val - hist.min_val;
+        if (data_range > 1e-10f) {
+            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
+                std::log2(static_cast<float>(num_steps) / data_range)));
+            n = std::min(n, max_exp2_inv);
+            po2_scale = std::pow(2.0f, -static_cast<float>(n));
+        }
     }
     
     exp2_inv = n;
