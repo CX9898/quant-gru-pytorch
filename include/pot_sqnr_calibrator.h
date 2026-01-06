@@ -62,6 +62,8 @@ struct PercentileConfig {
 /**
  * Percentile 校准：基于百分位数裁剪计算连续 scale
  * 
+ * 与 AIMET PercentileEncodingAnalyzer.compute_encodings_from_stats + adjust_min_max 完全一致
+ * 
  * @param hist 直方图数据
  * @param num_steps 量化级数 (quant_max - quant_min)
  * @param is_symmetric 是否对称量化
@@ -78,28 +80,59 @@ inline ContinuousScaleResult calibratePercentile(
         throw std::runtime_error("Histogram is invalid in calibratePercentile");
     }
     
+    // 与 AIMET 一致：检查 num_steps
+    if (num_steps <= 0) {
+        throw std::runtime_error("num_steps must be > 0 in calibratePercentile");
+    }
+    
+    // 与 AIMET _get_minimum_scale 一致
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    
     // 获取百分位数范围
     float clip_ratio = (100.0f - config.percentile) / 100.0f;
     auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
     
-    // 确保范围包含 0（与 AIMET 一致）
+    // 与 AIMET adjust_min_max 一致：确保范围包含 0
     pmin = std::min(pmin, 0.0f);
     pmax = std::max(pmax, 0.0f);
     
-    // 确保范围有效
-    if (pmax <= pmin) {
-        pmax = pmin + 1e-6f;
+    // 与 AIMET adjust_min_max 一致：确保 finite（clamp 到合理范围）
+    constexpr float float_max = std::numeric_limits<float>::max();
+    constexpr float float_min = std::numeric_limits<float>::lowest();
+    pmin = std::max(float_min, std::min(pmin, 0.0f));
+    pmax = std::min(float_max, std::max(pmax, 0.0f));
+    
+    // 与 AIMET adjust_min_max 一致：确保范围不太小（使用 minimum_scale）
+    float tensor_threshold = (pmax - pmin) / static_cast<float>(num_steps);
+    if (tensor_threshold < minimum_scale) {
+        if (is_symmetric) {
+            // 对称量化：两边扩展
+            int64_t num_neg_steps = (num_steps + 1) / 2;  // ceil
+            int64_t num_pos_steps = num_steps / 2;        // floor
+            pmin -= minimum_scale * static_cast<float>(num_neg_steps);
+            pmax += minimum_scale * static_cast<float>(num_pos_steps);
+        } else {
+            // 非对称量化：只扩展 max
+            pmax += minimum_scale * static_cast<float>(num_steps);
+        }
     }
     
     ContinuousScaleResult result;
     
     if (is_symmetric) {
         // 与 AIMET adjust_min_max 对称量化处理完全一致
-        int64_t num_pos_steps = num_steps / 2;
-        int64_t num_neg_steps = (num_steps + 1) / 2;
+        int64_t num_pos_steps = num_steps / 2;        // floor
+        int64_t num_neg_steps = (num_steps + 1) / 2;  // ceil
         
-        float delta_from_max = pmax / static_cast<float>(num_pos_steps);
-        float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
+        // 边缘情况：num_steps=1 时 num_pos_steps=0，需要防止除零
+        // AIMET 在这种情况下会得到 inf，但最终会被 minimum_scale 约束
+        float delta_from_max = (num_pos_steps > 0) 
+            ? pmax / static_cast<float>(num_pos_steps) 
+            : std::numeric_limits<float>::max();
+        float delta_from_min = (num_neg_steps > 0) 
+            ? -pmin / static_cast<float>(num_neg_steps) 
+            : std::numeric_limits<float>::max();
+        
         result.scale = std::max(delta_from_max, delta_from_min);
         result.min = -static_cast<float>(num_neg_steps) * result.scale;
         result.max = static_cast<float>(num_pos_steps) * result.scale;
@@ -109,8 +142,8 @@ inline ContinuousScaleResult calibratePercentile(
         result.max = pmax;
     }
     
-    // 确保 scale 有效
-    result.scale = std::max(result.scale, 1e-8f);
+    // 最终保护：确保 scale 不小于 minimum_scale（与 AIMET 一致）
+    result.scale = std::max(result.scale, minimum_scale);
     result.noise = 0.0f;  // Percentile 不计算噪声
     
     return result;
