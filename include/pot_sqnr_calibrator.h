@@ -30,14 +30,6 @@
 // ============================================================================
 
 /**
- * 校准方案枚举
- */
-enum class CalibrationScheme {
-    SQNR,        // AIMET tf_enhanced 风格：SQNR 优化搜索最优 scale
-    PERCENTILE   // AIMET percentile 风格：百分位数裁剪
-};
-
-/**
  * 连续 scale 校准结果（模块 2/3 的输出）
  */
 struct ContinuousScaleResult {
@@ -132,10 +124,10 @@ inline ContinuousScaleResult calibratePercentile(
  * SQNR 校准配置
  */
 struct SqnrConfig {
-    int symmetric_delta_candidates = 201;   // 对称量化搜索精度
-    int asymmetric_delta_candidates = 35;   // 非对称量化搜索精度
-    int offset_candidates = 31;             // offset 搜索精度
-    float gamma = 3.0f;                     // clipping noise 权重 (AIMET 默认 3.0)
+    int symmetric_delta_candidates = 101;   // AIMET 默认 101
+    int asymmetric_delta_candidates = 17;   // AIMET 默认 17
+    int offset_candidates = 21;             // AIMET 默认 21
+    float gamma = 3.0f;                     // AIMET 默认 3.0
     float p = 2.0f;                         // Lp 范数 (p=2 = MSE)
 };
 
@@ -331,46 +323,6 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
 }
 
 /**
- * 应用位宽约束
- * 
- * 对称量化：max(|val|) / scale <= qmax  =>  exp2_inv <= floor(log2(qmax / max_abs))
- * 非对称量化：data_range / scale <= num_steps  =>  exp2_inv <= floor(log2(num_steps / data_range))
- * 
- * @param n 当前 exp2_inv
- * @param hist_min 直方图原始 min
- * @param hist_max 直方图原始 max
- * @param quant_max 量化最大值
- * @param num_steps 量化级数
- * @param is_symmetric 是否对称量化
- * @return 约束后的 exp2_inv
- */
-inline int8_t applyBitwidthConstraint(
-    int8_t n,
-    float hist_min,
-    float hist_max,
-    int64_t quant_max,
-    int64_t num_steps,
-    bool is_symmetric) {
-    
-    if (is_symmetric) {
-        float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
-        if (max_abs > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(quant_max) / max_abs)));
-            n = std::min(n, max_exp2_inv);
-        }
-    } else {
-        float data_range = hist_max - hist_min;
-        if (data_range > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(num_steps) / data_range)));
-            n = std::min(n, max_exp2_inv);
-        }
-    }
-    return n;
-}
-
-/**
  * 计算 zero-point
  * 
  * @param continuous_min 量化范围最小值
@@ -390,12 +342,18 @@ inline int32_t computeZeroPoint(float continuous_min, float po2_scale,
 }
 
 /**
- * 转换连续 scale 为 POT 形式（完整流程）
+ * 转换连续 scale 为 POT 形式（与 AIMET 一致）
+ * 
+ * 策略：
+ * 1. 四舍五入 scale 到最近的 2^n
+ * 2. 保持 qmin, qmax 不变
+ * 3. 计算 zero-point
+ * 
+ * 注意：与 AIMET 一致，不做位宽约束。如果 POT scale 变小，
+ * 硬件需要支持饱和处理（saturate）或调用方需要调整 rmin/rmax。
  * 
  * @param continuous_scale 连续 scale
  * @param continuous_min 连续 min（用于计算 zero-point）
- * @param hist_min 直方图原始 min（用于位宽约束）
- * @param hist_max 直方图原始 max（用于位宽约束）
  * @param bw 量化位宽配置
  * @param is_symmetric 是否对称量化
  * @return PotScaleResult
@@ -403,23 +361,15 @@ inline int32_t computeZeroPoint(float continuous_min, float po2_scale,
 inline PotScaleResult convertToPot(
     float continuous_scale,
     float continuous_min,
-    float hist_min,
-    float hist_max,
     QuantBitWidth bw,
     bool is_symmetric) {
     
     const int64_t quant_min = bw.qmin();
-    const int64_t quant_max = bw.qmax();
-    const int64_t num_steps = quant_max - quant_min;
     
     // 步骤 1: 转换到 POT（AIMET find_closest_power_of_2_scale）
     auto [po2_scale, n] = roundScaleToPowerOfTwo(continuous_scale);
     
-    // 步骤 2: 位宽约束
-    n = applyBitwidthConstraint(n, hist_min, hist_max, quant_max, num_steps, is_symmetric);
-    po2_scale = std::pow(2.0f, -static_cast<float>(n));
-    
-    // 步骤 3: 计算 zero-point
+    // 步骤 2: 计算 zero-point
     int32_t zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
     
     return PotScaleResult{n, po2_scale, zp};
@@ -433,6 +383,15 @@ inline PotScaleResult convertToPot(
  * 从直方图计算 POT 量化参数
  * 
  * 调用流程: Histogram → [calibratePercentile/calibrateSqnr] → [convertToPot] → 最终参数
+ * 
+ * @param hist 直方图数据
+ * @param bw 量化位宽配置
+ * @param is_symmetric 是否对称量化
+ * @param exp2_inv [out] POT 指数
+ * @param zp [out] 零点
+ * @param name 调试名称（可选）
+ * @param use_percentile 使用 Percentile 校准（false = SQNR）
+ * @param percentile 百分位数（仅当 use_percentile=true 时有效）
  */
 inline void calibrateQuantParamsFromHistogram(
     const Histogram& hist,
@@ -441,7 +400,7 @@ inline void calibrateQuantParamsFromHistogram(
     int8_t& exp2_inv,
     int32_t& zp,
     const char* name = nullptr,
-    CalibrationScheme scheme = CalibrationScheme::SQNR,
+    bool use_percentile = false,
     float percentile = 99.99f) {
     
     if (!hist.is_valid()) {
@@ -453,7 +412,7 @@ inline void calibrateQuantParamsFromHistogram(
     // 步骤 1: 使用对应的校准方法计算连续 scale
     ContinuousScaleResult continuous_result;
     
-    if (scheme == CalibrationScheme::PERCENTILE) {
+    if (use_percentile) {
         PercentileConfig config;
         config.percentile = percentile;
         continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config);
@@ -462,20 +421,10 @@ inline void calibrateQuantParamsFromHistogram(
         continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config);
     }
     
-    // 步骤 2: 转换为 POT
-    // 位宽约束使用的范围:
-    // - SQNR: 使用原始直方图范围（SQNR 已经在搜索中平衡了 clipping）
-    // - Percentile: 使用裁剪后的范围（允许异常值被 clip）
-    float constraint_min = (scheme == CalibrationScheme::PERCENTILE) 
-        ? continuous_result.min : hist.min_val;
-    float constraint_max = (scheme == CalibrationScheme::PERCENTILE) 
-        ? continuous_result.max : hist.max_val;
-    
+    // 步骤 2: 转换为 POT（与 AIMET 一致，无位宽约束）
     PotScaleResult pot_result = convertToPot(
         continuous_result.scale,
         continuous_result.min,
-        constraint_min,
-        constraint_max,
         bw,
         is_symmetric);
     
@@ -484,7 +433,7 @@ inline void calibrateQuantParamsFromHistogram(
     
 #ifdef DEBUG
     if (name && name[0]) {
-        const char* scheme_name = (scheme == CalibrationScheme::PERCENTILE) ? "PERC" : "SQNR";
+        const char* scheme_name = use_percentile ? "PERC" : "SQNR";
         printf("[%s][%s] range=[%.4f,%.4f] cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
                scheme_name, name, hist.min_val, hist.max_val, 
                continuous_result.scale, pot_result.po2_scale, pot_result.exp2_inv, pot_result.zero_point);

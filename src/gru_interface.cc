@@ -529,7 +529,6 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     quant_params.hidden_ = hist_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
-    CalibrationScheme scheme = use_percentile ? CalibrationScheme::PERCENTILE : CalibrationScheme::SQNR;
     const int channel_size = hist_collectors.hidden_ * 3;
     
     quant_params.exp2_inv_W_.resize(channel_size);
@@ -542,7 +541,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
                              int8_t& exp2, int32_t& zp, const char* name) {
         if (!hist.is_valid()) throw std::runtime_error(std::string(name) + " is invalid.");
         calibrateQuantParamsFromHistogram(hist.histogram(), bw, sym, exp2, zp,
-                                          verbose ? name : nullptr, scheme, percentile_value);
+                                          verbose ? name : nullptr, use_percentile, percentile_value);
     };
 
     // OpenMP 并行化 per-channel 计算
@@ -636,10 +635,20 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
             throw std::runtime_error(std::string("GPU histogram ") + (name ? name : "unknown") + " is invalid");
         }
         const auto& hist = collector.histogram();
-        gpu_hist::compute_sqnr_params_gpu(
+        const int64_t num_steps = quant_bw.qmax() - quant_bw.qmin();
+        
+        // 步骤 1: GPU SQNR 搜索获取连续 scale
+        ContinuousScaleResult continuous_result = gpu_hist::searchSqnrGpu(
             hist.counts.data(), hist.min_val, hist.max_val,
-            hist.num_bins, hist.total_count,
-            is_symmetric, quant_bw, out_exp2_inv, out_zp);
+            hist.num_bins, num_steps, is_symmetric);
+        
+        // 步骤 2: CPU POT 转换（与 AIMET 一致，无位宽约束）
+        PotScaleResult pot_result = convertToPot(
+            continuous_result.scale, continuous_result.min,
+            quant_bw, is_symmetric);
+        
+        out_exp2_inv = pot_result.exp2_inv;
+        out_zp = pot_result.zero_point;
         
         if (verbose && name) {
             printf("[GPU-SQNR][%s] bits=%d range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
@@ -680,27 +689,36 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
                         bitwidth_config.old_contrib_, quant_params.exp2_inv_old_contrib_,
                         quant_params.zp_old_contrib_, "old_contrib");
     
-    // Per-channel 直方图（使用批量 GPU SQNR）
-    if (gpu_collectors.W_batch.is_valid()) {
-        gpu_hist::compute_sqnr_per_channel_gpu(
-            gpu_collectors.W_batch, bitwidth_config.W_symmetric_, 
-            bitwidth_config.W_, quant_params.exp2_inv_W_);
-    }
-    if (gpu_collectors.R_batch.is_valid()) {
-        gpu_hist::compute_sqnr_per_channel_gpu(
-            gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
-            bitwidth_config.R_, quant_params.exp2_inv_R_);
-    }
-    if (gpu_collectors.bx_batch.is_valid()) {
-        gpu_hist::compute_sqnr_per_channel_gpu(
-            gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
-            bitwidth_config.bx_, quant_params.exp2_inv_bx_);
-    }
-    if (gpu_collectors.br_batch.is_valid()) {
-        gpu_hist::compute_sqnr_per_channel_gpu(
-            gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
-            bitwidth_config.br_, quant_params.exp2_inv_br_);
-    }
+    // Per-channel 直方图（使用批量 GPU SQNR + CPU POT 转换）
+    auto compute_per_channel_sqnr = [&](const PerChannelHistogramBatch& batch,
+                                         bool is_symmetric, QuantBitWidth quant_bw,
+                                         std::vector<int8_t>& out_exp2_inv) {
+        if (!batch.is_valid()) return;
+        
+        const int64_t num_steps = quant_bw.qmax() - quant_bw.qmin();
+        
+        // 步骤 1: GPU SQNR 搜索获取连续 scale
+        std::vector<ContinuousScaleResult> continuous_results;
+        gpu_hist::searchSqnrPerChannelGpu(batch, num_steps, is_symmetric, continuous_results);
+        
+        // 步骤 2: CPU POT 转换（与 AIMET 一致，无位宽约束）
+        out_exp2_inv.resize(batch.channel_size);
+        for (int c = 0; c < batch.channel_size; ++c) {
+            PotScaleResult pot_result = convertToPot(
+                continuous_results[c].scale, continuous_results[c].min,
+                quant_bw, is_symmetric);
+            out_exp2_inv[c] = pot_result.exp2_inv;
+        }
+    };
+    
+    compute_per_channel_sqnr(gpu_collectors.W_batch, bitwidth_config.W_symmetric_, 
+                             bitwidth_config.W_, quant_params.exp2_inv_W_);
+    compute_per_channel_sqnr(gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
+                             bitwidth_config.R_, quant_params.exp2_inv_R_);
+    compute_per_channel_sqnr(gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
+                             bitwidth_config.bx_, quant_params.exp2_inv_bx_);
+    compute_per_channel_sqnr(gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
+                             bitwidth_config.br_, quant_params.exp2_inv_br_);
     
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
