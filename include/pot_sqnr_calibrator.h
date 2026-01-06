@@ -259,37 +259,29 @@ class AimetPotSqnrCalibrator {
     HistogramCollector collector_;
 
     /**
-     * 对称量化搜索（带 clamp 机制，类似 AIMET 非对称量化的 _clamp_delta_offset_values）
+     * 对称量化搜索（与 AIMET _pick_test_candidates_symmetric 完全一致）
      * 
-     * 搜索空间与 AIMET 一致：从 max_delta/N 到 max_delta
-     * 但添加了 clamp 机制：将量化范围 clamp 到观察范围后重新计算 delta
-     * 
-     * 这确保了：即使初始 delta 很小，最终选出的 delta 也能覆盖观察范围
+     * AIMET 对称量化特点：
+     * 1. 搜索空间：从 max_delta/N 到 max_delta
+     * 2. 没有 clamp 机制（与非对称量化不同）
+     * 3. 通过 gamma 参数控制 clipping 惩罚，由搜索自动平衡精度与覆盖范围
      */
     static ContinuousCalibrationResult searchSymmetric(
-        const Histogram& hist, float max_delta, int64_t num_steps, float observed_max_abs,
+        const Histogram& hist, float max_delta, int64_t num_steps, float /*observed_max_abs*/,
         const HistogramCalibrationConfig& config) {
         
         ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
         // 对称量化：offset = (-num_steps) // 2（Python floor division）
         const float offset = -static_cast<float>((num_steps + 1) / 2);
-        const float num_pos_steps = static_cast<float>(num_steps / 2);
+        
+        // 最小 delta（与 AIMET minimum_scale 一致）
+        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
         
         // AIMET 风格的搜索空间：从 max_delta/N 到 max_delta
+        // 注意：AIMET 对称量化没有 clamp 机制，完全依赖 gamma 控制 clipping 惩罚
         for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
             float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
-            delta = std::max(delta, 1e-8f);
-            
-            // ===== 关键改进：类似 AIMET _clamp_delta_offset_values 的 clamp 机制 =====
-            // 对称量化的范围：[-delta * num_pos_steps, delta * num_pos_steps]
-            // 如果这个范围小于观察范围 [-observed_max_abs, observed_max_abs]
-            // 则需要将 delta 调整到能覆盖观察范围的最小值
-            float quant_max_abs = delta * num_pos_steps;
-            if (quant_max_abs < observed_max_abs) {
-                // 量化范围无法覆盖观察范围，调整 delta
-                delta = observed_max_abs / num_pos_steps;
-            }
-            // ==========================================================================
+            delta = std::max(delta, minimum_scale);  // 与 AIMET min_delta 一致
             
             float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
             
