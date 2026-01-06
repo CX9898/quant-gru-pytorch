@@ -23,35 +23,47 @@
 // ============================================================================
 
 /**
- * @brief 直方图构建核心 Kernel
+ * @brief 直方图构建核心 Kernel（与 AIMET 完全一致）
  *
  * 使用 atomicAdd 累加到全局直方图
- * 对于大数据量，atomic 竞争可接受；对于超大数据可考虑分块+归约
+ * 与 AIMET torch.histc + 边界外统计完全一致：
+ * - inf/NaN 被忽略
+ * - 边界外的值加到边界 bin
  */
 __global__ void histogram_kernel(const float* __restrict__ data, size_t size,
                                   float* __restrict__ counts, float min_val,
-                                  float inv_bin_width, int num_bins) {
+                                  float max_val, float inv_bin_width, int num_bins) {
     const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
 
     float val = data[idx];
-    int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
     
-    // 裁剪到有效范围
-    bin_idx = max(0, min(bin_idx, num_bins - 1));
-
-    atomicAdd(&counts[bin_idx], 1.0f);
+    // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+    if (!isfinite(val)) return;
+    
+    // 与 AIMET 一致：边界外的值加到边界 bin
+    if (val < min_val) {
+        atomicAdd(&counts[0], 1.0f);  // histogram[0] += sum(input < bin_edges[0])
+    } else if (val > max_val) {
+        atomicAdd(&counts[num_bins - 1], 1.0f);  // histogram[-1] += sum(input > bin_edges[-1])
+    } else {
+        // 范围内的值：与 AIMET _get_bin_num 一致（只有上界 clamp）
+        int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+        bin_idx = min(bin_idx, num_bins - 1);
+        atomicAdd(&counts[bin_idx], 1.0f);
+    }
 }
 
 /**
- * @brief 使用共享内存优化的直方图 Kernel（适用于 bin 数量较小的情况）
+ * @brief 使用共享内存优化的直方图 Kernel（与 AIMET 完全一致）
  *
  * 每个 block 先在共享内存中累加，最后再 atomicAdd 到全局
  * 当 num_bins <= 2048 时效率更高
+ * 与 AIMET torch.histc + 边界外统计完全一致
  */
 __global__ void histogram_kernel_shared(const float* __restrict__ data, size_t size,
                                          float* __restrict__ counts, float min_val,
-                                         float inv_bin_width, int num_bins) {
+                                         float max_val, float inv_bin_width, int num_bins) {
     extern __shared__ float shared_hist[];
 
     // 初始化共享内存
@@ -60,13 +72,24 @@ __global__ void histogram_kernel_shared(const float* __restrict__ data, size_t s
     }
     __syncthreads();
 
-    // 每个线程处理多个元素
+    // 每个线程处理多个元素（与 AIMET 完全一致）
     const size_t stride = blockDim.x * gridDim.x;
     for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += stride) {
         float val = data[idx];
-        int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
-        bin_idx = max(0, min(bin_idx, num_bins - 1));
-        atomicAdd(&shared_hist[bin_idx], 1.0f);
+        
+        // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+        if (!isfinite(val)) continue;
+        
+        // 与 AIMET 一致：边界外的值加到边界 bin
+        if (val < min_val) {
+            atomicAdd(&shared_hist[0], 1.0f);
+        } else if (val > max_val) {
+            atomicAdd(&shared_hist[num_bins - 1], 1.0f);
+        } else {
+            int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+            bin_idx = min(bin_idx, num_bins - 1);
+            atomicAdd(&shared_hist[bin_idx], 1.0f);
+        }
     }
     __syncthreads();
 
@@ -79,7 +102,7 @@ __global__ void histogram_kernel_shared(const float* __restrict__ data, size_t s
 }
 
 /**
- * @brief 直方图重分配 Kernel（与 AIMET _HistogramObserver.merge_stats 逻辑一致）
+ * @brief 直方图重分配 Kernel（与 AIMET _HistogramObserver.merge_stats 完全一致）
  *
  * 将源直方图按比例分配到新范围的目标直方图
  * 
@@ -104,28 +127,29 @@ __global__ void redistribute_histogram_kernel(const float* __restrict__ src_coun
     // 源 bin 的起始位置
     float src_bin_start = src_min + src_idx * src_bin_width;
 
-    // 计算落入的目标 bin 索引（与 AIMET _get_bin_num 一致）
+    // 计算落入的目标 bin 索引（与 AIMET _get_bin_num 完全一致：只有上界 clamp）
     int dst_idx = static_cast<int>((src_bin_start - dst_min) * dst_inv_bin_width);
-    dst_idx = max(0, min(dst_idx, num_bins - 1));
+    dst_idx = min(dst_idx, num_bins - 1);
 
-    // 目标 bin 的结束位置（与 CPU 版本一致：dst_min + dst_bin_width * (dst_idx + 1)）
+    // 目标 bin 的结束位置
     float dst_bin_end = dst_min + dst_bin_width * (dst_idx + 1);
 
-    // 计算分割比例（与 AIMET split_hist_value 逻辑一致）
-    // 源 bin 落入第一个目标 bin 的比例
-    float overlap_ratio = (dst_bin_end - src_bin_start) / src_bin_width;
-    overlap_ratio = fmaxf(0.0f, fminf(1.0f, overlap_ratio));
-
-    float first_bin_count = roundf(overlap_ratio * count);
-    first_bin_count = fminf(first_bin_count, count);
+    // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
+    float split_hist_value = roundf(
+        ((dst_bin_end - src_bin_start) / src_bin_width) * count
+    );
+    float first_bin_count = fminf(split_hist_value, count);
 
     // 添加到第一个目标 bin
     atomicAdd(&dst_counts[dst_idx], first_bin_count);
 
-    // 剩余部分添加到下一个 bin（与 AIMET other_bin_updates 一致）
+    // 剩余部分添加到下一个 bin（与 AIMET other_bin_updates 完全一致）
     float remaining = count - first_bin_count;
-    if (remaining > 0 && dst_idx + 1 < num_bins) {
-        atomicAdd(&dst_counts[dst_idx + 1], remaining);
+    if (remaining > 0) {
+        // 与 AIMET 一致：使用 _get_bin_num 计算 other_bin_index
+        int other_bin_idx = static_cast<int>((src_bin_start + dst_bin_width - dst_min) * dst_inv_bin_width);
+        other_bin_idx = min(other_bin_idx, num_bins - 1);
+        atomicAdd(&dst_counts[other_bin_idx], remaining);
     }
 }
 
@@ -395,12 +419,23 @@ __global__ void build_per_channel_histogram_kernel(
     }
     __syncthreads();
     
-    // 每个线程处理多个元素
+    // 每个线程处理多个元素（与 AIMET 完全一致）
     for (int i = threadIdx.x; i < input_size; i += blockDim.x) {
         float val = data[i * channel_size + channel];
-        int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
-        bin_idx = max(0, min(bin_idx, num_bins - 1));
-        atomicAdd(&s_hist[bin_idx], 1.0f);
+        
+        // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+        if (!isfinite(val)) continue;
+        
+        // 与 AIMET 一致：边界外的值加到边界 bin
+        if (val < min_val) {
+            atomicAdd(&s_hist[0], 1.0f);
+        } else if (val > max_val) {
+            atomicAdd(&s_hist[num_bins - 1], 1.0f);
+        } else {
+            int bin_idx = static_cast<int>((val - min_val) * inv_bin_width);
+            bin_idx = min(bin_idx, num_bins - 1);
+            atomicAdd(&s_hist[bin_idx], 1.0f);
+        }
     }
     __syncthreads();
     
@@ -469,18 +504,18 @@ void build_histogram(const float* data_dev, size_t size, float* counts_dev, floa
 
     const int threads = 256;
 
-    // 选择合适的 kernel
+    // 选择合适的 kernel（与 AIMET 完全一致：包含边界外值处理）
     if (num_bins <= 2048) {
         // 使用共享内存优化版本
         const int blocks = std::min(static_cast<int>((size + threads - 1) / threads), 256);
         const size_t shared_mem_size = num_bins * sizeof(float);
         histogram_kernel_shared<<<blocks, threads, shared_mem_size, stream>>>(
-            data_dev, size, counts_dev, min_val, inv_bin_width, num_bins);
+            data_dev, size, counts_dev, min_val, max_val, inv_bin_width, num_bins);
     } else {
         // 使用简单的全局 atomic 版本
         const int blocks = (size + threads - 1) / threads;
         histogram_kernel<<<blocks, threads, 0, stream>>>(data_dev, size, counts_dev, min_val,
-                                                          inv_bin_width, num_bins);
+                                                          max_val, inv_bin_width, num_bins);
     }
 }
 
