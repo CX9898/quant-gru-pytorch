@@ -1071,10 +1071,17 @@ __global__ void sqnr_noise_symmetric_kernel(
  * @brief SQNR 噪声计算 Kernel（非对称量化）
  *
  * 每个 block 处理一个 (delta_idx, offset_idx) 组合
+ * 
+ * 参数说明（与 AIMET 一致）：
+ * - hist_min: 直方图原始 min，用于计算 bin 中点
+ * - search_min/search_max: 搜索范围（已扩展确保包含 0），用于 clamp 操作
  */
 __global__ void sqnr_noise_asymmetric_kernel(
     const float* __restrict__ counts,
-    float min_val, float max_val, float bin_width, int num_bins,
+    float hist_min,        // 直方图原始 min（用于 bin 中点计算）
+    float search_min,      // 搜索范围 min（用于 clamp，与 AIMET observed_min 类似）
+    float search_max,      // 搜索范围 max（用于 clamp，与 AIMET observed_max 类似）
+    float bin_width, int num_bins,
     float max_delta, int num_delta_candidates, int num_offset_candidates,
     int64_t num_steps,
     const float* __restrict__ offsets,  // [num_offset_candidates]
@@ -1092,10 +1099,10 @@ __global__ void sqnr_noise_asymmetric_kernel(
     float delta = max_delta * (delta_idx + 1) / (num_delta_candidates - 1);
     delta = fmaxf(delta, 1e-8f);
     
-    // 获取 offset 并 clamp
+    // 获取 offset 并 clamp（使用搜索范围，与 AIMET _clamp_delta_offset_values 一致）
     float offset = offsets[offset_idx];
-    float test_min = fmaxf(min_val, delta * offset);
-    float test_max = fminf(max_val, test_min + delta * num_steps);
+    float test_min = fmaxf(search_min, delta * offset);
+    float test_max = fminf(search_max, test_min + delta * num_steps);
     float clamped_delta = fmaxf((test_max - test_min) / num_steps, 1e-8f);
     float clamped_offset = roundf(test_min / clamped_delta);
     
@@ -1108,7 +1115,8 @@ __global__ void sqnr_noise_asymmetric_kernel(
         float count = counts[i];
         if (count < 1e-6f) continue;
         
-        float x = min_val + (i + 0.5f) * bin_width;
+        // bin 中点使用原始直方图范围（与 AIMET stat.bin_edges 一致）
+        float x = hist_min + (i + 0.5f) * bin_width;
         
         float q = roundf(x / clamped_delta - clamped_offset);
         bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
@@ -1193,21 +1201,25 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     const int64_t quant_max = bw.qmax();
     const int64_t num_steps = quant_max - quant_min;
     
-    // 确保范围包含 0
+    // ===== 关键修复：保存原始直方图范围用于计算 bin_width =====
+    // bin_width 必须基于直方图收集时的原始范围，而不是扩展后的范围
+    // 这与 AIMET 的 _estimate_clip_and_quant_noise 中使用 stat.bin_edges 一致
+    const float hist_min = min_val;
+    const float hist_max = max_val;
+    float bin_width = (hist_max - hist_min) / num_bins;
+    if (bin_width < 1e-9f) bin_width = 1e-9f;
+    
+    // 确保搜索范围包含 0（用于 SQNR 搜索，与 AIMET _pick_test_candidates 一致）
     min_val = (min_val < 0.0f) ? min_val : 0.0f;
     max_val = (max_val > 0.0f) ? max_val : 0.0f;
     float min_range_limit = min_val + 1e-8f * static_cast<float>(num_steps);
     max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
     
-    float bin_width = (max_val - min_val) / num_bins;
-    if (bin_width < 1e-9f) bin_width = 1e-9f;
-    
     float optimal_scale, optimal_min;
     
     // 观察到的绝对值最大范围（用于对称量化的 clamp 机制）
-    float abs_min_val = std::abs(min_val);
-    float abs_max_val = std::abs(max_val);
-    float observed_max_abs = (abs_min_val > abs_max_val) ? abs_min_val : abs_max_val;
+    // 注意：必须使用原始直方图范围，而不是扩展后的 min_val/max_val
+    float observed_max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
     
     if (is_symmetric) {
         // 对称量化
@@ -1226,8 +1238,9 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         const int blocks = num_candidates;
         size_t shared_mem = threads * sizeof(float);
         
+        // 传入原始 hist_min 和 bin_width（与 CPU estimateNoise 和 AIMET 一致）
         sqnr_noise_symmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
-            counts_dev, min_val, bin_width, num_bins,
+            counts_dev, hist_min, bin_width, num_bins,
             max_delta, num_candidates,
             num_steps, offset, observed_max_abs, config.gamma, config.p, noise_dev.data());
         
@@ -1282,8 +1295,10 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         const int blocks = total_combos;
         size_t shared_mem = threads * sizeof(float);
         
+        // 传入原始 hist_min 和 bin_width（与 CPU estimateNoise 和 AIMET 一致）
+        // search_min/search_max 用于 clamp 操作（已扩展确保包含 0）
         sqnr_noise_asymmetric_kernel<<<blocks, threads, shared_mem, stream>>>(
-            counts_dev, min_val, max_val, bin_width, num_bins,
+            counts_dev, hist_min, min_val, max_val, bin_width, num_bins,
             max_delta, num_delta_candidates, num_offsets,
             num_steps, offsets_dev.data(), config.gamma, config.p, noise_dev.data());
         
@@ -1320,9 +1335,8 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
     
     // 位宽约束：确保量化值不超出范围
     // max(|val|) / scale <= qmax => exp2_inv <= log2(qmax / max(|val|))
-    float abs_min_for_constraint = std::abs(min_val);
-    float abs_max_for_constraint = std::abs(max_val);
-    float max_abs = (abs_min_for_constraint > abs_max_for_constraint) ? abs_min_for_constraint : abs_max_for_constraint;
+    // 注意：使用原始直方图范围进行约束，而不是扩展后的范围
+    float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
     if (max_abs > 1e-10f) {
         int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
             std::log2(static_cast<float>(quant_max) / max_abs)));
@@ -1496,8 +1510,9 @@ void compute_sqnr_per_channel_gpu(
             size_t shared_mem = threads * sizeof(float);
             
             // 传递原始 hist_min 和 bin_width（与 CPU estimateNoise 一致）
+            // search_min/search_max 用于 clamp 操作（已扩展确保包含 0）
             sqnr_noise_asymmetric_kernel<<<total_combos, threads, shared_mem, s>>>(
-                counts_ptr, hist_min, max_val, bin_width, batch.num_bins,
+                counts_ptr, hist_min, min_val, max_val, bin_width, batch.num_bins,
                 max_delta, asym_delta_candidates, num_offsets,
                 num_steps, offsets_dev_all[c].data(), config.gamma, config.p,
                 noise_buffers[stream_id].data());
