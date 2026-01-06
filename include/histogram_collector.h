@@ -78,6 +78,7 @@ struct Histogram {
     /**
      * 获取百分位数范围（与 AIMET PercentileEncodingAnalyzer 完全一致）
      * @param clip_percentile 裁剪百分位数 (例如 0.0001 表示裁剪两端各 0.01%，保留 99.98%)
+     *                        当 clip_percentile=0 时，返回完整范围（percentile=100）
      * @return (min, max) 对应的范围
      * 
      * AIMET 实现参考：
@@ -87,6 +88,11 @@ struct Histogram {
      */
     std::pair<float, float> getPercentileRange(float clip_percentile = 0.0001f) const {
         if (!is_valid() || total_count == 0) {
+            return {min_val, max_val};
+        }
+
+        // 与 AIMET percentile=100 特殊处理一致
+        if (clip_percentile <= 0.0f) {
             return {min_val, max_val};
         }
 
