@@ -16,7 +16,7 @@
 
 #include "dev_vector.h"
 #include "parallel_algorithm.h"  // for dev::fill_n
-#include "quantize_bitwidth_config.h"  // for QuantBitWidth
+#include "pot_sqnr_calibrator.h"  // for SqnrConfig, QuantBitWidth
 
 // ============================================================================
 // GPU 直方图结构体
@@ -381,22 +381,11 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
  * 2. 非对称量化：搜索 35×31 = 1085 个 (delta, offset) 组合
  * 3. 每个候选并行计算所有 bin 的噪声，reduction 求和
  */
-/**
- * @brief GPU SQNR 配置（与 HistogramCalibrationConfig 对应）
- */
-struct GPUSqnrConfig {
-    int symmetric_delta_candidates = 201;
-    int asymmetric_delta_candidates = 35;
-    int offset_candidates = 31;
-    float gamma = 3.0f;
-    float p = 2.0f;
-};
-
 void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_val, 
                               int num_bins, int64_t total_count,
                               bool is_symmetric, QuantBitWidth bw,
                               int8_t& out_exp2_inv, int32_t& out_zp,
-                              const GPUSqnrConfig& config = GPUSqnrConfig(),
+                              const SqnrConfig& config = SqnrConfig(),
                               cudaStream_t stream = 0);
 
 /**
@@ -425,7 +414,7 @@ void compute_sqnr_per_channel_gpu(
     const PerChannelHistogramBatch& batch,
     bool is_symmetric, QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
-    const GPUSqnrConfig& config = GPUSqnrConfig(),
+    const SqnrConfig& config = SqnrConfig(),
     cudaStream_t stream = 0);
 
 // ============================================================================
