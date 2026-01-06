@@ -1,28 +1,18 @@
 #pragma once
 
 /**
- * AIMET-Style POT-SQNR Calibrator
+ * POT 量化校准模块
  * 
- * 基于 AIMET SqnrEncodingAnalyzer 的三阶段量化校准：
+ * 四个独立模块（均为独立函数，无状态类）：
+ * 1. 直方图收集 - 在 histogram_collector.h
+ * 2. Percentile 校准 - calibratePercentile()
+ * 3. SQNR 校准 - calibrateSqnr()
+ * 4. POT 转换 - convertToPot(), roundScaleToPowerOfTwo(), applyBitwidthConstraint()
  * 
- * - 阶段 1：SQNR 优化找到最优连续 scale（与 AIMET 一致）
- *   - 搜索 delta/offset 候选值，最小化量化噪声
- *   - gamma 参数权衡 clipping noise
+ * 调用流程：
+ * Histogram → [calibratePercentile/calibrateSqnr] → ContinuousScaleResult → [convertToPot] → PotScaleResult
  * 
- * - 阶段 2：转换到 POT（Power-of-Two）
- *   - AIMET 使用 round(-log2(scale))
- *   - 本实现使用 floor(-log2(scale))，确保 po2_scale >= optimal_scale，避免 clipping
- * 
- * - 阶段 3：计算 zero-point
- *   - AIMET 使用 optimal_min
- *   - 本实现使用 hist.min_val，确保覆盖所有数据
- * 
- * 核心参数：
- * - symmetric_delta_candidates = 201
- * - asymmetric_delta_candidates = 35
- * - offset_candidates = 31
- * - gamma = 3.0
- * - num_bins = 2048
+ * 统一入口：calibrateQuantParamsFromHistogram()
  */
 
 #include <algorithm>
@@ -33,6 +23,11 @@
 #include <vector>
 
 #include "histogram_collector.h"
+#include "quantize_bitwidth_config.h"  // for QuantBitWidth
+
+// ============================================================================
+// 公共数据结构
+// ============================================================================
 
 /**
  * 校准方案枚举
@@ -43,507 +38,457 @@ enum class CalibrationScheme {
 };
 
 /**
- * 直方图校准配置（统一配置，支持 SQNR 和 Percentile 两种方案）
+ * 连续 scale 校准结果（模块 2/3 的输出）
  */
-struct HistogramCalibrationConfig {
-    // ========== 通用配置 ==========
-    int num_bins = 2048;                    // 直方图 bin 数量
-    CalibrationScheme scheme = CalibrationScheme::SQNR;  // 校准方案
+struct ContinuousScaleResult {
+    float scale;      // 连续 scale
+    float min;        // 量化范围最小值
+    float max;        // 量化范围最大值
+    float noise;      // 估计噪声（仅 SQNR 使用）
+};
+
+/**
+ * POT scale 结果（模块 4 的输出）
+ */
+struct PotScaleResult {
+    int8_t exp2_inv;   // POT 指数 (scale = 2^(-exp2_inv))
+    float po2_scale;   // POT scale 值
+    int32_t zero_point; // 零点
+};
+
+// ============================================================================
+// 模块 2: Percentile 校准
+// ============================================================================
+
+/**
+ * Percentile 校准配置
+ */
+struct PercentileConfig {
+    float percentile = 99.99f;  // 百分位数 (如 99.99 表示保留 99.99% 数据)
+};
+
+/**
+ * Percentile 校准：基于百分位数裁剪计算连续 scale
+ * 
+ * @param hist 直方图数据
+ * @param num_steps 量化级数 (quant_max - quant_min)
+ * @param is_symmetric 是否对称量化
+ * @param config 配置参数
+ * @return ContinuousScaleResult
+ */
+inline ContinuousScaleResult calibratePercentile(
+    const Histogram& hist,
+    int64_t num_steps,
+    bool is_symmetric,
+    const PercentileConfig& config = PercentileConfig()) {
     
-    // ========== SQNR 方案配置 ==========
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibratePercentile");
+    }
+    
+    // 获取百分位数范围
+    float clip_ratio = (100.0f - config.percentile) / 100.0f;
+    auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
+    
+    // 确保范围包含 0（与 AIMET 一致）
+    pmin = std::min(pmin, 0.0f);
+    pmax = std::max(pmax, 0.0f);
+    
+    // 确保范围有效
+    if (pmax <= pmin) {
+        pmax = pmin + 1e-6f;
+    }
+    
+    ContinuousScaleResult result;
+    
+    if (is_symmetric) {
+        // 与 AIMET adjust_min_max 对称量化处理完全一致
+        int64_t num_pos_steps = num_steps / 2;
+        int64_t num_neg_steps = (num_steps + 1) / 2;
+        
+        float delta_from_max = pmax / static_cast<float>(num_pos_steps);
+        float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
+        result.scale = std::max(delta_from_max, delta_from_min);
+        result.min = -static_cast<float>(num_neg_steps) * result.scale;
+        result.max = static_cast<float>(num_pos_steps) * result.scale;
+    } else {
+        result.scale = (pmax - pmin) / static_cast<float>(num_steps);
+        result.min = pmin;
+        result.max = pmax;
+    }
+    
+    // 确保 scale 有效
+    result.scale = std::max(result.scale, 1e-8f);
+    result.noise = 0.0f;  // Percentile 不计算噪声
+    
+    return result;
+}
+
+// ============================================================================
+// 模块 3: SQNR 校准
+// ============================================================================
+
+/**
+ * SQNR 校准配置
+ */
+struct SqnrConfig {
     int symmetric_delta_candidates = 201;   // 对称量化搜索精度
     int asymmetric_delta_candidates = 35;   // 非对称量化搜索精度
     int offset_candidates = 31;             // offset 搜索精度
     float gamma = 3.0f;                     // clipping noise 权重 (AIMET 默认 3.0)
     float p = 2.0f;                         // Lp 范数 (p=2 = MSE)
+};
+
+namespace sqnr_detail {
+
+/**
+ * 估算量化噪声（与 AIMET _estimate_clip_and_quant_noise 完全一致）
+ */
+inline float estimateNoise(const Histogram& hist, float delta, float offset,
+                           int64_t num_steps, float gamma, float p) {
+    if (delta <= 0) return std::numeric_limits<float>::max();
     
-    // ========== Percentile 方案配置 ==========
-    float percentile = 99.99f;              // 百分位数 (如 99.99 表示保留 99.99% 数据)
-};
+    float bin_width = hist.bin_width();
+    float total_noise = 0.0f;
+    
+    for (int i = 0; i < hist.num_bins; ++i) {
+        float count = hist.counts[i];
+        if (count < 1e-6f) continue;
+        
+        float x = hist.min_val + (i + 0.5f) * bin_width;
+        
+        // AIMET 公式：q = round(x / delta - offset)
+        float q = std::round(x / delta - offset);
+        
+        bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
+        q = std::max(0.0f, std::min(static_cast<float>(num_steps), q));
+        float x_recon = (q + offset) * delta;
+        
+        float error = std::pow(std::abs(x_recon - x), p);
+        if (clipped && gamma != 1.0f) error *= gamma;
+        
+        total_noise += error * count;
+    }
+    return total_noise;
+}
 
 /**
- * 连续 scale 校准结果
+ * 对称量化搜索（与 AIMET _pick_test_candidates_symmetric 完全一致）
  */
-struct ContinuousCalibrationResult {
-    float optimal_scale;
-    float optimal_offset;
-    float optimal_min;
-    float optimal_max;
-    float best_noise;
-};
+inline ContinuousScaleResult searchSymmetric(
+    const Histogram& hist,
+    float min_val, float max_val,
+    int64_t num_steps,
+    const SqnrConfig& config) {
+    
+    float max_delta = 2.0f * std::max(max_val, -min_val) / static_cast<float>(num_steps);
+    
+    ContinuousScaleResult best{0, 0, 0, std::numeric_limits<float>::max()};
+    
+    // 对称量化：offset = (-num_steps) // 2
+    const float offset = -static_cast<float>((num_steps + 1) / 2);
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    
+    for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
+        float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
+        delta = std::max(delta, minimum_scale);
+        
+        float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
+        
+        if (noise < best.noise) {
+            best.noise = noise;
+            best.scale = delta;
+            best.min = offset * delta;
+            best.max = best.min + num_steps * delta;
+        }
+    }
+    
+    if (best.noise == std::numeric_limits<float>::max()) {
+        throw std::runtime_error("calibrateSqnr: searchSymmetric failed to find valid scale");
+    }
+    return best;
+}
 
 /**
- * AIMET 风格的 POT-SQNR 校准器
+ * 非对称量化搜索（与 AIMET _pick_test_candidates_asymmetric 完全一致）
  */
-class AimetPotSqnrCalibrator {
-   public:
-    explicit AimetPotSqnrCalibrator(HistogramCalibrationConfig config = HistogramCalibrationConfig())
-        : config_(config), collector_(config.num_bins) {}
-
-    void update(const float* data, size_t size) {
-        if (size > 0) collector_.collect(data, size);
+inline ContinuousScaleResult searchAsymmetric(
+    const Histogram& hist,
+    float min_val, float max_val,
+    int64_t num_steps,
+    const SqnrConfig& config) {
+    
+    float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
+    
+    // 计算 observed_min/observed_max（量化对齐的范围）
+    float observed_offset = std::round(min_val / max_delta);
+    float observed_min = max_delta * observed_offset;
+    float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
+    
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    
+    // 生成 offset 候选值
+    const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
+    std::vector<float> offsets(num_offsets);
+    float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
+    for (int o = 0; o < num_offsets - 1; ++o) {
+        offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
     }
-
-    void merge(const Histogram& other) { collector_.merge(other); }
-
-    void reset() { collector_.reset(); }
-
-    bool isValid() const { return collector_.is_valid(); }
-
-    const Histogram& getHistogram() const { return collector_.histogram(); }
-
-    std::pair<float, float> getRange() const {
-        const Histogram& hist = collector_.histogram();
-        return {hist.min_val, hist.max_val};
-    }
-
-    /**
-     * 计算最优 POT 量化参数（两阶段方法）
-     */
-    template <typename QuantT>
-    void computeOptimalParams(bool is_symmetric, int8_t& out_exp2_inv, int32_t& out_zp,
-                              const char* name = nullptr) {
-        computeOptimalParamsFromHistogram<QuantT>(collector_.histogram(), is_symmetric,
-                                                   out_exp2_inv, out_zp, name, config_);
-    }
-
-    /**
-     * 统一的 POT 量化参数计算（支持 SQNR 和 Percentile 两种方案）
-     * 
-     * 流程：
-     * 1. 根据 scheme 选择计算最优连续 scale 和 min 的方式
-     *    - SQNR: 搜索最优 delta/offset，最小化量化噪声
-     *    - PERCENTILE: 直接从百分位数范围计算
-     * 2. round 到最近的 POT（AIMET find_closest_power_of_2_scale）
-     * 3. 计算 zero-point
-     */
-    template <typename QuantT>
-    static void computeOptimalParamsFromHistogram(const Histogram& hist, bool is_symmetric,
-                                                  int8_t& out_exp2_inv, int32_t& out_zp,
-                                                  const char* name = nullptr,
-                                                  const HistogramCalibrationConfig& config = HistogramCalibrationConfig()) {
-        if (!hist.is_valid()) {
-            throw std::runtime_error("Histogram is invalid in computeOptimalParamsFromHistogram");
-        }
-
-        const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
-        const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
-        const int64_t num_steps = quant_max - quant_min;
-
-        float optimal_scale, optimal_min;
-
-        if (config.scheme == CalibrationScheme::PERCENTILE) {
-            // ========== Percentile 方案 ==========
-            // 从直方图获取百分位数范围
-            float clip_ratio = (100.0f - config.percentile) / 100.0f;
-            auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
-            
-            // 确保范围包含 0（与 AIMET 一致）
-            pmin = std::min(pmin, 0.0f);
-            pmax = std::max(pmax, 0.0f);
-            
-            // 确保范围有效
-            if (pmax <= pmin) {
-                pmax = pmin + 1e-6f;
-            }
-            
-            if (is_symmetric) {
-                // 与 AIMET adjust_min_max 对称量化处理完全一致
-                // delta = max(curr_max / num_pos_steps, -curr_min / num_neg_steps)
-                int64_t num_pos_steps = num_steps / 2;
-                int64_t num_neg_steps = (num_steps + 1) / 2;
-                
-                float delta_from_max = pmax / static_cast<float>(num_pos_steps);
-                float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
-                optimal_scale = std::max(delta_from_max, delta_from_min);
-                
-                // curr_min = offset * delta, curr_max = num_pos_steps * delta
-                optimal_min = -static_cast<float>(num_neg_steps) * optimal_scale;
-            } else {
-                optimal_scale = (pmax - pmin) / static_cast<float>(num_steps);
-                optimal_min = pmin;
-            }
-            
-            // 确保 scale 有效
-            optimal_scale = std::max(optimal_scale, 1e-8f);
-        } else {
-            // ========== SQNR 方案（默认）==========
-            auto result = computeOptimalContinuousScale<QuantT>(hist, is_symmetric, config);
-            optimal_scale = result.optimal_scale;
-            optimal_min = result.optimal_min;
-        }
-
-        // 阶段 2：round 到最近的 POT（AIMET 方式）
-        auto [po2_scale, n] = roundToPowerOfTwo(optimal_scale);
+    offsets[num_offsets - 1] = observed_offset;
+    
+    ContinuousScaleResult best{0, 0, 0, std::numeric_limits<float>::max()};
+    
+    for (int d = 1; d <= config.asymmetric_delta_candidates; ++d) {
+        float delta = max_delta * d / (config.asymmetric_delta_candidates - 1);
+        delta = std::max(delta, minimum_scale);
         
-        // 位宽约束：确保量化值不超出范围
-        // 对称量化：max(|val|) / scale <= qmax
-        // 非对称量化：data_range / scale <= num_steps
-        if (is_symmetric) {
-            float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
-            if (max_abs > 1e-10f) {
-                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                    std::log2(static_cast<float>(quant_max) / max_abs)));
-                n = std::min(n, max_exp2_inv);
-                po2_scale = std::pow(2.0f, -static_cast<float>(n));
-            }
-        } else {
-            float data_range = hist.max_val - hist.min_val;
-            if (data_range > 1e-10f) {
-                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                    std::log2(static_cast<float>(num_steps) / data_range)));
-                n = std::min(n, max_exp2_inv);
-                po2_scale = std::pow(2.0f, -static_cast<float>(n));
+        for (int o = 0; o < num_offsets; ++o) {
+            float off = offsets[o];
+            
+            // 与 AIMET _clamp_delta_offset_values 完全一致
+            float test_min = delta * off;
+            float test_max = test_min + delta * static_cast<float>(num_steps);
+            test_min = std::max(observed_min, test_min);
+            test_max = std::min(observed_max, test_max);
+            float clamped_delta = (test_max - test_min) / static_cast<float>(num_steps);
+            clamped_delta = std::max(clamped_delta, minimum_scale);
+            float clamped_offset = std::round(test_min / clamped_delta);
+            
+            float noise = estimateNoise(hist, clamped_delta, clamped_offset, num_steps,
+                                       config.gamma, config.p);
+            
+            if (noise < best.noise) {
+                best.noise = noise;
+                best.scale = clamped_delta;
+                best.min = clamped_offset * clamped_delta;
+                best.max = best.min + num_steps * clamped_delta;
             }
         }
-        
-        out_exp2_inv = n;
-        
-        // 阶段 3：计算 zp
-        if (is_symmetric) {
-            out_zp = 0;
-        } else {
-            float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
-            out_zp = static_cast<int32_t>(std::round(zp_fp));
-        }
-
-#ifdef DEBUG
-        if (name && name[0]) {
-            const char* scheme_name = (config.scheme == CalibrationScheme::PERCENTILE) ? "PERC" : "SQNR";
-            printf("[AIMET-POT][%s][%s] range=[%.4f,%.4f] opt_min=%.4f cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
-                   scheme_name, name, hist.min_val, hist.max_val, optimal_min, optimal_scale, po2_scale, n, out_zp);
-        }
-#endif
     }
-
-    /**
-     * 阶段 1：AIMET 风格连续 scale 搜索
-     * 
-     * 搜索空间与 AIMET 一致：从 max_delta/N 到 max_delta
-     * 对称量化添加了 clamp 机制（类似非对称量化的 _clamp_delta_offset_values）
-     */
-    template <typename QuantT>
-    static ContinuousCalibrationResult computeOptimalContinuousScale(
-        const Histogram& hist, bool is_symmetric, const HistogramCalibrationConfig& config = HistogramCalibrationConfig()) {
-        
-        const int64_t quant_min = static_cast<int64_t>(std::numeric_limits<QuantT>::min());
-        const int64_t quant_max = static_cast<int64_t>(std::numeric_limits<QuantT>::max());
-        const int64_t num_steps = quant_max - quant_min;
-
-        // 与 AIMET _pick_test_candidates 完全一致的范围预处理
-        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
-        
-        // 确保范围包含 0
-        float min_val = std::min(hist.min_val, 0.0f);
-        float max_val = std::max(hist.max_val, 0.0f);
-        // 与 AIMET 745 行一致：max_vals = torch.max(max_vals, min_vals + minimum_scale * num_steps)
-        max_val = std::max(max_val, min_val + minimum_scale * static_cast<float>(num_steps));
-        
-        float max_delta = is_symmetric 
-            ? 2.0f * std::max(max_val, -min_val) / num_steps
-            : (max_val - min_val) / num_steps;
-        
-        // 观察到的绝对值最大范围（用于对称量化的 clamp）
-        float observed_max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
-        
-        return is_symmetric 
-            ? searchSymmetric(hist, max_delta, num_steps, observed_max_abs, config)
-            : searchAsymmetric(hist, min_val, max_val, max_delta, num_steps, config);
+    
+    if (best.noise == std::numeric_limits<float>::max()) {
+        throw std::runtime_error("calibrateSqnr: searchAsymmetric failed to find valid scale");
     }
+    return best;
+}
 
-    /**
-     * 阶段 2：转换到 POT（完全 AIMET 一致）
-     * 
-     * AIMET find_closest_power_of_2_scale 使用 round：
-     *   n = -log2(scale)
-     *   n_rounded = round(n)
-     *   new_scale = 2^(-n_rounded)
-     */
-    static std::pair<float, int8_t> roundToPowerOfTwo(float scale) {
-        if (scale <= 0) {
-            throw std::runtime_error("Invalid scale <= 0 in roundToPowerOfTwo");
-        }
-        float n = -std::log2(scale);
-        // AIMET 使用 round，四舍五入到最近的 POT
-        int8_t n_rounded = static_cast<int8_t>(std::round(n));
-        return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
-    }
-
-   private:
-    HistogramCalibrationConfig config_;
-    HistogramCollector collector_;
-
-    /**
-     * 对称量化搜索（与 AIMET _pick_test_candidates_symmetric 完全一致）
-     * 
-     * AIMET 对称量化特点：
-     * 1. 搜索空间：从 max_delta/N 到 max_delta
-     * 2. 没有 clamp 机制（与非对称量化不同）
-     * 3. 通过 gamma 参数控制 clipping 惩罚，由搜索自动平衡精度与覆盖范围
-     */
-    static ContinuousCalibrationResult searchSymmetric(
-        const Histogram& hist, float max_delta, int64_t num_steps, float /*observed_max_abs*/,
-        const HistogramCalibrationConfig& config) {
-        
-        ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
-        // 对称量化：offset = (-num_steps) // 2（Python floor division）
-        const float offset = -static_cast<float>((num_steps + 1) / 2);
-        
-        // 最小 delta（与 AIMET minimum_scale 一致）
-        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
-        
-        // AIMET 风格的搜索空间：从 max_delta/N 到 max_delta
-        // 注意：AIMET 对称量化没有 clamp 机制，完全依赖 gamma 控制 clipping 惩罚
-        for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
-            float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
-            delta = std::max(delta, minimum_scale);  // 与 AIMET min_delta 一致
-            
-            float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
-            
-            if (noise < result.best_noise) {
-                result.best_noise = noise;
-                result.optimal_scale = delta;
-                result.optimal_offset = offset;
-                result.optimal_min = offset * delta;
-                result.optimal_max = result.optimal_min + num_steps * delta;
-            }
-        }
-        
-        if (result.best_noise == std::numeric_limits<float>::max()) {
-            throw std::runtime_error("searchSymmetric failed to find valid scale");
-        }
-        return result;
-    }
-
-    /**
-     * 非对称量化搜索（与 AIMET _pick_test_candidates_asymmetric 完全一致）
-     * 
-     * AIMET 的关键细节：
-     * 1. clamp 用的是 observed_min/observed_max（量化对齐后的范围），不是原始 min_val/max_val
-     * 2. observed_offset 作为额外的候选加入搜索
-     */
-    static ContinuousCalibrationResult searchAsymmetric(
-        const Histogram& hist, float min_val, float max_val, float max_delta,
-        int64_t num_steps, const HistogramCalibrationConfig& config) {
-        
-        ContinuousCalibrationResult result{0, 0, 0, 0, std::numeric_limits<float>::max()};
-        
-        // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
-        float observed_offset = std::round(min_val / max_delta);
-        float observed_min = max_delta * observed_offset;
-        float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
-        
-        // 最小 delta（与 AIMET minimum_scale 一致）
-        const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
-        
-        const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
-        std::vector<float> offsets(num_offsets);
-        float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
-        for (int o = 0; o < num_offsets - 1; ++o) {
-            offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
-        }
-        offsets[num_offsets - 1] = observed_offset;  // 与 AIMET 一致：加入 observed_offset
-        
-        for (int d = 1; d <= config.asymmetric_delta_candidates; ++d) {
-            float delta = max_delta * d / (config.asymmetric_delta_candidates - 1);
-            delta = std::max(delta, minimum_scale);  // 与 AIMET 一致
-            
-            for (int o = 0; o < num_offsets; ++o) {
-                float offset = offsets[o];
-                
-                // 与 AIMET _clamp_delta_offset_values 完全一致：
-                // 用 observed_min/observed_max 做 clamp，不是原始 min_val/max_val
-                float test_min = delta * offset;
-                float test_max = test_min + delta * static_cast<float>(num_steps);
-                test_min = std::max(observed_min, test_min);
-                test_max = std::min(observed_max, test_max);
-                float clamped_delta = (test_max - test_min) / static_cast<float>(num_steps);
-                clamped_delta = std::max(clamped_delta, minimum_scale);
-                float clamped_offset = std::round(test_min / clamped_delta);
-                
-                float noise = estimateNoise(hist, clamped_delta, clamped_offset, num_steps,
-                                             config.gamma, config.p);
-                
-                if (noise < result.best_noise) {
-                    result.best_noise = noise;
-                    result.optimal_scale = clamped_delta;
-                    result.optimal_offset = clamped_offset;
-                    result.optimal_min = clamped_offset * clamped_delta;
-                    result.optimal_max = result.optimal_min + num_steps * clamped_delta;
-                }
-            }
-        }
-        
-        if (result.best_noise == std::numeric_limits<float>::max()) {
-            throw std::runtime_error("searchAsymmetric failed to find valid scale");
-        }
-        return result;
-    }
-
-    /**
-     * 估算量化噪声（与 AIMET _estimate_clip_and_quant_noise 完全一致）
-     * 
-     * AIMET 量化公式：
-     *   q = round(x / delta - offset)     // 先减后 round
-     *   q = clamp(q, 0, num_steps)
-     *   x_recon = (q + offset) * delta
-     */
-    static float estimateNoise(const Histogram& hist, float delta, float offset,
-                                int64_t num_steps, float gamma, float p) {
-        if (delta <= 0) return std::numeric_limits<float>::max();
-        
-        float bin_width = hist.bin_width();
-        float total_noise = 0.0f;
-        
-        for (int i = 0; i < hist.num_bins; ++i) {
-            float count = hist.counts[i];
-            if (count < 1e-6f) continue;
-            
-            float x = hist.min_val + (i + 0.5f) * bin_width;
-            
-            // AIMET 公式：q = round(x / delta - offset)（先减后 round）
-            float q = std::round(x / delta - offset);
-            
-            bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
-            q = std::max(0.0f, std::min(static_cast<float>(num_steps), q));
-            float x_recon = (q + offset) * delta;
-            
-            float error = std::pow(std::abs(x_recon - x), p);
-            if (clipped && gamma != 1.0f) error *= gamma;
-            
-            total_noise += error * count;
-        }
-        return total_noise;
-    }
-};
+}  // namespace sqnr_detail
 
 /**
- * 从直方图计算 POT 量化参数（任意位宽版本）
+ * SQNR 校准：基于 AIMET SqnrEncodingAnalyzer 的 SQNR 优化搜索
  * 
  * @param hist 直方图数据
- * @param bw 量化位宽配置
+ * @param num_steps 量化级数 (quant_max - quant_min)
  * @param is_symmetric 是否对称量化
- * @param exp2_inv 输出：POT 指数 (scale = 2^(-exp2_inv))
- * @param zp 输出：零点
- * @param name 调试名称（可选）
- * @param scheme 校准方案：SQNR 或 PERCENTILE
- * @param percentile 百分位数（仅 PERCENTILE 方案使用）
+ * @param config 配置参数
+ * @return ContinuousScaleResult
  */
-inline void calibrateQuantParamsFromHistogram(const Histogram& hist, QuantBitWidth bw,
-                                              bool is_symmetric,
-                                              int8_t& exp2_inv, int32_t& zp,
-                                              const char* name = nullptr,
-                                              CalibrationScheme scheme = CalibrationScheme::SQNR,
-                                              float percentile = 99.99f) {
-    if (!hist.is_valid()) {
-        throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
-    }
-
-    HistogramCalibrationConfig config;
-    config.scheme = scheme;
-    config.percentile = percentile;
-
-    const int64_t quant_min = bw.qmin();
-    const int64_t quant_max = bw.qmax();
-    const int64_t num_steps = quant_max - quant_min;
-
-    float optimal_scale, optimal_min;
-
-    if (config.scheme == CalibrationScheme::PERCENTILE) {
-        // Percentile 方案
-        float clip_ratio = (100.0f - config.percentile) / 100.0f;
-        auto [pmin, pmax] = hist.getPercentileRange(clip_ratio);
-        pmin = std::min(pmin, 0.0f);
-        pmax = std::max(pmax, 0.0f);
-        if (pmax <= pmin) pmax = pmin + 1e-6f;
-
-        if (is_symmetric) {
-            int64_t num_pos_steps = num_steps / 2;
-            int64_t num_neg_steps = (num_steps + 1) / 2;
-            float delta_from_max = pmax / static_cast<float>(num_pos_steps);
-            float delta_from_min = -pmin / static_cast<float>(num_neg_steps);
-            optimal_scale = std::max(delta_from_max, delta_from_min);
-            optimal_min = -static_cast<float>(num_neg_steps) * optimal_scale;
-        } else {
-            optimal_scale = (pmax - pmin) / static_cast<float>(num_steps);
-            optimal_min = pmin;
-        }
-        optimal_scale = std::max(optimal_scale, 1e-8f);
-    } else {
-        // SQNR 方案 - 需要根据位宽调整搜索参数
-        // 简化实现：使用 min/max 范围直接计算
-        float min_val = std::min(hist.min_val, 0.0f);
-        float max_val = std::max(hist.max_val, 0.0f);
-        max_val = std::max(max_val, min_val + 1e-8f * num_steps);
-
-        if (is_symmetric) {
-            float abs_max = std::max(std::abs(min_val), std::abs(max_val));
-            optimal_scale = abs_max / quant_max;
-            optimal_min = -abs_max;
-        } else {
-            optimal_scale = (max_val - min_val) / static_cast<float>(num_steps);
-            optimal_min = min_val;
-        }
-        optimal_scale = std::max(optimal_scale, 1e-8f);
-    }
-
-    // Round to POT
-    auto [po2_scale, n] = AimetPotSqnrCalibrator::roundToPowerOfTwo(optimal_scale);
+inline ContinuousScaleResult calibrateSqnr(
+    const Histogram& hist,
+    int64_t num_steps,
+    bool is_symmetric,
+    const SqnrConfig& config = SqnrConfig()) {
     
-    // 位宽约束：确保量化值不超出范围（作为 round 的安全网）
-    // 对称量化：max(|val|) / scale <= qmax
-    // 非对称量化：data_range / scale <= num_steps
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibrateSqnr");
+    }
+    
+    // 与 AIMET _pick_test_candidates 完全一致的范围预处理
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    
+    // 确保范围包含 0
+    float min_val = std::min(hist.min_val, 0.0f);
+    float max_val = std::max(hist.max_val, 0.0f);
+    
+    // 确保范围有效（与 AIMET 一致）
+    float min_range_limit = min_val + minimum_scale * static_cast<float>(num_steps);
+    max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
+    
     if (is_symmetric) {
-        float max_abs = std::max(std::abs(hist.min_val), std::abs(hist.max_val));
+        return sqnr_detail::searchSymmetric(hist, min_val, max_val, num_steps, config);
+    } else {
+        return sqnr_detail::searchAsymmetric(hist, min_val, max_val, num_steps, config);
+    }
+}
+
+// ============================================================================
+// 模块 4: POT 转换工具函数
+// ============================================================================
+
+/**
+ * 转换连续 scale 为 POT（AIMET find_closest_power_of_2_scale）
+ * 
+ * @param scale 连续 scale
+ * @return {po2_scale, exp2_inv} 其中 po2_scale = 2^(-exp2_inv)
+ */
+inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
+    if (scale <= 0) {
+        throw std::runtime_error("Invalid scale <= 0 in roundScaleToPowerOfTwo");
+    }
+    float n = -std::log2(scale);
+    int8_t n_rounded = static_cast<int8_t>(std::round(n));
+    return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
+}
+
+/**
+ * 应用位宽约束
+ * 
+ * 对称量化：max(|val|) / scale <= qmax  =>  exp2_inv <= floor(log2(qmax / max_abs))
+ * 非对称量化：data_range / scale <= num_steps  =>  exp2_inv <= floor(log2(num_steps / data_range))
+ * 
+ * @param n 当前 exp2_inv
+ * @param hist_min 直方图原始 min
+ * @param hist_max 直方图原始 max
+ * @param quant_max 量化最大值
+ * @param num_steps 量化级数
+ * @param is_symmetric 是否对称量化
+ * @return 约束后的 exp2_inv
+ */
+inline int8_t applyBitwidthConstraint(
+    int8_t n,
+    float hist_min,
+    float hist_max,
+    int64_t quant_max,
+    int64_t num_steps,
+    bool is_symmetric) {
+    
+    if (is_symmetric) {
+        float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
         if (max_abs > 1e-10f) {
             int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
                 std::log2(static_cast<float>(quant_max) / max_abs)));
             n = std::min(n, max_exp2_inv);
-            po2_scale = std::pow(2.0f, -static_cast<float>(n));
         }
     } else {
-        float data_range = hist.max_val - hist.min_val;
+        float data_range = hist_max - hist_min;
         if (data_range > 1e-10f) {
             int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
                 std::log2(static_cast<float>(num_steps) / data_range)));
             n = std::min(n, max_exp2_inv);
-            po2_scale = std::pow(2.0f, -static_cast<float>(n));
         }
     }
-    
-    exp2_inv = n;
+    return n;
+}
 
-    // Compute zero-point
+/**
+ * 计算 zero-point
+ * 
+ * @param continuous_min 量化范围最小值
+ * @param po2_scale POT scale
+ * @param quant_min 量化最小值
+ * @param is_symmetric 是否对称量化
+ * @return zero-point
+ */
+inline int32_t computeZeroPoint(float continuous_min, float po2_scale, 
+                                int64_t quant_min, bool is_symmetric) {
     if (is_symmetric) {
-        zp = 0;
+        return 0;
     } else {
-        float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
-        zp = static_cast<int32_t>(std::round(zp_fp));
+        float zp_fp = static_cast<float>(quant_min) - continuous_min / po2_scale;
+        return static_cast<int32_t>(std::round(zp_fp));
     }
+}
 
+/**
+ * 转换连续 scale 为 POT 形式（完整流程）
+ * 
+ * @param continuous_scale 连续 scale
+ * @param continuous_min 连续 min（用于计算 zero-point）
+ * @param hist_min 直方图原始 min（用于位宽约束）
+ * @param hist_max 直方图原始 max（用于位宽约束）
+ * @param bw 量化位宽配置
+ * @param is_symmetric 是否对称量化
+ * @return PotScaleResult
+ */
+inline PotScaleResult convertToPot(
+    float continuous_scale,
+    float continuous_min,
+    float hist_min,
+    float hist_max,
+    QuantBitWidth bw,
+    bool is_symmetric) {
+    
+    const int64_t quant_min = bw.qmin();
+    const int64_t quant_max = bw.qmax();
+    const int64_t num_steps = quant_max - quant_min;
+    
+    // 步骤 1: 转换到 POT（AIMET find_closest_power_of_2_scale）
+    auto [po2_scale, n] = roundScaleToPowerOfTwo(continuous_scale);
+    
+    // 步骤 2: 位宽约束
+    n = applyBitwidthConstraint(n, hist_min, hist_max, quant_max, num_steps, is_symmetric);
+    po2_scale = std::pow(2.0f, -static_cast<float>(n));
+    
+    // 步骤 3: 计算 zero-point
+    int32_t zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
+    
+    return PotScaleResult{n, po2_scale, zp};
+}
+
+// ============================================================================
+// 统一入口函数
+// ============================================================================
+
+/**
+ * 从直方图计算 POT 量化参数
+ * 
+ * 调用流程: Histogram → [calibratePercentile/calibrateSqnr] → [convertToPot] → 最终参数
+ */
+inline void calibrateQuantParamsFromHistogram(
+    const Histogram& hist,
+    QuantBitWidth bw,
+    bool is_symmetric,
+    int8_t& exp2_inv,
+    int32_t& zp,
+    const char* name = nullptr,
+    CalibrationScheme scheme = CalibrationScheme::SQNR,
+    float percentile = 99.99f) {
+    
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
+    }
+    
+    const int64_t num_steps = bw.qmax() - bw.qmin();
+    
+    // 步骤 1: 使用对应的校准方法计算连续 scale
+    ContinuousScaleResult continuous_result;
+    
+    if (scheme == CalibrationScheme::PERCENTILE) {
+        PercentileConfig config;
+        config.percentile = percentile;
+        continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config);
+    } else {
+        SqnrConfig config;
+        continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config);
+    }
+    
+    // 步骤 2: 转换为 POT
+    // 位宽约束使用的范围:
+    // - SQNR: 使用原始直方图范围（SQNR 已经在搜索中平衡了 clipping）
+    // - Percentile: 使用裁剪后的范围（允许异常值被 clip）
+    float constraint_min = (scheme == CalibrationScheme::PERCENTILE) 
+        ? continuous_result.min : hist.min_val;
+    float constraint_max = (scheme == CalibrationScheme::PERCENTILE) 
+        ? continuous_result.max : hist.max_val;
+    
+    PotScaleResult pot_result = convertToPot(
+        continuous_result.scale,
+        continuous_result.min,
+        constraint_min,
+        constraint_max,
+        bw,
+        is_symmetric);
+    
+    exp2_inv = pot_result.exp2_inv;
+    zp = pot_result.zero_point;
+    
 #ifdef DEBUG
     if (name && name[0]) {
-        printf("[POT-Calibrate][%s] bits=%d range=[%.4f,%.4f] scale=%.6f exp2=%d zp=%d\n",
-               name, bw.bits_, hist.min_val, hist.max_val, po2_scale, n, zp);
+        const char* scheme_name = (scheme == CalibrationScheme::PERCENTILE) ? "PERC" : "SQNR";
+        printf("[%s][%s] range=[%.4f,%.4f] cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
+               scheme_name, name, hist.min_val, hist.max_val, 
+               continuous_result.scale, pot_result.po2_scale, pot_result.exp2_inv, pot_result.zero_point);
     }
 #endif
 }
 
-/**
- * 从直方图计算 POT 量化参数（模板版本，兼容旧代码）
- */
-template <typename QuantT>
-inline void calibrateQuantParamsFromHistogram(const Histogram& hist, bool is_symmetric,
-                                              int8_t& exp2_inv, int32_t& zp,
-                                              const char* name = nullptr,
-                                              CalibrationScheme scheme = CalibrationScheme::SQNR,
-                                              float percentile = 99.99f) {
-    HistogramCalibrationConfig config;
-    config.scheme = scheme;
-    config.percentile = percentile;
-    AimetPotSqnrCalibrator::computeOptimalParamsFromHistogram<QuantT>(
-        hist, is_symmetric, exp2_inv, zp, name, config);
-}
-
-// 向后兼容别名
-using POTSqnrCalibrator = AimetPotSqnrCalibrator;

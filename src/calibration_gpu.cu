@@ -991,7 +991,7 @@ Histogram gpu_histogram_to_cpu(const GPUHistogram& gpu_hist) {
 
 namespace {
 
-// SQNR 配置现在从 GPUSqnrConfig 参数传入
+// SQNR 配置现在从 SqnrConfig 参数传入
 
 /**
  * @brief SQNR 噪声计算 Kernel（对称量化，与 AIMET 完全一致）
@@ -1193,7 +1193,7 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
                               int num_bins, int64_t total_count,
                               bool is_symmetric, QuantBitWidth bw,
                               int8_t& out_exp2_inv, int32_t& out_zp,
-                              const GPUSqnrConfig& config,
+                              const SqnrConfig& config,
                               cudaStream_t stream) {
     
     // 从 QuantBitWidth 获取量化范围（支持任意位宽）
@@ -1329,41 +1329,14 @@ void compute_sqnr_params_gpu(const float* counts_dev, float min_val, float max_v
         optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
     }
     
-    // 转换到 POT
-    float n = -std::log2(optimal_scale);
-    int8_t n_rounded = static_cast<int8_t>(std::round(n));
+    // 使用 POT 转换函数（复用 CPU 实现，避免重复代码）
+    PotScaleResult pot_result = convertToPot(
+        optimal_scale, optimal_min,
+        hist_min, hist_max,  // 原始直方图范围用于位宽约束
+        bw, is_symmetric);
     
-    // 位宽约束：确保量化值不超出范围
-    // 对称量化：max(|val|) / scale <= qmax
-    // 非对称量化：data_range / scale <= num_steps
-    // 注意：使用原始直方图范围进行约束，而不是扩展后的范围
-    if (is_symmetric) {
-        float max_abs = std::max(std::abs(hist_min), std::abs(hist_max));
-        if (max_abs > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(quant_max) / max_abs)));
-            n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
-        }
-    } else {
-        float data_range = hist_max - hist_min;
-        if (data_range > 1e-10f) {
-            int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                std::log2(static_cast<float>(num_steps) / data_range)));
-            n_rounded = (n_rounded < max_exp2_inv) ? n_rounded : max_exp2_inv;
-        }
-    }
-    
-    float po2_scale = std::pow(2.0f, -static_cast<float>(n_rounded));
-    
-    out_exp2_inv = n_rounded;
-    
-    // 计算 zp
-    if (is_symmetric) {
-        out_zp = 0;
-    } else {
-        float zp_fp = static_cast<float>(quant_min) - optimal_min / po2_scale;
-        out_zp = static_cast<int32_t>(std::round(zp_fp));
-    }
+    out_exp2_inv = pot_result.exp2_inv;
+    out_zp = pot_result.zero_point;
 }
 
 void compute_sqnr_params_batch_gpu(
@@ -1382,7 +1355,7 @@ void compute_sqnr_params_batch_gpu(
     out_exp2_inv.resize(n);
     out_zp.resize(n);
     
-    GPUSqnrConfig config;  // 使用默认配置
+    SqnrConfig config;  // 使用默认配置
     
     // 简单实现：串行处理每个直方图
     // TODO: 可以进一步优化为真正的批量并行
@@ -1397,7 +1370,7 @@ void compute_sqnr_per_channel_gpu(
     const PerChannelHistogramBatch& batch,
     bool is_symmetric, QuantBitWidth bw,
     std::vector<int8_t>& out_exp2_inv,
-    const GPUSqnrConfig& config,
+    const SqnrConfig& config,
     cudaStream_t stream) {
     
     const int n = batch.channel_size;
@@ -1605,35 +1578,14 @@ void compute_sqnr_per_channel_gpu(
             optimal_scale = std::max(scale_calc, minimum_scale);  // 与 AIMET 一致
         }
         
-        // 转换到 POT
-        float n_val = -std::log2(optimal_scale);
-        int8_t n_rounded = static_cast<int8_t>(std::round(n_val));
+        // 使用 POT 转换函数（复用 CPU 实现，避免重复代码）
+        auto [po2_scale, n_rounded] = roundScaleToPowerOfTwo(optimal_scale);
         
-        // 位宽约束：使用原始 min/max（未被范围扩展修改的值）
-        // 对称量化：max(|val|) / scale <= qmax
-        // 非对称量化：data_range / scale <= num_steps
+        // 应用位宽约束：使用原始 min/max（未被范围扩展修改的值）
         float orig_min = batch.original_mins[c];
         float orig_max = batch.original_maxs[c];
-        if (is_symmetric) {
-            float max_abs = std::max(std::abs(orig_min), std::abs(orig_max));
-            if (max_abs > 1e-10f) {
-                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                    std::log2(static_cast<float>(quant_max) / max_abs)));
-                if (max_exp2_inv < n_rounded) {
-                    n_rounded = max_exp2_inv;
-                }
-            }
-        } else {
-            float data_range = orig_max - orig_min;
-            if (data_range > 1e-10f) {
-                int8_t max_exp2_inv = static_cast<int8_t>(std::floor(
-                    std::log2(static_cast<float>(num_steps) / data_range)));
-                if (max_exp2_inv < n_rounded) {
-                    n_rounded = max_exp2_inv;
-                }
-            }
-        }
-        out_exp2_inv[c] = n_rounded;
+        out_exp2_inv[c] = applyBitwidthConstraint(
+            n_rounded, orig_min, orig_max, quant_max, num_steps, is_symmetric);
     }
     
     // 清理 streams
