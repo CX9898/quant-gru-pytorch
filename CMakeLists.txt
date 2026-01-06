@@ -12,6 +12,12 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # ------------------------------
+# CUDA 架构设置
+# RTX 20系=75, RTX 30系=86, RTX 40系=89, RTX 50系=120
+# ------------------------------
+set(CMAKE_CUDA_ARCHITECTURES 75 86 89 120)
+
+# ------------------------------
 # include / src 路径
 # ------------------------------
 set(INCLUDE_DIR "${CMAKE_SOURCE_DIR}/include")
@@ -45,9 +51,16 @@ add_library(gru_quant_shared SHARED ${SRC_FILES})
 #)
 set_target_properties(gru_quant_shared PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/pytorch/lib
-        CUDA_SEPARABLE_COMPILATION ON
         POSITION_INDEPENDENT_CODE ON
 )
+
+# ------------------------------
+# [可选] CUDA 分离编译
+# 用途：允许跨 .cu 文件调用 __device__ 函数，或链接 CUDA 库的 device API
+# 代价：增加一个 device link 步骤，编译稍慢
+# 当前项目：所有 __device__ 都是 inline，不需要开启
+# ------------------------------
+# set_target_properties(gru_quant_shared PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # ------------------------------
 # Windows 特定配置
@@ -94,7 +107,3 @@ target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
 #target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_quant_shared PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_example PRIVATE CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
-
-# 可选：CUDA优化
-#set_target_properties(gru_quant_static PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-set_target_properties(gru_quant_shared PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
