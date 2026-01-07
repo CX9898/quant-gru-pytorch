@@ -9,10 +9,9 @@
 #include <type_traits>
 
 #include "dev_vector.h"
-#include "quantize_ops.cuh"
 #include "quantize_ops_helper.h"
 
-// LUT 生成函数声明已在 quantize_lut_types.h 中（通过 quantize_ops.cuh 包含）
+// LUT 生成函数声明已在 quantize_lut_types.h 中（通过 quantize_ops_helper.h 包含）
 
 // 生成分段线性量化表并存储到参数中
 // 在 finalize_calibration 时调用一次，然后在每次 forward 时从参数复制到 QuantGRUReScale
@@ -115,7 +114,7 @@ __global__ void quantification(const T *data, QuantT *quant_data, size_t size, i
         return;
     }
 
-    quant_data[idx] = dev::quantize<QuantT>(data[idx], exp2_inv, zp);
+    quant_data[idx] = ::quantize<QuantT>(data[idx], exp2_inv, zp);
 }
 
 // 统一 int32_t 输出，使用位宽配置进行 clamp
@@ -127,7 +126,7 @@ __global__ void quantificationBitwidth(const T *data, int32_t *quant_data, size_
         return;
     }
 
-    quant_data[idx] = dev::quantize(data[idx], exp2_inv, zp, bw);
+    quant_data[idx] = ::quantize(data[idx], exp2_inv, zp, bw);
 }
 
 template <typename T, typename QuantT>
@@ -203,7 +202,7 @@ __global__ void quantificationPerChannel(const T *src, QuantT *quant_data, size_
     const int8_t exp2_inv = exp2_invs[channel_idx];
 
     const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = dev::quantize<QuantT>(src[idx], exp2_inv, 0);
+    quant_data[idx] = ::quantize<QuantT>(src[idx], exp2_inv, 0);
 }
 
 // 统一 int32_t 输出，使用位宽配置进行 clamp
@@ -219,7 +218,7 @@ __global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_da
 
     const int8_t exp2_inv = exp2_invs[channel_idx];
     const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = dev::quantize(src[idx], exp2_inv, 0, bw);
+    quant_data[idx] = ::quantize(src[idx], exp2_inv, 0, bw);
 }
 
 template <typename T, typename QuantT>

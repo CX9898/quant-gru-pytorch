@@ -415,7 +415,7 @@ quant-gru-pytorch/
 │   ├── gru_quant.h             # 量化 GRU 前向传播类
 │   ├── gru_interface.hpp       # 统一接口层（校准、量化、前向传播）
 │   ├── quantize_bitwidth_config.hpp  # 量化位宽配置
-│   ├── quantize_ops.cuh        # 量化操作 CUDA 内核
+│   ├── quantize_ops_helper.h   # 量化操作（CPU/GPU 共用）
 │   ├── histogram_collector.hpp # 直方图收集器（AIMET 风格校准）
 │   ├── pot_sqnr_calibrator.hpp # SQNR 校准器
 │   └── ...

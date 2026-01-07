@@ -208,6 +208,20 @@ void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params);
 // ============================================================================
 
 /**
+ * @brief 计算 2 的负 n 次方缩放因子（CPU/GPU 共用）
+ *
+ * scale = 2^(-exp2_inv)
+ *
+ * 使用 ldexpf 直接操作浮点指数，比除法更高效。
+ *
+ * @param exp2_inv 缩放因子指数
+ * @return 缩放因子 scale = 2^(-exp2_inv)
+ */
+__host__ __device__ __forceinline__ float exp2_scale(int8_t exp2_inv) {
+    return ldexpf(1.0f, -static_cast<int>(exp2_inv));
+}
+
+/**
  * @brief 带四舍五入的右移操作（int32_t 版本）
  *
  * 实现 round(x / 2^n) 的定点运算，支持正负移位。
@@ -546,9 +560,10 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
 }
 
 /**
- * @brief 单值量化（任意位宽版本）
+ * @brief 单值量化（任意位宽版本，CPU/GPU 共用）
  *
  * q = clamp(round(src / scale + zp), qmin, qmax)
+ * 使用 roundf 实现四舍五入（round half away from zero），确保 CPU/GPU 行为一致。
  *
  * @param src 浮点输入
  * @param exp2_inv 缩放因子指数
@@ -556,29 +571,23 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
  * @param bw 位宽配置
  * @return 量化值（int32_t 存储）
  */
-inline int32_t quantize(float src, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
-    float scale = (exp2_inv >= 0) ? (1.0f / static_cast<float>(1 << exp2_inv))
-                                  : static_cast<float>(1 << (-exp2_inv));
+__host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
+                                                      QuantBitWidth bw) {
+    float scale = exp2_scale(exp2_inv);
     float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(std::round(shifted));
+    int32_t q = static_cast<int32_t>(roundf(shifted));
     return clamp_by_bitwidth(q, bw);
 }
 
 /**
- * @brief 单值量化（模板版本，兼容旧代码）
+ * @brief 单值量化（模板版本，CPU/GPU 共用，兼容旧代码）
  */
 template <typename QuantT>
-inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
-    float scale = (exp2_inv >= 0) ? (1.0f / static_cast<float>(1 << exp2_inv))
-                                  : static_cast<float>(1 << (-exp2_inv));
+__host__ __device__ __forceinline__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
+    float scale = exp2_scale(exp2_inv);
     float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(std::round(shifted));
-
-    constexpr int32_t qmin = static_cast<int32_t>(std::numeric_limits<QuantT>::min());
-    constexpr int32_t qmax = static_cast<int32_t>(std::numeric_limits<QuantT>::max());
-    q = std::clamp(q, qmin, qmax);
-
-    return static_cast<QuantT>(q);
+    int32_t q = static_cast<int32_t>(roundf(shifted));
+    return clamp_to_type<QuantT>(q);
 }
 
 /**
@@ -589,11 +598,7 @@ inline QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
 template <typename QuantT>
 __host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
     int32_t v = static_cast<int32_t>(q) - zp;
-    if (exp2_inv >= 0) {
-        return static_cast<float>(v) / static_cast<float>(1 << exp2_inv);
-    } else {
-        return static_cast<float>(v) * static_cast<float>(1 << (-exp2_inv));
-    }
+    return static_cast<float>(v) * exp2_scale(exp2_inv);
 }
 
 /// @brief 批量量化（任意位宽版本，输出 int32_t）
