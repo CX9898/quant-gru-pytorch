@@ -95,25 +95,6 @@ $$q_z = \frac{z}{S_z} + Z_z = \frac{S_x \cdot S_y}{S_z}(q_x - Z_x)(q_y - Z_y) + 
 
 $$\boxed{q_z = \frac{S_x \cdot S_y}{S_z}(q_x - Z_x)(q_y - Z_y) + Z_z}$$
 
-### 各参数量化配置
-
-| 参数 | 量化类型 | scale | zp | 备注 |
-|------|----------|-------|-----|------|
-| 输入 x | 非对称 + 动态范围 | `exp2_inv_x_` | `zp_x_` | 时间步 EMA 更新 |
-| 隐藏状态 h | 非对称 + 动态范围 | `exp2_inv_h_` | `zp_h_` | 时间步 EMA 更新 |
-| 权重 W | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | size = hidden×3 |
-| 权重 R | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | size = hidden×3 |
-| Wx 结果 | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | GEMM 输出 |
-| Rh 结果 | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | GEMM 输出 |
-| 偏置 bx | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | size = hidden×3 |
-| 偏置 br | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | size = hidden×3 |
-| z_pre | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | 更新门预激活 |
-| r_pre | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | 重置门预激活 |
-| g_pre | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | 候选门预激活 |
-| z_out | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid 输出 |
-| r_out | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid 输出 |
-| g_out | 对称 | `exp2_inv_g_out_` | 0 | tanh 输出 |
-
 ---
 
 ## 张量维度说明
@@ -154,49 +135,71 @@ const int g_idx = weight_idx + 2 * hidden_dim;  // [2H, 3H)
 
 ## 量化推理流程
 
-### Step 1: 预计算 Wx（所有时间步一次性）
+### 整体流程图
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         量化 GRU 前向计算流程                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 预处理阶段（一次性）                                                │   │
+│  │  1. Wx_tmp = GEMM(W, x)           // 所有时间步的 Wx              │   │
+│  │  2. 预计算权重行求和 Σ_k W[c,k]    // 用于零点补偿                  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                              ↓                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ 时间步循环 for t = 0 to T-1                                        │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │ Step A: GEMM                                               │  │   │
+│  │  │   Rh_tmp = GEMM(R, h[t])                                   │  │   │
+│  │  └────────────────────────────────────────────────────────────┘  │   │
+│  │                              ↓                                    │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │ Step B: GEMM 结果 Rescale + 零点补偿                         │  │   │
+│  │  │   Wx[t] = rescale(Wx_tmp[t] - W_sum_mul_x_zp)              │  │   │
+│  │  │   Rh    = rescale(Rh_tmp    - R_sum_mul_h_zp)              │  │   │
+│  │  └────────────────────────────────────────────────────────────┘  │   │
+│  │                              ↓                                    │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │ Step C: 门控计算（CUDA Kernel 逐元素）                       │  │   │
+│  │  │   z = sigmoid(Wx_z + Rh_z + bx_z + br_z)                   │  │   │
+│  │  │   r = sigmoid(Wx_r + Rh_r + bx_r + br_r)                   │  │   │
+│  │  │   g = tanh(Wx_g + r*(Rh_g + br_g) + bx_g)                  │  │   │
+│  │  │   h[t+1] = z*h[t] + (1-z)*g                                │  │   │
+│  │  └────────────────────────────────────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1: 预处理（GEMM + 零点补偿准备）
 
 ```
 Wx_tmp = cuBLAS::GEMM(W, x)  // [H×3, T×N]
 ```
 
-### Step 2: 零点补偿预计算
-
-由于 x 和 h 是非对称量化，GEMM 结果需要零点补偿。
+由于 x 和 h 是非对称量化（zp≠0），GEMM 结果需要**零点补偿**。
 
 #### 为什么需要零点补偿？
 
-**背景**：在混合量化场景中，权重 W 采用对称量化（zp=0），而激活值 x 采用非对称量化（zp≠0）。当我们用整数 GEMM 计算 $q_W \cdot q_x$ 时，结果并不直接等于浮点 $W \cdot x$ 的量化值，需要额外的零点补偿项。
+**背景**：权重 W 采用对称量化（zp=0），激活值 x 采用非对称量化（zp≠0）。整数 GEMM $q_W \cdot q_x$ 的结果并不直接等于 $W \cdot x$ 的量化值。
 
-**推导过程**：
+**推导**：设 $W = q_W \cdot S_W$，$x = (q_x - Z_x) \cdot S_x$，则：
 
-设量化参数为：
-- 权重对称量化：$q_W = \text{round}(W / S_W)$，即 $W = q_W \cdot S_W$
-- 激活非对称量化：$q_x = \text{round}(x / S_x) + Z_x$，即 $x = (q_x - Z_x) \cdot S_x$
+$$Y[c] = \sum_k W[c,k] \cdot x[k] = S_W \cdot S_x \sum_k q_W[c,k] \cdot (q_x[k] - Z_x)$$
 
-我们需要计算矩阵乘法 $Y = W \cdot x$，其中 $Y[c] = \sum_k W[c,k] \cdot x[k]$
+$$= S_W \cdot S_x \left( \underbrace{(q_W \cdot q_x)[c]}_{\text{整数GEMM}} - \underbrace{Z_x \sum_k q_W[c,k]}_{\text{零点补偿项}} \right)$$
 
-将浮点值用量化值表示：
-
-$$Y[c] = \sum_k (q_W[c,k] \cdot S_W) \cdot ((q_x[k] - Z_x) \cdot S_x)$$
-
-$$= S_W \cdot S_x \sum_k q_W[c,k] \cdot (q_x[k] - Z_x)$$
-
-$$= S_W \cdot S_x \left( \sum_k q_W[c,k] \cdot q_x[k] - Z_x \sum_k q_W[c,k] \right)$$
-
-$$= S_W \cdot S_x \left( \underbrace{(q_W \cdot q_x)[c]}_{\text{整数GEMM结果}} - \underbrace{Z_x \sum_k q_W[c,k]}_{\text{零点补偿项}} \right)$$
-
-因此，**整数 GEMM 的结果需要减去零点补偿项**才能得到正确的浮点乘积的量化表示。
-
-#### 预计算公式
+**预计算公式**：
 
 $$W\_sum\_mul\_x\_zp[c] = Z_x \times \sum_{k} q_W[c, k]$$
 
 $$R\_sum\_mul\_h\_zp[c] = Z_h \times \sum_{k} q_R[c, k]$$
 
-> **优化说明**：由于 $\sum_k q_W[c,k]$ 只与权重相关，可在模型加载时一次性计算。而 $Z_x$ 和 $Z_h$ 在动态量化时可能随输入变化，因此补偿值 = 零点 × 权重行求和。
+> **优化**：$\sum_k q_W[c,k]$ 在模型加载时一次性计算，运行时只需乘以零点。
 
-### Step 3: 时间步循环
+### Step 2: 时间步循环
 
 ```
 for t in 0..T:
@@ -208,37 +211,33 @@ for t in 0..T:
 
 ## CUDA Kernel 逐元素计算详解
 
-### 公共步骤：GEMM 结果 rescale
+### Step B: GEMM 结果 Rescale
 
-GEMM 输出的 `Wx_tmp` 和 `Rh_tmp` 包含三个门（z/r/g）的数据，需要按门索引分别提取并 rescale。
+GEMM 后需要做两件事：**减去零点补偿** + **Rescale 到目标量化参数**。
 
-#### 推导过程
-
-根据 Step 2 的零点补偿推导，整数 GEMM 结果表示的浮点值为：
+根据上面的推导，整数 GEMM 结果表示的浮点值为：
 
 $$Wx = S_W \cdot S_x \cdot (q_{Wx\_tmp} - W\_sum\_mul\_x\_zp)$$
 
-现在要将其量化到目标参数 $(S_{Wx}, Z_{Wx})$：
+将其 rescale 到目标参数 $(S_{Wx}, Z_{Wx})$：
 
 $$q_{Wx} = \frac{Wx}{S_{Wx}} + Z_{Wx} = \frac{S_W \cdot S_x}{S_{Wx}}(q_{Wx\_tmp} - W\_sum\_mul\_x\_zp) + Z_{Wx}$$
 
-#### 最终公式
-
-对于门 $\gamma \in \{z, r, g\}$，使用对应索引 $\gamma\_idx$ 提取数据：
+**per-channel 公式**（对于门 $\gamma \in \{z, r, g\}$）：
 
 $$q_{Wx_\gamma} = \frac{S_{W[\gamma\_idx]} \cdot S_x}{S_{Wx}} (q_{Wx\_tmp[\gamma\_idx]} - W\_sum\_mul\_x\_zp[\gamma\_idx]) + Z_{Wx}$$
 
 $$q_{Rh_\gamma} = \frac{S_{R[\gamma\_idx]} \cdot S_h}{S_{Rh}} (q_{Rh\_tmp[\gamma\_idx]} - R\_sum\_mul\_h\_zp[\gamma\_idx]) + Z_{Rh}$$
 
-> **per-channel 说明**：$S_W$, $S_R$, $S_{bx}$, $S_{br}$ 均为 per-channel 数组，大小 = H×3。每个门使用对应索引的 scale 值。
-
 ---
 
-### 1. 更新门 z（Update Gate）
+### Step C: 门控计算
+
+#### C-1. 更新门 z（Update Gate）
 
 **浮点公式**：`z = sigmoid(Wx_z + Rh_z + bx_z + br_z)`
 
-#### 推导过程
+**推导过程**
 
 设 `z_pre = Wx_z + Rh_z + bx_z + br_z`，根据**量化加法**公式，四个不同 scale 的量化值相加：
 
@@ -252,7 +251,7 @@ $$= \frac{S_{Wx}}{S_{z\_pre}}(q_{Wx_z} - Z_{Wx}) + \frac{S_{Rh}}{S_{z\_pre}}(q_{
 
 > 注：偏置 $bx$, $br$ 是对称量化（zp=0），所以没有减零点项。
 
-#### 量化计算公式（使用 z_idx 索引）
+**量化计算公式**（使用 z_idx 索引）：
 
 定义中间变量（rescale 后的整数值）：
 
@@ -274,21 +273,21 @@ $$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bx\_z\_shifted} + q_
 
 ---
 
-### 2. 重置门 r（Reset Gate）
+#### C-2. 重置门 r（Reset Gate）
 
 **浮点公式**：`r = sigmoid(Wx_r + Rh_r + bx_r + br_r)`
 
-**量化计算**（使用 r_idx 索引）：与 z 门结构相同，使用 `Wx_r`, `Rh_r`, `bx_r`, `br_r`，目标 scale 替换为 `S_{r_pre}`
+**量化计算**：与 z 门结构完全相同，仅将索引和 scale 替换为 r 对应的参数。
 
 ---
 
-### 3. 候选门 g（Candidate Gate）
+#### C-3. 候选门 g（Candidate Gate）
 
 **浮点公式**：`g = tanh(Wx_g + r × (Rh_g + br_g) + bx_g)`
 
 > **注意**：haste 实现中，重置门 r 仅作用于 $(Rh_g + br_g)$，不作用于 $Wx_g$。
 
-#### 推导过程
+**推导过程**
 
 **Step 1: 计算 $Rh\_add\_br\_g = Rh_g + br_g$（量化加法）**
 
@@ -316,7 +315,7 @@ $$g\_pre = (q_{Wx_g} - Z_{Wx}) \cdot S_{Wx} + (q_{rRh} - Z_{rRh}) \cdot S_{rRh} 
 
 $$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bx}}{S_{g\_pre}}q_{bx_g} + Z_{g\_pre}$$
 
-#### 量化计算公式汇总（使用 g_idx 索引）
+**量化计算公式汇总**（使用 g_idx 索引）：
 
 $$q_{Rh\_add\_br\_g} = \frac{S_{Rh}}{S_{Rh\_add\_br}} (q_{Rh_g} - Z_{Rh}) + \frac{S_{br[g\_idx]}}{S_{Rh\_add\_br}} q_{br_g} + Z_{Rh\_add\_br}$$
 
@@ -330,18 +329,18 @@ $$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{
 
 ---
 
-### 4. 隐藏状态更新
+#### C-4. 隐藏状态更新
 
 **浮点公式**：`h_new = z × h_old + (1 - z) × g`
 
-#### 推导过程
+**推导过程**
 
 该公式包含两个乘法和一个加法：
 1. $old\_contrib = z \times h_{old}$
 2. $new\_contrib = (1 - z) \times g$
 3. $h_{new} = old\_contrib + new\_contrib$
 
-#### 4.1 计算 z × h_old（量化乘法）
+**C-4.1 计算 z × h_old**（量化乘法）
 
 **推导**：根据量化乘法公式
 
@@ -351,7 +350,7 @@ $$old\_contrib = z \times h_{old} = (q_z - Z_{z\_out}) \cdot S_{z\_out} \times (
 
 $$q_{old\_contrib} = \frac{old\_contrib}{S_{old\_contrib}} + Z_{old\_contrib} = \frac{S_{z\_out} \cdot S_h}{S_{old\_contrib}}(q_z - Z_{z\_out})(q_{h\_old} - Z_h) + Z_{old\_contrib}$$
 
-#### 4.2 计算 (1 - z)（量化减法的优化技巧）
+**C-4.2 计算 (1 - z)**（量化减法的优化技巧）
 
 **问题**：如何在量化域计算 $1 - z$？
 
@@ -389,7 +388,7 @@ $$q_{one\_minus\_z} = q_{1\_in\_z\_scale} - q_z + Z_{z\_out}$$
 
 > **关键优化**：$(1-z)$ 直接复用 z_out 的量化参数，无需额外的 scale 和 zp！
 
-#### 4.3 计算 (1 - z) × g（量化乘法）
+**C-4.3 计算 (1 - z) × g**（量化乘法）
 
 **推导**：$(1-z)$ 使用量化参数 $(S_{z\_out}, Z_{z\_out})$，$g$ 使用 $(S_{g\_out}, Z_{g\_out})$
 
@@ -399,7 +398,7 @@ $$new\_contrib = (1-z) \times g = (q_{one\_minus\_z} - Z_{z\_out}) \cdot S_{z\_o
 
 $$q_{new\_contrib} = \frac{S_{z\_out} \cdot S_{g\_out}}{S_{new\_contrib}}(q_{one\_minus\_z} - Z_{z\_out})(q_g - Z_{g\_out}) + Z_{new\_contrib}$$
 
-#### 4.4 最终合并（量化加法）
+**C-4.4 最终合并**（量化加法）
 
 **推导**：$h_{new} = old\_contrib + new\_contrib$
 
@@ -411,7 +410,28 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 
 ---
 
-## 代码对应关系
+## 附录
+
+### A. 各参数量化配置
+
+| 参数 | 量化类型 | scale | zp | 备注 |
+|------|----------|-------|-----|------|
+| 输入 x | 非对称 + 动态范围 | `exp2_inv_x_` | `zp_x_` | 时间步 EMA 更新 |
+| 隐藏状态 h | 非对称 + 动态范围 | `exp2_inv_h_` | `zp_h_` | 时间步 EMA 更新 |
+| 权重 W | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | size = hidden×3 |
+| 权重 R | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | size = hidden×3 |
+| Wx 结果 | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | GEMM 输出 |
+| Rh 结果 | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | GEMM 输出 |
+| 偏置 bx | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | size = hidden×3 |
+| 偏置 br | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | size = hidden×3 |
+| z_pre | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | 更新门预激活 |
+| r_pre | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | 重置门预激活 |
+| g_pre | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | 候选门预激活 |
+| z_out | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid 输出 |
+| r_out | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid 输出 |
+| g_out | 对称 | `exp2_inv_g_out_` | 0 | tanh 输出 |
+
+### B. 代码对应关系
 
 | 计算步骤 | 代码位置 |
 |----------|----------|
