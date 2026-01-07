@@ -212,25 +212,7 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
         }
     }
 
-    // 计算并更新各中间结果的范围
-#ifdef USE_EMA
-    const int step_size = batch_size * hidden_size;
-    computeMinMaxPerStepEMAHost(z_out, steps, step_size, quant_ranges.min_z_out_,
-                                quant_ranges.max_z_out_);
-    computeMinMaxPerStepEMAHost(r_out, steps, step_size, quant_ranges.min_r_out_,
-                                quant_ranges.max_r_out_);
-    computeMinMaxPerStepEMAHost(g_out, steps, step_size, quant_ranges.min_g_out_,
-                                quant_ranges.max_g_out_);
-    computeMinMaxPerStepEMAHost(Rh_add_br_g, steps, step_size, quant_ranges.min_Rh_add_br_g_,
-                                quant_ranges.max_Rh_add_br_g_);
-    computeMinMaxPerStepEMAHost(rRh_g, steps, step_size, quant_ranges.min_rRh_,
-                                quant_ranges.max_rRh_);
-    // 注意: one_minus_update 不再单独记录范围，直接复用 z_out 的 scale
-    computeMinMaxPerStepEMAHost(new_contrib, steps, step_size, quant_ranges.min_new_contrib_,
-                                quant_ranges.max_new_contrib_);
-    computeMinMaxPerStepEMAHost(old_contrib, steps, step_size, quant_ranges.min_old_contrib_,
-                                quant_ranges.max_old_contrib_);
-#else
+    // 计算并更新各中间结果的范围（全局极值，与 AIMET 一致）
     auto [min_z, max_z] = computeMinMax(z_out);
     updateRange(quant_ranges.min_z_out_, quant_ranges.max_z_out_, min_z, max_z);
 
@@ -256,7 +238,6 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     auto [min_old_contrib, max_old_contrib] = computeMinMax(old_contrib);
     updateRange(quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_, min_old_contrib,
                 max_old_contrib);
-#endif
 }
 
 // =====================================================================
@@ -294,12 +275,20 @@ inline void updateGRUQuantizationRanges(
     // 设置 hidden_ 维度
     quant_ranges.hidden_ = hidden_size;
 
-    // 输入 x 的范围（一次拷贝，分时间步平滑更新）
+    // =====================================================================
+    // 1. 输入/输出：使用 EMA 累积（平滑噪声）
+    // =====================================================================
+    
+    // 输入 x 的范围（分时间步 EMA）
     computeMinMaxPerStepEMA(x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_);
 
-    // 隐藏状态 h 的范围（跳过初始状态 h0，一次拷贝，分时间步平滑更新）
+    // 隐藏状态 h 的范围（跳过 h0，分时间步 EMA）
     computeMinMaxPerStepEMA(h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_);
 
+    // =====================================================================
+    // 2. 权重/偏置：per-channel 全局极值
+    // =====================================================================
+    
     // 权重 W 的范围（per-channel）
     computeMinMaxPerChannel(W, input_size, hidden_size * 3, quant_ranges.min_W_, quant_ranges.max_W_);
 
@@ -312,38 +301,29 @@ inline void updateGRUQuantizationRanges(
     // 偏置 br 的范围（per-channel）
     computeMinMaxPerChannel(br, 1, hidden_size * 3, quant_ranges.min_br_, quant_ranges.max_br_);
 
-#ifdef USE_EMA
-    // Wx 结果的范围（分时间步平滑更新）
-    computeMinMaxPerStepEMA(tmp_Wx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_);
-    // Rh 结果的范围（分时间步平滑更新）
-    computeMinMaxPerStepEMA(tmp_Rh, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_);
-    // z 门输入的范围（分时间步平滑更新）
-    computeMinMaxPerStepEMA(z_pres, time_steps, NH, quant_ranges.min_z_pre_, quant_ranges.max_z_pre_);
-    // r 门输入的范围（分时间步平滑更新）
-    computeMinMaxPerStepEMA(r_pres, time_steps, NH, quant_ranges.min_r_pre_, quant_ranges.max_r_pre_);
-    // g 门输入的范围（分时间步平滑更新）
-    computeMinMaxPerStepEMA(g_pres, time_steps, NH, quant_ranges.min_g_pre_, quant_ranges.max_g_pre_);
-#else
-    // Wx 结果的范围
+    // =====================================================================
+    // 3. 中间值：使用全局极值累积（与 AIMET 一致）
+    // =====================================================================
+    
+    // Wx 结果的范围（全局极值）
     auto [min_Wx, max_Wx] = computeMinMaxDev(tmp_Wx, time_steps * NH * 3);
     updateRange(quant_ranges.min_Wx_, quant_ranges.max_Wx_, min_Wx, max_Wx);
 
-    // Rh 结果的范围
+    // Rh 结果的范围（全局极值）
     auto [min_Rh, max_Rh] = computeMinMaxDev(tmp_Rh, time_steps * NH * 3);
     updateRange(quant_ranges.min_Rh_, quant_ranges.max_Rh_, min_Rh, max_Rh);
 
-    // z 门输入的范围
+    // z 门输入的范围（全局极值）
     auto [min_z_pre, max_z_pre] = computeMinMaxDev(z_pres, time_steps * NH);
     updateRange(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, min_z_pre, max_z_pre);
 
-    // r 门输入的范围
+    // r 门输入的范围（全局极值）
     auto [min_r_pre, max_r_pre] = computeMinMaxDev(r_pres, time_steps * NH);
     updateRange(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, min_r_pre, max_r_pre);
 
-    // g 门输入的范围
+    // g 门输入的范围（全局极值）
     auto [min_g_pre, max_g_pre] = computeMinMaxDev(g_pres, time_steps * NH);
     updateRange(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, min_g_pre, max_g_pre);
-#endif
 
     // 从 v 中计算其他中间结果的范围
     std::vector<float> h_host = d2h(h, NH * (time_steps + 1));
