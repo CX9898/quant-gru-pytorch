@@ -3,7 +3,7 @@ QuantGRU - 支持量化的 GRU 实现
 
 功能特性:
     - 兼容 nn.GRU 接口(支持 batch_first、bidirectional 等参数)
-    - 支持 INT8/INT16/INT32 混合精度量化推理
+    - 支持任意位宽 (1-32 bit) 混合精度量化推理
     - 支持 MinMax / SQNR / Percentile 校准方法
     - 支持 JSON 配置文件指定各算子的位宽和对称量化设置
     - 支持 ONNX 导出(float / QDQ 两种格式)
@@ -320,7 +320,38 @@ def convert_weights_to_haste_format(
 # 量化参数说明：
 #   - exp2_inv: 量化指数，scale = 2^(-exp2_inv)
 #   - zp: 零点（对称量化时为 0）
-#   - bitwidth: 位宽 (8/16/32)
+#   - bitwidth: 位宽 (1-32)
+
+def get_quant_range(bitwidth: int, is_unsigned: bool = False) -> Tuple[int, int]:
+    """
+    计算任意位宽的量化范围
+    
+    Args:
+        bitwidth: 位宽 (1-32)
+        is_unsigned: 是否使用无符号范围
+        
+    Returns:
+        (qmin, qmax): 量化范围
+        
+    Examples:
+        >>> get_quant_range(8, False)   # INT8
+        (-128, 127)
+        >>> get_quant_range(8, True)    # UINT8
+        (0, 255)
+        >>> get_quant_range(4, False)   # INT4
+        (-8, 7)
+    """
+    if not (1 <= bitwidth <= 32):
+        raise ValueError(f"bitwidth must be in range [1, 32], got {bitwidth}")
+    
+    if is_unsigned:
+        qmin = 0
+        qmax = (1 << bitwidth) - 1
+    else:
+        qmin = -(1 << (bitwidth - 1))
+        qmax = (1 << (bitwidth - 1)) - 1
+    
+    return qmin, qmax
 
 def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
                   bitwidth: int = 8, symmetric: bool = True,
@@ -337,11 +368,11 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
         x: 输入张量
         exp2_inv: 量化指数 (scale = 2^(-exp2_inv))
         zp: 零点
-        bitwidth: 位宽 (8/16/32)
+        bitwidth: 位宽 (1-32)
         symmetric: 对称量化 (影响 zp 的使用方式)
         is_unsigned: 是否使用无符号范围 (UINT)，与 symmetric 独立
-                     - False: INT 范围 (-128~127, -32768~32767)
-                     - True: UINT 范围 (0~255, 0~65535)
+                     - False: INT 范围，如 8bit: -128~127
+                     - True: UINT 范围，如 8bit: 0~255
     """
     # 计算 scale
     if exp2_inv >= 0:
@@ -350,12 +381,7 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
         scale = float(1 << (-exp2_inv))
 
     # 确定量化范围：由 is_unsigned 决定 INT/UINT
-    if bitwidth == 8:
-        qmin, qmax = (0, 255) if is_unsigned else (-128, 127)
-    elif bitwidth == 16:
-        qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
-    else:
-        qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
+    qmin, qmax = get_quant_range(bitwidth, is_unsigned)
 
     # 量化: q = clamp(round(x / scale) + zp, qmin, qmax)
     # 注意: torch.round 使用银行家舍入，与 CUDA 的 round half up 略有差异
@@ -381,17 +407,12 @@ def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
         x: 输入张量
         exp2_invs: per-channel 量化指数列表
         zp: 零点
-        bitwidth: 位宽 (8/16/32)
+        bitwidth: 位宽 (1-32)
         symmetric: 对称量化
         is_unsigned: 是否使用无符号范围 (UINT)
     """
     # 确定量化范围：由 is_unsigned 决定 INT/UINT
-    if bitwidth == 8:
-        qmin, qmax = (0, 255) if is_unsigned else (-128, 127)
-    elif bitwidth == 16:
-        qmin, qmax = (0, 65535) if is_unsigned else (-32768, 32767)
-    else:
-        qmin, qmax = (0, 4294967295) if is_unsigned else (-2147483648, 2147483647)
+    qmin, qmax = get_quant_range(bitwidth, is_unsigned)
 
     device = x.device
     result = torch.zeros_like(x)
@@ -569,7 +590,7 @@ class GRUFunction(torch.autograd.Function):
 #
 # QuantGRU 是本模块的核心类，提供：
 #   - 兼容 nn.GRU 的接口
-#   - INT8/16/32 混合精度量化推理
+#   - 任意位宽 (1-32 bit) 混合精度量化推理
 #   - 多种校准方法（MinMax/SQNR/Percentile）
 #   - ONNX 导出支持（float/QDQ 格式）
 #
