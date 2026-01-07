@@ -530,7 +530,7 @@ void updateGRUQuantizationRangesGPU(
     cudaStream_t stream = 0);
 
 // ============================================================================
-// 转换函数：GPU 直方图 -> CPU Histogram（用于兼容现有代码）
+// 转换函数：GPU 直方图 -> CPU Histogram
 // ============================================================================
 
 struct Histogram;  // 前向声明（来自 histogram_collector.h）

@@ -81,7 +81,7 @@ __global__ void computeWeightSumMulZP(
     weight_sum[row] = sum_i64;
 }
 
-// 兼容旧版本：int32_t 输出（用于 8 位量化，不会溢出）
+// int32_t 版本：适用于 8 位量化，累加结果不会溢出 int32
 template <typename T>
 __global__ void computeWeightSumMulZP_i32(
     const T *__restrict__ W_q,         // [out_dim, in_dim] 权重量化矩阵, 列主序储存
