@@ -7,7 +7,7 @@
 本项目实现了一个支持量化的 GRU 神经网络模块，核心使用 CUDA 编写以实现高性能计算，并通过 PyBind11 提供 PyTorch 接口。项目支持：
 
 - **浮点和量化两种模式**：可在训练和推理时自由切换
-- **灵活的量化配置**：支持 8/16 位量化，可配置对称/非对称量化
+- **灵活的量化配置**：支持任意位宽 (1-32 bit) 量化，可配置对称/非对称量化
 - **三种校准方法**：SQNR（默认，高精度）、Percentile（百分位裁剪）和 MinMax（快速）
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
@@ -102,7 +102,7 @@ gru = QuantGRU(
 # 2. 加载位宽配置（二选一）
 # 方式一：从配置文件加载
 gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
-# 方式二：直接设置统一位宽（8/16位，is_symmetric控制对称量化）
+# 方式二：直接设置统一位宽（1-32 bit，is_symmetric控制对称量化）
 # gru.set_all_bitwidth(bitwidth=8, is_symmetric=True, verbose=True)
 
 # 3. 校准：设置 calibrating=True，然后用校准数据前向传播
@@ -299,8 +299,8 @@ gru.export_mode = False  # 恢复 CUDA 模式
 # 设置所有算子使用 8bit 对称量化
 gru.set_all_bitwidth(8, is_symmetric=True)
 
-# 设置所有算子使用 16bit 非对称量化
-gru.set_all_bitwidth(16, is_symmetric=False)
+# 设置所有算子使用 14bit 非对称量化（支持任意 1-32 bit）
+gru.set_all_bitwidth(14, is_symmetric=False)
 ```
 
 ## 📐 GRU 公式

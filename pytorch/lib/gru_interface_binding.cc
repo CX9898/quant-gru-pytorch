@@ -38,7 +38,7 @@ inline CalibrationMethod stringToCalibMethod(const std::string &method) {
 // ============================================================================
 //
 // 设计说明：
-// - Python 端只配置位宽数量（8, 16, 32），不关心实际类型（INT/UINT）
+// - Python 端只配置位宽数量（1-32），不关心实际类型（INT/UINT）
 // - C++ 端在 to_cpp() 时决定实际类型
 // - 这些辅助函数需要在 OperatorQuantConfigPy 之前定义
 //
@@ -71,7 +71,7 @@ inline QuantBitWidth bitwidthToUnsigned(int8_t bitwidth) {
 // ============================================================================
 
 struct OperatorQuantConfigPy {
-    // 位宽配置（存储位宽数量 8, 16, 32）
+    // 位宽配置（存储位宽数量 1-32）
     int8_t x_ = 8, h_ = 8;
     int8_t W_ = 8, R_ = 8, bx_ = 8, br_ = 8;
     int8_t Wx_ = 8, Rh_ = 8;
@@ -673,7 +673,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     #undef DEF_PROP
 
     // OperatorQuantConfig 绑定（位宽配置 + 对称量化配置）
-    // 位宽值: 8, 16, 32（Python 端只看到位宽数量，C++ 端决定实际类型）
+    // 位宽值: 1-32（Python 端只看到位宽数量，C++ 端决定实际类型）
     // 对称量化: is_symmetric=true 对称量化(zp=0), is_symmetric=false 非对称量化(zp≠0)
     py::class_<OperatorQuantConfigPy>(m, "OperatorQuantConfig")
         .def(py::init<>())
