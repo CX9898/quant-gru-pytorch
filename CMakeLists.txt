@@ -15,7 +15,7 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # CUDA 架构设置
 # RTX 20系=75, RTX 30系=86, RTX 40系=89, RTX 50系=120
 # ------------------------------
-set(CMAKE_CUDA_ARCHITECTURES 75 86 89 120)
+#set(CMAKE_CUDA_ARCHITECTURES 75 86 89 120)
 
 # ------------------------------
 # include / src 路径
