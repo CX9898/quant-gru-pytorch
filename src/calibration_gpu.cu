@@ -1195,7 +1195,7 @@ ContinuousScaleResult searchSqnrGpu(
     int num_bins, int64_t num_steps,
     bool is_symmetric,
     const SqnrConfig& config,
-    cudaStream_t stream) {
+                              cudaStream_t stream) {
     
     // 最小 delta（与 AIMET minimum_scale 一致）
     const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
@@ -1577,6 +1577,11 @@ void compute_minmax_dev(const float* data_dev, size_t size, float& min_out, floa
     compute_minmax(data_dev, size, min_out, max_out);
 }
 
+/**
+ * @brief 分时间步计算 min/max 并使用 EMA 累积（用于输入/输出）
+ * 
+ * 适用于可能有噪声的输入输出数据，EMA 可以平滑掉异常值
+ */
 void compute_minmax_per_step_ema_gpu(const float* data_dev, int steps, int step_size,
                                       float& min_out, float& max_out, float decay,
                                       cudaStream_t stream) {
@@ -1614,6 +1619,42 @@ void compute_minmax_per_step_ema_gpu(const float* data_dev, int steps, int step_
             min_out = decay * min_out + (1.0f - decay) * h_mins[t];
             max_out = decay * max_out + (1.0f - decay) * h_maxs[t];
         }
+    }
+}
+
+/**
+ * @brief 分时间步计算 min/max 并使用全局极值累积（用于中间值）
+ * 
+ * 适用于中间计算结果，使用全局极值更稳定，与 AIMET 一致
+ */
+void compute_minmax_per_step_gpu(const float* data_dev, int steps, int step_size,
+                                  float& min_out, float& max_out,
+                                  cudaStream_t stream) {
+    if (steps <= 0 || step_size <= 0) return;
+    
+    // 分配 GPU 端 min/max 数组
+    dev::vector<float> all_mins(steps);
+    dev::vector<float> all_maxs(steps);
+    
+    // 一次 kernel 调用计算所有时间步的 min/max
+    {
+        const int threads = 256;
+        const int blocks = steps;
+        const size_t shared_mem = 2 * threads * sizeof(float);
+        compute_contiguous_batch_minmax_kernel<<<blocks, threads, shared_mem, stream>>>(
+            data_dev, all_mins.data(), all_maxs.data(), step_size, steps);
+    }
+    cudaStreamSynchronize(stream);
+    
+    // 拷贝到 CPU
+    std::vector<float> h_mins(steps), h_maxs(steps);
+    cudaMemcpy(h_mins.data(), all_mins.data(), steps * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_maxs.data(), all_maxs.data(), steps * sizeof(float), cudaMemcpyDeviceToHost);
+    
+    // CPU 端做全局极值累积
+    for (int t = 0; t < steps; ++t) {
+        min_out = std::min(min_out, h_mins[t]);
+        max_out = std::max(max_out, h_maxs[t]);
     }
 }
 
@@ -1744,36 +1785,40 @@ void updateGRUQuantizationRangesGPU(
     }
     
     // =====================================================================
-    // 1. 标量范围：使用 GPU minmax + EMA
+    // 1. 输入/输出：使用 EMA 累积（平滑噪声）
     // =====================================================================
     
     // 输入 x 的范围（分时间步 EMA）
     gpu_hist::compute_minmax_per_step_ema_gpu(
         x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_, 0.9f, stream);
     
-    // 隐藏状态 h 的范围（跳过 h0）
+    // 隐藏状态 h 的范围（跳过 h0，分时间步 EMA）
     gpu_hist::compute_minmax_per_step_ema_gpu(
         h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_, 0.9f, stream);
     
-    // Wx 结果的范围
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        tmp_Wx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_, 0.9f, stream);
+    // =====================================================================
+    // 2. 中间值：使用全局极值累积（与 AIMET 一致）
+    // =====================================================================
     
-    // Rh 结果的范围
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        tmp_Rh, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, 0.9f, stream);
+    // Wx 结果的范围（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        tmp_Wx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_, stream);
     
-    // z 门预激活值
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        z_pres, time_steps, NH, quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, 0.9f, stream);
+    // Rh 结果的范围（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        tmp_Rh, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, stream);
     
-    // r 门预激活值
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        r_pres, time_steps, NH, quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, 0.9f, stream);
+    // z 门预激活值（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        z_pres, time_steps, NH, quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, stream);
     
-    // g 门预激活值
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        g_pres, time_steps, NH, quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, 0.9f, stream);
+    // r 门预激活值（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        r_pres, time_steps, NH, quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, stream);
+    
+    // g 门预激活值（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        g_pres, time_steps, NH, quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, stream);
     
     // =====================================================================
     // 2. Per-channel 范围：使用 GPU 批量 kernel

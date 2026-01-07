@@ -436,12 +436,22 @@ void compute_minmax_dev(const float* data_dev, size_t size, float& min_out, floa
 /**
  * @brief 分时间步计算 min/max 并使用 EMA 更新（GPU 版本）
  *
+ * 适用于输入/输出数据，EMA 可以平滑掉噪声异常值
  * 使用批量 kernel 一次计算所有时间步的 min/max，然后 CPU 端做 EMA 融合
- * 相比 CPU 版本避免了 GPU→CPU 大数据传输
  */
 void compute_minmax_per_step_ema_gpu(const float* data_dev, int steps, int step_size,
                                       float& min_out, float& max_out, float decay = 0.9f,
                                       cudaStream_t stream = 0);
+
+/**
+ * @brief 分时间步计算 min/max 并使用全局极值累积（GPU 版本）
+ *
+ * 适用于中间计算结果，使用全局极值更稳定，与 AIMET MinMax 一致
+ * 使用批量 kernel 一次计算所有时间步的 min/max，然后 CPU 端取全局极值
+ */
+void compute_minmax_per_step_gpu(const float* data_dev, int steps, int step_size,
+                                  float& min_out, float& max_out,
+                                  cudaStream_t stream = 0);
 
 /**
  * @brief 计算 per-channel 的 min/max（GPU 版本）
