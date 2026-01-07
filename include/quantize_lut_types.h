@@ -17,10 +17,7 @@
 
 #include "quantize_bitwidth_config.h"
 
-/// @brief 分段数量（固定为 16 段）
-#ifndef NUM_SEGMENTS
 #define NUM_SEGMENTS 16
-#endif
 
 // ============================================================================
 // 分段参数结构体
@@ -54,17 +51,6 @@ struct SigmoidLUT {
     int8_t shift_bits_y;                   ///< 输出缩放因子指数
     int32_t zp_y;                          ///< 输出零点
 };
-
-// ============================================================================
-// 类型别名（兼容旧代码）
-// ============================================================================
-
-using SegmentParams_INT8 = SegmentParams;
-using SegmentParams_INT16 = SegmentParams;
-using SegmentParams_INT8_to_INT16 = SegmentParams;
-using SigmoidLUT_INT8 = SigmoidLUT;
-using SigmoidLUT_INT16 = SigmoidLUT;
-using SigmoidLUT_INT8_to_INT16 = SigmoidLUT;
 
 // ============================================================================
 // LUT 生成函数声明

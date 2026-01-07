@@ -72,107 +72,29 @@ inline QuantBitWidth bitwidthToUnsigned(int8_t bitwidth) {
 
 struct OperatorQuantConfigPy {
     // 位宽配置（存储位宽数量 1-32）
-    int8_t x_ = 8, h_ = 8;
-    int8_t W_ = 8, R_ = 8, bx_ = 8, br_ = 8;
-    int8_t Wx_ = 8, Rh_ = 8;
-    int8_t z_pre_ = 8, z_out_ = 8;
-    int8_t r_pre_ = 8, r_out_ = 8;
-    int8_t g_pre_ = 8, g_out_ = 8;
-    int8_t Rh_add_br_ = 8, rRh_ = 8, old_contrib_ = 8, new_contrib_ = 8;
+    // 注意：不再硬编码默认值，而是通过构造函数从 C++ 默认值初始化
+    int8_t x_, h_;
+    int8_t W_, R_, bx_, br_;
+    int8_t Wx_, Rh_;
+    int8_t z_pre_, z_out_;
+    int8_t r_pre_, r_out_;
+    int8_t g_pre_, g_out_;
+    int8_t Rh_add_br_, rRh_, old_contrib_, new_contrib_;
 
     // 对称量化配置
-    bool x_symmetric_ = false, h_symmetric_ = false;
-    bool W_symmetric_ = true, R_symmetric_ = true, bx_symmetric_ = true, br_symmetric_ = true;
-    bool Wx_symmetric_ = false, Rh_symmetric_ = false;
-    bool z_pre_symmetric_ = false, z_out_symmetric_ = false;
-    bool r_pre_symmetric_ = false, r_out_symmetric_ = false;
-    bool g_pre_symmetric_ = false, g_out_symmetric_ = false;
-    bool Rh_add_br_symmetric_ = false, rRh_symmetric_ = false;
-    bool old_contrib_symmetric_ = false, new_contrib_symmetric_ = false;
+    bool x_symmetric_, h_symmetric_;
+    bool W_symmetric_, R_symmetric_, bx_symmetric_, br_symmetric_;
+    bool Wx_symmetric_, Rh_symmetric_;
+    bool z_pre_symmetric_, z_out_symmetric_;
+    bool r_pre_symmetric_, r_out_symmetric_;
+    bool g_pre_symmetric_, g_out_symmetric_;
+    bool Rh_add_br_symmetric_, rRh_symmetric_;
+    bool old_contrib_symmetric_, new_contrib_symmetric_;
 
-    OperatorQuantConfig to_cpp() const {
-        OperatorQuantConfig cfg;
-        // 位宽配置（sigmoid 输出为无符号，其他有符号）
-        cfg.x_ = bitwidthToSigned(x_);
-        cfg.h_ = bitwidthToSigned(h_);
-        cfg.W_ = bitwidthToSigned(W_);
-        cfg.R_ = bitwidthToSigned(R_);
-        cfg.bx_ = bitwidthToSigned(bx_);
-        cfg.br_ = bitwidthToSigned(br_);
-        cfg.Wx_ = bitwidthToSigned(Wx_);
-        cfg.Rh_ = bitwidthToSigned(Rh_);
-        cfg.z_pre_ = bitwidthToSigned(z_pre_);
-        cfg.z_out_ = bitwidthToUnsigned(z_out_);  // sigmoid → unsigned
-        cfg.r_pre_ = bitwidthToSigned(r_pre_);
-        cfg.r_out_ = bitwidthToUnsigned(r_out_);  // sigmoid → unsigned
-        cfg.g_pre_ = bitwidthToSigned(g_pre_);
-        cfg.g_out_ = bitwidthToSigned(g_out_);
-        cfg.Rh_add_br_ = bitwidthToSigned(Rh_add_br_);
-        cfg.rRh_ = bitwidthToSigned(rRh_);
-        cfg.old_contrib_ = bitwidthToSigned(old_contrib_);
-        cfg.new_contrib_ = bitwidthToSigned(new_contrib_);
-        // 对称量化配置
-        cfg.x_symmetric_ = x_symmetric_;
-        cfg.h_symmetric_ = h_symmetric_;
-        cfg.W_symmetric_ = W_symmetric_;
-        cfg.R_symmetric_ = R_symmetric_;
-        cfg.bx_symmetric_ = bx_symmetric_;
-        cfg.br_symmetric_ = br_symmetric_;
-        cfg.Wx_symmetric_ = Wx_symmetric_;
-        cfg.Rh_symmetric_ = Rh_symmetric_;
-        cfg.z_pre_symmetric_ = z_pre_symmetric_;
-        cfg.z_out_symmetric_ = z_out_symmetric_;
-        cfg.r_pre_symmetric_ = r_pre_symmetric_;
-        cfg.r_out_symmetric_ = r_out_symmetric_;
-        cfg.g_pre_symmetric_ = g_pre_symmetric_;
-        cfg.g_out_symmetric_ = g_out_symmetric_;
-        cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
-        cfg.rRh_symmetric_ = rRh_symmetric_;
-        cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
-        cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
-        return cfg;
-    }
-
-    void from_cpp(const OperatorQuantConfig &cfg) {
-        // 直接从 C++ 结构体读取位宽（忽略 is_signed，Python 端不关心）
-        x_ = cfg.x_.bits_;
-        h_ = cfg.h_.bits_;
-        W_ = cfg.W_.bits_;
-        R_ = cfg.R_.bits_;
-        bx_ = cfg.bx_.bits_;
-        br_ = cfg.br_.bits_;
-        Wx_ = cfg.Wx_.bits_;
-        Rh_ = cfg.Rh_.bits_;
-        z_pre_ = cfg.z_pre_.bits_;
-        z_out_ = cfg.z_out_.bits_;
-        r_pre_ = cfg.r_pre_.bits_;
-        r_out_ = cfg.r_out_.bits_;
-        g_pre_ = cfg.g_pre_.bits_;
-        g_out_ = cfg.g_out_.bits_;
-        Rh_add_br_ = cfg.Rh_add_br_.bits_;
-        rRh_ = cfg.rRh_.bits_;
-        old_contrib_ = cfg.old_contrib_.bits_;
-        new_contrib_ = cfg.new_contrib_.bits_;
-        // 对称量化配置
-        x_symmetric_ = cfg.x_symmetric_;
-        h_symmetric_ = cfg.h_symmetric_;
-        W_symmetric_ = cfg.W_symmetric_;
-        R_symmetric_ = cfg.R_symmetric_;
-        bx_symmetric_ = cfg.bx_symmetric_;
-        br_symmetric_ = cfg.br_symmetric_;
-        Wx_symmetric_ = cfg.Wx_symmetric_;
-        Rh_symmetric_ = cfg.Rh_symmetric_;
-        z_pre_symmetric_ = cfg.z_pre_symmetric_;
-        z_out_symmetric_ = cfg.z_out_symmetric_;
-        r_pre_symmetric_ = cfg.r_pre_symmetric_;
-        r_out_symmetric_ = cfg.r_out_symmetric_;
-        g_pre_symmetric_ = cfg.g_pre_symmetric_;
-        g_out_symmetric_ = cfg.g_out_symmetric_;
-        Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
-        rRh_symmetric_ = cfg.rRh_symmetric_;
-        old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
-        new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
-    }
+    // 方法声明（实现在文件末尾）
+    OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
+    OperatorQuantConfig to_cpp() const;                // 转换为 C++ 结构体
+    void from_cpp(const OperatorQuantConfig &cfg);     // 从 C++ 结构体读取
 };
 
 // GRUQuantizationRanges 的 Python 绑定（直接包装 C++ 对象）
@@ -233,92 +155,9 @@ struct GRUQuantitativeParametersPy {
     // 否则 forwardInterface 会使用默认的 8 位配置
     OperatorQuantConfigPy bitwidth_config_;
 
-    // 从 C++ 结构体转换
-    void from_cpp(const GRUQuantitativeParameters &cpp_params) {
-        hidden_ = cpp_params.hidden_;
-        exp2_inv_x_ = cpp_params.exp2_inv_x_;
-        zp_x_ = cpp_params.zp_x_;
-        exp2_inv_h_ = cpp_params.exp2_inv_h_;
-        zp_h_ = cpp_params.zp_h_;
-        exp2_inv_W_ = cpp_params.exp2_inv_W_;
-        exp2_inv_R_ = cpp_params.exp2_inv_R_;
-        exp2_inv_Wx_ = cpp_params.exp2_inv_Wx_;
-        zp_Wx_ = cpp_params.zp_Wx_;
-        exp2_inv_Rh_ = cpp_params.exp2_inv_Rh_;
-        zp_Rh_ = cpp_params.zp_Rh_;
-        exp2_inv_bx_ = cpp_params.exp2_inv_bx_;
-        exp2_inv_br_ = cpp_params.exp2_inv_br_;
-        exp2_inv_z_pre_ = cpp_params.exp2_inv_z_pre_;
-        zp_z_pre_ = cpp_params.zp_z_pre_;
-        exp2_inv_r_pre_ = cpp_params.exp2_inv_r_pre_;
-        zp_r_pre_ = cpp_params.zp_r_pre_;
-        exp2_inv_g_pre_ = cpp_params.exp2_inv_g_pre_;
-        zp_g_pre_ = cpp_params.zp_g_pre_;
-        exp2_inv_z_out_ = cpp_params.exp2_inv_z_out_;
-        zp_z_out_ = cpp_params.zp_z_out_;
-        exp2_inv_r_out_ = cpp_params.exp2_inv_r_out_;
-        zp_r_out_ = cpp_params.zp_r_out_;
-        exp2_inv_g_out_ = cpp_params.exp2_inv_g_out_;
-        zp_g_out_ = cpp_params.zp_g_out_;
-        exp2_inv_Rh_add_br_ = cpp_params.exp2_inv_Rh_add_br_;
-        zp_Rh_add_br_ = cpp_params.zp_Rh_add_br_;
-        exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
-        zp_rRh_ = cpp_params.zp_rRh_;
-        exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
-        zp_new_contrib_ = cpp_params.zp_new_contrib_;
-        exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
-        zp_old_contrib_ = cpp_params.zp_old_contrib_;
-
-        // ⚠️ 关键：复制位宽配置
-        bitwidth_config_.from_cpp(cpp_params.bitwidth_config_);
-    }
-
-    // 转换为 C++ 结构体
-    GRUQuantitativeParameters to_cpp() const {
-        GRUQuantitativeParameters cpp_params;
-        cpp_params.hidden_ = hidden_;
-        cpp_params.exp2_inv_x_ = exp2_inv_x_;
-        cpp_params.zp_x_ = zp_x_;
-        cpp_params.exp2_inv_h_ = exp2_inv_h_;
-        cpp_params.zp_h_ = zp_h_;
-        cpp_params.exp2_inv_W_ = exp2_inv_W_;
-        cpp_params.exp2_inv_R_ = exp2_inv_R_;
-        cpp_params.exp2_inv_Wx_ = exp2_inv_Wx_;
-        cpp_params.zp_Wx_ = zp_Wx_;
-        cpp_params.exp2_inv_Rh_ = exp2_inv_Rh_;
-        cpp_params.zp_Rh_ = zp_Rh_;
-        cpp_params.exp2_inv_bx_ = exp2_inv_bx_;
-        cpp_params.exp2_inv_br_ = exp2_inv_br_;
-        cpp_params.exp2_inv_z_pre_ = exp2_inv_z_pre_;
-        cpp_params.zp_z_pre_ = zp_z_pre_;
-        cpp_params.exp2_inv_r_pre_ = exp2_inv_r_pre_;
-        cpp_params.zp_r_pre_ = zp_r_pre_;
-        cpp_params.exp2_inv_g_pre_ = exp2_inv_g_pre_;
-        cpp_params.zp_g_pre_ = zp_g_pre_;
-        cpp_params.exp2_inv_z_out_ = exp2_inv_z_out_;
-        cpp_params.zp_z_out_ = zp_z_out_;
-        cpp_params.exp2_inv_r_out_ = exp2_inv_r_out_;
-        cpp_params.zp_r_out_ = zp_r_out_;
-        cpp_params.exp2_inv_g_out_ = exp2_inv_g_out_;
-        cpp_params.zp_g_out_ = zp_g_out_;
-        cpp_params.exp2_inv_Rh_add_br_ = exp2_inv_Rh_add_br_;
-        cpp_params.zp_Rh_add_br_ = zp_Rh_add_br_;
-        cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
-        cpp_params.zp_rRh_ = zp_rRh_;
-        cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
-        cpp_params.zp_new_contrib_ = zp_new_contrib_;
-        cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
-        cpp_params.zp_old_contrib_ = zp_old_contrib_;
-
-        // ⚠️ 关键：复制位宽配置
-        cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
-
-        // 重新生成 LUT（因为 LUT 不能直接序列化到 Python）
-        // 这会在每次 to_cpp() 时重新生成，但开销可以接受（只在 forward 前调用一次）
-        generate_piecewise_linear_lut_to_params(cpp_params);
-
-        return cpp_params;
-    }
+    // 方法声明（实现在文件末尾）
+    void from_cpp(const GRUQuantitativeParameters &cpp_params);  // 从 C++ 结构体转换
+    GRUQuantitativeParameters to_cpp() const;                     // 转换为 C++ 结构体
 };
 
 // 根据量化范围计算量化参数的包装函数（支持自定义位宽配置）
@@ -438,7 +277,11 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
-    GRUQuantitativeParameters cpp_params = quant_params.to_cpp();
+    // 只有量化推理时才调用 to_cpp()（避免非量化推理时白白生成 LUT）
+    GRUQuantitativeParameters cpp_params;
+    if (is_quant) {
+        cpp_params = quant_params.to_cpp();  // 包含 LUT 生成
+    }
     
     forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
                      W.data_ptr<float>(), R.data_ptr<float>(), 
@@ -610,6 +453,194 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
                      dh.data_ptr<float>());
 
     return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
+}
+
+// ============================================================================
+//                    OperatorQuantConfigPy 方法实现
+// ============================================================================
+
+// 默认构造函数：从 C++ OperatorQuantConfig 获取默认值
+// 这样保证 Python 端和 C++ 端的默认值始终一致
+OperatorQuantConfigPy::OperatorQuantConfigPy() {
+    OperatorQuantConfig cpp_defaults;  // 使用 C++ 的默认值
+    from_cpp(cpp_defaults);
+}
+
+// 转换为 C++ 结构体
+OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
+    OperatorQuantConfig cfg;
+    // 位宽配置（sigmoid 输出为无符号，其他有符号）
+    cfg.x_ = bitwidthToSigned(x_);
+    cfg.h_ = bitwidthToSigned(h_);
+    cfg.W_ = bitwidthToSigned(W_);
+    cfg.R_ = bitwidthToSigned(R_);
+    cfg.bx_ = bitwidthToSigned(bx_);
+    cfg.br_ = bitwidthToSigned(br_);
+    cfg.Wx_ = bitwidthToSigned(Wx_);
+    cfg.Rh_ = bitwidthToSigned(Rh_);
+    cfg.z_pre_ = bitwidthToSigned(z_pre_);
+    cfg.z_out_ = bitwidthToUnsigned(z_out_);  // sigmoid → unsigned
+    cfg.r_pre_ = bitwidthToSigned(r_pre_);
+    cfg.r_out_ = bitwidthToUnsigned(r_out_);  // sigmoid → unsigned
+    cfg.g_pre_ = bitwidthToSigned(g_pre_);
+    cfg.g_out_ = bitwidthToSigned(g_out_);
+    cfg.Rh_add_br_ = bitwidthToSigned(Rh_add_br_);
+    cfg.rRh_ = bitwidthToSigned(rRh_);
+    cfg.old_contrib_ = bitwidthToSigned(old_contrib_);
+    cfg.new_contrib_ = bitwidthToSigned(new_contrib_);
+    // 对称量化配置
+    cfg.x_symmetric_ = x_symmetric_;
+    cfg.h_symmetric_ = h_symmetric_;
+    cfg.W_symmetric_ = W_symmetric_;
+    cfg.R_symmetric_ = R_symmetric_;
+    cfg.bx_symmetric_ = bx_symmetric_;
+    cfg.br_symmetric_ = br_symmetric_;
+    cfg.Wx_symmetric_ = Wx_symmetric_;
+    cfg.Rh_symmetric_ = Rh_symmetric_;
+    cfg.z_pre_symmetric_ = z_pre_symmetric_;
+    cfg.z_out_symmetric_ = z_out_symmetric_;
+    cfg.r_pre_symmetric_ = r_pre_symmetric_;
+    cfg.r_out_symmetric_ = r_out_symmetric_;
+    cfg.g_pre_symmetric_ = g_pre_symmetric_;
+    cfg.g_out_symmetric_ = g_out_symmetric_;
+    cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
+    cfg.rRh_symmetric_ = rRh_symmetric_;
+    cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
+    cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
+    return cfg;
+}
+
+// 从 C++ 结构体读取
+void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
+    // 直接从 C++ 结构体读取位宽（忽略 is_signed，Python 端不关心）
+    x_ = cfg.x_.bits_;
+    h_ = cfg.h_.bits_;
+    W_ = cfg.W_.bits_;
+    R_ = cfg.R_.bits_;
+    bx_ = cfg.bx_.bits_;
+    br_ = cfg.br_.bits_;
+    Wx_ = cfg.Wx_.bits_;
+    Rh_ = cfg.Rh_.bits_;
+    z_pre_ = cfg.z_pre_.bits_;
+    z_out_ = cfg.z_out_.bits_;
+    r_pre_ = cfg.r_pre_.bits_;
+    r_out_ = cfg.r_out_.bits_;
+    g_pre_ = cfg.g_pre_.bits_;
+    g_out_ = cfg.g_out_.bits_;
+    Rh_add_br_ = cfg.Rh_add_br_.bits_;
+    rRh_ = cfg.rRh_.bits_;
+    old_contrib_ = cfg.old_contrib_.bits_;
+    new_contrib_ = cfg.new_contrib_.bits_;
+    // 对称量化配置
+    x_symmetric_ = cfg.x_symmetric_;
+    h_symmetric_ = cfg.h_symmetric_;
+    W_symmetric_ = cfg.W_symmetric_;
+    R_symmetric_ = cfg.R_symmetric_;
+    bx_symmetric_ = cfg.bx_symmetric_;
+    br_symmetric_ = cfg.br_symmetric_;
+    Wx_symmetric_ = cfg.Wx_symmetric_;
+    Rh_symmetric_ = cfg.Rh_symmetric_;
+    z_pre_symmetric_ = cfg.z_pre_symmetric_;
+    z_out_symmetric_ = cfg.z_out_symmetric_;
+    r_pre_symmetric_ = cfg.r_pre_symmetric_;
+    r_out_symmetric_ = cfg.r_out_symmetric_;
+    g_pre_symmetric_ = cfg.g_pre_symmetric_;
+    g_out_symmetric_ = cfg.g_out_symmetric_;
+    Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
+    rRh_symmetric_ = cfg.rRh_symmetric_;
+    old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
+    new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
+}
+
+// ============================================================================
+//                    GRUQuantitativeParametersPy 方法实现
+// ============================================================================
+
+// 从 C++ 结构体转换
+void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_params) {
+    hidden_ = cpp_params.hidden_;
+    exp2_inv_x_ = cpp_params.exp2_inv_x_;
+    zp_x_ = cpp_params.zp_x_;
+    exp2_inv_h_ = cpp_params.exp2_inv_h_;
+    zp_h_ = cpp_params.zp_h_;
+    exp2_inv_W_ = cpp_params.exp2_inv_W_;
+    exp2_inv_R_ = cpp_params.exp2_inv_R_;
+    exp2_inv_Wx_ = cpp_params.exp2_inv_Wx_;
+    zp_Wx_ = cpp_params.zp_Wx_;
+    exp2_inv_Rh_ = cpp_params.exp2_inv_Rh_;
+    zp_Rh_ = cpp_params.zp_Rh_;
+    exp2_inv_bx_ = cpp_params.exp2_inv_bx_;
+    exp2_inv_br_ = cpp_params.exp2_inv_br_;
+    exp2_inv_z_pre_ = cpp_params.exp2_inv_z_pre_;
+    zp_z_pre_ = cpp_params.zp_z_pre_;
+    exp2_inv_r_pre_ = cpp_params.exp2_inv_r_pre_;
+    zp_r_pre_ = cpp_params.zp_r_pre_;
+    exp2_inv_g_pre_ = cpp_params.exp2_inv_g_pre_;
+    zp_g_pre_ = cpp_params.zp_g_pre_;
+    exp2_inv_z_out_ = cpp_params.exp2_inv_z_out_;
+    zp_z_out_ = cpp_params.zp_z_out_;
+    exp2_inv_r_out_ = cpp_params.exp2_inv_r_out_;
+    zp_r_out_ = cpp_params.zp_r_out_;
+    exp2_inv_g_out_ = cpp_params.exp2_inv_g_out_;
+    zp_g_out_ = cpp_params.zp_g_out_;
+    exp2_inv_Rh_add_br_ = cpp_params.exp2_inv_Rh_add_br_;
+    zp_Rh_add_br_ = cpp_params.zp_Rh_add_br_;
+    exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
+    zp_rRh_ = cpp_params.zp_rRh_;
+    exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
+    zp_new_contrib_ = cpp_params.zp_new_contrib_;
+    exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
+    zp_old_contrib_ = cpp_params.zp_old_contrib_;
+
+    // ⚠️ 关键：复制位宽配置
+    bitwidth_config_.from_cpp(cpp_params.bitwidth_config_);
+}
+
+// 转换为 C++ 结构体
+GRUQuantitativeParameters GRUQuantitativeParametersPy::to_cpp() const {
+    GRUQuantitativeParameters cpp_params;
+    cpp_params.hidden_ = hidden_;
+    cpp_params.exp2_inv_x_ = exp2_inv_x_;
+    cpp_params.zp_x_ = zp_x_;
+    cpp_params.exp2_inv_h_ = exp2_inv_h_;
+    cpp_params.zp_h_ = zp_h_;
+    cpp_params.exp2_inv_W_ = exp2_inv_W_;
+    cpp_params.exp2_inv_R_ = exp2_inv_R_;
+    cpp_params.exp2_inv_Wx_ = exp2_inv_Wx_;
+    cpp_params.zp_Wx_ = zp_Wx_;
+    cpp_params.exp2_inv_Rh_ = exp2_inv_Rh_;
+    cpp_params.zp_Rh_ = zp_Rh_;
+    cpp_params.exp2_inv_bx_ = exp2_inv_bx_;
+    cpp_params.exp2_inv_br_ = exp2_inv_br_;
+    cpp_params.exp2_inv_z_pre_ = exp2_inv_z_pre_;
+    cpp_params.zp_z_pre_ = zp_z_pre_;
+    cpp_params.exp2_inv_r_pre_ = exp2_inv_r_pre_;
+    cpp_params.zp_r_pre_ = zp_r_pre_;
+    cpp_params.exp2_inv_g_pre_ = exp2_inv_g_pre_;
+    cpp_params.zp_g_pre_ = zp_g_pre_;
+    cpp_params.exp2_inv_z_out_ = exp2_inv_z_out_;
+    cpp_params.zp_z_out_ = zp_z_out_;
+    cpp_params.exp2_inv_r_out_ = exp2_inv_r_out_;
+    cpp_params.zp_r_out_ = zp_r_out_;
+    cpp_params.exp2_inv_g_out_ = exp2_inv_g_out_;
+    cpp_params.zp_g_out_ = zp_g_out_;
+    cpp_params.exp2_inv_Rh_add_br_ = exp2_inv_Rh_add_br_;
+    cpp_params.zp_Rh_add_br_ = zp_Rh_add_br_;
+    cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
+    cpp_params.zp_rRh_ = zp_rRh_;
+    cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
+    cpp_params.zp_new_contrib_ = zp_new_contrib_;
+    cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
+    cpp_params.zp_old_contrib_ = zp_old_contrib_;
+
+    // ⚠️ 关键：复制位宽配置
+    cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
+
+    // 重新生成 LUT（因为 LUT 不能直接序列化到 Python）
+    // 这会在每次 to_cpp() 时重新生成，但开销可以接受（只在 forward 前调用一次）
+    generate_piecewise_linear_lut_to_params(cpp_params);
+
+    return cpp_params;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
