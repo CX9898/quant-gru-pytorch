@@ -120,11 +120,39 @@ Wx_tmp = cuBLAS::GEMM(W, x)  // [H×3, T×N]
 
 ### Step 2: 零点补偿预计算
 
-由于 x 和 h 是非对称量化，GEMM 结果需要零点补偿：
+由于 x 和 h 是非对称量化，GEMM 结果需要零点补偿。
 
-$$W\_sum\_mul\_x\_zp[c] = zp_x \times \sum_{k} W[c, k]$$
+#### 为什么需要零点补偿？
 
-$$R\_sum\_mul\_h\_zp[c] = zp_h \times \sum_{k} R[c, k]$$
+**背景**：在混合量化场景中，权重 W 采用对称量化（zp=0），而激活值 x 采用非对称量化（zp≠0）。当我们用整数 GEMM 计算 $q_W \cdot q_x$ 时，结果并不直接等于浮点 $W \cdot x$ 的量化值，需要额外的零点补偿项。
+
+**推导过程**：
+
+设量化参数为：
+- 权重对称量化：$q_W = \text{round}(W / S_W)$，即 $W = q_W \cdot S_W$
+- 激活非对称量化：$q_x = \text{round}(x / S_x) + Z_x$，即 $x = (q_x - Z_x) \cdot S_x$
+
+我们需要计算矩阵乘法 $Y = W \cdot x$，其中 $Y[c] = \sum_k W[c,k] \cdot x[k]$
+
+将浮点值用量化值表示：
+
+$$Y[c] = \sum_k (q_W[c,k] \cdot S_W) \cdot ((q_x[k] - Z_x) \cdot S_x)$$
+
+$$= S_W \cdot S_x \sum_k q_W[c,k] \cdot (q_x[k] - Z_x)$$
+
+$$= S_W \cdot S_x \left( \sum_k q_W[c,k] \cdot q_x[k] - Z_x \sum_k q_W[c,k] \right)$$
+
+$$= S_W \cdot S_x \left( \underbrace{(q_W \cdot q_x)[c]}_{\text{整数GEMM结果}} - \underbrace{Z_x \sum_k q_W[c,k]}_{\text{零点补偿项}} \right)$$
+
+因此，**整数 GEMM 的结果需要减去零点补偿项**才能得到正确的浮点乘积的量化表示。
+
+#### 预计算公式
+
+$$W\_sum\_mul\_x\_zp[c] = Z_x \times \sum_{k} q_W[c, k]$$
+
+$$R\_sum\_mul\_h\_zp[c] = Z_h \times \sum_{k} q_R[c, k]$$
+
+> **优化说明**：由于 $\sum_k q_W[c,k]$ 只与权重相关，可在模型加载时一次性计算。而 $Z_x$ 和 $Z_h$ 在动态量化时可能随输入变化，因此补偿值 = 零点 × 权重行求和。
 
 ### Step 3: 时间步循环
 
