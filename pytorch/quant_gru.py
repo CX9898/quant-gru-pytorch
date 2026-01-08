@@ -1917,3 +1917,771 @@ def print_quant_ranges(gru: QuantGRU):
     print(f"  [new_contrib]      min={r.min_new_contrib_:12.6f}, max={r.max_new_contrib_:12.6f}")
     print(f"  [old_contrib]      min={r.min_old_contrib_:12.6f}, max={r.max_old_contrib_:12.6f}")
     print("=" * 60)
+
+
+# ============================================================
+#                   量化参数导出/导入
+# ============================================================
+#
+# 量化参数导出用于：
+#   1. 部署：将校准后的量化参数导出到文件，供推理引擎使用
+#   2. 调试：检查量化参数是否正确
+#   3. 复用：在不同环境间共享量化参数，避免重复校准
+#
+# 支持格式：
+#   - JSON: 人类可读，便于调试和版本控制
+#
+# 导出内容包括：
+#   - 位宽配置 (bitwidth_config)
+#   - 标量量化参数 (exp2_inv_*, zp_*)
+#   - Per-channel 量化参数 (exp2_inv_W_, exp2_inv_R_, exp2_inv_bx_, exp2_inv_br_)
+#   - 元信息 (hidden_size, input_size, calibration_method 等)
+
+# 量化参数字段映射表（用于导出/导入）
+# 格式: "字段名" -> ("属性名", "类型")
+# 类型: "scalar" 表示标量, "per_channel" 表示 per-channel 向量
+_QUANT_PARAMS_FIELD_MAP = {
+    # 基础参数
+    "hidden": ("hidden_", "scalar"),
+    "exp2_inv_x": ("exp2_inv_x_", "scalar"),
+    "zp_x": ("zp_x_", "scalar"),
+    "exp2_inv_h": ("exp2_inv_h_", "scalar"),
+    "zp_h": ("zp_h_", "scalar"),
+    # GEMM 输出参数
+    "exp2_inv_Wx": ("exp2_inv_Wx_", "scalar"),
+    "zp_Wx": ("zp_Wx_", "scalar"),
+    "exp2_inv_Rh": ("exp2_inv_Rh_", "scalar"),
+    "zp_Rh": ("zp_Rh_", "scalar"),
+    # 门激活函数输入参数
+    "exp2_inv_z_pre": ("exp2_inv_z_pre_", "scalar"),
+    "zp_z_pre": ("zp_z_pre_", "scalar"),
+    "exp2_inv_r_pre": ("exp2_inv_r_pre_", "scalar"),
+    "zp_r_pre": ("zp_r_pre_", "scalar"),
+    "exp2_inv_g_pre": ("exp2_inv_g_pre_", "scalar"),
+    "zp_g_pre": ("zp_g_pre_", "scalar"),
+    # 门激活函数输出参数
+    "exp2_inv_z_out": ("exp2_inv_z_out_", "scalar"),
+    "zp_z_out": ("zp_z_out_", "scalar"),
+    "exp2_inv_r_out": ("exp2_inv_r_out_", "scalar"),
+    "zp_r_out": ("zp_r_out_", "scalar"),
+    "exp2_inv_g_out": ("exp2_inv_g_out_", "scalar"),
+    "zp_g_out": ("zp_g_out_", "scalar"),
+    # 中间结果参数
+    "exp2_inv_Rh_add_br": ("exp2_inv_Rh_add_br_", "scalar"),
+    "zp_Rh_add_br": ("zp_Rh_add_br_", "scalar"),
+    "exp2_inv_rRh": ("exp2_inv_rRh_", "scalar"),
+    "zp_rRh": ("zp_rRh_", "scalar"),
+    "exp2_inv_new_contrib": ("exp2_inv_new_contrib_", "scalar"),
+    "zp_new_contrib": ("zp_new_contrib_", "scalar"),
+    "exp2_inv_old_contrib": ("exp2_inv_old_contrib_", "scalar"),
+    "zp_old_contrib": ("zp_old_contrib_", "scalar"),
+    # Per-channel 参数
+    "exp2_inv_W": ("exp2_inv_W_", "per_channel"),
+    "exp2_inv_R": ("exp2_inv_R_", "per_channel"),
+    "exp2_inv_bx": ("exp2_inv_bx_", "per_channel"),
+    "exp2_inv_br": ("exp2_inv_br_", "per_channel"),
+}
+
+
+def _exp2_inv_to_scale(exp2_inv: int) -> float:
+    """
+    将 power-of-2 指数转换为浮点 scale
+    
+    exp2_inv -> scale = 2^(-exp2_inv)
+    例如: exp2_inv=7 -> scale=0.0078125 (1/128)
+    """
+    if exp2_inv >= 0:
+        return 1.0 / (1 << exp2_inv)
+    else:
+        return float(1 << (-exp2_inv))
+
+
+def _scale_to_exp2_inv(scale: float) -> int:
+    """
+    将浮点 scale 转换为最接近的 power-of-2 指数
+    
+    scale -> exp2_inv = -log2(scale)
+    """
+    import math
+    if scale <= 0:
+        return 0
+    return int(round(-math.log2(scale)))
+
+
+def _quant_params_to_dict(params, use_float_scale: bool = False) -> dict:
+    """
+    将 GRUQuantitativeParameters 对象转换为 Python 字典
+    
+    Args:
+        params: gru_ops.GRUQuantitativeParameters 对象
+        use_float_scale: 是否使用浮点 scale 格式（AIMET/ONNX 兼容）
+            - False: 使用 exp2_inv 格式（power-of-2，硬件友好）
+            - True: 使用 float scale 格式（ONNX/TensorRT 兼容）
+        
+    Returns:
+        包含所有量化参数的字典
+    """
+    result = {}
+    
+    for field_name, (attr_name, field_type) in _QUANT_PARAMS_FIELD_MAP.items():
+        value = getattr(params, attr_name)
+        
+        if field_type == "per_channel":
+            # Per-channel 参数
+            values = list(value)
+            if use_float_scale and field_name.startswith("exp2_inv_"):
+                # 转换为浮点 scale
+                scale_name = field_name.replace("exp2_inv_", "scale_")
+                result[scale_name] = [_exp2_inv_to_scale(v) for v in values]
+            else:
+                result[field_name] = values
+        else:
+            # 标量参数
+            if use_float_scale and field_name.startswith("exp2_inv_"):
+                # 转换为浮点 scale
+                scale_name = field_name.replace("exp2_inv_", "scale_")
+                result[scale_name] = _exp2_inv_to_scale(int(value))
+            else:
+                result[field_name] = int(value)
+    
+    return result
+
+
+def _dict_to_quant_params(data: dict):
+    """
+    从 Python 字典创建 GRUQuantitativeParameters 对象
+    
+    支持两种格式：
+    - exp2_inv 格式（power-of-2）: {"exp2_inv_x": 7, ...}
+    - float scale 格式（AIMET 风格）: {"scale_x": 0.0078125, ...}
+    
+    Args:
+        data: 包含量化参数的字典
+        
+    Returns:
+        gru_ops.GRUQuantitativeParameters 对象
+    """
+    params = gru_ops.GRUQuantitativeParameters()
+    
+    for field_name, (attr_name, field_type) in _QUANT_PARAMS_FIELD_MAP.items():
+        # 检查原始字段名或转换后的字段名
+        scale_name = field_name.replace("exp2_inv_", "scale_") if field_name.startswith("exp2_inv_") else None
+        
+        if field_name in data:
+            value = data[field_name]
+            if field_type == "per_channel":
+                setattr(params, attr_name, list(value))
+            else:
+                setattr(params, attr_name, int(value))
+        elif scale_name and scale_name in data:
+            # 从浮点 scale 转换回 exp2_inv
+            value = data[scale_name]
+            if field_type == "per_channel":
+                setattr(params, attr_name, [_scale_to_exp2_inv(v) for v in value])
+            else:
+                setattr(params, attr_name, _scale_to_exp2_inv(value))
+    
+    return params
+
+
+def _bitwidth_config_to_dict(config) -> dict:
+    """
+    将 OperatorQuantConfig 对象转换为 Python 字典
+    
+    Args:
+        config: gru_ops.OperatorQuantConfig 对象
+        
+    Returns:
+        包含位宽配置的字典
+    """
+    result = {}
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+        result[json_key] = {
+            "bitwidth": getattr(config, bw_attr),
+            "is_symmetric": getattr(config, sym_attr)
+        }
+    return result
+
+
+def _dict_to_bitwidth_config(data: dict):
+    """
+    从 Python 字典创建 OperatorQuantConfig 对象
+    
+    Args:
+        data: 包含位宽配置的字典
+        
+    Returns:
+        gru_ops.OperatorQuantConfig 对象
+    """
+    config = gru_ops.OperatorQuantConfig()
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+        if json_key in data:
+            op_cfg = data[json_key]
+            setattr(config, bw_attr, op_cfg.get("bitwidth", 8))
+            setattr(config, sym_attr, op_cfg.get("is_symmetric", True))
+    return config
+
+
+def export_quant_params(
+    gru: QuantGRU,
+    export_path: str,
+    scale_format: str = "exp2_inv",
+    include_weights: bool = False,
+    verbose: bool = False
+) -> None:
+    """
+    导出 QuantGRU 的量化参数到 JSON 文件
+    
+    Args:
+        gru: 已完成校准的 QuantGRU 实例
+        export_path: 导出文件路径（.json）
+        scale_format: scale 格式选择
+            - "exp2_inv": power-of-2 指数格式（默认，硬件友好）
+                scale = 2^(-exp2_inv)，乘除可用移位实现
+                适用于: FPGA、ASIC、定点 NPU、自定义硬件
+            - "float": 浮点 scale 格式（AIMET/ONNX 兼容）
+                直接存储浮点 scale 值
+                适用于: TensorRT、ONNX Runtime、其他 AI 框架
+        include_weights: 是否包含量化后的权重（默认 False）
+        verbose: 是否打印详情
+        
+    Raises:
+        RuntimeError: 未完成校准
+        ValueError: 无效的 scale_format
+        
+    Example:
+        >>> gru = QuantGRU(64, 128).cuda()
+        >>> gru.calibrating = True
+        >>> _ = gru(calibration_data)
+        >>> gru.calibrating = False
+        >>> gru.finalize_calibration()
+        >>>
+        >>> # 导出为 power-of-2 格式（硬件部署）
+        >>> export_quant_params(gru, "quant_params_hw.json", scale_format="exp2_inv")
+        >>>
+        >>> # 导出为浮点格式（ONNX/TensorRT 部署）
+        >>> export_quant_params(gru, "quant_params_onnx.json", scale_format="float")
+    """
+    if scale_format not in ("exp2_inv", "float"):
+        raise ValueError(f"无效的 scale_format: '{scale_format}'，可选值: 'exp2_inv', 'float'")
+    
+    if not gru.is_calibrated():
+        raise RuntimeError(
+            "请先完成校准。使用方法：\n"
+            "  1. gru.calibrating = True\n"
+            "  2. gru(calibration_data)\n"
+            "  3. gru.calibrating = False\n"
+            "  4. gru.finalize_calibration()"
+        )
+    
+    use_float_scale = (scale_format == "float")
+    
+    # 构建导出数据
+    export_data = {
+        "version": "1.0",
+        "scale_format": scale_format,
+        "model_info": {
+            "input_size": gru.input_size,
+            "hidden_size": gru.hidden_size,
+            "bias": gru.bias,
+            "bidirectional": gru.bidirectional,
+            "calibration_method": gru.calibration_method,
+        },
+        "bitwidth_config": _bitwidth_config_to_dict(gru._bitwidth_config),
+        "quant_params": _quant_params_to_dict(gru.quant_params, use_float_scale),
+    }
+    
+    # 双向 GRU 导出反向参数
+    if gru.bidirectional and gru.quant_params_reverse is not None:
+        export_data["quant_params_reverse"] = _quant_params_to_dict(
+            gru.quant_params_reverse, use_float_scale
+        )
+    
+    # 可选：导出量化后的权重
+    if include_weights:
+        export_data["quantized_weights"] = _export_quantized_weights(gru)
+    
+    # 写入文件
+    with open(export_path, 'w', encoding='utf-8') as f:
+        json.dump(export_data, f, indent=2, ensure_ascii=False)
+    
+    if verbose:
+        format_desc = "power-of-2 (硬件友好)" if scale_format == "exp2_inv" else "float (ONNX/TensorRT 兼容)"
+        print(f"\n[QuantGRU] 量化参数已导出到: {export_path}")
+        print(f"  - Scale 格式: {format_desc}")
+        print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
+        print(f"  - 校准方法: {gru.calibration_method}")
+        print(f"  - 双向: {gru.bidirectional}")
+        if include_weights:
+            print(f"  - 包含量化权重: 是")
+
+
+def _export_quantized_weights(gru: QuantGRU) -> dict:
+    """
+    导出量化后的权重（内部函数）
+    
+    将权重转换为 Haste 格式并应用 per-channel 量化参数，
+    返回量化后的整数权重。
+    """
+    device = next(gru.parameters()).device
+    params = gru.quant_params
+    
+    # 转换为 Haste 格式
+    W, R, bx, br = convert_weights_to_haste_format(
+        gru.weight_ih_l0, gru.weight_hh_l0,
+        gru.bias_ih_l0 if gru.bias else None,
+        gru.bias_hh_l0 if gru.bias else None,
+        gru.hidden_size, device
+    )
+    
+    # 量化权重（使用 per-channel 参数）
+    def quantize_per_channel(tensor, exp2_inv_list, bitwidth, symmetric):
+        """对每个 channel 应用量化"""
+        qmin, qmax = get_quant_range(bitwidth, is_unsigned=False)
+        result = torch.zeros_like(tensor, dtype=torch.int32)
+        
+        for c in range(len(exp2_inv_list)):
+            exp2_inv = exp2_inv_list[c]
+            if exp2_inv >= 0:
+                scale = 1.0 / (1 << exp2_inv)
+            else:
+                scale = float(1 << (-exp2_inv))
+            
+            q = torch.clamp(torch.round(tensor[:, c] / scale), qmin, qmax)
+            result[:, c] = q.int()
+        
+        return result.tolist()
+    
+    # 获取位宽配置
+    W_bitwidth = gru._bitwidth_config.W_
+    R_bitwidth = gru._bitwidth_config.R_
+    bx_bitwidth = gru._bitwidth_config.bx_
+    br_bitwidth = gru._bitwidth_config.br_
+    
+    weights = {
+        "W": quantize_per_channel(W, list(params.exp2_inv_W_), W_bitwidth, True),
+        "R": quantize_per_channel(R, list(params.exp2_inv_R_), R_bitwidth, True),
+    }
+    
+    if gru.bias:
+        # 偏置是 1D，需要 unsqueeze
+        bx_2d = bx.unsqueeze(0)  # [1, 3*H]
+        br_2d = br.unsqueeze(0)
+        weights["bx"] = quantize_per_channel(bx_2d, list(params.exp2_inv_bx_), bx_bitwidth, True)[0]
+        weights["br"] = quantize_per_channel(br_2d, list(params.exp2_inv_br_), br_bitwidth, True)[0]
+    
+    return weights
+
+
+def load_quant_params(
+    gru: QuantGRU,
+    import_path: str,
+    verbose: bool = False
+) -> None:
+    """
+    从 JSON 文件加载量化参数到 QuantGRU
+    
+    Args:
+        gru: QuantGRU 实例
+        import_path: JSON 文件路径
+        verbose: 是否打印详情
+        
+    Raises:
+        ValueError: 模型配置不匹配
+        FileNotFoundError: 文件不存在
+        
+    Example:
+        >>> gru = QuantGRU(64, 128).cuda()
+        >>> load_quant_params(gru, "quant_params.json", verbose=True)
+        >>> gru.use_quantization = True
+        >>> output = gru(x)  # 直接进行量化推理，无需校准
+    
+    Note:
+        加载后 gru.is_calibrated() 返回 True，可直接进行量化推理。
+    """
+    with open(import_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    # 验证版本
+    version = data.get("version", "1.0")
+    if version != "1.0":
+        import warnings
+        warnings.warn(f"量化参数版本 {version} 可能与当前版本不兼容")
+    
+    # 验证模型配置
+    model_info = data.get("model_info", {})
+    if model_info.get("input_size") != gru.input_size:
+        raise ValueError(
+            f"input_size 不匹配: 文件中为 {model_info.get('input_size')}, "
+            f"模型为 {gru.input_size}"
+        )
+    if model_info.get("hidden_size") != gru.hidden_size:
+        raise ValueError(
+            f"hidden_size 不匹配: 文件中为 {model_info.get('hidden_size')}, "
+            f"模型为 {gru.hidden_size}"
+        )
+    if model_info.get("bidirectional", False) != gru.bidirectional:
+        raise ValueError(
+            f"bidirectional 不匹配: 文件中为 {model_info.get('bidirectional')}, "
+            f"模型为 {gru.bidirectional}"
+        )
+    
+    # 加载位宽配置
+    if "bitwidth_config" in data:
+        gru._bitwidth_config = _dict_to_bitwidth_config(data["bitwidth_config"])
+    
+    # 加载量化参数
+    if "quant_params" in data:
+        gru.quant_params = _dict_to_quant_params(data["quant_params"])
+        # 设置位宽配置到量化参数中
+        gru.quant_params.bitwidth_config_ = gru._bitwidth_config
+        # 重新生成 LUT（如果需要）
+        try:
+            gru_ops.generate_piecewise_linear_lut_to_params(gru.quant_params)
+        except AttributeError:
+            pass  # 某些版本可能不需要 LUT
+    
+    # 加载反向量化参数（双向）
+    if gru.bidirectional and "quant_params_reverse" in data:
+        gru.quant_params_reverse = _dict_to_quant_params(data["quant_params_reverse"])
+        gru.quant_params_reverse.bitwidth_config_ = gru._bitwidth_config
+        try:
+            gru_ops.generate_piecewise_linear_lut_to_params(gru.quant_params_reverse)
+        except AttributeError:
+            pass
+    
+    # 清除脏标志
+    gru._quant_params_dirty = False
+    
+    # 设置校准方法（用于记录）
+    if "calibration_method" in model_info:
+        gru.calibration_method = model_info["calibration_method"]
+    
+    if verbose:
+        print(f"\n[QuantGRU] 量化参数已从 {import_path} 加载")
+        print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
+        print(f"  - 校准方法: {gru.calibration_method}")
+        print(f"  - 双向: {gru.bidirectional}")
+        print(f"  - is_calibrated(): {gru.is_calibrated()}")
+
+
+def adjust_quant_config(
+    gru: QuantGRU,
+    operator: str,
+    bitwidth: int = None,
+    is_symmetric: bool = None,
+    exp2_inv: int = None,
+    zero_point: int = None,
+    auto_scale: bool = False,
+    verbose: bool = False
+) -> None:
+    """
+    手动调整指定算子的量化配置（位宽、对称性、scale、zero_point）
+    
+    Args:
+        gru: 已校准的 QuantGRU 实例
+        operator: 算子名称，支持以下值：
+            - 输入: "x", "h"
+            - 权重: "W", "R", "bx", "br"
+            - GEMM: "Wx", "Rh"
+            - 门控: "z_pre", "z_out", "r_pre", "r_out", "g_pre", "g_out"
+            - 中间: "Rh_add_br", "rRh", "old_contrib", "new_contrib"
+        bitwidth: 新的位宽 (1-32)，None 表示不修改
+        is_symmetric: 是否对称量化，None 表示不修改
+        exp2_inv: 新的量化指数 (scale = 2^(-exp2_inv))，None 表示不修改
+        zero_point: 新的零点，None 表示不修改
+        auto_scale: 是否自动计算 scale（当修改位宽时）
+            - True: 根据位宽变化自动调整 exp2_inv
+            - False: 保持原有 exp2_inv（默认）
+        verbose: 是否打印详情
+        
+    Example:
+        >>> # 将 z_out 从 8bit 调整为 16bit（自动计算 scale）
+        >>> adjust_quant_config(gru, "z_out", bitwidth=16, auto_scale=True, verbose=True)
+        >>>
+        >>> # 手动指定位宽和 scale
+        >>> adjust_quant_config(gru, "Wx", bitwidth=14, exp2_inv=10, verbose=True)
+        >>>
+        >>> # 只调整 scale，不改位宽
+        >>> adjust_quant_config(gru, "x", exp2_inv=6, verbose=True)
+    
+    Note:
+        - auto_scale=True 时，会根据位宽变化自动调整 exp2_inv
+        - 公式: new_exp2_inv = old_exp2_inv - (new_bitwidth - old_bitwidth)
+        - 例如: 8bit(exp2_inv=8) -> 14bit，则 new_exp2_inv = 8 - 6 = 2
+        - 修改后的配置会立即生效，无需重新校准
+        - 使用 export_quant_params() 可以导出修改后的配置
+    """
+    # 验证算子名称
+    # 构建算子到属性名的映射
+    operator_to_attrs = {}
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+        # 从 json_key 提取短名称，如 "input.x" -> "x"
+        short_name = json_key.split('.')[-1]
+        operator_to_attrs[short_name] = {
+            'bw_attr': bw_attr,
+            'sym_attr': sym_attr,
+            'json_key': json_key,
+        }
+    
+    if operator not in operator_to_attrs:
+        valid_ops = sorted(operator_to_attrs.keys())
+        raise ValueError(
+            f"无效的算子名称: '{operator}'。\n"
+            f"有效的算子名称: {valid_ops}"
+        )
+    
+    attrs = operator_to_attrs[operator]
+    old_values = {}
+    new_values = {}
+    
+    # 获取旧值
+    old_bitwidth = getattr(gru._bitwidth_config, attrs['bw_attr'])
+    old_symmetric = getattr(gru._bitwidth_config, attrs['sym_attr'])
+    old_values['bitwidth'] = old_bitwidth
+    old_values['is_symmetric'] = old_symmetric
+    
+    # 修改位宽配置
+    if bitwidth is not None:
+        if not (1 <= bitwidth <= 32):
+            raise ValueError(f"bitwidth 必须在 [1, 32] 范围内，当前值: {bitwidth}")
+        setattr(gru._bitwidth_config, attrs['bw_attr'], bitwidth)
+        new_values['bitwidth'] = bitwidth
+        
+        # auto_scale: 根据位宽变化自动计算新的 exp2_inv 和 zp
+        # 
+        # 原理：保持相同的数据表示范围，但用更多/更少的量化级别
+        # - scale = 2^(-exp2_inv) 
+        # - 位宽增加 -> 量化级别增多 -> scale 应减小 -> exp2_inv 应增大
+        # - 公式: new_exp2_inv = old_exp2_inv + (new_bitwidth - old_bitwidth)
+        #
+        # 对于 zp:
+        # - 对称量化: zp = 0（固定不变）
+        # - 非对称量化: zp_new ≈ zp_old * 2^delta_bits
+        #
+        if auto_scale and exp2_inv is None and gru.quant_params is not None:
+            exp2_attr = f"exp2_inv_{operator}_"
+            zp_attr = f"zp_{operator}_"
+            is_per_channel = operator in ['W', 'R', 'bx', 'br']
+            is_symmetric = old_symmetric  # 使用当前的对称性设置
+            
+            bitwidth_delta = bitwidth - old_bitwidth
+            scale_factor = 1 << abs(bitwidth_delta)  # 2^|delta|
+            
+            if hasattr(gru.quant_params, exp2_attr):
+                if is_per_channel:
+                    old_exp2_list = list(getattr(gru.quant_params, exp2_attr))
+                    # exp2_inv 增加 delta_bits（scale 减小）
+                    new_exp2_list = [max(-32, min(32, e + bitwidth_delta)) for e in old_exp2_list]
+                    setattr(gru.quant_params, exp2_attr, new_exp2_list)
+                    new_values['exp2_inv'] = f"auto: [{new_exp2_list[0]}, ...] (delta=+{bitwidth_delta})"
+                else:
+                    old_exp2 = int(getattr(gru.quant_params, exp2_attr))
+                    # exp2_inv 增加 delta_bits
+                    new_exp2 = max(-32, min(32, old_exp2 + bitwidth_delta))
+                    setattr(gru.quant_params, exp2_attr, new_exp2)
+                    new_values['exp2_inv'] = f"auto: {new_exp2} (was {old_exp2}, delta=+{bitwidth_delta})"
+                    
+                    # 同时调整 zp（非 per-channel 情况）
+                    if hasattr(gru.quant_params, zp_attr):
+                        old_zp = int(getattr(gru.quant_params, zp_attr))
+                        
+                        if is_symmetric:
+                            # 对称量化：zp 恒为 0
+                            new_zp = 0
+                            if old_zp != 0:
+                                new_values['zero_point'] = f"auto: 0 (对称量化, 强制为0)"
+                            else:
+                                new_values['zero_point'] = f"auto: 0 (对称量化)"
+                        else:
+                            # 非对称量化：zp 按比例缩放
+                            if bitwidth_delta > 0:
+                                new_zp = old_zp * scale_factor
+                            else:
+                                new_zp = old_zp // scale_factor
+                            new_values['zero_point'] = f"auto: {new_zp} (was {old_zp}, x{scale_factor if bitwidth_delta > 0 else '/' + str(scale_factor)})"
+                        
+                        setattr(gru.quant_params, zp_attr, new_zp)
+    
+    if is_symmetric is not None:
+        setattr(gru._bitwidth_config, attrs['sym_attr'], is_symmetric)
+        new_values['is_symmetric'] = is_symmetric
+    
+    # 修改量化参数（如果已校准且未被 auto_scale 处理）
+    if gru.quant_params is not None:
+        # 确定 exp2_inv 和 zp 的属性名
+        exp2_attr = f"exp2_inv_{operator}_"
+        zp_attr = f"zp_{operator}_"
+        
+        # 检查是否是 per-channel 参数
+        is_per_channel = operator in ['W', 'R', 'bx', 'br']
+        
+        if is_per_channel:
+            # per-channel 参数只有 exp2_inv，没有 zp
+            if hasattr(gru.quant_params, exp2_attr):
+                old_exp2 = list(getattr(gru.quant_params, exp2_attr))
+                old_values['exp2_inv'] = f"[{old_exp2[0]}, {old_exp2[1]}, ...] (per-channel)"
+                
+                if exp2_inv is not None:
+                    # 将所有 channel 设置为相同的值
+                    new_exp2 = [exp2_inv] * len(old_exp2)
+                    setattr(gru.quant_params, exp2_attr, new_exp2)
+                    new_values['exp2_inv'] = f"[{exp2_inv}, {exp2_inv}, ...] (all channels)"
+        else:
+            # 标量参数
+            if hasattr(gru.quant_params, exp2_attr):
+                old_values['exp2_inv'] = int(getattr(gru.quant_params, exp2_attr))
+                if exp2_inv is not None:
+                    setattr(gru.quant_params, exp2_attr, exp2_inv)
+                    new_values['exp2_inv'] = exp2_inv
+            
+            if hasattr(gru.quant_params, zp_attr):
+                old_values['zero_point'] = int(getattr(gru.quant_params, zp_attr))
+                if zero_point is not None:
+                    setattr(gru.quant_params, zp_attr, zero_point)
+                    new_values['zero_point'] = zero_point
+    
+    # 同步更新 quant_params 中的 bitwidth_config
+    if gru.quant_params is not None:
+        gru.quant_params.bitwidth_config_ = gru._bitwidth_config
+    
+    if verbose:
+        print(f"\n[QuantGRU] 调整算子 '{operator}' 配置:")
+        print(f"  修改前: {old_values}")
+        print(f"  修改后: {new_values if new_values else '(无修改)'}")
+
+
+def get_quant_config(gru: QuantGRU, operator: str = None) -> dict:
+    """
+    获取量化配置信息
+    
+    Args:
+        gru: QuantGRU 实例
+        operator: 算子名称，None 表示获取所有算子的配置
+        
+    Returns:
+        配置字典，包含 bitwidth, is_symmetric, exp2_inv, zero_point 等
+        
+    Example:
+        >>> # 获取所有配置
+        >>> config = get_quant_config(gru)
+        >>> print(config['x'])
+        {'bitwidth': 8, 'is_symmetric': False, 'exp2_inv': 5, 'zero_point': -42}
+        >>>
+        >>> # 获取单个算子配置
+        >>> config = get_quant_config(gru, "z_out")
+        >>> print(config)
+        {'bitwidth': 8, 'is_symmetric': False, 'exp2_inv': 8, 'zero_point': 0}
+    """
+    # 构建算子映射
+    operator_to_attrs = {}
+    for json_key, (bw_attr, sym_attr) in _BITWIDTH_FIELD_MAP.items():
+        short_name = json_key.split('.')[-1]
+        operator_to_attrs[short_name] = {
+            'bw_attr': bw_attr,
+            'sym_attr': sym_attr,
+            'json_key': json_key,
+        }
+    
+    def get_single_config(op_name):
+        if op_name not in operator_to_attrs:
+            raise ValueError(f"无效的算子名称: '{op_name}'")
+        
+        attrs = operator_to_attrs[op_name]
+        config = {
+            'bitwidth': getattr(gru._bitwidth_config, attrs['bw_attr']),
+            'is_symmetric': getattr(gru._bitwidth_config, attrs['sym_attr']),
+        }
+        
+        if gru.quant_params is not None:
+            exp2_attr = f"exp2_inv_{op_name}_"
+            zp_attr = f"zp_{op_name}_"
+            
+            is_per_channel = op_name in ['W', 'R', 'bx', 'br']
+            
+            if is_per_channel:
+                if hasattr(gru.quant_params, exp2_attr):
+                    config['exp2_inv'] = list(getattr(gru.quant_params, exp2_attr))
+                    # 计算对应的 scale
+                    config['scale'] = [_exp2_inv_to_scale(e) for e in config['exp2_inv']]
+            else:
+                if hasattr(gru.quant_params, exp2_attr):
+                    exp2 = int(getattr(gru.quant_params, exp2_attr))
+                    config['exp2_inv'] = exp2
+                    config['scale'] = _exp2_inv_to_scale(exp2)
+                if hasattr(gru.quant_params, zp_attr):
+                    config['zero_point'] = int(getattr(gru.quant_params, zp_attr))
+        
+        return config
+    
+    if operator is not None:
+        return get_single_config(operator)
+    else:
+        return {op: get_single_config(op) for op in operator_to_attrs}
+
+
+def print_quant_config(gru: QuantGRU, operators: list = None):
+    """
+    打印量化配置（便于查看和调整）
+    
+    Args:
+        gru: QuantGRU 实例
+        operators: 要打印的算子列表，None 表示全部打印
+        
+    Example:
+        >>> print_quant_config(gru)  # 打印所有
+        >>> print_quant_config(gru, ["x", "h", "z_out"])  # 只打印指定算子
+    """
+    all_config = get_quant_config(gru)
+    
+    if operators is not None:
+        config = {k: v for k, v in all_config.items() if k in operators}
+    else:
+        config = all_config
+    
+    # 分组显示
+    groups = {
+        '输入': ['x', 'h'],
+        '权重': ['W', 'R', 'bx', 'br'],
+        'GEMM': ['Wx', 'Rh'],
+        '门控(pre)': ['z_pre', 'r_pre', 'g_pre'],
+        '门控(out)': ['z_out', 'r_out', 'g_out'],
+        '中间': ['Rh_add_br', 'rRh', 'old_contrib', 'new_contrib'],
+    }
+    
+    print("\n" + "=" * 80)
+    print("GRU 量化配置详情")
+    print("=" * 80)
+    
+    for group_name, op_list in groups.items():
+        ops_in_group = [op for op in op_list if op in config]
+        if not ops_in_group:
+            continue
+        
+        print(f"\n[{group_name}]")
+        print("-" * 80)
+        
+        for op in ops_in_group:
+            cfg = config[op]
+            bw = cfg.get('bitwidth', '?')
+            sym = "对称" if cfg.get('is_symmetric', True) else "非对称"
+            
+            if 'exp2_inv' in cfg:
+                exp2 = cfg['exp2_inv']
+                if isinstance(exp2, list):
+                    # per-channel
+                    exp2_str = f"[{exp2[0]}, {exp2[1]}, ...] (per-channel, len={len(exp2)})"
+                    scale_str = f"[{cfg['scale'][0]:.6f}, ...]"
+                else:
+                    exp2_str = str(exp2)
+                    scale_str = f"{cfg.get('scale', '?'):.6f}"
+            else:
+                exp2_str = "N/A"
+                scale_str = "N/A"
+            
+            zp = cfg.get('zero_point', 'N/A')
+            
+            print(f"  {op:15s}: {bw:2}bit, {sym:4s}, exp2_inv={exp2_str:30s}, scale={scale_str}, zp={zp}")
+    
+    print("=" * 80)
+    print("\n💡 使用 adjust_quant_config(gru, 'x', bitwidth=16) 可调整配置")
