@@ -5,20 +5,20 @@
 
 struct QuantBitWidth {
     int8_t bits_ = 8;
-    bool is_signed_ = true;
+    bool is_unsigned_ = false;  // false=INT(有符号), true=UINT(无符号)
 
     QuantBitWidth() = default;
-    __host__ __device__ QuantBitWidth(int8_t b, bool s = true) 
-        : bits_(b), is_signed_(b >= 32 ? true : s) {}
+    __host__ __device__ QuantBitWidth(int8_t b, bool is_unsigned = false) 
+        : bits_(b), is_unsigned_(b >= 32 ? false : is_unsigned) {}
 
     __host__ __device__ int32_t qmin() const {
         if (bits_ >= 32) return static_cast<int32_t>(0x80000000);
-        return is_signed_ ? -(1 << (bits_ - 1)) : 0;
+        return is_unsigned_ ? 0 : -(1 << (bits_ - 1));
     }
     
     __host__ __device__ int32_t qmax() const {
         if (bits_ >= 32) return 0x7FFFFFFF;
-        return is_signed_ ? (1 << (bits_ - 1)) - 1 : (1 << bits_) - 1;
+        return is_unsigned_ ? (1 << bits_) - 1 : (1 << (bits_ - 1)) - 1;
     }
     
     __host__ __device__ int64_t range() const {
@@ -29,28 +29,28 @@ struct QuantBitWidth {
     bool fitsInt16() const { return bits_ <= 16; }
     
     bool operator==(const QuantBitWidth& other) const {
-        return bits_ == other.bits_ && is_signed_ == other.is_signed_;
+        return bits_ == other.bits_ && is_unsigned_ == other.is_unsigned_;
     }
     bool operator!=(const QuantBitWidth& other) const {
         return !(*this == other);
     }
     
-    static QuantBitWidth INT8() { return QuantBitWidth(8, true); }
-    static QuantBitWidth INT16() { return QuantBitWidth(16, true); }
-    static QuantBitWidth INT32() { return QuantBitWidth(32, true); }
-    static QuantBitWidth UINT8() { return QuantBitWidth(8, false); }
-    static QuantBitWidth UINT16() { return QuantBitWidth(16, false); }
+    static QuantBitWidth INT8() { return QuantBitWidth(8, false); }
+    static QuantBitWidth INT16() { return QuantBitWidth(16, false); }
+    static QuantBitWidth INT32() { return QuantBitWidth(32, false); }
+    static QuantBitWidth UINT8() { return QuantBitWidth(8, true); }
+    static QuantBitWidth UINT16() { return QuantBitWidth(16, true); }
 };
 
 struct OperatorQuantConfig {
-    QuantBitWidth x_{8, true}, h_{8, true};
-    QuantBitWidth W_{8, true}, R_{8, true}, bx_{16, true}, br_{16, true};
-    QuantBitWidth Wx_{16, true}, Rh_{16, true};
-    QuantBitWidth z_pre_{8, true}, z_out_{8, false};
-    QuantBitWidth r_pre_{8, true}, r_out_{8, false};
-    QuantBitWidth g_pre_{8, true}, g_out_{8, true};
-    QuantBitWidth Rh_add_br_{16, true}, rRh_{16, true};
-    QuantBitWidth old_contrib_{16, true}, new_contrib_{16, true};
+    QuantBitWidth x_{8, false}, h_{8, false};
+    QuantBitWidth W_{8, false}, R_{8, false}, bx_{16, false}, br_{16, false};
+    QuantBitWidth Wx_{16, false}, Rh_{16, false};
+    QuantBitWidth z_pre_{8, false}, z_out_{8, true};   // z_out: UINT
+    QuantBitWidth r_pre_{8, false}, r_out_{8, true};   // r_out: UINT
+    QuantBitWidth g_pre_{8, false}, g_out_{8, false};
+    QuantBitWidth Rh_add_br_{16, false}, rRh_{16, false};
+    QuantBitWidth old_contrib_{16, false}, new_contrib_{16, false};
 
     bool x_symmetric_ = false, h_symmetric_ = false;
     bool W_symmetric_ = true, R_symmetric_ = true, bx_symmetric_ = true, br_symmetric_ = true;
@@ -69,10 +69,10 @@ struct OperatorQuantConfig {
         };
         for (auto* m : signed_members) {
             m->bits_ = bits;
-            m->is_signed_ = true;
+            m->is_unsigned_ = false;  // 有符号
         }
-        z_out_ = {bits, false};
-        r_out_ = {bits, false};
+        z_out_ = {bits, true};   // UINT
+        r_out_ = {bits, true};   // UINT
         return *this;
     }
 };

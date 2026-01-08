@@ -37,7 +37,7 @@ COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改配置文件中的位宽
-# 新格式: QuantBitWidth z_pre_{bits, is_signed}
+# 新格式: QuantBitWidth z_pre_{bits, is_unsigned}
 modify_bitwidth() {
     local z_pre=$1
     local z_out=$2
