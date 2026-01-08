@@ -4,9 +4,11 @@ QuantGRU 量化库使用示例
 本示例展示如何使用 QuantGRU 进行：
 - 基本推理（浮点/量化）
 - 量化感知训练（QAT）
-- 校准方法选择（MinMax / Histogram）
+- 校准方法选择（MinMax / SQNR / Percentile）
 - 双向 GRU
 - ONNX 导出（float 浮点 / qdq 伪量化）
+- 量化参数导出/导入
+- 量化配置调整与查看
 """
 
 import torch
@@ -17,7 +19,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from quant_gru import QuantGRU
+from quant_gru import QuantGRU, print_quant_config, print_quant_params
 
 
 def example_basic_usage():
@@ -90,11 +92,17 @@ def example_quantization_with_json():
     # 2. 校准（使用代表性数据）
     print("\n📊 开始校准...")
     calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
-    gru.calibrate(calibration_data)
+    
+    # 新的校准方式：设置 calibrating=True 后进行 forward
+    gru.calibrating = True
+    _ = gru(calibration_data)
+    gru.calibrating = False
+    
     print("✅ 校准完成！")
     
     # 3. 推理
     print("\n🚀 开始推理...")
+    gru.use_quantization = True
     x = torch.randn(batch_size, seq_len, input_size).cuda()
     output, h_n = gru(x)
     
@@ -137,7 +145,11 @@ def example_quantization_manual(bitwidth=8):
     # 3. 校准
     print("\n📊 开始校准...")
     calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
-    gru.calibrate(calibration_data)
+    
+    gru.calibrating = True
+    _ = gru(calibration_data)
+    gru.calibrating = False
+    
     print("✅ 校准完成！")
     
     # 4. 开启量化并推理
@@ -195,7 +207,11 @@ def example_compare_precision(bitwidth=8):
     # 校准并开启量化
     x = torch.randn(batch_size, seq_len, input_size).cuda()
     gru_quant.set_all_bitwidth(bitwidth)
-    gru_quant.calibrate(x)
+    
+    gru_quant.calibrating = True
+    _ = gru_quant(x)
+    gru_quant.calibrating = False
+    
     gru_quant.use_quantization = True
     
     # 比较输出
@@ -256,7 +272,11 @@ def example_training(bitwidth=8):
     
     # 校准
     gru.set_all_bitwidth(bitwidth)
-    gru.calibrate(x_train)
+    
+    gru.calibrating = True
+    _ = gru(x_train)
+    gru.calibrating = False
+    
     gru.use_quantization = True
     
     # 创建优化器
@@ -287,9 +307,10 @@ def example_calibration_method():
     """
     示例 6: 校准方法选择
     
-    QuantGRU 支持两种校准方法:
-    - 'minmax': 快速，适合对速度要求高的场景
-    - 'histogram': AIMET 风格，精度更高，适合对精度要求高的场景
+    QuantGRU 支持三种校准方法:
+    - 'minmax': 快速，使用 min/max 范围
+    - 'sqnr': SQNR 优化搜索最优 scale（基于直方图，高精度）
+    - 'percentile': 百分位裁剪（基于直方图）
     """
     print("\n" + "=" * 60)
     print("示例 6: 校准方法选择")
@@ -318,12 +339,12 @@ def example_calibration_method():
     with torch.no_grad():
         fp32_output, _ = gru_base(test_input)
     
-    print("\n📊 对比两种校准方法:")
+    print("\n📊 对比三种校准方法:")
     print("-" * 50)
     
     results = {}
     
-    for method in ['minmax', 'histogram']:
+    for method in ['minmax', 'sqnr', 'percentile']:
         # 创建量化模型（复制权重）
         gru_quant = QuantGRU(
             input_size=input_size,
@@ -340,13 +361,19 @@ def example_calibration_method():
         # 设置校准方法
         gru_quant.calibration_method = method
         
-        # 设置位宽并校准
+        # 如果是 percentile 方法，可以设置百分位值
+        if method == 'percentile':
+            gru_quant.percentile_value = 99.99
+        
+        # 设置位宽
         gru_quant.set_all_bitwidth(16)
         
-        # 多批次校准（histogram 方法在多批次下效果更好）
+        # 多批次校准（sqnr/percentile 方法在多批次下效果更好）
+        gru_quant.calibrating = True
         for _ in range(3):
             calib_data = torch.randn(batch_size, seq_len, input_size).cuda()
-            gru_quant.calibrate(calib_data)
+            _ = gru_quant(calib_data)
+        gru_quant.calibrating = False
         
         # 开启量化并推理
         gru_quant.use_quantization = True
@@ -362,15 +389,21 @@ def example_calibration_method():
         ).item()
         
         results[method] = cos_sim
-        method_desc = "MinMax (快速)" if method == 'minmax' else "Histogram (高精度)"
-        print(f"   {method_desc:<20} 余弦相似度: {cos_sim:.6f}")
+        method_desc = {
+            'minmax': 'MinMax (快速)',
+            'sqnr': 'SQNR (高精度)',
+            'percentile': 'Percentile (抗异常值)'
+        }[method]
+        print(f"   {method_desc:<25} 余弦相似度: {cos_sim:.6f}")
     
     print("-" * 50)
     print("\n💡 选择建议:")
-    print("   • minmax:    校准速度快，适合快速迭代和调试")
-    print("   • histogram: 精度更高，适合最终部署（推荐）")
-    print(f"\n   默认使用 'histogram' 方法")
+    print("   • minmax:     校准速度快，适合快速迭代和调试")
+    print("   • sqnr:       精度更高，搜索最优 scale（推荐）")
+    print("   • percentile: 对异常值鲁棒，适合含噪声数据")
+    print(f"\n   默认使用 'minmax' 方法")
     print("✅ 校准方法对比完成！")
+
 
 def example_bidirectional():
     """
@@ -397,7 +430,11 @@ def example_bidirectional():
     # 校准并开启量化
     x = torch.randn(batch_size, seq_len, input_size).cuda()
     gru.set_all_bitwidth(8)
-    gru.calibrate(x)
+    
+    gru.calibrating = True
+    _ = gru(x)
+    gru.calibrating = False
+    
     gru.use_quantization = True
     
     # 推理
@@ -425,7 +462,7 @@ def example_onnx_export():
     
     注意事项:
     - 导出前必须设置 export_mode = True
-    - QDQ 格式需要先调用 calibrate() 和 finalize_calibration()
+    - QDQ 格式需要先校准
     - 导出后应恢复 export_mode = False 以使用 CUDA 推理
     """
     print("\n" + "=" * 60)
@@ -452,8 +489,12 @@ def example_onnx_export():
     # 2. 校准
     print("\n📊 步骤 2: 校准模型")
     calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
-    gru.calibrate(calibration_data)
+    
+    gru.calibrating = True
+    _ = gru(calibration_data)
+    gru.calibrating = False
     gru.finalize_calibration()
+    
     gru.use_quantization = True
     print("   ✅ 校准完成")
     
@@ -547,8 +588,12 @@ def example_onnx_export_modes():
     # 校准
     calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
     gru_base.set_all_bitwidth(16)
-    gru_base.calibrate(calibration_data)
+    
+    gru_base.calibrating = True
+    _ = gru_base(calibration_data)
+    gru_base.calibrating = False
     gru_base.finalize_calibration()
+    
     gru_base.use_quantization = True
     
     # 获取 CUDA 参考输出
@@ -596,6 +641,256 @@ def example_onnx_export_modes():
     print("\n✅ 导出格式对比完成！")
 
 
+def example_quant_params_export_import():
+    """
+    示例 10: 量化参数导出/导入
+    
+    演示如何：
+    1. 校准后导出量化参数到 JSON 文件
+    2. 在部署环境从 JSON 加载量化参数（无需重新校准）
+    """
+    print("\n" + "=" * 60)
+    print("示例 10: 量化参数导出/导入")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # ========== 训练/校准环境 ==========
+    print("\n📦 [训练环境] 校准并导出量化参数")
+    print("-" * 50)
+    
+    gru_train = QuantGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    # 设置位宽并校准
+    gru_train.set_all_bitwidth(8)
+    gru_train.calibration_method = 'sqnr'  # 使用 SQNR 高精度校准
+    
+    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru_train.calibrating = True
+    _ = gru_train(calibration_data)
+    gru_train.calibrating = False
+    gru_train.finalize_calibration()
+    
+    print("   ✅ 校准完成")
+    
+    # 导出量化参数
+    quant_params_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "example_quant_params.json"
+    )
+    gru_train.export_quant_params(quant_params_path, verbose=True)
+    
+    # 同时保存模型权重
+    weights_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "example_weights.pth"
+    )
+    torch.save(gru_train.state_dict(), weights_path)
+    print(f"   ✅ 权重已保存到: {weights_path}")
+    
+    # ========== 部署环境 ==========
+    print("\n📥 [部署环境] 加载量化参数")
+    print("-" * 50)
+    
+    # 从 JSON 读取模型配置
+    import json
+    with open(quant_params_path) as f:
+        config = json.load(f)["model_info"]
+    
+    # 创建模型
+    gru_deploy = QuantGRU(
+        input_size=config["input_size"],
+        hidden_size=config["hidden_size"],
+        batch_first=config["batch_first"],
+        bidirectional=config["bidirectional"]
+    ).cuda()
+    
+    # 加载权重
+    gru_deploy.load_state_dict(torch.load(weights_path))
+    print(f"   ✅ 权重已加载")
+    
+    # 加载量化参数
+    gru_deploy.load_quant_params(quant_params_path, verbose=True)
+    
+    # 开启量化推理
+    gru_deploy.use_quantization = True
+    
+    # ========== 验证一致性 ==========
+    print("\n🔍 验证导出/导入一致性")
+    print("-" * 50)
+    
+    gru_train.use_quantization = True
+    gru_train.eval()
+    gru_deploy.eval()
+    
+    test_input = torch.randn(batch_size, seq_len, input_size).cuda()
+    with torch.no_grad():
+        output_train, _ = gru_train(test_input)
+        output_deploy, _ = gru_deploy(test_input)
+    
+    mse = torch.mean((output_train - output_deploy) ** 2).item()
+    cos_sim = torch.nn.functional.cosine_similarity(
+        output_train.flatten().unsqueeze(0),
+        output_deploy.flatten().unsqueeze(0)
+    ).item()
+    
+    print(f"   训练模型 vs 部署模型:")
+    print(f"   MSE: {mse:.10f}")
+    print(f"   余弦相似度: {cos_sim:.6f}")
+    
+    if mse < 1e-10:
+        print("   ✅ 导出/导入一致性验证通过！")
+    else:
+        print("   ⚠️ 存在微小差异（可能是数值精度问题）")
+    
+    # 清理临时文件
+    for path in [quant_params_path, weights_path]:
+        if os.path.exists(path):
+            os.remove(path)
+    print(f"\n   已清理临时文件")
+    
+    print("\n✅ 量化参数导出/导入示例完成！")
+
+
+def example_adjust_quant_config():
+    """
+    示例 11: 调整量化配置
+    
+    演示如何：
+    1. 查看当前量化配置
+    2. 调整单个算子的位宽/scale
+    3. 观察调整前后的效果
+    """
+    print("\n" + "=" * 60)
+    print("示例 11: 调整量化配置")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建并校准模型
+    gru = QuantGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    gru.set_all_bitwidth(8)
+    
+    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru.calibrating = True
+    _ = gru(calibration_data)
+    gru.calibrating = False
+    gru.finalize_calibration()
+    
+    print("\n📋 查看量化配置")
+    print("-" * 50)
+    
+    # 查看单个算子配置
+    config = gru.get_quant_config("z_out")
+    print(f"   z_out 配置: {config}")
+    
+    # 查看所有配置（使用调试工具）
+    print("\n📊 所有量化配置:")
+    print_quant_config(gru, ["x", "h", "z_out", "r_out", "g_out"])
+    
+    # ========== 调整配置 ==========
+    print("\n🔧 调整 z_out 位宽: 8bit -> 16bit")
+    print("-" * 50)
+    
+    # 调整前获取基准输出
+    gru.use_quantization = True
+    gru.eval()
+    test_input = torch.randn(batch_size, seq_len, input_size).cuda()
+    
+    with torch.no_grad():
+        output_before, _ = gru(test_input)
+    
+    # 调整位宽（会自动调整 scale）
+    gru.adjust_quant_config("z_out", bitwidth=16, verbose=True)
+    
+    # 调整后输出
+    with torch.no_grad():
+        output_after, _ = gru(test_input)
+    
+    # 比较差异
+    diff = torch.mean((output_before - output_after) ** 2).item()
+    print(f"\n   调整前后输出差异 (MSE): {diff:.8f}")
+    
+    # 查看调整后的配置
+    new_config = gru.get_quant_config("z_out")
+    print(f"   调整后 z_out 配置: {new_config}")
+    
+    print("\n✅ 量化配置调整示例完成！")
+
+
+def example_debug_tools():
+    """
+    示例 12: 调试工具使用
+    
+    演示调试工具的使用方法：
+    - print_quant_params(): 打印量化参数
+    - print_quant_config(): 打印量化配置
+    """
+    print("\n" + "=" * 60)
+    print("示例 12: 调试工具使用")
+    print("=" * 60)
+    
+    from quant_gru import print_quant_params, print_quant_config, print_quant_ranges
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建并校准模型
+    gru = QuantGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True
+    ).cuda()
+    
+    gru.set_all_bitwidth(8)
+    gru.calibration_method = 'minmax'  # minmax 方法会记录范围
+    
+    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
+    gru.calibrating = True
+    _ = gru(calibration_data)
+    gru.calibrating = False
+    
+    # 1. 打印量化范围（校准收集的数值范围）
+    print("\n📊 1. 量化范围 (print_quant_ranges)")
+    print("-" * 50)
+    print_quant_ranges(gru)
+    
+    # 2. 完成校准
+    gru.finalize_calibration()
+    
+    # 3. 打印量化参数
+    print("\n📊 2. 量化参数 (print_quant_params)")
+    print("-" * 50)
+    print_quant_params(gru)
+    
+    # 4. 打印量化配置（更详细的视图）
+    print("\n📊 3. 量化配置详情 (print_quant_config)")
+    print("-" * 50)
+    print_quant_config(gru)
+    
+    print("\n✅ 调试工具示例完成！")
+
+
 def main():
     """运行所有示例"""
     print("=" * 60)
@@ -635,6 +930,15 @@ def main():
         # 示例 9: ONNX 导出格式对比
         example_onnx_export_modes()
         
+        # 示例 10: 量化参数导出/导入
+        example_quant_params_export_import()
+        
+        # 示例 11: 调整量化配置
+        example_adjust_quant_config()
+        
+        # 示例 12: 调试工具使用
+        example_debug_tools()
+        
         print("\n" + "=" * 60)
         print("  所有示例运行完成！")
         print("=" * 60)
@@ -647,4 +951,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
