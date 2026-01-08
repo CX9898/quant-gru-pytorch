@@ -62,10 +62,6 @@ ONNX 导出:
     >>> gru.export_format = 'float'  # 或 'qdq' (量化模型, 可选)
     >>> torch.onnx.export(gru, x, "model.onnx", dynamo=False)  # PyTorch 2.x 需要 dynamo=False
     >>> gru.export_mode = False
-    
-    注意:
-        - PyTorch 2.x 需要 dynamo=False 参数（回退到 trace 模式）
-        - PyTorch 1.x 不需要此参数
 """
 
 import json
@@ -154,7 +150,7 @@ _OPERATOR_MAP = {
     "gate.z_out": {
         "bw_attr": "z_out_", "sym_attr": "z_out_symmetric_",
         "exp2_inv_attr": "exp2_inv_z_out_", "zp_attr": "zp_z_out_",
-        "is_per_channel": False
+        "is_per_channel": False, "is_unsigned": True  # Sigmoid 输出 [0,1] 使用 UINT
     },
     "gate.r_pre": {
         "bw_attr": "r_pre_", "sym_attr": "r_pre_symmetric_",
@@ -164,7 +160,7 @@ _OPERATOR_MAP = {
     "gate.r_out": {
         "bw_attr": "r_out_", "sym_attr": "r_out_symmetric_",
         "exp2_inv_attr": "exp2_inv_r_out_", "zp_attr": "zp_r_out_",
-        "is_per_channel": False
+        "is_per_channel": False, "is_unsigned": True  # Sigmoid 输出 [0,1] 使用 UINT
     },
     "gate.g_pre": {
         "bw_attr": "g_pre_", "sym_attr": "g_pre_symmetric_",
@@ -2171,51 +2167,103 @@ def _scale_to_exp2_inv(scale: float) -> int:
     return int(round(-math.log2(scale)))
 
 
+def _bitwidth_to_dtype(bitwidth: int, is_signed: bool = True) -> str:
+    """将位宽转换为 AIMET 风格的 dtype 字符串"""
+    prefix = "INT" if is_signed else "UINT"
+    return f"{prefix}{bitwidth}"
+
+
 def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool = False) -> dict:
     """
-    构建统一的 operators 字典，每个算子的信息放在一起
+    构建统一的 operators 字典（AIMET 兼容格式）
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
         quant_params: GRUQuantitativeParameters 对象
-        use_float_scale: 是否使用浮点 scale 格式
+        use_float_scale: 是否仅使用浮点 scale（不输出 n）
         
     Returns:
         operators 字典（per-channel 权重放在最后）
+        
+    输出字段顺序（AIMET 风格）:
+        1. dtype: "INT8" 等
+        2. symmetric: true/false
+        3. scale: 浮点数或列表
+        4. zero_point: 整数
+        5. real_min: 量化表示的最小实际值
+        6. real_max: 量化表示的最大实际值
+        7. enc_type: "PER_TENSOR" 或 "PER_CHANNEL"
+        8. n: exp2_inv 指数（scale = 2^(-n)，仅 exp2_inv 格式）
     """
     operators = {}
     per_channel_ops = {}  # 存放 per-channel 算子，最后再添加
     
     for op_name, op_info in _OPERATOR_MAP.items():
-        op_data = {
-            "bitwidth": getattr(bitwidth_config, op_info["bw_attr"]),
-            "is_symmetric": getattr(bitwidth_config, op_info["sym_attr"]),
-        }
+        bitwidth = getattr(bitwidth_config, op_info["bw_attr"])
+        is_symmetric = getattr(bitwidth_config, op_info["sym_attr"])
+        is_per_channel = op_info["is_per_channel"]
         
-        # 获取 exp2_inv / scale
+        # 判断是否使用 unsigned（如 Sigmoid 输出 z_out, r_out）
+        is_unsigned = op_info.get("is_unsigned", False)
+        
+        # 计算 qmin, qmax
+        if is_unsigned:
+            qmin = 0                           # UINT: [0, 2^bitwidth - 1]
+            qmax = (1 << bitwidth) - 1
+        else:
+            qmin = -(1 << (bitwidth - 1))      # INT: [-2^(bitwidth-1), 2^(bitwidth-1) - 1]
+            qmax = (1 << (bitwidth - 1)) - 1
+        
+        # 按 AIMET 字段顺序构建 op_data
+        op_data = {}
+        
+        # 1. dtype
+        op_data["dtype"] = _bitwidth_to_dtype(bitwidth, is_signed=not is_unsigned)
+        
+        # 2. symmetric
+        op_data["symmetric"] = is_symmetric
+        
+        # 3. scale
+        scale_value = None
+        n_value = None
         if hasattr(quant_params, op_info["exp2_inv_attr"]):
             exp2_inv_value = getattr(quant_params, op_info["exp2_inv_attr"])
-            
-            if op_info["is_per_channel"]:
-                # per-channel 参数
+            if is_per_channel:
                 exp2_inv_list = list(exp2_inv_value)
-                if use_float_scale:
-                    op_data["scale"] = [_exp2_inv_to_scale(e) for e in exp2_inv_list]
-                else:
-                    op_data["exp2_inv"] = exp2_inv_list
+                scale_value = [_exp2_inv_to_scale(e) for e in exp2_inv_list]
+                n_value = exp2_inv_list
             else:
-                # 标量参数
-                if use_float_scale:
-                    op_data["scale"] = _exp2_inv_to_scale(int(exp2_inv_value))
-                else:
-                    op_data["exp2_inv"] = int(exp2_inv_value)
+                n = int(exp2_inv_value)
+                scale_value = _exp2_inv_to_scale(n)
+                n_value = n
+        if scale_value is not None:
+            op_data["scale"] = scale_value
         
-        # 获取 zp（如果有）
+        # 4. zero_point
+        zp_value = 0
         if op_info["zp_attr"] and hasattr(quant_params, op_info["zp_attr"]):
-            op_data["zp"] = int(getattr(quant_params, op_info["zp_attr"]))
+            zp_value = int(getattr(quant_params, op_info["zp_attr"]))
+        op_data["zero_point"] = zp_value
+        
+        # 5. real_min, 6. real_max: scale * (q - zero_point)
+        if scale_value is not None:
+            if is_per_channel:
+                # per-channel: 每个 channel 一个 real_min/real_max
+                op_data["real_min"] = [s * (qmin - zp_value) for s in scale_value]
+                op_data["real_max"] = [s * (qmax - zp_value) for s in scale_value]
+            else:
+                op_data["real_min"] = scale_value * (qmin - zp_value)
+                op_data["real_max"] = scale_value * (qmax - zp_value)
+        
+        # 7. enc_type
+        op_data["enc_type"] = "PER_CHANNEL" if is_per_channel else "PER_TENSOR"
+        
+        # 8. n（仅 exp2_inv 格式）
+        if not use_float_scale and n_value is not None:
+            op_data["n"] = n_value
         
         # per-channel 放到最后
-        if op_info["is_per_channel"]:
+        if is_per_channel:
             per_channel_ops[op_name] = op_data
         else:
             operators[op_name] = op_data
@@ -2226,9 +2274,25 @@ def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool =
     return operators
 
 
+def _dtype_to_bitwidth(dtype: str) -> int:
+    """从 AIMET 风格的 dtype 字符串解析位宽"""
+    import re
+    match = re.search(r'(\d+)', dtype)
+    if match:
+        return int(match.group(1))
+    return 8  # 默认值
+
+
 def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> None:
     """
     从 operators 字典解析并设置 bitwidth_config 和 quant_params
+    
+    AIMET 风格字段名：
+        - dtype: "INT8" 等 → 位宽
+        - symmetric: true/false → 对称量化
+        - n: 量化指数（优先）
+        - scale: 浮点 scale（当无 n 时使用）
+        - zero_point: 零点
     
     Args:
         operators: operators 字典
@@ -2241,17 +2305,17 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
             
         op_info = _OPERATOR_MAP[op_name]
         
-        # 设置 bitwidth
-        if "bitwidth" in op_data:
-            setattr(bitwidth_config, op_info["bw_attr"], op_data["bitwidth"])
+        # 设置 bitwidth（从 dtype 解析，如 "INT8" → 8）
+        if "dtype" in op_data:
+            setattr(bitwidth_config, op_info["bw_attr"], _dtype_to_bitwidth(op_data["dtype"]))
         
-        # 设置 is_symmetric
-        if "is_symmetric" in op_data:
-            setattr(bitwidth_config, op_info["sym_attr"], op_data["is_symmetric"])
+        # 设置 symmetric
+        if "symmetric" in op_data:
+            setattr(bitwidth_config, op_info["sym_attr"], op_data["symmetric"])
         
-        # 设置 exp2_inv / scale
-        if "exp2_inv" in op_data:
-            value = op_data["exp2_inv"]
+        # 设置 n / scale（优先使用 n，其次从 scale 计算）
+        if "n" in op_data:
+            value = op_data["n"]
             if op_info["is_per_channel"]:
                 setattr(quant_params, op_info["exp2_inv_attr"], list(value))
             else:
@@ -2264,9 +2328,9 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
             else:
                 setattr(quant_params, op_info["exp2_inv_attr"], _scale_to_exp2_inv(value))
         
-        # 设置 zp
-        if "zp" in op_data and op_info["zp_attr"]:
-            setattr(quant_params, op_info["zp_attr"], int(op_data["zp"]))
+        # 设置 zero_point
+        if op_info["zp_attr"] and "zero_point" in op_data:
+            setattr(quant_params, op_info["zp_attr"], int(op_data["zero_point"]))
 
 
 def _export_quant_params_impl(
@@ -2298,8 +2362,8 @@ def _export_quant_params_impl(
             "input_size": gru.input_size,
             "hidden_size": gru.hidden_size,
             "bias": gru.bias,
+            "batch_first": gru.batch_first,
             "bidirectional": gru.bidirectional,
-            "calibration_method": gru.calibration_method,
         },
         "operators": _build_operators_dict(
             gru._bitwidth_config, gru.quant_params, use_float_scale
@@ -2325,7 +2389,6 @@ def _export_quant_params_impl(
         print(f"\n[QuantGRU] 量化参数已导出到: {export_path}")
         print(f"  - Scale 格式: {format_desc}")
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
-        print(f"  - 校准方法: {gru.calibration_method}")
         print(f"  - 双向: {gru.bidirectional}")
         if include_weights:
             print(f"  - 包含量化权重: 是")
@@ -2451,14 +2514,9 @@ def _load_quant_params_impl(
     # 清除脏标志
     gru._quant_params_dirty = False
     
-    # 设置校准方法（用于记录）
-    if "calibration_method" in model_info:
-        gru.calibration_method = model_info["calibration_method"]
-    
     if verbose:
         print(f"\n[QuantGRU] 量化参数已从 {import_path} 加载")
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
-        print(f"  - 校准方法: {gru.calibration_method}")
         print(f"  - 双向: {gru.bidirectional}")
         print(f"  - is_calibrated(): {gru.is_calibrated()}")
 
