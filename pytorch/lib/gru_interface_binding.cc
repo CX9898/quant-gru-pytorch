@@ -45,20 +45,14 @@ inline CalibrationMethod stringToCalibMethod(const std::string &method) {
 // ============================================================================
 
 /// 位宽转换：Python 端的位宽数值 → C++ QuantBitWidth 结构体
-inline QuantBitWidth bitwidthToSigned(int8_t bitwidth) {
+/// @param bitwidth 位宽 (1-32)
+/// @param is_unsigned false=INT有符号(默认), true=UINT无符号
+inline QuantBitWidth toBitwidth(int8_t bitwidth, bool is_unsigned = false) {
     if (bitwidth < 1 || bitwidth > 32) {
         throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
                                     ". Must be 1-32.");
     }
-    return QuantBitWidth(bitwidth, true);  // 有符号
-}
-
-inline QuantBitWidth bitwidthToUnsigned(int8_t bitwidth) {
-    if (bitwidth < 1 || bitwidth > 32) {
-        throw std::invalid_argument("Invalid bitwidth: " + std::to_string(bitwidth) +
-                                    ". Must be 1-32.");
-    }
-    return QuantBitWidth(bitwidth, false);  // 无符号
+    return QuantBitWidth(bitwidth, is_unsigned);
 }
 
 // ============================================================================
@@ -90,6 +84,16 @@ struct OperatorQuantConfigPy {
     bool g_pre_symmetric_, g_out_symmetric_;
     bool Rh_add_br_symmetric_, rRh_symmetric_;
     bool old_contrib_symmetric_, new_contrib_symmetric_;
+
+    // 无符号量化配置（与 C++ is_unsigned_ 一致，只标记例外情况）
+    bool x_unsigned_, h_unsigned_;
+    bool W_unsigned_, R_unsigned_, bx_unsigned_, br_unsigned_;
+    bool Wx_unsigned_, Rh_unsigned_;
+    bool z_pre_unsigned_, z_out_unsigned_;
+    bool r_pre_unsigned_, r_out_unsigned_;
+    bool g_pre_unsigned_, g_out_unsigned_;
+    bool Rh_add_br_unsigned_, rRh_unsigned_;
+    bool old_contrib_unsigned_, new_contrib_unsigned_;
 
     // 方法声明（实现在文件末尾）
     OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
@@ -469,25 +473,25 @@ OperatorQuantConfigPy::OperatorQuantConfigPy() {
 // 转换为 C++ 结构体
 OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     OperatorQuantConfig cfg;
-    // 位宽配置（sigmoid 输出为无符号，其他有符号）
-    cfg.x_ = bitwidthToSigned(x_);
-    cfg.h_ = bitwidthToSigned(h_);
-    cfg.W_ = bitwidthToSigned(W_);
-    cfg.R_ = bitwidthToSigned(R_);
-    cfg.bx_ = bitwidthToSigned(bx_);
-    cfg.br_ = bitwidthToSigned(br_);
-    cfg.Wx_ = bitwidthToSigned(Wx_);
-    cfg.Rh_ = bitwidthToSigned(Rh_);
-    cfg.z_pre_ = bitwidthToSigned(z_pre_);
-    cfg.z_out_ = bitwidthToUnsigned(z_out_);  // sigmoid → unsigned
-    cfg.r_pre_ = bitwidthToSigned(r_pre_);
-    cfg.r_out_ = bitwidthToUnsigned(r_out_);  // sigmoid → unsigned
-    cfg.g_pre_ = bitwidthToSigned(g_pre_);
-    cfg.g_out_ = bitwidthToSigned(g_out_);
-    cfg.Rh_add_br_ = bitwidthToSigned(Rh_add_br_);
-    cfg.rRh_ = bitwidthToSigned(rRh_);
-    cfg.old_contrib_ = bitwidthToSigned(old_contrib_);
-    cfg.new_contrib_ = bitwidthToSigned(new_contrib_);
+    // 位宽配置（直接使用 is_unsigned 标志，与 C++ 语义一致）
+    cfg.x_ = toBitwidth(x_, x_unsigned_);
+    cfg.h_ = toBitwidth(h_, h_unsigned_);
+    cfg.W_ = toBitwidth(W_, W_unsigned_);
+    cfg.R_ = toBitwidth(R_, R_unsigned_);
+    cfg.bx_ = toBitwidth(bx_, bx_unsigned_);
+    cfg.br_ = toBitwidth(br_, br_unsigned_);
+    cfg.Wx_ = toBitwidth(Wx_, Wx_unsigned_);
+    cfg.Rh_ = toBitwidth(Rh_, Rh_unsigned_);
+    cfg.z_pre_ = toBitwidth(z_pre_, z_pre_unsigned_);
+    cfg.z_out_ = toBitwidth(z_out_, z_out_unsigned_);
+    cfg.r_pre_ = toBitwidth(r_pre_, r_pre_unsigned_);
+    cfg.r_out_ = toBitwidth(r_out_, r_out_unsigned_);
+    cfg.g_pre_ = toBitwidth(g_pre_, g_pre_unsigned_);
+    cfg.g_out_ = toBitwidth(g_out_, g_out_unsigned_);
+    cfg.Rh_add_br_ = toBitwidth(Rh_add_br_, Rh_add_br_unsigned_);
+    cfg.rRh_ = toBitwidth(rRh_, rRh_unsigned_);
+    cfg.old_contrib_ = toBitwidth(old_contrib_, old_contrib_unsigned_);
+    cfg.new_contrib_ = toBitwidth(new_contrib_, new_contrib_unsigned_);
     // 对称量化配置
     cfg.x_symmetric_ = x_symmetric_;
     cfg.h_symmetric_ = h_symmetric_;
@@ -512,7 +516,7 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
 
 // 从 C++ 结构体读取
 void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
-    // 直接从 C++ 结构体读取位宽（忽略 is_signed，Python 端不关心）
+    // 位宽配置
     x_ = cfg.x_.bits_;
     h_ = cfg.h_.bits_;
     W_ = cfg.W_.bits_;
@@ -550,6 +554,25 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     rRh_symmetric_ = cfg.rRh_symmetric_;
     old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
     new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
+    // 无符号配置（直接从 C++ is_unsigned_ 读取，无需转换）
+    x_unsigned_ = cfg.x_.is_unsigned_;
+    h_unsigned_ = cfg.h_.is_unsigned_;
+    W_unsigned_ = cfg.W_.is_unsigned_;
+    R_unsigned_ = cfg.R_.is_unsigned_;
+    bx_unsigned_ = cfg.bx_.is_unsigned_;
+    br_unsigned_ = cfg.br_.is_unsigned_;
+    Wx_unsigned_ = cfg.Wx_.is_unsigned_;
+    Rh_unsigned_ = cfg.Rh_.is_unsigned_;
+    z_pre_unsigned_ = cfg.z_pre_.is_unsigned_;
+    z_out_unsigned_ = cfg.z_out_.is_unsigned_;
+    r_pre_unsigned_ = cfg.r_pre_.is_unsigned_;
+    r_out_unsigned_ = cfg.r_out_.is_unsigned_;
+    g_pre_unsigned_ = cfg.g_pre_.is_unsigned_;
+    g_out_unsigned_ = cfg.g_out_.is_unsigned_;
+    Rh_add_br_unsigned_ = cfg.Rh_add_br_.is_unsigned_;
+    rRh_unsigned_ = cfg.rRh_.is_unsigned_;
+    old_contrib_unsigned_ = cfg.old_contrib_.is_unsigned_;
+    new_contrib_unsigned_ = cfg.new_contrib_.is_unsigned_;
 }
 
 // ============================================================================
@@ -745,7 +768,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("Rh_add_br_symmetric_", &OperatorQuantConfigPy::Rh_add_br_symmetric_)
         .def_readwrite("rRh_symmetric_", &OperatorQuantConfigPy::rRh_symmetric_)
         .def_readwrite("old_contrib_symmetric_", &OperatorQuantConfigPy::old_contrib_symmetric_)
-        .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_);
+        .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_)
+        // 无符号配置（与 C++ is_unsigned_ 语义一致，只标记例外）
+        .def_readwrite("x_unsigned_", &OperatorQuantConfigPy::x_unsigned_)
+        .def_readwrite("h_unsigned_", &OperatorQuantConfigPy::h_unsigned_)
+        .def_readwrite("W_unsigned_", &OperatorQuantConfigPy::W_unsigned_)
+        .def_readwrite("R_unsigned_", &OperatorQuantConfigPy::R_unsigned_)
+        .def_readwrite("bx_unsigned_", &OperatorQuantConfigPy::bx_unsigned_)
+        .def_readwrite("br_unsigned_", &OperatorQuantConfigPy::br_unsigned_)
+        .def_readwrite("Wx_unsigned_", &OperatorQuantConfigPy::Wx_unsigned_)
+        .def_readwrite("Rh_unsigned_", &OperatorQuantConfigPy::Rh_unsigned_)
+        .def_readwrite("z_pre_unsigned_", &OperatorQuantConfigPy::z_pre_unsigned_)
+        .def_readwrite("z_out_unsigned_", &OperatorQuantConfigPy::z_out_unsigned_)
+        .def_readwrite("r_pre_unsigned_", &OperatorQuantConfigPy::r_pre_unsigned_)
+        .def_readwrite("r_out_unsigned_", &OperatorQuantConfigPy::r_out_unsigned_)
+        .def_readwrite("g_pre_unsigned_", &OperatorQuantConfigPy::g_pre_unsigned_)
+        .def_readwrite("g_out_unsigned_", &OperatorQuantConfigPy::g_out_unsigned_)
+        .def_readwrite("Rh_add_br_unsigned_", &OperatorQuantConfigPy::Rh_add_br_unsigned_)
+        .def_readwrite("rRh_unsigned_", &OperatorQuantConfigPy::rRh_unsigned_)
+        .def_readwrite("old_contrib_unsigned_", &OperatorQuantConfigPy::old_contrib_unsigned_)
+        .def_readwrite("new_contrib_unsigned_", &OperatorQuantConfigPy::new_contrib_unsigned_);
 
     // GRUQuantitativeParameters 绑定
     py::class_<GRUQuantitativeParametersPy>(m, "GRUQuantitativeParameters")

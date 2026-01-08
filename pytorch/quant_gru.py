@@ -35,14 +35,22 @@ QuantGRU - 支持量化的 GRU 实现
     >>> output = gru(x)
 
 量化参数导出/导入:
-    >>> # 导出量化参数到 JSON 文件
-    >>> gru.export_quant_params("quant_params.json", verbose=True)
+    >>> # 导出（训练/校准环境）
+    >>> torch.save(gru.state_dict(), "weights.pth")
+    >>> gru.export_quant_params("quant_params.json")
     >>>
-    >>> # 从 JSON 文件加载量化参数（无需重新校准）
-    >>> gru2 = QuantGRU(64, 128).cuda()
-    >>> gru2.load_quant_params("quant_params.json", verbose=True)
+    >>> # 导入（部署环境）- 从 JSON 读取模型配置
+    >>> import json
+    >>> with open("quant_params.json") as f:
+    ...     config = json.load(f)["model_info"]
+    >>> gru2 = QuantGRU(
+    ...     config["input_size"], config["hidden_size"],
+    ...     batch_first=config["batch_first"],
+    ...     bidirectional=config["bidirectional"]
+    ... ).cuda()
+    >>> gru2.load_state_dict(torch.load("weights.pth"))
+    >>> gru2.load_quant_params("quant_params.json")
     >>> gru2.use_quantization = True
-    >>> output = gru2(x)
 
 调整量化配置:
     >>> # 修改单个算子的位宽（自动调整 scale）
@@ -79,20 +87,6 @@ except ImportError:
 # ============================================================
 #                   模块级常量与配置映射
 # ============================================================
-#
-# 本节定义 JSON 配置文件与 C++ OperatorQuantConfig 之间的映射关系。
-# 采用 2 层设计：JSON 文件 → C++ 对象（无中间 Python 字典层）。
-#
-# JSON 配置示例:
-#   {
-#     "GRU_config": {
-#       "operator_config": {
-#         "input.x": {"bitwidth": 8, "is_symmetric": true},
-#         ...
-#       }
-#     }
-#   }
-
 # 统一算子映射表（唯一数据源）
 # 格式: "算子名" -> {
 #   "bw_attr": 位宽属性名,
@@ -101,102 +95,80 @@ except ImportError:
 #   "zp_attr": zp 属性名 (None 表示无 zp，如 per-channel 权重),
 #   "is_per_channel": 是否 per-channel
 # }
+def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned: bool = False):
+    """
+    生成算子信息字典（减少重复代码）
+    
+    Args:
+        base_name: 基础属性名（如 "x_", "z_out_"）
+        is_per_channel: 是否 per-channel 量化
+        default_unsigned: C++ 默认是否 unsigned（False=INT, True=UINT）
+    
+    属性命名规律:
+        - bw_attr: "{base_name}" (位宽)
+        - sym_attr: "{base_name}symmetric_" (对称量化)
+        - unsigned_attr: "{base_name}unsigned_" (无符号量化，只标记例外)
+        - exp2_inv_attr: "exp2_inv_{base_name}" (量化指数)
+        - zp_attr: "zp_{base_name}" (零点，per-channel 为 None)
+    """
+    return {
+        "bw_attr": base_name,
+        "sym_attr": f"{base_name}symmetric_",
+        "unsigned_attr": f"{base_name}unsigned_",
+        "exp2_inv_attr": f"exp2_inv_{base_name}",
+        "zp_attr": None if is_per_channel else f"zp_{base_name}",
+        "is_per_channel": is_per_channel,
+        "default_unsigned": default_unsigned,
+    }
+
+
+# 算子映射表：JSON 字段名 → C++ 属性名
+# 每个算子的属性命名遵循统一规律
 _OPERATOR_MAP = {
-    "input.x": {
-        "bw_attr": "x_", "sym_attr": "x_symmetric_",
-        "exp2_inv_attr": "exp2_inv_x_", "zp_attr": "zp_x_",
-        "is_per_channel": False
-    },
-    "input.h": {
-        "bw_attr": "h_", "sym_attr": "h_symmetric_",
-        "exp2_inv_attr": "exp2_inv_h_", "zp_attr": "zp_h_",
-        "is_per_channel": False
-    },
-    "weight.W": {
-        "bw_attr": "W_", "sym_attr": "W_symmetric_",
-        "exp2_inv_attr": "exp2_inv_W_", "zp_attr": None,
-        "is_per_channel": True
-    },
-    "weight.R": {
-        "bw_attr": "R_", "sym_attr": "R_symmetric_",
-        "exp2_inv_attr": "exp2_inv_R_", "zp_attr": None,
-        "is_per_channel": True
-    },
-    "weight.bx": {
-        "bw_attr": "bx_", "sym_attr": "bx_symmetric_",
-        "exp2_inv_attr": "exp2_inv_bx_", "zp_attr": None,
-        "is_per_channel": True
-    },
-    "weight.br": {
-        "bw_attr": "br_", "sym_attr": "br_symmetric_",
-        "exp2_inv_attr": "exp2_inv_br_", "zp_attr": None,
-        "is_per_channel": True
-    },
-    "matmul.Wx": {
-        "bw_attr": "Wx_", "sym_attr": "Wx_symmetric_",
-        "exp2_inv_attr": "exp2_inv_Wx_", "zp_attr": "zp_Wx_",
-        "is_per_channel": False
-    },
-    "matmul.Rh": {
-        "bw_attr": "Rh_", "sym_attr": "Rh_symmetric_",
-        "exp2_inv_attr": "exp2_inv_Rh_", "zp_attr": "zp_Rh_",
-        "is_per_channel": False
-    },
-    "gate.z_pre": {
-        "bw_attr": "z_pre_", "sym_attr": "z_pre_symmetric_",
-        "exp2_inv_attr": "exp2_inv_z_pre_", "zp_attr": "zp_z_pre_",
-        "is_per_channel": False
-    },
-    "gate.z_out": {
-        "bw_attr": "z_out_", "sym_attr": "z_out_symmetric_",
-        "exp2_inv_attr": "exp2_inv_z_out_", "zp_attr": "zp_z_out_",
-        "is_per_channel": False, "is_unsigned": True  # Sigmoid 输出 [0,1] 使用 UINT
-    },
-    "gate.r_pre": {
-        "bw_attr": "r_pre_", "sym_attr": "r_pre_symmetric_",
-        "exp2_inv_attr": "exp2_inv_r_pre_", "zp_attr": "zp_r_pre_",
-        "is_per_channel": False
-    },
-    "gate.r_out": {
-        "bw_attr": "r_out_", "sym_attr": "r_out_symmetric_",
-        "exp2_inv_attr": "exp2_inv_r_out_", "zp_attr": "zp_r_out_",
-        "is_per_channel": False, "is_unsigned": True  # Sigmoid 输出 [0,1] 使用 UINT
-    },
-    "gate.g_pre": {
-        "bw_attr": "g_pre_", "sym_attr": "g_pre_symmetric_",
-        "exp2_inv_attr": "exp2_inv_g_pre_", "zp_attr": "zp_g_pre_",
-        "is_per_channel": False
-    },
-    "gate.g_out": {
-        "bw_attr": "g_out_", "sym_attr": "g_out_symmetric_",
-        "exp2_inv_attr": "exp2_inv_g_out_", "zp_attr": "zp_g_out_",
-        "is_per_channel": False
-    },
-    "op.Rh_add_br": {
-        "bw_attr": "Rh_add_br_", "sym_attr": "Rh_add_br_symmetric_",
-        "exp2_inv_attr": "exp2_inv_Rh_add_br_", "zp_attr": "zp_Rh_add_br_",
-        "is_per_channel": False
-    },
-    "op.rRh": {
-        "bw_attr": "rRh_", "sym_attr": "rRh_symmetric_",
-        "exp2_inv_attr": "exp2_inv_rRh_", "zp_attr": "zp_rRh_",
-        "is_per_channel": False
-    },
-    "op.old_contrib": {
-        "bw_attr": "old_contrib_", "sym_attr": "old_contrib_symmetric_",
-        "exp2_inv_attr": "exp2_inv_old_contrib_", "zp_attr": "zp_old_contrib_",
-        "is_per_channel": False
-    },
-    "op.new_contrib": {
-        "bw_attr": "new_contrib_", "sym_attr": "new_contrib_symmetric_",
-        "exp2_inv_attr": "exp2_inv_new_contrib_", "zp_attr": "zp_new_contrib_",
-        "is_per_channel": False
-    },
+    # 输入
+    "input.x": _make_op_info("x_"),
+    "input.h": _make_op_info("h_"),
+    # 权重（per-channel）
+    "weight.W": _make_op_info("W_", is_per_channel=True),
+    "weight.R": _make_op_info("R_", is_per_channel=True),
+    "weight.bx": _make_op_info("bx_", is_per_channel=True),
+    "weight.br": _make_op_info("br_", is_per_channel=True),
+    # 矩阵乘法结果
+    "matmul.Wx": _make_op_info("Wx_"),
+    "matmul.Rh": _make_op_info("Rh_"),
+    # 门控（激活前/后）
+    "gate.z_pre": _make_op_info("z_pre_"),
+    "gate.z_out": _make_op_info("z_out_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.r_pre": _make_op_info("r_pre_"),
+    "gate.r_out": _make_op_info("r_out_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.g_pre": _make_op_info("g_pre_"),
+    "gate.g_out": _make_op_info("g_out_"),  # Tanh [-1,1]
+    # 中间操作
+    "op.Rh_add_br": _make_op_info("Rh_add_br_"),
+    "op.rRh": _make_op_info("rRh_"),
+    "op.old_contrib": _make_op_info("old_contrib_"),
+    "op.new_contrib": _make_op_info("new_contrib_"),
 }
 
 # 派生常量：从映射表提取的 C++ 属性名集合
 _VALID_BITWIDTH_ATTRS = {info["bw_attr"] for info in _OPERATOR_MAP.values()}
 _VALID_SYMMETRIC_ATTRS = {info["sym_attr"] for info in _OPERATOR_MAP.values()}
+_VALID_UNSIGNED_ATTRS = {info["unsigned_attr"] for info in _OPERATOR_MAP.values()}
+
+# 短名称到属性映射（从 _OPERATOR_MAP 提取，避免重复构建）
+# 例如: "x" -> {"bw_attr": "x_", "sym_attr": "x_symmetric_", ...}
+_OPERATOR_SHORT_NAME_MAP = {
+    op_name.split('.')[-1]: {
+        'bw_attr': info["bw_attr"],
+        'sym_attr': info["sym_attr"],
+        'unsigned_attr': info.get("unsigned_attr"),
+        'exp2_inv_attr': info["exp2_inv_attr"],
+        'zp_attr': info["zp_attr"],
+        'is_per_channel': info["is_per_channel"],
+        'json_key': op_name,
+    }
+    for op_name, info in _OPERATOR_MAP.items()
+}
 
 # 对称量化属性分类（用于 set_all_bitwidth）
 # - 权重/偏置：始终使用对称量化（zero_point=0），计算效率更高
@@ -241,64 +213,6 @@ _validate_operator_map()
 
 
 # ============================================================
-#                      格式化辅助函数
-# ============================================================
-
-def _format_bitwidth(val: int) -> str:
-    """格式化位宽值: 8 -> '8bit'"""
-    return f"{abs(val)}bit"
-
-
-def _format_symmetric(is_symmetric: bool) -> str:
-    """格式化对称量化: True -> '对称'"""
-    return "对称" if is_symmetric else "非对称"
-
-
-def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
-                          config_file: str = None,
-                          verbose: bool = True) -> None:
-    """
-    打印 OperatorQuantConfig 的配置详情
-    
-    Args:
-        config: 配置对象
-        config_file: 配置文件路径(可选，仅用于显示来源)
-        verbose: 是否打印详情(默认 True)
-    """
-    if not verbose:
-        return
-
-    print("\n" + "=" * 70)
-    print("🔧 GRU 量化配置(位宽 + 对称量化)")
-    print("=" * 70)
-    if config_file:
-        print(f"📄 配置来源: {config_file}")
-    print("-" * 70)
-    print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
-    print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
-    print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
-    print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
-    print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
-    print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
-    print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
-    print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")
-    print(f"  [门控]  z_pre: {_format_bitwidth(config.z_pre_):6s} ({_format_symmetric(config.z_pre_symmetric_)})")
-    print(f"          z_out: {_format_bitwidth(config.z_out_):6s} ({_format_symmetric(config.z_out_symmetric_)})")
-    print(f"          r_pre: {_format_bitwidth(config.r_pre_):6s} ({_format_symmetric(config.r_pre_symmetric_)})")
-    print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
-    print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
-    print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
-    print(
-        f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
-    print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
-    print(
-        f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
-    print(
-        f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
-    print("=" * 70 + "\n")
-
-
-# ============================================================
 #                      权重格式转换
 # ============================================================
 #
@@ -311,6 +225,9 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
 def reorder_weights_pytorch_to_haste(w: torch.Tensor) -> torch.Tensor:
     """
     PyTorch 权重格式 (r,z,n) -> Haste 格式 (z,r,n)
+    
+    注意：此操作与 reorder_weights_haste_to_pytorch 实现相同，
+          因为交换 r 和 z 是自反操作（执行两次等于不变）。
     
     Args:
         w: 形状 [3*H, ...] 的权重张量
@@ -334,22 +251,16 @@ def reorder_weights_haste_to_pytorch(w: torch.Tensor) -> torch.Tensor:
     """
     Haste 权重格式 (z,r,n) -> PyTorch 格式 (r,z,n)
     
+    注意：此操作与 reorder_weights_pytorch_to_haste 实现相同，
+          因为交换 r 和 z 是自反操作（执行两次等于不变）。
+    
     Args:
         w: 形状 [3*H, ...] 的权重张量
         
     Returns:
         重排序后的张量，形状不变
     """
-    w = w.contiguous()
-    h3 = w.shape[0] // 3
-    device = w.device
-    # [z, r, n] -> [r, z, n]
-    indices = torch.cat([
-        torch.arange(h3, 2 * h3, device=device),
-        torch.arange(0, h3, device=device),
-        torch.arange(2 * h3, 3 * h3, device=device)
-    ])
-    return w.index_select(0, indices).contiguous()
+    return reorder_weights_pytorch_to_haste(w)
 
 
 def ensure_cuda_float32(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -430,17 +341,17 @@ def get_quant_range(bitwidth: int, is_unsigned: bool = False) -> Tuple[int, int]
     
     Args:
         bitwidth: 位宽 (1-32)
-        is_unsigned: 是否使用无符号范围
+        is_unsigned: 是否无符号（False=INT, True=UINT）
         
     Returns:
         (qmin, qmax): 量化范围
         
     Examples:
-        >>> get_quant_range(8, False)   # INT8
+        >>> get_quant_range(8)          # INT8 (默认)
         (-128, 127)
         >>> get_quant_range(8, True)    # UINT8
         (0, 255)
-        >>> get_quant_range(4, False)   # INT4
+        >>> get_quant_range(4)          # INT4
         (-8, 7)
     """
     if not (1 <= bitwidth <= 32):
@@ -472,8 +383,8 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
         zp: 零点
         bitwidth: 位宽 (1-32)
         symmetric: 对称量化 (影响 zp 的使用方式)
-        is_unsigned: 是否使用无符号范围 (UINT)，与 symmetric 独立
-                     - False: INT 范围，如 8bit: -128~127
+        is_unsigned: 是否无符号（只标记 UINT 例外）
+                     - False: INT 范围(默认)，如 8bit: -128~127
                      - True: UINT 范围，如 8bit: 0~255
     """
     # 计算 scale
@@ -482,7 +393,7 @@ def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
     else:
         scale = float(1 << (-exp2_inv))
 
-    # 确定量化范围：由 is_unsigned 决定 INT/UINT
+    # 确定量化范围
     qmin, qmax = get_quant_range(bitwidth, is_unsigned)
 
     # 量化: q = clamp(round(x / scale) + zp, qmin, qmax)
@@ -511,9 +422,9 @@ def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
         zp: 零点
         bitwidth: 位宽 (1-32)
         symmetric: 对称量化
-        is_unsigned: 是否使用无符号范围 (UINT)
+        is_unsigned: 是否无符号（只标记 UINT 例外）
     """
-    # 确定量化范围：由 is_unsigned 决定 INT/UINT
+    # 确定量化范围
     qmin, qmax = get_quant_range(bitwidth, is_unsigned)
 
     device = x.device
@@ -837,7 +748,7 @@ class QuantGRU(nn.Module):
         将 C++ 扩展对象转换为 Python 字典，使 QuantGRU 可被序列化。
         
         Note:
-            - 位宽配置会被保留
+            - 位宽配置会被保留（包括 bitwidth、symmetric、unsigned）
             - 校准数据（quant_params 等）不会被保存，反序列化后需重新校准
         """
         state = self.__dict__.copy()
@@ -846,9 +757,13 @@ class QuantGRU(nn.Module):
         if self._bitwidth_config is not None:
             bitwidth_dict = {}
             for op_name, info in _OPERATOR_MAP.items():
-                bw_attr, sym_attr = info["bw_attr"], info["sym_attr"]
+                bw_attr = info["bw_attr"]
+                sym_attr = info["sym_attr"]
+                unsigned_attr = info.get("unsigned_attr")
                 bitwidth_dict[bw_attr] = getattr(self._bitwidth_config, bw_attr)
                 bitwidth_dict[sym_attr] = getattr(self._bitwidth_config, sym_attr)
+                if unsigned_attr:
+                    bitwidth_dict[unsigned_attr] = getattr(self._bitwidth_config, unsigned_attr)
             state['_bitwidth_config'] = bitwidth_dict
         
         # C++ 对象无法序列化，设为 None（反序列化后需重新校准）
@@ -1012,6 +927,7 @@ class QuantGRU(nn.Module):
         missing_fields = []
         for op_name, info in _OPERATOR_MAP.items():
             bw_attr, sym_attr = info["bw_attr"], info["sym_attr"]
+            unsigned_attr = info.get("unsigned_attr")
             if op_name in op_config:
                 op_cfg = op_config[op_name]
                 bitwidth = op_cfg.get('bitwidth', 8)
@@ -1023,6 +939,10 @@ class QuantGRU(nn.Module):
                     )
                 setattr(self._bitwidth_config, bw_attr, bitwidth)
                 setattr(self._bitwidth_config, sym_attr, op_cfg.get('is_symmetric', True))
+                # 设置 unsigned 属性（只标记 UINT 例外）
+                if unsigned_attr:
+                    default_unsigned = info.get("default_unsigned", False)
+                    setattr(self._bitwidth_config, unsigned_attr, op_cfg.get('is_unsigned', default_unsigned))
             else:
                 missing_fields.append(op_name)
 
@@ -1154,53 +1074,43 @@ class QuantGRU(nn.Module):
 
     # -------------------- ONNX 导出模式：纯 PyTorch 实现 --------------------
 
-    def _get_bitwidth(self, op_name: str) -> int:
+    def _get_config_attr(self, op_name: str, suffix: str, valid_set: set, default):
         """
-        获取指定操作的位宽
+        获取配置属性的通用方法
         
         Args:
             op_name: 操作名称（如 'x', 'h', 'Wx' 等）
+            suffix: 属性后缀（'_', '_symmetric_', '_unsigned_'）
+            valid_set: 有效属性集合
+            default: 默认值
             
         Returns:
-            位宽值（8/16/32），无效操作名返回默认值 8 并发出警告
+            属性值，无效操作名返回默认值并发出警告
         """
-        attr_name = f'{op_name}_'
-
-        # 验证属性名是否有效
-        if attr_name not in _VALID_BITWIDTH_ATTRS:
+        attr_name = f'{op_name}{suffix}'
+        
+        if attr_name not in valid_set:
             import warnings
             warnings.warn(
-                f"未知的位宽属性名: '{attr_name}'，将返回默认值 8。"
-                f"有效属性: {sorted(_VALID_BITWIDTH_ATTRS)}",
+                f"未知的配置属性名: '{attr_name}'，将返回默认值 {default}。"
+                f"有效属性: {sorted(valid_set)}",
                 UserWarning
             )
-            return 8
+            return default
+        
+        return getattr(self._bitwidth_config, attr_name, default)
 
-        return getattr(self._bitwidth_config, attr_name, 8)
+    def _get_bitwidth(self, op_name: str) -> int:
+        """获取指定操作的位宽（如 'x', 'h', 'Wx' 等），无效返回 8"""
+        return self._get_config_attr(op_name, '_', _VALID_BITWIDTH_ATTRS, 8)
 
     def _get_symmetric(self, op_name: str) -> bool:
-        """
-        获取指定操作是否使用对称量化
-        
-        Args:
-            op_name: 操作名称（如 'x', 'h', 'Wx' 等）
-            
-        Returns:
-            是否对称量化，无效操作名返回默认值 True 并发出警告
-        """
-        attr_name = f'{op_name}_symmetric_'
+        """获取指定操作是否对称量化，无效返回 True"""
+        return self._get_config_attr(op_name, '_symmetric_', _VALID_SYMMETRIC_ATTRS, True)
 
-        # 验证属性名是否有效
-        if attr_name not in _VALID_SYMMETRIC_ATTRS:
-            import warnings
-            warnings.warn(
-                f"未知的对称量化属性名: '{attr_name}'，将返回默认值 True。"
-                f"有效属性: {sorted(_VALID_SYMMETRIC_ATTRS)}",
-                UserWarning
-            )
-            return True
-
-        return getattr(self._bitwidth_config, attr_name, True)
+    def _get_unsigned(self, op_name: str) -> bool:
+        """获取指定操作是否无符号量化（False=INT, True=UINT），无效返回 False"""
+        return self._get_config_attr(op_name, '_unsigned_', _VALID_UNSIGNED_ATTRS, False)
 
     @property
     def export_format(self) -> str:
@@ -1562,12 +1472,11 @@ class QuantGRU(nn.Module):
             # [ONNX 兼容] 使用标准 sigmoid(推理引擎会用量化版本或 LUT)
             z = torch.sigmoid(z_pre)
 
-            # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
-            # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
+            # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
             z = fake_quantize(z, exp2_z_out, zp_z_out,
                               bitwidth=self._get_bitwidth('z_out'),
                               symmetric=self._get_symmetric('z_out'),
-                              is_unsigned=True)
+                              is_unsigned=self._get_unsigned('z_out'))
 
             # ========== r 门(Reset Gate)==========
             # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
@@ -1580,12 +1489,11 @@ class QuantGRU(nn.Module):
             # [ONNX 兼容] 使用标准 sigmoid
             r = torch.sigmoid(r_pre)
 
-            # [与 CUDA 一致] sigmoid 输出强制使用 UINT 范围，对称性从配置读取
-            # [与 CUDA 一致] sigmoid 输出固定使用 UINT (硬编码，不可配置)
+            # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
             r = fake_quantize(r, exp2_r_out, zp_r_out,
                               bitwidth=self._get_bitwidth('r_out'),
                               symmetric=self._get_symmetric('r_out'),
-                              is_unsigned=True)
+                              is_unsigned=self._get_unsigned('r_out'))
 
             # ========== g 门(New Gate / Candidate)==========
             # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
@@ -2042,10 +1950,17 @@ class QuantGRU(nn.Module):
 
 
 # ============================================================
-#                      调试与诊断工具
+#                      调试与诊断工具（模块级函数）
 # ============================================================
 #
-# 以下为模块级实现函数（供类方法调用）和兼容性别名
+# 以下函数用于调试和诊断量化模型，便于快速查看模型状态。
+# 
+# 使用示例：
+#   >>> from quant_gru import print_quant_params, print_quant_config
+#   >>> print_quant_params(gru)   # 打印量化参数（需已校准）
+#   >>> print_quant_ranges(gru)   # 打印校准收集的数值范围
+#   >>> print_quant_config(gru)   # 打印量化配置详情
+#   >>> print_bitwidth_config(gru._bitwidth_config)  # 打印位宽配置
 
 def print_quant_params(gru: 'QuantGRU'):
     """
@@ -2125,22 +2040,23 @@ def print_quant_ranges(gru: 'QuantGRU'):
 
 
 # ============================================================
-#                   量化参数导出/导入
+#                   量化参数导出/导入（内部实现）
 # ============================================================
 #
-# 量化参数导出用于：
-#   1. 部署：将校准后的量化参数导出到文件，供推理引擎使用
-#   2. 调试：检查量化参数是否正确
-#   3. 复用：在不同环境间共享量化参数，避免重复校准
+# 以下为 QuantGRU 类方法的内部实现函数：
+#   - gru.export_quant_params(path): 导出量化参数到 JSON 文件
+#   - gru.load_quant_params(path):   从 JSON 文件加载量化参数
+#   - gru.adjust_quant_config(op):   调整单个算子的量化配置
+#   - gru.get_quant_config(op):      获取算子的量化配置
 #
-# 支持格式：
-#   - JSON: 人类可读，便于调试和版本控制
-#
-# 导出内容包括：
-#   - 位宽配置 (bitwidth_config)
-#   - 标量量化参数 (exp2_inv_*, zp_*)
-#   - Per-channel 量化参数 (exp2_inv_W_, exp2_inv_R_, exp2_inv_bx_, exp2_inv_br_)
-#   - 元信息 (hidden_size, input_size, calibration_method 等)
+# JSON 格式说明（AIMET 兼容）：
+#   - operators: 各算子的量化参数
+#     - dtype: 数据类型 (INT8/UINT8/INT16 等)
+#     - symmetric: 是否对称量化
+#     - scale: 浮点 scale (= 2^(-n))
+#     - zero_point: 零点
+#     - n: power-of-2 指数 (exp2_inv)
+#   - model_info: 模型元信息
 
 def _exp2_inv_to_scale(exp2_inv: int) -> float:
     """
@@ -2167,9 +2083,9 @@ def _scale_to_exp2_inv(scale: float) -> int:
     return int(round(-math.log2(scale)))
 
 
-def _bitwidth_to_dtype(bitwidth: int, is_signed: bool = True) -> str:
+def _bitwidth_to_dtype(bitwidth: int, is_unsigned: bool = False) -> str:
     """将位宽转换为 AIMET 风格的 dtype 字符串"""
-    prefix = "INT" if is_signed else "UINT"
+    prefix = "UINT" if is_unsigned else "INT"
     return f"{prefix}{bitwidth}"
 
 
@@ -2203,22 +2119,21 @@ def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool =
         is_symmetric = getattr(bitwidth_config, op_info["sym_attr"])
         is_per_channel = op_info["is_per_channel"]
         
-        # 判断是否使用 unsigned（如 Sigmoid 输出 z_out, r_out）
-        is_unsigned = op_info.get("is_unsigned", False)
-        
-        # 计算 qmin, qmax
-        if is_unsigned:
-            qmin = 0                           # UINT: [0, 2^bitwidth - 1]
-            qmax = (1 << bitwidth) - 1
+        # 读取 is_unsigned（只标记 UINT 例外）
+        unsigned_attr = op_info.get("unsigned_attr")
+        if unsigned_attr and hasattr(bitwidth_config, unsigned_attr):
+            is_unsigned = getattr(bitwidth_config, unsigned_attr)
         else:
-            qmin = -(1 << (bitwidth - 1))      # INT: [-2^(bitwidth-1), 2^(bitwidth-1) - 1]
-            qmax = (1 << (bitwidth - 1)) - 1
+            is_unsigned = False  # 默认有符号
+        
+        # 计算 qmin, qmax（复用 get_quant_range 函数）
+        qmin, qmax = get_quant_range(bitwidth, is_unsigned)
         
         # 按 AIMET 字段顺序构建 op_data
         op_data = {}
         
         # 1. dtype
-        op_data["dtype"] = _bitwidth_to_dtype(bitwidth, is_signed=not is_unsigned)
+        op_data["dtype"] = _bitwidth_to_dtype(bitwidth, is_unsigned=is_unsigned)
         
         # 2. symmetric
         op_data["symmetric"] = is_symmetric
@@ -2275,12 +2190,17 @@ def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool =
 
 
 def _dtype_to_bitwidth(dtype: str) -> int:
-    """从 AIMET 风格的 dtype 字符串解析位宽"""
+    """从 AIMET 风格的 dtype 字符串解析位宽（如 "INT8" → 8）"""
     import re
     match = re.search(r'(\d+)', dtype)
     if match:
         return int(match.group(1))
     return 8  # 默认值
+
+
+def _dtype_to_is_unsigned(dtype: str) -> bool:
+    """从 AIMET 风格的 dtype 字符串解析是否无符号（如 "UINT8" → True, "INT8" → False）"""
+    return dtype.upper().startswith("UINT")
 
 
 def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> None:
@@ -2305,9 +2225,13 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
             
         op_info = _OPERATOR_MAP[op_name]
         
-        # 设置 bitwidth（从 dtype 解析，如 "INT8" → 8）
+        # 设置 bitwidth 和 is_unsigned（从 dtype 解析，如 "INT8" → 8, False；"UINT8" → 8, True）
         if "dtype" in op_data:
-            setattr(bitwidth_config, op_info["bw_attr"], _dtype_to_bitwidth(op_data["dtype"]))
+            dtype_str = op_data["dtype"]
+            setattr(bitwidth_config, op_info["bw_attr"], _dtype_to_bitwidth(dtype_str))
+            unsigned_attr = op_info.get("unsigned_attr")
+            if unsigned_attr:
+                setattr(bitwidth_config, unsigned_attr, _dtype_to_is_unsigned(dtype_str))
         
         # 设置 symmetric
         if "symmetric" in op_data:
@@ -2414,8 +2338,8 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     
     # 量化权重（使用 per-channel 参数）
     def quantize_per_channel(tensor, exp2_inv_list, bitwidth, symmetric):
-        """对每个 channel 应用量化"""
-        qmin, qmax = get_quant_range(bitwidth, is_unsigned=False)
+        """对每个 channel 应用量化（权重使用有符号量化）"""
+        qmin, qmax = get_quant_range(bitwidth)  # 权重使用有符号量化（默认）
         result = torch.zeros_like(tensor, dtype=torch.int32)
         
         for c in range(len(exp2_inv_list)):
@@ -2477,6 +2401,14 @@ def _load_quant_params_impl(
             f"bidirectional 不匹配: 文件中为 {model_info.get('bidirectional')}, "
             f"模型为 {gru.bidirectional}"
         )
+    # batch_first 不影响量化参数，但不一致可能导致用户困惑，给出警告
+    if model_info.get("batch_first", False) != gru.batch_first:
+        import warnings
+        warnings.warn(
+            f"batch_first 不匹配: 文件中为 {model_info.get('batch_first')}, "
+            f"模型为 {gru.batch_first}。这不影响量化参数，但请确保输入数据格式正确。",
+            UserWarning
+        )
     
     # 验证版本和格式
     if "operators" not in data:
@@ -2531,26 +2463,15 @@ def _adjust_quant_config_impl(
     verbose: bool = False
 ) -> None:
     """手动调整指定算子的量化配置（内部实现）"""
-    # 验证算子名称
-    # 构建算子到属性名的映射（从 _OPERATOR_MAP 提取短名称）
-    operator_to_attrs = {}
-    for op_name, info in _OPERATOR_MAP.items():
-        # 从 op_name 提取短名称，如 "input.x" -> "x"
-        short_name = op_name.split('.')[-1]
-        operator_to_attrs[short_name] = {
-            'bw_attr': info["bw_attr"],
-            'sym_attr': info["sym_attr"],
-            'json_key': op_name,
-        }
-    
-    if operator not in operator_to_attrs:
-        valid_ops = sorted(operator_to_attrs.keys())
+    # 验证算子名称（使用模块级常量）
+    if operator not in _OPERATOR_SHORT_NAME_MAP:
+        valid_ops = sorted(_OPERATOR_SHORT_NAME_MAP.keys())
         raise ValueError(
             f"无效的算子名称: '{operator}'。\n"
             f"有效的算子名称: {valid_ops}"
         )
     
-    attrs = operator_to_attrs[operator]
+    attrs = _OPERATOR_SHORT_NAME_MAP[operator]
     old_values = {}
     new_values = {}
     
@@ -2672,21 +2593,11 @@ def _adjust_quant_config_impl(
 
 def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
     """获取量化配置信息（内部实现）"""
-    # 构建算子映射（从 _OPERATOR_MAP 提取短名称）
-    operator_to_attrs = {}
-    for op_name, info in _OPERATOR_MAP.items():
-        short_name = op_name.split('.')[-1]
-        operator_to_attrs[short_name] = {
-            'bw_attr': info["bw_attr"],
-            'sym_attr': info["sym_attr"],
-            'json_key': op_name,
-        }
-    
     def get_single_config(op_name):
-        if op_name not in operator_to_attrs:
+        if op_name not in _OPERATOR_SHORT_NAME_MAP:
             raise ValueError(f"无效的算子名称: '{op_name}'")
         
-        attrs = operator_to_attrs[op_name]
+        attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
         config = {
             'bitwidth': getattr(gru._bitwidth_config, attrs['bw_attr']),
             'is_symmetric': getattr(gru._bitwidth_config, attrs['sym_attr']),
@@ -2716,8 +2627,14 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
     if operator is not None:
         return get_single_config(operator)
     else:
-        return {op: get_single_config(op) for op in operator_to_attrs}
+        return {op: get_single_config(op) for op in _OPERATOR_SHORT_NAME_MAP}
 
+
+# ============================================================
+#                      调试打印函数（续）
+# ============================================================
+#
+# 以下函数依赖 _get_quant_config_impl，故放在其后。
 
 def print_quant_config(gru: 'QuantGRU', operators: list = None):
     """
@@ -2786,37 +2703,55 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
     print("\n💡 使用 gru.adjust_quant_config('x', bitwidth=16) 可调整配置")
 
 
-# ============================================================
-#                      兼容性别名（模块级函数）
-# ============================================================
-# 
-# 以下函数是类方法的兼容性别名，保持向后兼容：
-#   - export_quant_params(gru, path) -> gru.export_quant_params(path)
-#   - load_quant_params(gru, path) -> gru.load_quant_params(path)
-#   - adjust_quant_config(gru, op, ...) -> gru.adjust_quant_config(op, ...)
-#   - get_quant_config(gru, op) -> gru.get_quant_config(op)
-
-def export_quant_params(gru: 'QuantGRU', export_path: str, 
-                        scale_format: str = "exp2_inv",
-                        include_weights: bool = False, 
-                        verbose: bool = False) -> None:
-    """兼容性别名，请使用 gru.export_quant_params() 替代"""
-    gru.export_quant_params(export_path, scale_format, include_weights, verbose)
+def _format_bitwidth(val: int) -> str:
+    """格式化位宽值: 8 -> '8bit'"""
+    return f"{abs(val)}bit"
 
 
-def load_quant_params(gru: 'QuantGRU', import_path: str, verbose: bool = False) -> None:
-    """兼容性别名，请使用 gru.load_quant_params() 替代"""
-    gru.load_quant_params(import_path, verbose)
+def _format_symmetric(is_symmetric: bool) -> str:
+    """格式化对称量化: True -> '对称'"""
+    return "对称" if is_symmetric else "非对称"
 
 
-def adjust_quant_config(gru: 'QuantGRU', operator: str,
-                        bitwidth: int = None, is_symmetric: bool = None,
-                        exp2_inv: int = None, zero_point: int = None,
-                        verbose: bool = False) -> None:
-    """兼容性别名，请使用 gru.adjust_quant_config() 替代"""
-    gru.adjust_quant_config(operator, bitwidth, is_symmetric, exp2_inv, zero_point, verbose)
+def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
+                          config_file: str = None,
+                          verbose: bool = True) -> None:
+    """
+    打印 OperatorQuantConfig 的配置详情
+    
+    Args:
+        config: 配置对象
+        config_file: 配置文件路径(可选，仅用于显示来源)
+        verbose: 是否打印详情(默认 True)
+    """
+    if not verbose:
+        return
 
-
-def get_quant_config(gru: 'QuantGRU', operator: str = None) -> dict:
-    """兼容性别名，请使用 gru.get_quant_config() 替代"""
-    return gru.get_quant_config(operator)
+    print("\n" + "=" * 70)
+    print("🔧 GRU 量化配置(位宽 + 对称量化)")
+    print("=" * 70)
+    if config_file:
+        print(f"📄 配置来源: {config_file}")
+    print("-" * 70)
+    print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
+    print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+    print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
+    print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
+    print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
+    print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
+    print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
+    print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")
+    print(f"  [门控]  z_pre: {_format_bitwidth(config.z_pre_):6s} ({_format_symmetric(config.z_pre_symmetric_)})")
+    print(f"          z_out: {_format_bitwidth(config.z_out_):6s} ({_format_symmetric(config.z_out_symmetric_)})")
+    print(f"          r_pre: {_format_bitwidth(config.r_pre_):6s} ({_format_symmetric(config.r_pre_symmetric_)})")
+    print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
+    print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
+    print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
+    print(
+        f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
+    print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
+    print(
+        f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
+    print(
+        f"          new: {_format_bitwidth(config.new_contrib_):6s} ({_format_symmetric(config.new_contrib_symmetric_)})")
+    print("=" * 70 + "\n")

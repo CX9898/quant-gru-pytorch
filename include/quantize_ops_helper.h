@@ -551,9 +551,9 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
 
 #ifdef DEBUG
     if (!name.empty()) {
-        printf("[DEBUG][QuantParam][%s] bits=%d, signed=%d, orig=[%.4f,%.4f], "
+        printf("[DEBUG][QuantParam][%s] bits=%d, unsigned=%d, orig=[%.4f,%.4f], "
                "zero_included=[%.4f,%.4f], aligned=[%.4f,%.4f], scale=%.6f, exp2_inv=%d, zp=%d\n",
-               name.c_str(), bw.bits_, bw.is_signed_, orig_min, orig_max,
+               name.c_str(), bw.bits_, bw.is_unsigned_, orig_min, orig_max,
                min_with_zero, max_with_zero, aligned_min, aligned_max, scale, exp2_inv, zp);
     }
 #endif
