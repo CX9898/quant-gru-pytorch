@@ -46,14 +46,14 @@ modify_bitwidth() {
     local g_pre=$5
     local g_out=$6
     
-    # z_pre, r_pre, g_pre, g_out: 有符号 (true)
-    # z_out, r_out: 无符号 (false)，sigmoid 输出
-    sed -i "s/z_pre_{[0-9]*, [a-z]*}/z_pre_{${z_pre}, true}/g" "$CONFIG_FILE"
-    sed -i "s/z_out_{[0-9]*, [a-z]*}/z_out_{${z_out}, false}/g" "$CONFIG_FILE"
-    sed -i "s/r_pre_{[0-9]*, [a-z]*}/r_pre_{${r_pre}, true}/g" "$CONFIG_FILE"
-    sed -i "s/r_out_{[0-9]*, [a-z]*}/r_out_{${r_out}, false}/g" "$CONFIG_FILE"
-    sed -i "s/g_pre_{[0-9]*, [a-z]*}/g_pre_{${g_pre}, true}/g" "$CONFIG_FILE"
-    sed -i "s/g_out_{[0-9]*, [a-z]*}/g_out_{${g_out}, true}/g" "$CONFIG_FILE"
+    # z_pre, r_pre, g_pre, g_out: 有符号 (false)
+    # z_out, r_out: 无符号 (true)，sigmoid 输出范围 [0, 1]
+    sed -i "s/z_pre_{[0-9]*, [a-z]*}/z_pre_{${z_pre}, false}/g" "$CONFIG_FILE"
+    sed -i "s/z_out_{[0-9]*, [a-z]*}/z_out_{${z_out}, true}/g" "$CONFIG_FILE"
+    sed -i "s/r_pre_{[0-9]*, [a-z]*}/r_pre_{${r_pre}, false}/g" "$CONFIG_FILE"
+    sed -i "s/r_out_{[0-9]*, [a-z]*}/r_out_{${r_out}, true}/g" "$CONFIG_FILE"
+    sed -i "s/g_pre_{[0-9]*, [a-z]*}/g_pre_{${g_pre}, false}/g" "$CONFIG_FILE"
+    sed -i "s/g_out_{[0-9]*, [a-z]*}/g_out_{${g_out}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改对称配置
