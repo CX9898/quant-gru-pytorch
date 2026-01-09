@@ -287,7 +287,7 @@ gru.export_mode = False  # 恢复 CUDA 模式
 
 | 类别 | 算子名 | 说明 |
 |------|--------|------|
-| 输入 | `input.x`, `input.h` | 输入序列和隐藏状态 |
+| 输入 | `input.x`, `output.h` | 输入序列和隐藏状态 |
 | 权重 | `weight.W`, `weight.R`, `weight.bx`, `weight.br` | 权重矩阵和偏置 |
 | 矩阵乘法 | `matmul.Wx`, `matmul.Rh` | 矩阵乘法中间结果 |
 | 门控 | `gate.z_pre/out`, `gate.r_pre/out`, `gate.g_pre/out` | 门控激活前后 |
