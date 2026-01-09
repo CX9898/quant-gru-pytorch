@@ -924,13 +924,54 @@ class QuantGRU(nn.Module):
         # 直接将配置写入 C++ 对象
         op_config = gru_config.get('operator_config', {})
 
+        # ========================================================================
+        # 严格配置验证：检测未知字段（提前暴露配置错误）
+        # ========================================================================
+        valid_op_names = set(_OPERATOR_MAP.keys())
+        json_op_names = set(op_config.keys())
+        unknown_fields = json_op_names - valid_op_names
+        
+        if unknown_fields:
+            # 尝试给出修正建议
+            suggestions = []
+            for unknown in unknown_fields:
+                # 简单的相似度匹配：检查是否是常见的拼写错误
+                for valid in valid_op_names:
+                    # 检查是否只是前缀不同（如 input.h vs output.h）
+                    if unknown.split('.')[-1] == valid.split('.')[-1]:
+                        suggestions.append(f"  '{unknown}' → 您是否想用 '{valid}'?")
+                        break
+            
+            suggestion_text = "\n".join(suggestions) if suggestions else ""
+            raise ValueError(
+                f"JSON 配置文件 '{config_file}' 包含未知的算子字段:\n"
+                f"  {list(unknown_fields)}\n"
+                f"有效的字段名:\n"
+                f"  {sorted(valid_op_names)}\n"
+                f"{suggestion_text}"
+            )
+
         # 检查 JSON 中缺失的字段并发出警告
-        missing_fields = []
+        missing_fields = []  # [(op_name, default_bitwidth, default_symmetric, default_unsigned), ...]
+        missing_attrs = []   # [(op_name, attr_name, default_value), ...] - 算子存在但属性缺失
+        
         for op_name, info in _OPERATOR_MAP.items():
             bw_attr, sym_attr = info["bw_attr"], info["sym_attr"]
             unsigned_attr = info.get("unsigned_attr")
+            default_unsigned = info.get("default_unsigned", False)
+            
             if op_name in op_config:
                 op_cfg = op_config[op_name]
+                
+                # 检查并记录缺失的属性
+                if 'bitwidth' not in op_cfg:
+                    missing_attrs.append((op_name, 'bitwidth', 8))
+                if 'is_symmetric' not in op_cfg:
+                    missing_attrs.append((op_name, 'is_symmetric', True))
+                if unsigned_attr and 'is_unsigned' not in op_cfg:
+                    unsigned_default_str = "true (UINT)" if default_unsigned else "false (INT)"
+                    missing_attrs.append((op_name, 'is_unsigned', unsigned_default_str))
+                
                 bitwidth = op_cfg.get('bitwidth', 8)
                 # 验证位宽范围 (1-32)
                 if not (1 <= bitwidth <= 32):
@@ -942,15 +983,47 @@ class QuantGRU(nn.Module):
                 setattr(self._bitwidth_config, sym_attr, op_cfg.get('is_symmetric', True))
                 # 设置 unsigned 属性（只标记 UINT 例外）
                 if unsigned_attr:
-                    default_unsigned = info.get("default_unsigned", False)
                     setattr(self._bitwidth_config, unsigned_attr, op_cfg.get('is_unsigned', default_unsigned))
             else:
-                missing_fields.append(op_name)
+                # 记录缺失字段及其默认值
+                missing_fields.append((op_name, 8, True, default_unsigned))
 
+        # 报告缺失的算子（整个算子缺失）
         if missing_fields:
+            missing_details = []
+            for op_name, bw, sym, unsigned in missing_fields:
+                unsigned_str = "is_unsigned=true (UINT)" if unsigned else "is_unsigned=false (INT)"
+                sym_str = "is_symmetric=true" if sym else "is_symmetric=false"
+                missing_details.append(
+                    f"    ⚠️ 缺少字段: '{op_name}'\n"
+                    f"       → 将使用默认值: bitwidth={bw}, {sym_str}, {unsigned_str}"
+                )
+            
             warnings.warn(
-                f"JSON 配置文件 '{config_file}' 缺少以下字段，将使用默认值 (8bit, 对称):\n"
-                f"  {missing_fields}",
+                f"\nJSON 配置文件 '{config_file}' 缺少以下算子配置:\n"
+                + "\n".join(missing_details) + "\n",
+                UserWarning
+            )
+        
+        # 报告缺失的属性（算子存在但属性缺失）
+        if missing_attrs:
+            # 按算子分组
+            attr_by_op = {}
+            for op_name, attr_name, default_val in missing_attrs:
+                if op_name not in attr_by_op:
+                    attr_by_op[op_name] = []
+                attr_by_op[op_name].append((attr_name, default_val))
+            
+            attr_details = []
+            for op_name, attrs in attr_by_op.items():
+                attr_lines = []
+                for attr_name, default_val in attrs:
+                    attr_lines.append(f"       → 缺少 '{attr_name}'，将使用默认值: {default_val}")
+                attr_details.append(f"    ⚠️ 算子 '{op_name}':\n" + "\n".join(attr_lines))
+            
+            warnings.warn(
+                f"\nJSON 配置文件 '{config_file}' 以下算子缺少部分属性:\n"
+                + "\n".join(attr_details) + "\n",
                 UserWarning
             )
 
