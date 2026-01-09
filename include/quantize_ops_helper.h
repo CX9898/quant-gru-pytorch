@@ -480,9 +480,15 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
     
     float updated_min, updated_max;
     if (is_symmetric) {
-        // 对称量化: 两边扩展
-        updated_max = max_with_zero + std::floor(num_steps / 2.0f) * adjustment_step;
-        updated_min = min_with_zero - std::ceil(num_steps / 2.0f) * adjustment_step;
+        if (bw.is_unsigned_) {
+            // UINT 对称量化：只扩展 max（数据范围 [0, max]）
+            updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
+            updated_min = 0.0f;  // UINT 的 min 固定为 0
+        } else {
+            // INT 对称量化: 两边扩展
+            updated_max = max_with_zero + std::floor(num_steps / 2.0f) * adjustment_step;
+            updated_min = min_with_zero - std::ceil(num_steps / 2.0f) * adjustment_step;
+        }
     } else {
         // 非对称量化: 只扩展 max
         updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
@@ -493,41 +499,56 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
     if (is_symmetric) {
         zp = 0;
         
-        // 与 AIMET 一致: 对称量化 delta 计算
-        const int num_pos_steps = num_steps / 2;           // floor(N/2), 8-bit: 127
-        const int num_neg_steps = (num_steps + 1) / 2;     // ceil(N/2),  8-bit: 128
-        
-        // 与 AIMET 一致: 2-bit 特殊处理
-        // "For 2-bit quantization, using math.floor to compute num_pos_steps can result 
-        //  in a wasted bin on the negative side given a symmetrically distributed weight."
-        int additional_step_for_calibration = 0;
-        if (num_steps == 3) {  // 2-bit strict symmetric
-            additional_step_for_calibration = 1;
+        // UINT + symmetric: 特殊处理（zp=0，范围 [0, qmax]）
+        if (bw.is_unsigned_) {
+            // UINT 对称量化：数据范围 [0, max]，量化范围 [0, qmax]
+            // scale = max / qmax，确保 max 能被正确量化
+            float data_max = std::max(updated_max, minimum_scale);
+            float raw_scale = data_max / static_cast<float>(quant_max);
+            raw_scale = std::max(raw_scale, minimum_scale);
+            
+            // POT 转换
+            exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+            scale = std::pow(2.0f, -exp2_inv);
+            aligned_min = 0.0f;
+            aligned_max = scale * static_cast<float>(quant_max);
+        } else {
+            // INT 对称量化：与 AIMET 一致
+            const int num_pos_steps = num_steps / 2;           // floor(N/2), 8-bit: 127
+            const int num_neg_steps = (num_steps + 1) / 2;     // ceil(N/2),  8-bit: 128
+            
+            // 与 AIMET 一致: 2-bit 特殊处理
+            // "For 2-bit quantization, using math.floor to compute num_pos_steps can result 
+            //  in a wasted bin on the negative side given a symmetrically distributed weight."
+            int additional_step_for_calibration = 0;
+            if (num_steps == 3) {  // 2-bit strict symmetric
+                additional_step_for_calibration = 1;
+            }
+            
+            // 与 AIMET 一致: delta = max(max/(pos+additional), -min/neg)
+            float delta_from_max = (num_pos_steps + additional_step_for_calibration > 0) 
+                                 ? updated_max / (num_pos_steps + additional_step_for_calibration)
+                                 : 0.0f;
+            float delta_from_min = (num_neg_steps > 0) 
+                                 ? -updated_min / num_neg_steps 
+                                 : 0.0f;
+            float delta = std::max(delta_from_max, delta_from_min);
+            delta = std::max(delta, minimum_scale);  // 确保 delta >= minimum_scale
+            
+            // 与 AIMET 一致: 重新计算 min/max
+            // offset = -num_neg_steps
+            // updated_min = offset * delta = -num_neg_steps * delta
+            // updated_max = num_pos_steps * delta
+            updated_min = -static_cast<float>(num_neg_steps) * delta;
+            updated_max = static_cast<float>(num_pos_steps) * delta;
+            
+            // POT 转换
+            float raw_scale = delta;
+            exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+            scale = std::pow(2.0f, -exp2_inv);
+            aligned_max = scale * num_pos_steps;
+            aligned_min = -scale * num_neg_steps;
         }
-        
-        // 与 AIMET 一致: delta = max(max/(pos+additional), -min/neg)
-        float delta_from_max = (num_pos_steps + additional_step_for_calibration > 0) 
-                             ? updated_max / (num_pos_steps + additional_step_for_calibration)
-                             : 0.0f;
-        float delta_from_min = (num_neg_steps > 0) 
-                             ? -updated_min / num_neg_steps 
-                             : 0.0f;
-        float delta = std::max(delta_from_max, delta_from_min);
-        delta = std::max(delta, minimum_scale);  // 确保 delta >= minimum_scale
-        
-        // 与 AIMET 一致: 重新计算 min/max
-        // offset = -num_neg_steps
-        // updated_min = offset * delta = -num_neg_steps * delta
-        // updated_max = num_pos_steps * delta
-        updated_min = -static_cast<float>(num_neg_steps) * delta;
-        updated_max = static_cast<float>(num_pos_steps) * delta;
-        
-        // POT 转换
-        float raw_scale = delta;
-        exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
-        scale = std::pow(2.0f, -exp2_inv);
-        aligned_max = scale * num_pos_steps;
-        aligned_min = -scale * num_neg_steps;
     } else {
         // 非对称量化
         float range = updated_max - updated_min;

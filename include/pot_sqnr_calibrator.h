@@ -68,13 +68,15 @@ struct PercentileConfig {
  * @param num_steps 量化级数 (quant_max - quant_min)
  * @param is_symmetric 是否对称量化
  * @param config 配置参数
+ * @param is_unsigned 是否无符号量化（UINT）
  * @return ContinuousScaleResult
  */
 inline ContinuousScaleResult calibratePercentile(
     const Histogram& hist,
     int64_t num_steps,
     bool is_symmetric,
-    const PercentileConfig& config = PercentileConfig()) {
+    const PercentileConfig& config = PercentileConfig(),
+    bool is_unsigned = false) {
     
     if (!hist.is_valid()) {
         throw std::runtime_error("Histogram is invalid in calibratePercentile");
@@ -105,14 +107,14 @@ inline ContinuousScaleResult calibratePercentile(
     // 与 AIMET adjust_min_max 一致：确保范围不太小（使用 minimum_scale）
     float tensor_threshold = (pmax - pmin) / static_cast<float>(num_steps);
     if (tensor_threshold < minimum_scale) {
-        if (is_symmetric) {
-            // 对称量化：两边扩展
+        if (is_symmetric && !is_unsigned) {
+            // INT 对称量化：两边扩展
             int64_t num_neg_steps = (num_steps + 1) / 2;  // ceil
             int64_t num_pos_steps = num_steps / 2;        // floor
             pmin -= minimum_scale * static_cast<float>(num_neg_steps);
             pmax += minimum_scale * static_cast<float>(num_pos_steps);
         } else {
-            // 非对称量化：只扩展 max
+            // 非对称量化 或 UINT 对称量化：只扩展 max
             pmax += minimum_scale * static_cast<float>(num_steps);
         }
     }
@@ -120,22 +122,31 @@ inline ContinuousScaleResult calibratePercentile(
     ContinuousScaleResult result;
     
     if (is_symmetric) {
-        // 与 AIMET adjust_min_max 对称量化处理完全一致
-        int64_t num_pos_steps = num_steps / 2;        // floor
-        int64_t num_neg_steps = (num_steps + 1) / 2;  // ceil
-        
-        // 边缘情况：num_steps=1 时 num_pos_steps=0，需要防止除零
-        // AIMET 在这种情况下会得到 inf，但最终会被 minimum_scale 约束
-        float delta_from_max = (num_pos_steps > 0) 
-            ? pmax / static_cast<float>(num_pos_steps) 
-            : std::numeric_limits<float>::max();
-        float delta_from_min = (num_neg_steps > 0) 
-            ? -pmin / static_cast<float>(num_neg_steps) 
-            : std::numeric_limits<float>::max();
-        
-        result.scale = std::max(delta_from_max, delta_from_min);
-        result.min = -static_cast<float>(num_neg_steps) * result.scale;
-        result.max = static_cast<float>(num_pos_steps) * result.scale;
+        if (is_unsigned) {
+            // UINT + symmetric: 数据范围 [0, max]，量化范围 [0, num_steps]
+            float data_max = std::max(pmax, minimum_scale);
+            result.scale = data_max / static_cast<float>(num_steps);
+            result.scale = std::max(result.scale, minimum_scale);
+            result.min = 0.0f;
+            result.max = result.scale * static_cast<float>(num_steps);
+        } else {
+            // INT + symmetric: 与 AIMET adjust_min_max 对称量化处理完全一致
+            int64_t num_pos_steps = num_steps / 2;        // floor
+            int64_t num_neg_steps = (num_steps + 1) / 2;  // ceil
+            
+            // 边缘情况：num_steps=1 时 num_pos_steps=0，需要防止除零
+            // AIMET 在这种情况下会得到 inf，但最终会被 minimum_scale 约束
+            float delta_from_max = (num_pos_steps > 0) 
+                ? pmax / static_cast<float>(num_pos_steps) 
+                : std::numeric_limits<float>::max();
+            float delta_from_min = (num_neg_steps > 0) 
+                ? -pmin / static_cast<float>(num_neg_steps) 
+                : std::numeric_limits<float>::max();
+            
+            result.scale = std::max(delta_from_max, delta_from_min);
+            result.min = -static_cast<float>(num_neg_steps) * result.scale;
+            result.max = static_cast<float>(num_pos_steps) * result.scale;
+        }
     } else {
         result.scale = (pmax - pmin) / static_cast<float>(num_steps);
         result.min = pmin;
@@ -199,23 +210,42 @@ inline float estimateNoise(const Histogram& hist, float delta, float offset,
 
 /**
  * 对称量化搜索（与 AIMET _pick_test_candidates_symmetric 完全一致）
+ * 
+ * @param is_unsigned 是否 UINT 类型
  */
 inline ContinuousScaleResult searchSymmetric(
     const Histogram& hist,
     float min_val, float max_val,
     int64_t num_steps,
-    const SqnrConfig& config) {
+    const SqnrConfig& config,
+    bool is_unsigned = false) {
     
-    float max_delta = 2.0f * std::max(max_val, -min_val) / static_cast<float>(num_steps);
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
     
     ContinuousScaleResult best{0, 0, 0, std::numeric_limits<float>::max()};
     
-    // 对称量化：offset = (-num_steps) // 2
-    const float offset = -static_cast<float>((num_steps + 1) / 2);
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    float max_delta;
+    float offset;
+    
+    if (is_unsigned) {
+        // UINT + symmetric: 数据范围 [0, max]，量化范围 [0, num_steps]
+        // offset = 0 (zp = 0)
+        max_delta = max_val / static_cast<float>(num_steps);
+        offset = 0.0f;
+    } else {
+        // INT + symmetric: 对称量化，offset = (-num_steps) // 2
+        max_delta = 2.0f * std::max(max_val, -min_val) / static_cast<float>(num_steps);
+        offset = -static_cast<float>((num_steps + 1) / 2);
+    }
+    
+    // 边缘保护：确保 max_delta 不为 0（避免 SQNR 搜索退化）
+    max_delta = std::max(max_delta, minimum_scale);
+    
+    // 边缘保护：确保除数不为 0
+    const int divisor = std::max(config.symmetric_delta_candidates - 1, 1);
     
     for (int d = 1; d <= config.symmetric_delta_candidates; ++d) {
-        float delta = max_delta * d / (config.symmetric_delta_candidates - 1);
+        float delta = max_delta * d / divisor;
         delta = std::max(delta, minimum_scale);
         
         float noise = estimateNoise(hist, delta, offset, num_steps, config.gamma, config.p);
@@ -306,13 +336,15 @@ inline ContinuousScaleResult searchAsymmetric(
  * @param num_steps 量化级数 (quant_max - quant_min)
  * @param is_symmetric 是否对称量化
  * @param config 配置参数
+ * @param is_unsigned 是否无符号量化（UINT）
  * @return ContinuousScaleResult
  */
 inline ContinuousScaleResult calibrateSqnr(
     const Histogram& hist,
     int64_t num_steps,
     bool is_symmetric,
-    const SqnrConfig& config = SqnrConfig()) {
+    const SqnrConfig& config = SqnrConfig(),
+    bool is_unsigned = false) {
     
     if (!hist.is_valid()) {
         throw std::runtime_error("Histogram is invalid in calibrateSqnr");
@@ -330,7 +362,7 @@ inline ContinuousScaleResult calibrateSqnr(
     max_val = (max_val > min_range_limit) ? max_val : min_range_limit;
     
     if (is_symmetric) {
-        return sqnr_detail::searchSymmetric(hist, min_val, max_val, num_steps, config);
+        return sqnr_detail::searchSymmetric(hist, min_val, max_val, num_steps, config, is_unsigned);
     } else {
         return sqnr_detail::searchAsymmetric(hist, min_val, max_val, num_steps, config);
     }
@@ -418,7 +450,7 @@ inline PotScaleResult convertToPot(
  * 调用流程: Histogram → [calibratePercentile/calibrateSqnr] → [convertToPot] → 最终参数
  * 
  * @param hist 直方图数据
- * @param bw 量化位宽配置
+ * @param bw 量化位宽配置（包含 is_unsigned_ 信息）
  * @param is_symmetric 是否对称量化
  * @param exp2_inv [out] POT 指数
  * @param zp [out] 零点
@@ -441,6 +473,7 @@ inline void calibrateQuantParamsFromHistogram(
     }
     
     const int64_t num_steps = bw.qmax() - bw.qmin();
+    const bool is_unsigned = bw.is_unsigned_;
     
     // 步骤 1: 使用对应的校准方法计算连续 scale
     ContinuousScaleResult continuous_result;
@@ -448,10 +481,10 @@ inline void calibrateQuantParamsFromHistogram(
     if (use_percentile) {
         PercentileConfig config;
         config.percentile = percentile;
-        continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config);
+        continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config, is_unsigned);
     } else {
         SqnrConfig config;
-        continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config);
+        continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config, is_unsigned);
     }
     
     // 步骤 2: 转换为 POT（与 AIMET 一致，无位宽约束）
@@ -467,8 +500,8 @@ inline void calibrateQuantParamsFromHistogram(
 #ifdef DEBUG
     if (name && name[0]) {
         const char* scheme_name = use_percentile ? "PERC" : "SQNR";
-        printf("[%s][%s] range=[%.4f,%.4f] cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
-               scheme_name, name, hist.min_val, hist.max_val, 
+        printf("[%s][%s] unsigned=%d range=[%.4f,%.4f] cont_scale=%.6f po2=%.6f(1/2^%d) zp=%d\n",
+               scheme_name, name, is_unsigned, hist.min_val, hist.max_val, 
                continuous_result.scale, pot_result.po2_scale, pot_result.exp2_inv, pot_result.zero_point);
     }
 #endif

@@ -1195,7 +1195,8 @@ ContinuousScaleResult searchSqnrGpu(
     int num_bins, int64_t num_steps,
     bool is_symmetric,
     const SqnrConfig& config,
-                              cudaStream_t stream) {
+    bool is_unsigned,
+    cudaStream_t stream) {
     
     // 最小 delta（与 AIMET minimum_scale 一致）
     const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
@@ -1213,10 +1214,22 @@ ContinuousScaleResult searchSqnrGpu(
     float optimal_scale, optimal_min;
     
     if (is_symmetric) {
-        // 对称量化（与 AIMET _pick_test_candidates_symmetric 完全一致）
-        float abs_max_for_delta = (max_val > -min_val) ? max_val : -min_val;
-        float max_delta = 2.0f * abs_max_for_delta / static_cast<float>(num_steps);
-        float offset = -static_cast<float>((num_steps + 1) / 2);
+        float max_delta, offset;
+        
+        if (is_unsigned) {
+            // UINT + symmetric: 数据范围 [0, max]，量化范围 [0, num_steps]
+            // offset = 0 (zp = 0)
+            max_delta = max_val / static_cast<float>(num_steps);
+            offset = 0.0f;
+        } else {
+            // INT + symmetric: 对称量化（与 AIMET _pick_test_candidates_symmetric 完全一致）
+            float abs_max_for_delta = (max_val > -min_val) ? max_val : -min_val;
+            max_delta = 2.0f * abs_max_for_delta / static_cast<float>(num_steps);
+            offset = -static_cast<float>((num_steps + 1) / 2);
+        }
+        
+        // 边缘保护：确保 max_delta 不为 0（避免 SQNR 搜索退化）
+        max_delta = std::max(max_delta, minimum_scale);
         
         const int num_candidates = config.symmetric_delta_candidates;
         
@@ -1333,6 +1346,7 @@ void searchSqnrBatchGpu(
     const std::vector<bool>& is_symmetric,
     std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config,
+    const std::vector<bool>& is_unsigned,
     cudaStream_t stream) {
     
     const int n = counts_ptrs.size();
@@ -1340,9 +1354,10 @@ void searchSqnrBatchGpu(
     
     // 串行处理每个直方图
     for (int i = 0; i < n; ++i) {
+        bool unsigned_flag = is_unsigned.empty() ? false : is_unsigned[i];
         out_results[i] = searchSqnrGpu(
             counts_ptrs[i], mins[i], maxs[i], num_bins, num_steps,
-            is_symmetric[i], config, stream);
+            is_symmetric[i], config, unsigned_flag, stream);
     }
 }
 
@@ -1351,6 +1366,7 @@ void searchSqnrPerChannelGpu(
     int64_t num_steps, bool is_symmetric,
     std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config,
+    bool is_unsigned,
     cudaStream_t stream) {
     
     const int n = batch.channel_size;

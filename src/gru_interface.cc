@@ -636,11 +636,12 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
         }
         const auto& hist = collector.histogram();
         const int64_t num_steps = quant_bw.qmax() - quant_bw.qmin();
+        const bool is_unsigned = quant_bw.is_unsigned_;
         
         // 步骤 1: GPU SQNR 搜索获取连续 scale
         ContinuousScaleResult continuous_result = gpu_hist::searchSqnrGpu(
             hist.counts.data(), hist.min_val, hist.max_val,
-            hist.num_bins, num_steps, is_symmetric);
+            hist.num_bins, num_steps, is_symmetric, SqnrConfig(), is_unsigned);
         
         // 步骤 2: CPU POT 转换（与 AIMET 一致，无位宽约束）
         PotScaleResult pot_result = convertToPot(
@@ -651,8 +652,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
         out_zp = pot_result.zero_point;
         
         if (verbose && name) {
-            printf("[GPU-SQNR][%s] bits=%d range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
-                   name, quant_bw.bits_, hist.min_val, hist.max_val, out_exp2_inv, out_zp);
+            printf("[GPU-SQNR][%s] bits=%d unsigned=%d range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
+                   name, quant_bw.bits_, is_unsigned, hist.min_val, hist.max_val, out_exp2_inv, out_zp);
         }
     };
     
@@ -696,10 +697,12 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
         if (!batch.is_valid()) return;
         
         const int64_t num_steps = quant_bw.qmax() - quant_bw.qmin();
+        const bool is_unsigned = quant_bw.is_unsigned_;
         
         // 步骤 1: GPU SQNR 搜索获取连续 scale
         std::vector<ContinuousScaleResult> continuous_results;
-        gpu_hist::searchSqnrPerChannelGpu(batch, num_steps, is_symmetric, continuous_results);
+        gpu_hist::searchSqnrPerChannelGpu(batch, num_steps, is_symmetric, continuous_results,
+                                           SqnrConfig(), is_unsigned);
         
         // 步骤 2: CPU POT 转换（与 AIMET 一致，无位宽约束）
         out_exp2_inv.resize(batch.channel_size);
