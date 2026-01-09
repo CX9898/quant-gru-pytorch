@@ -387,6 +387,7 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
  * @param num_steps 量化级数 (quant_max - quant_min)
  * @param is_symmetric 是否对称量化
  * @param config SQNR 搜索配置
+ * @param is_unsigned 是否无符号量化（UINT）
  * @param stream CUDA 流
  * @return ContinuousScaleResult 连续 scale 结果
  */
@@ -396,6 +397,7 @@ ContinuousScaleResult searchSqnrGpu(
     int num_bins, int64_t num_steps,
     bool is_symmetric,
     const SqnrConfig& config = SqnrConfig(),
+    bool is_unsigned = false,
     cudaStream_t stream = 0);
 
 /**
@@ -409,6 +411,7 @@ void searchSqnrBatchGpu(
     const std::vector<bool>& is_symmetric,
     std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config = SqnrConfig(),
+    const std::vector<bool>& is_unsigned = {},
     cudaStream_t stream = 0);
 
 /**
@@ -419,6 +422,7 @@ void searchSqnrPerChannelGpu(
     int64_t num_steps, bool is_symmetric,
     std::vector<ContinuousScaleResult>& out_results,
     const SqnrConfig& config = SqnrConfig(),
+    bool is_unsigned = false,
     cudaStream_t stream = 0);
 
 // ============================================================================
