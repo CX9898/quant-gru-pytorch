@@ -49,17 +49,17 @@ modify_weight_activation_bitwidth() {
     local activation_bits=$2
     local gemm_result_bits=${3:-$activation_bits}  # 默认跟随激活位宽
     
-    # 修改权重位宽 (W_, R_) - 有符号
-    sed -i "s/W_{[0-9]*, [a-z]*}/W_{${weight_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/R_{[0-9]*, [a-z]*}/R_{${weight_bits}, true}/g" "$CONFIG_FILE"
+    # 修改权重位宽 (W_, R_) - 有符号 (false)
+    sed -i "s/W_{[0-9]*, [a-z]*}/W_{${weight_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/R_{[0-9]*, [a-z]*}/R_{${weight_bits}, false}/g" "$CONFIG_FILE"
     
-    # 修改激活位宽 (x_, h_) - 有符号
-    sed -i "s/x_{[0-9]*, [a-z]*}/x_{${activation_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/h_{[0-9]*, [a-z]*}/h_{${activation_bits}, true}/g" "$CONFIG_FILE"
+    # 修改激活位宽 (x_, h_) - 有符号 (false)
+    sed -i "s/x_{[0-9]*, [a-z]*}/x_{${activation_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/h_{[0-9]*, [a-z]*}/h_{${activation_bits}, false}/g" "$CONFIG_FILE"
     
-    # 修改 GEMM 结果位宽 (Wx_, Rh_) - 有符号
-    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${gemm_result_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${gemm_result_bits}, true}/g" "$CONFIG_FILE"
+    # 修改 GEMM 结果位宽 (Wx_, Rh_) - 有符号 (false)
+    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：编译项目

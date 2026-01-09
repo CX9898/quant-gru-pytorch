@@ -46,35 +46,37 @@ COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改 GEMM 结果位宽 (Wx_, Rh_)
-# 新格式: Wx_{bits, true}
+# 注意：GEMM 结果应该是有符号的 (false)，因为权重和输入都可能是负的
 modify_gemm_bitwidth() {
     local Wx_bits=$1
     local Rh_bits=$2
     
-    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${Wx_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${Rh_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${Wx_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${Rh_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改偏置位宽 (bx_, br_)
+# 注意：偏置应该是有符号的 (false)
 modify_bias_bitwidth() {
     local bx_bits=$1
     local br_bits=$2
     
-    sed -i "s/bx_{[0-9]*, [a-z]*}/bx_{${bx_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/br_{[0-9]*, [a-z]*}/br_{${br_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/bx_{[0-9]*, [a-z]*}/bx_{${bx_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/br_{[0-9]*, [a-z]*}/br_{${br_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改中间运算位宽
+# 注意：中间运算结果应该是有符号的 (false)
 modify_intermediate_bitwidth() {
     local Rh_add_br_bits=$1
     local rRh_bits=$2
     local old_contrib_bits=$3
     local new_contrib_bits=$4
     
-    sed -i "s/Rh_add_br_{[0-9]*, [a-z]*}/Rh_add_br_{${Rh_add_br_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/rRh_{[0-9]*, [a-z]*}/rRh_{${rRh_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/old_contrib_{[0-9]*, [a-z]*}/old_contrib_{${old_contrib_bits}, true}/g" "$CONFIG_FILE"
-    sed -i "s/new_contrib_{[0-9]*, [a-z]*}/new_contrib_{${new_contrib_bits}, true}/g" "$CONFIG_FILE"
+    sed -i "s/Rh_add_br_{[0-9]*, [a-z]*}/Rh_add_br_{${Rh_add_br_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/rRh_{[0-9]*, [a-z]*}/rRh_{${rRh_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/old_contrib_{[0-9]*, [a-z]*}/old_contrib_{${old_contrib_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/new_contrib_{[0-9]*, [a-z]*}/new_contrib_{${new_contrib_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改 GEMM 结果对称配置
