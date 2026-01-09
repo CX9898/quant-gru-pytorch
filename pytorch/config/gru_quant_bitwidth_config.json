@@ -14,11 +14,11 @@
         "is_unsigned": false,
         "comment": "输入序列 x"
       },
-      "input.h": {
+      "output.h": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
-        "comment": "隐藏状态 h"
+        "comment": "隐藏状态输出 h"
       },
       "weight.W": {
         "bitwidth": 8,
