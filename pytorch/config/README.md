@@ -232,7 +232,7 @@ output, h_n = gru(input_data)
 
 ```python
 # 导出量化参数
-gru.export_quant_params("quant_params.json", scale_format="exp2_inv")
+gru.export_quant_params("quant_params.json")
 
 # 导入量化参数（无需重新校准）
 gru2 = QuantGRU(input_size=64, hidden_size=128)
