@@ -440,26 +440,28 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 
 ### A. 各参数量化配置
 
-| 参数 | 量化类型 | scale | zp | 备注 |
-|------|----------|-------|-----|------|
-| 输入 x | 非对称 + 动态范围 | `exp2_inv_x_` | `zp_x_` | 时间步 EMA 更新 |
-| 隐藏状态 h | 非对称 + 动态范围 | `exp2_inv_h_` | `zp_h_` | 时间步 EMA 更新 |
-| 权重 W | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | size = hidden×3 |
-| 权重 R | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | size = hidden×3 |
-| Wx 结果 | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | GEMM 输出 |
-| Rh 结果 | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | GEMM 输出 |
-| 偏置 bx | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | size = hidden×3 |
-| 偏置 br | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | size = hidden×3 |
-| z_pre | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | 更新门预激活 |
-| r_pre | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | 重置门预激活 |
-| g_pre | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | 候选门预激活 |
-| z_out | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid 输出 |
-| r_out | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid 输出 |
-| g_out | 对称 | `exp2_inv_g_out_` | 0 | tanh 输出 |
-| Rh_add_br | 非对称 | `exp2_inv_Rh_add_br_` | `zp_Rh_add_br_` | 候选门中间值 |
-| rRh | 非对称 | `exp2_inv_rRh_` | `zp_rRh_` | r × (Rh + br) |
-| old_contrib | 非对称 | `exp2_inv_old_contrib_` | `zp_old_contrib_` | z × h_old |
-| new_contrib | 非对称 | `exp2_inv_new_contrib_` | `zp_new_contrib_` | (1-z) × g |
+| 参数 | 数据类型 | 量化类型 | scale | zp | 计算公式 | 使用位置 |
+|------|----------|----------|-------|-----|----------|----------|
+| 输入 x | INT | 非对称 + 动态 | `exp2_inv_x_` | `zp_x_` | - | GRU 输入 |
+| 隐藏状态 h | INT | 非对称 + 动态 | `exp2_inv_h_` | `zp_h_` | - | GRU 输出/下一步输入 |
+| 权重 W | INT | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | - | GEMM: W×x |
+| 权重 R | INT | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | - | GEMM: R×h |
+| 偏置 bx | INT | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | - | 门控加法 |
+| 偏置 br | INT | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | - | 门控加法 |
+| Wx | INT | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | W × x | z/r/g 门输入 |
+| Rh | INT | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | R × h | z/r/g 门输入 |
+| z_pre | INT | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | Wx_z + Rh_z + bx_z + br_z | sigmoid 输入 |
+| z_out | **UINT** | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid(z_pre) | h 更新门控 |
+| r_pre | INT | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | Wx_r + Rh_r + bx_r + br_r | sigmoid 输入 |
+| r_out | **UINT** | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid(r_pre) | g 门乘法输入 |
+| Rh_add_br | INT | 非对称 | `exp2_inv_Rh_add_br_` | `zp_Rh_add_br_` | Rh_g + br_g | g 门中间加法 |
+| rRh | INT | 非对称 | `exp2_inv_rRh_` | `zp_rRh_` | r_out × Rh_add_br | g 门中间乘法 |
+| g_pre | INT | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | Wx_g + rRh + bx_g | tanh 输入 |
+| g_out | INT | 对称 | `exp2_inv_g_out_` | 0 | tanh(g_pre) | h 更新候选值 |
+| old_contrib | INT | 非对称 | `exp2_inv_old_contrib_` | `zp_old_contrib_` | z_out × h_old | h 更新旧状态贡献 |
+| new_contrib | INT | 非对称 | `exp2_inv_new_contrib_` | `zp_new_contrib_` | (1 - z_out) × g_out | h 更新新状态贡献 |
+
+> **说明**：`z_out` 和 `r_out` 使用 **UINT**（无符号整数），因为 sigmoid 输出范围为 [0, 1]，使用无符号类型可以充分利用所有 bit 位。其他参数使用 **INT**（有符号整数）。
 
 ### B. 量化参数详细说明
 
@@ -576,8 +578,8 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 
 **z_out (`gate.z_out`)** = `sigmoid(z_pre)`
 - **浮点范围**：`[0.0, 1.0]`（sigmoid 输出恒正）
-- **典型配置**：UINT8 对称量化，`exp2_inv=8`，scale=1/256
-- **特殊说明**：由于范围为 [0,1]，用 UINT8 可充分利用 8bit
+- **默认配置**：UINT8 非对称量化（`z_out_symmetric_ = false`）
+- **特殊说明**：由于 sigmoid 输出范围 [0,1]，使用 UINT 可充分利用所有 bit 位表示正值范围
 
 **r_out (`gate.r_out`)** = `sigmoid(r_pre)`
 - **配置与 z_out 相同**
