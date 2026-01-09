@@ -317,12 +317,15 @@ fi
 
 # 位宽选项
 BITWIDTHS_8_TO_16=(8 9 10 11 12 13 14 15 16)
+BITWIDTHS_LOW=(2 3 4 5 6 7)                                        # 低位宽测试 (2-7位)
+BITWIDTHS_HIGH=(17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32)   # 高位宽测试 (17-32位)
 BITWIDTHS_STANDARD=(8 16)
 BITWIDTHS_EXTENDED=(4 10 12 24)
 SYMMETRICS=(false true)
 
 # 计算总测试数（动态计算）
-# 第一部分：8-16位完整基准测试 (9)
+# 第一部分A：8-16位完整基准测试 (9)
+# 第一部分B：扩展位宽测试 (6+16=22)
 # 第二部分：GEMM 结果位宽 (4)
 # 第三部分：偏置位宽 (4)
 # 第四部分：中间运算位宽单独测试 (8)
@@ -330,7 +333,7 @@ SYMMETRICS=(false true)
 # 第六部分：对称配置测试 (64)
 # 第七部分：典型组合测试 (20)
 # 第八部分：低/高位宽测试 (8)
-TOTAL_TESTS=$((9 + 4 + 4 + 8 + 12 + 64 + 20 + 8))
+TOTAL_TESTS=$((9 + 22 + 4 + 4 + 8 + 12 + 64 + 20 + 8))
 
 echo "预计测试数: $TOTAL_TESTS"
 echo ""
@@ -347,6 +350,22 @@ set_all_symmetric false false false false false false
 # 测试 8-16 位之间所有位宽（所有算子位宽统一）
 # 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 for bits in "${BITWIDTHS_8_TO_16[@]}"; do
+    run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits
+done
+
+# ==================== 第一部分B：扩展位宽基准测试 ====================
+echo ""
+echo "==================== 第一部分B：扩展位宽基准测试 ===================="
+echo ""
+echo "==================== 第一部分B：扩展位宽基准测试 ====================" >> "$RESULT_FILE"
+
+# 测试低位宽 (4-7 位)
+for bits in "${BITWIDTHS_LOW[@]}"; do
+    run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits
+done
+
+# 测试高位宽 (20, 24, 28, 32 位)
+for bits in "${BITWIDTHS_HIGH[@]}"; do
     run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits
 done
 
