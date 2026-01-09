@@ -675,7 +675,7 @@ LUT 在 `finalize_calibration` 时根据输入输出量化参数生成，支持�
 | 计算步骤 | 代码位置 |
 |----------|----------|
 | 浮点 GRU 前向 | `gru_forward_gpu.cu::PointwiseOperations()` |
-| 量化 GRU 前向 | `gru_forward_gpu_quant.cu::PointwiseOperationsQuantDynamic()` |
+| 量化 GRU 前向 | `gru_forward_gpu_quant.cu::PointwiseOperationsQuant()` |
 | z 门计算 | `gru_forward_gpu_quant.cu::computeZ()` |
 | r 门计算 | `gru_forward_gpu_quant.cu::computeR()` |
 | g 门计算 | `gru_forward_gpu_quant.cu::computeG()` |
