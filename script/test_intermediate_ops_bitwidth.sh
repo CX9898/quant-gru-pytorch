@@ -33,7 +33,7 @@ echo "测试时间: $(date)" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
 # CSV 头
-echo "config_name,Wx,Rh,bx,br,Rh_add_br,rRh,old_contrib,new_contrib,Wx_sym,Rh_sym,Rh_add_br_sym,rRh_sym,old_contrib_sym,new_contrib_sym,mse,cosine_similarity" > "$CSV_FILE"
+echo "config_name,x,h,W,R,Wx,Rh,bx,br,Rh_add_br,rRh,old_contrib,new_contrib,Wx_sym,Rh_sym,Rh_add_br_sym,rRh_sym,old_contrib_sym,new_contrib_sym,mse,cosine_similarity" > "$CSV_FILE"
 
 # 计数器
 TEST_COUNT=0
@@ -44,6 +44,20 @@ FAIL_COUNT=0
 # 阈值设置（必须同时满足才算通过）
 COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
+
+# 函数：修改核心位宽 (x_, h_, W_, R_)
+# 注意：这些都是有符号的 (false)
+modify_core_bitwidth() {
+    local x_bits=$1
+    local h_bits=$2
+    local W_bits=$3
+    local R_bits=$4
+    
+    sed -i "s/x_{[0-9]*, [a-z]*}/x_{${x_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/h_{[0-9]*, [a-z]*}/h_{${h_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/W_{[0-9]*, [a-z]*}/W_{${W_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/R_{[0-9]*, [a-z]*}/R_{${R_bits}, false}/g" "$CONFIG_FILE"
+}
 
 # 函数：修改 GEMM 结果位宽 (Wx_, Rh_)
 # 注意：GEMM 结果应该是有符号的 (false)，因为权重和输入都可能是负的
@@ -102,16 +116,22 @@ modify_intermediate_symmetric() {
 }
 
 # 函数：设置所有位宽配置
+# 参数顺序: x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 set_all_bitwidth() {
-    local Wx=$1
-    local Rh=$2
-    local bx=$3
-    local br=$4
-    local Rh_add_br=$5
-    local rRh=$6
-    local old_contrib=$7
-    local new_contrib=$8
+    local x=$1
+    local h=$2
+    local W=$3
+    local R=$4
+    local Wx=$5
+    local Rh=$6
+    local bx=$7
+    local br=$8
+    local Rh_add_br=$9
+    local rRh=${10}
+    local old_contrib=${11}
+    local new_contrib=${12}
     
+    modify_core_bitwidth $x $h $W $R
     modify_gemm_bitwidth $Wx $Rh
     modify_bias_bitwidth $bx $br
     modify_intermediate_bitwidth $Rh_add_br $rRh $old_contrib $new_contrib
@@ -131,29 +151,34 @@ set_all_symmetric() {
 }
 
 # 函数：编译并运行测试
+# 参数顺序: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym
 run_test() {
     local config_name=$1
-    local Wx=$2
-    local Rh=$3
-    local bx=$4
-    local br=$5
-    local Rh_add_br=$6
-    local rRh=$7
-    local old_contrib=$8
-    local new_contrib=$9
-    local Wx_sym=${10}
-    local Rh_sym=${11}
-    local Rh_add_br_sym=${12}
-    local rRh_sym=${13}
-    local old_contrib_sym=${14}
-    local new_contrib_sym=${15}
+    local x=$2
+    local h=$3
+    local W=$4
+    local R=$5
+    local Wx=$6
+    local Rh=$7
+    local bx=$8
+    local br=$9
+    local Rh_add_br=${10}
+    local rRh=${11}
+    local old_contrib=${12}
+    local new_contrib=${13}
+    local Wx_sym=${14}
+    local Rh_sym=${15}
+    local Rh_add_br_sym=${16}
+    local rRh_sym=${17}
+    local old_contrib_sym=${18}
+    local new_contrib_sym=${19}
     
     TEST_COUNT=$((TEST_COUNT + 1))
     
     echo "[$TEST_COUNT/$TOTAL_TESTS] 测试: $config_name"
     
     # 设置配置
-    set_all_bitwidth $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib
+    set_all_bitwidth $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib
     set_all_symmetric $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
     
     # 重新编译（静默模式）
@@ -163,7 +188,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 编译失败" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -182,7 +207,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 运行失败 - $error_msg" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -231,30 +256,36 @@ run_test() {
     
     # 记录到结果文件
     echo "配置: $config_name" >> "$RESULT_FILE"
-    echo "  位宽: Wx=$Wx, Rh=$Rh, bx=$bx, br=$br" >> "$RESULT_FILE"
-    echo "        Rh_add_br=$Rh_add_br, rRh=$rRh, old_contrib=$old_contrib, new_contrib=$new_contrib" >> "$RESULT_FILE"
+    echo "  核心位宽: x=$x, h=$h, W=$W, R=$R" >> "$RESULT_FILE"
+    echo "  中间位宽: Wx=$Wx, Rh=$Rh, bx=$bx, br=$br" >> "$RESULT_FILE"
+    echo "            Rh_add_br=$Rh_add_br, rRh=$rRh, old_contrib=$old_contrib, new_contrib=$new_contrib" >> "$RESULT_FILE"
     echo "  对称: Wx=$Wx_sym, Rh=$Rh_sym, Rh_add_br=$Rh_add_br_sym, rRh=$rRh_sym" >> "$RESULT_FILE"
     echo "        old_contrib=$old_contrib_sym, new_contrib=$new_contrib_sym" >> "$RESULT_FILE"
     echo "  MSE: $mse, Cosine Similarity: $cos" >> "$RESULT_FILE"
     echo "" >> "$RESULT_FILE"
     
     # 记录到 CSV
-    echo "$config_name,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,$mse,$cos" >> "$CSV_FILE"
+    echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,$mse,$cos" >> "$CSV_FILE"
 }
 
 # 简化版 run_test（位宽测试，对称全部使用默认 false）
+# 参数顺序: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 run_bitwidth_test() {
     local config_name=$1
-    local Wx=$2
-    local Rh=$3
-    local bx=$4
-    local br=$5
-    local Rh_add_br=$6
-    local rRh=$7
-    local old_contrib=$8
-    local new_contrib=$9
+    local x=$2
+    local h=$3
+    local W=$4
+    local R=$5
+    local Wx=$6
+    local Rh=$7
+    local bx=$8
+    local br=$9
+    local Rh_add_br=${10}
+    local rRh=${11}
+    local old_contrib=${12}
+    local new_contrib=${13}
     
-    run_test "$config_name" $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib false false false false false false
+    run_test "$config_name" $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib false false false false false false
 }
 
 # 简化版 run_test（对称测试，位宽全部使用 16 位）
@@ -267,7 +298,8 @@ run_symmetric_test() {
     local old_contrib_sym=$6
     local new_contrib_sym=$7
     
-    run_test "$config_name" 16 16 16 16 16 16 16 16 $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
+    # x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+    run_test "$config_name" 16 16 16 16 16 16 16 16 16 16 16 16 $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
 }
 
 # ==================== 开始测试 ====================
@@ -312,9 +344,10 @@ echo "==================== 第一部分：8-16位完整基准测试 ============
 # 设置默认对称配置
 set_all_symmetric false false false false false false
 
-# 测试 8-16 位之间所有位宽
+# 测试 8-16 位之间所有位宽（所有算子位宽统一）
+# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 for bits in "${BITWIDTHS_8_TO_16[@]}"; do
-    run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits
+    run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits
 done
 
 # ==================== 第二部分：GEMM 结果位宽测试 ====================
@@ -323,11 +356,12 @@ echo "==================== 第二部分：GEMM 结果位宽测试 (Wx_, Rh_) ===
 echo ""
 echo "==================== 第二部分：GEMM 结果位宽测试 ====================" >> "$RESULT_FILE"
 
-# 其他固定为 8 位，测试 GEMM 结果的不同组合
+# 核心位宽固定为 8 位，测试 GEMM 结果的不同组合
+# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 for Wx in "${BITWIDTHS_STANDARD[@]}"; do
     for Rh in "${BITWIDTHS_STANDARD[@]}"; do
         config_name="GEMM_Wx${Wx}_Rh${Rh}"
-        run_bitwidth_test "$config_name" $Wx $Rh 8 8 8 8 8 8
+        run_bitwidth_test "$config_name" 8 8 8 8 $Wx $Rh 8 8 8 8 8 8
     done
 done
 
@@ -337,11 +371,12 @@ echo "==================== 第三部分：偏置位宽测试 (bx_, br_) ========
 echo ""
 echo "==================== 第三部分：偏置位宽测试 ====================" >> "$RESULT_FILE"
 
-# 其他固定为 8 位，测试偏置的不同组合
+# 核心位宽固定为 8 位，测试偏置的不同组合
+# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
 for bx in "${BITWIDTHS_STANDARD[@]}"; do
     for br in "${BITWIDTHS_STANDARD[@]}"; do
         config_name="BIAS_bx${bx}_br${br}"
-        run_bitwidth_test "$config_name" 8 8 $bx $br 8 8 8 8
+        run_bitwidth_test "$config_name" 8 8 8 8 8 8 $bx $br 8 8 8 8
     done
 done
 
@@ -352,14 +387,15 @@ echo ""
 echo "==================== 第四部分：中间运算位宽单独测试 ====================" >> "$RESULT_FILE"
 
 # 每个中间算子单独升级到不同位宽
-run_bitwidth_test "INTER_Rh_add_br_4" 8 8 8 8 4 8 8 8
-run_bitwidth_test "INTER_Rh_add_br_16" 8 8 8 8 16 8 8 8
-run_bitwidth_test "INTER_rRh_4" 8 8 8 8 8 4 8 8
-run_bitwidth_test "INTER_rRh_16" 8 8 8 8 8 16 8 8
-run_bitwidth_test "INTER_old_contrib_4" 8 8 8 8 8 8 4 8
-run_bitwidth_test "INTER_old_contrib_16" 8 8 8 8 8 8 16 8
-run_bitwidth_test "INTER_new_contrib_4" 8 8 8 8 8 8 8 4
-run_bitwidth_test "INTER_new_contrib_16" 8 8 8 8 8 8 8 16
+# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+run_bitwidth_test "INTER_Rh_add_br_4" 8 8 8 8 8 8 8 8 4 8 8 8
+run_bitwidth_test "INTER_Rh_add_br_16" 8 8 8 8 8 8 8 8 16 8 8 8
+run_bitwidth_test "INTER_rRh_4" 8 8 8 8 8 8 8 8 8 4 8 8
+run_bitwidth_test "INTER_rRh_16" 8 8 8 8 8 8 8 8 8 16 8 8
+run_bitwidth_test "INTER_old_contrib_4" 8 8 8 8 8 8 8 8 8 8 4 8
+run_bitwidth_test "INTER_old_contrib_16" 8 8 8 8 8 8 8 8 8 8 16 8
+run_bitwidth_test "INTER_new_contrib_4" 8 8 8 8 8 8 8 8 8 8 8 4
+run_bitwidth_test "INTER_new_contrib_16" 8 8 8 8 8 8 8 8 8 8 8 16
 
 # ==================== 第五部分：关键路径位宽测试 ====================
 echo ""
@@ -367,41 +403,43 @@ echo "==================== 第五部分：关键路径位宽测试 =============
 echo ""
 echo "==================== 第五部分：关键路径位宽测试 ====================" >> "$RESULT_FILE"
 
+# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+
 # GEMM 16 位，中间运算 8 位
-run_bitwidth_test "PATH_GEMM16_INTER8" 16 16 8 8 8 8 8 8
+run_bitwidth_test "PATH_GEMM16_INTER8" 8 8 8 8 16 16 8 8 8 8 8 8
 
 # GEMM 8 位，中间运算 16 位
-run_bitwidth_test "PATH_GEMM8_INTER16" 8 8 8 8 16 16 16 16
+run_bitwidth_test "PATH_GEMM8_INTER16" 8 8 8 8 8 8 8 8 16 16 16 16
 
 # 偏置 16 位，其他 8 位
-run_bitwidth_test "PATH_BIAS16" 8 8 16 16 8 8 8 8
+run_bitwidth_test "PATH_BIAS16" 8 8 8 8 8 8 16 16 8 8 8 8
 
 # 候选门路径 (Rh_add_br -> rRh) 16 位
-run_bitwidth_test "PATH_CANDIDATE_16" 8 16 8 16 16 16 8 8
+run_bitwidth_test "PATH_CANDIDATE_16" 8 8 8 8 8 16 8 16 16 16 8 8
 
 # 输出路径 (old_contrib, new_contrib) 16 位
-run_bitwidth_test "PATH_OUTPUT_16" 8 8 8 8 8 8 16 16
+run_bitwidth_test "PATH_OUTPUT_16" 8 8 8 8 8 8 8 8 8 8 16 16
 
 # Rh 相关路径全 16 位 (Rh, br, Rh_add_br, rRh)
-run_bitwidth_test "PATH_RH_CHAIN_16" 8 16 8 16 16 16 8 8
+run_bitwidth_test "PATH_RH_CHAIN_16" 8 8 8 8 8 16 8 16 16 16 8 8
 
 # 混合：GEMM 16 位 + 输出路径 16 位
-run_bitwidth_test "PATH_GEMM16_OUTPUT16" 16 16 8 8 8 8 16 16
+run_bitwidth_test "PATH_GEMM16_OUTPUT16" 8 8 8 8 16 16 8 8 8 8 16 16
 
-# 全链路高精度
-run_bitwidth_test "PATH_FULL_HIGH_PREC" 16 16 16 16 16 16 16 16
+# 全链路高精度（所有算子 16 位）
+run_bitwidth_test "PATH_FULL_HIGH_PREC" 16 16 16 16 16 16 16 16 16 16 16 16
 
 # 扩展：低位宽路径测试
-run_bitwidth_test "PATH_GEMM4_INTER8" 4 4 4 4 8 8 8 8
+run_bitwidth_test "PATH_GEMM4_INTER8" 4 4 4 4 4 4 4 4 8 8 8 8
 
 # 扩展：12位路径测试
-run_bitwidth_test "PATH_GEMM12_INTER12" 12 12 12 12 12 12 12 12
+run_bitwidth_test "PATH_GEMM12_INTER12" 12 12 12 12 12 12 12 12 12 12 12 12
 
 # 扩展：24位高精度路径测试
-run_bitwidth_test "PATH_GEMM24_INTER24" 24 24 24 24 24 24 24 24
+run_bitwidth_test "PATH_GEMM24_INTER24" 24 24 24 24 24 24 24 24 24 24 24 24
 
-# 扩展：混合位宽测试
-run_bitwidth_test "PATH_GEMM10_INTER16" 10 10 10 10 16 16 16 16
+# 扩展：混合位宽测试（核心 10 位，中间 16 位）
+run_bitwidth_test "PATH_GEMM10_INTER16" 10 10 10 10 10 10 10 10 16 16 16 16
 
 # ==================== 第六部分：对称配置测试 ====================
 echo ""
@@ -440,43 +478,43 @@ echo ""
 echo "==================== 第七部分：典型组合测试 ====================" >> "$RESULT_FILE"
 
 # 典型组合测试
-# 格式: Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name
+# 格式: x h W R Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name
 TYPICAL_CONFIGS=(
     # 全 8 位 + 不同对称配置
-    "8 8 8 8 8 8 8 8 false false false false false false FULL8_ASYM"
-    "8 8 8 8 8 8 8 8 true true true true true true FULL8_SYM"
-    "8 8 8 8 8 8 8 8 true true false false false false FULL8_GEMM_SYM"
-    "8 8 8 8 8 8 8 8 false false false false true true FULL8_OUTPUT_SYM"
+    "8 8 8 8 8 8 8 8 8 8 8 8 false false false false false false FULL8_ASYM"
+    "8 8 8 8 8 8 8 8 8 8 8 8 true true true true true true FULL8_SYM"
+    "8 8 8 8 8 8 8 8 8 8 8 8 true true false false false false FULL8_GEMM_SYM"
+    "8 8 8 8 8 8 8 8 8 8 8 8 false false false false true true FULL8_OUTPUT_SYM"
     
     # 全 16 位 + 不同对称配置
-    "16 16 16 16 16 16 16 16 false false false false false false FULL16_ASYM"
-    "16 16 16 16 16 16 16 16 true true true true true true FULL16_SYM"
-    "16 16 16 16 16 16 16 16 true true false false false false FULL16_GEMM_SYM"
-    "16 16 16 16 16 16 16 16 false false false false true true FULL16_OUTPUT_SYM"
+    "16 16 16 16 16 16 16 16 16 16 16 16 false false false false false false FULL16_ASYM"
+    "16 16 16 16 16 16 16 16 16 16 16 16 true true true true true true FULL16_SYM"
+    "16 16 16 16 16 16 16 16 16 16 16 16 true true false false false false FULL16_GEMM_SYM"
+    "16 16 16 16 16 16 16 16 16 16 16 16 false false false false true true FULL16_OUTPUT_SYM"
     
-    # GEMM 高精度配置
-    "16 16 8 8 8 8 8 8 false false false false false false GEMM16_ONLY"
-    "16 16 8 8 8 8 8 8 true true false false false false GEMM16_SYM"
-    "16 16 16 16 8 8 8 8 false false false false false false GEMM16_BIAS16"
-    "16 16 16 16 16 16 8 8 false false false false false false GEMM16_BIAS16_CAND16"
+    # GEMM 高精度配置（核心 8 位，GEMM 结果 16 位）
+    "8 8 8 8 16 16 8 8 8 8 8 8 false false false false false false GEMM16_ONLY"
+    "8 8 8 8 16 16 8 8 8 8 8 8 true true false false false false GEMM16_SYM"
+    "8 8 8 8 16 16 16 16 8 8 8 8 false false false false false false GEMM16_BIAS16"
+    "8 8 8 8 16 16 16 16 16 16 8 8 false false false false false false GEMM16_BIAS16_CAND16"
     
     # 混合精度配置（部分高精度）
-    "8 16 8 16 16 16 8 8 false false false false false false RH_PATH_16"
-    "16 8 16 8 8 8 16 16 false false false false false false WX_OUTPUT_16"
-    "8 8 16 16 16 16 16 16 false false false false false false BIAS_INTER_16"
-    "16 16 8 8 16 16 16 16 false false false false false false GEMM16_INTER16"
+    "8 8 8 8 8 16 8 16 16 16 8 8 false false false false false false RH_PATH_16"
+    "8 8 8 8 16 8 16 8 8 8 16 16 false false false false false false WX_OUTPUT_16"
+    "8 8 8 8 8 8 16 16 16 16 16 16 false false false false false false BIAS_INTER_16"
+    "8 8 8 8 16 16 8 8 16 16 16 16 false false false false false false GEMM16_INTER16"
     
-    # 扩展位宽组合测试
-    "4 4 4 4 8 8 8 8 false false false false false false LOW4_INTER8"
-    "10 10 10 10 10 10 10 10 false false false false false false FULL10"
-    "12 12 12 12 12 12 12 12 false false false false false false FULL12"
-    "24 24 24 24 24 24 24 24 false false false false false false FULL24"
+    # 扩展位宽组合测试（核心位宽与中间位宽统一）
+    "4 4 4 4 4 4 4 4 8 8 8 8 false false false false false false LOW4_INTER8"
+    "10 10 10 10 10 10 10 10 10 10 10 10 false false false false false false FULL10"
+    "12 12 12 12 12 12 12 12 12 12 12 12 false false false false false false FULL12"
+    "24 24 24 24 24 24 24 24 24 24 24 24 false false false false false false FULL24"
 )
 
 for config in "${TYPICAL_CONFIGS[@]}"; do
-    read -r Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name <<< "$config"
+    read -r x h W R Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name <<< "$config"
     config_name="COMBO_${name}"
-    run_test "$config_name" $Wx $Rh $bx $br $Rh_add_br $rRh $old $new $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_sym $new_sym
+    run_test "$config_name" $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old $new $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_sym $new_sym
 done
 
 # 恢复原始配置
@@ -497,17 +535,17 @@ echo "  通过: $PASS_COUNT" | tee -a "$RESULT_FILE"
 echo "  失败: $FAIL_COUNT" | tee -a "$RESULT_FILE"
 echo "" | tee -a "$RESULT_FILE"
 
-# 按余弦相似度降序排序
+# 按余弦相似度降序排序（mse=第20列, cos=第21列）
 echo "Top 20 最佳配置（按余弦相似度排序）:" | tee -a "$RESULT_FILE"
 echo "" | tee -a "$RESULT_FILE"
 printf "%-4s | %-30s | %-15s | %-12s\n" "排名" "配置名称" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
 printf "%-4s-+-%-30s-+-%-15s-+-%-12s\n" "----" "------------------------------" "---------------" "------------" | tee -a "$RESULT_FILE"
-tail -n +2 "$CSV_FILE" | grep -v "ERROR" | grep -v "N/A" | sort -t',' -k17 -rn | head -20 | nl -w2 | while IFS= read -r line; do
+tail -n +2 "$CSV_FILE" | grep -v "ERROR" | grep -v "N/A" | sort -t',' -k21 -rn | head -20 | nl -w2 | while IFS= read -r line; do
     rank=$(echo "$line" | awk '{print $1}')
     data=$(echo "$line" | cut -f2-)
     name=$(echo "$data" | cut -d',' -f1)
-    mse=$(echo "$data" | cut -d',' -f16)
-    cos=$(echo "$data" | cut -d',' -f17)
+    mse=$(echo "$data" | cut -d',' -f20)
+    cos=$(echo "$data" | cut -d',' -f21)
     printf "%-4s | %-30s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
 done
 
@@ -515,12 +553,12 @@ echo "" | tee -a "$RESULT_FILE"
 echo "Bottom 10 最差配置:" | tee -a "$RESULT_FILE"
 printf "%-4s | %-30s | %-15s | %-12s\n" "排名" "配置名称" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
 printf "%-4s-+-%-30s-+-%-15s-+-%-12s\n" "----" "------------------------------" "---------------" "------------" | tee -a "$RESULT_FILE"
-tail -n +2 "$CSV_FILE" | grep -v "ERROR" | grep -v "N/A" | sort -t',' -k17 -n | head -10 | nl -w2 | while IFS= read -r line; do
+tail -n +2 "$CSV_FILE" | grep -v "ERROR" | grep -v "N/A" | sort -t',' -k21 -n | head -10 | nl -w2 | while IFS= read -r line; do
     rank=$(echo "$line" | awk '{print $1}')
     data=$(echo "$line" | cut -f2-)
     name=$(echo "$data" | cut -d',' -f1)
-    mse=$(echo "$data" | cut -d',' -f16)
-    cos=$(echo "$data" | cut -d',' -f17)
+    mse=$(echo "$data" | cut -d',' -f20)
+    cos=$(echo "$data" | cut -d',' -f21)
     printf "%-4s | %-30s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
 done
 
@@ -532,13 +570,13 @@ echo "" | tee -a "$RESULT_FILE"
 # 统计全 8 位配置的平均值
 echo "全 8 位配置:" | tee -a "$RESULT_FILE"
 tail -n +2 "$CSV_FILE" | grep "^BASELINE_INT8\|^GEMM_Wx8_Rh8\|^BIAS_bx8_br8\|^COMBO_FULL8" | grep -v "ERROR" | while IFS=',' read -r rest; do
-    echo "  $rest" | cut -d',' -f1,16,17
+    echo "  $rest" | cut -d',' -f1,20,21
 done | head -5 | tee -a "$RESULT_FILE"
 
 echo "" | tee -a "$RESULT_FILE"
 echo "全 16 位配置:" | tee -a "$RESULT_FILE"
 tail -n +2 "$CSV_FILE" | grep "^BASELINE_INT16\|^COMBO_FULL16" | grep -v "ERROR" | while IFS=',' read -r rest; do
-    echo "  $rest" | cut -d',' -f1,16,17
+    echo "  $rest" | cut -d',' -f1,20,21
 done | head -5 | tee -a "$RESULT_FILE"
 
 # 显示失败测试列表
@@ -553,13 +591,13 @@ if [ $FAIL_COUNT -gt 0 ]; then
         rank=$(echo "$line" | awk '{print $1}')
         data=$(echo "$line" | cut -f2-)
         name=$(echo "$data" | cut -d',' -f1)
-        mse=$(echo "$data" | cut -d',' -f16)
-        cos=$(echo "$data" | cut -d',' -f17)
+        mse=$(echo "$data" | cut -d',' -f20)
+        cos=$(echo "$data" | cut -d',' -f21)
         printf "%-4s | %-35s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
     done
     # 显示精度不达标的配置
     FAIL_IDX=0
-    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym mse cos; do
+    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym mse cos; do
         if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
             # 检查是否不满足阈值
             cos_fail=false
