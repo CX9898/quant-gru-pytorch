@@ -127,7 +127,8 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
 _OPERATOR_MAP = {
     # 输入
     "input.x": _make_op_info("x_"),
-    "input.h": _make_op_info("h_"),
+    # 隐藏状态输出（每时间步的输出，同时作为下一时间步的输入）
+    "output.h": _make_op_info("h_"),
     # 权重（per-channel）
     "weight.W": _make_op_info("W_", is_per_channel=True),
     "weight.R": _make_op_info("R_", is_per_channel=True),
@@ -728,7 +729,7 @@ class QuantGRU(nn.Module):
         #   - 'minmax': 使用 min/max 范围(快速，无直方图)
         #   - 'sqnr': SQNR 优化搜索最优 scale(基于直方图，高精度)
         #   - 'percentile': 百分位裁剪(基于直方图)
-        self.calibration_method = 'sqnr'
+        self.calibration_method = 'minmax'
 
         # Percentile 配置(仅 calibration_method='percentile' 时使用)
         self.percentile_value = 99.99
@@ -2657,7 +2658,8 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
     
     # 分组显示
     groups = {
-        '输入': ['x', 'h'],
+        '输入': ['x'],
+        '输出': ['h'],
         '权重': ['W', 'R', 'bx', 'br'],
         'GEMM': ['Wx', 'Rh'],
         '门控(pre)': ['z_pre', 'r_pre', 'g_pre'],
@@ -2734,7 +2736,7 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
         print(f"📄 配置来源: {config_file}")
     print("-" * 70)
     print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
-    print(f"          h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+    print(f"  [输出]  h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
     print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
     print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
     print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")

@@ -139,7 +139,12 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
 | `input.x` | 输入序列 x | `is_symmetric: false` |
-| `input.h` | 隐藏状态 h | `is_symmetric: false` |
+
+#### 输出类
+
+| 算子名 | 说明 | 推荐配置 |
+|--------|------|----------|
+| `output.h` | 隐藏状态输出 h | `is_symmetric: false` |
 
 #### 权重类（per-channel 量化）
 
@@ -254,7 +259,7 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
     "default_config": { "disable_quantization": false },
     "operator_config": {
       "input.x":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "input.h":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "output.h":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "weight.W":      { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.R":      { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.bx":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
