@@ -49,9 +49,35 @@ T cur_h_value = old_contrib + new_contrib;
 
 ### 量化/反量化公式
 
-- **量化**：$q = \text{round}(x \times 2^{exp2\_inv}) + zp$
-- **反量化**：$x = (q - zp) \times 2^{-exp2\_inv}$
+**缩放因子 (scale)**
+
+所有缩放因子均采用 2 的负 n 次方形式，便于用高效的移位操作代替乘除：
+
+$$scale = 2^{-exp2\_inv}$$
+
+例如：`exp2_inv=7` 对应 `scale=1/128=0.0078125`
+
+**零点 (zero point)**
+
+零点 `zp` 用于非对称量化，表示浮点零值对应的量化整数值：
+
+- 对称量化：`zp = 0`
+- 非对称量化：`zp = round(-min / scale)`
+
+**通用量化/反量化公式**：
+
+- **量化**：$q = \text{round}(x / scale) + zp$
+- **反量化**：$x = (q - zp) \times scale$
 - 对称量化时 zp=0，简化为 $q = \text{round}(x / scale)$
+
+**本项目采用的 2 的幂次形式**：
+
+由于所有 scale 均为 $2^{-exp2\_inv}$，公式可简化为：
+
+- **量化**：$q = \text{round}(x \times 2^{exp2\_inv}) + zp = \text{round}(x \ll exp2\_inv) + zp$
+- **反量化**：$x = (q - zp) \times 2^{-exp2\_inv} = (q - zp) \gg exp2\_inv$
+
+> **计算优化**：乘以 $2^{exp2\_inv}$ 等价于左移 `exp2_inv` 位，除以 $2^{exp2\_inv}$ 等价于右移 `exp2_inv` 位。这种设计使得定点运算可以完全用整数移位实现，避免浮点乘除，大幅提升计算效率。
 
 ### 量化运算基础推导
 
@@ -430,8 +456,219 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 | z_out | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid 输出 |
 | r_out | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid 输出 |
 | g_out | 对称 | `exp2_inv_g_out_` | 0 | tanh 输出 |
+| Rh_add_br | 非对称 | `exp2_inv_Rh_add_br_` | `zp_Rh_add_br_` | 候选门中间值 |
+| rRh | 非对称 | `exp2_inv_rRh_` | `zp_rRh_` | r × (Rh + br) |
+| old_contrib | 非对称 | `exp2_inv_old_contrib_` | `zp_old_contrib_` | z × h_old |
+| new_contrib | 非对称 | `exp2_inv_new_contrib_` | `zp_new_contrib_` | (1-z) × g |
 
-### B. 代码对应关系
+### B. 量化参数详细说明
+
+本节对每个量化参数进行详细介绍，包括含义、数据类型和典型取值。基础概念（scale、zp、量化公式）请参见前文「量化核心规则说明」章节。
+
+#### B.1 输入/输出参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_x_` | int8_t | 标量 | 输入 x 的缩放因子指数 |
+| `zp_x_` | int32_t | 标量 | 输入 x 的零点 |
+| `exp2_inv_h_` | int8_t | 标量 | 隐藏状态 h 的缩放因子指数 |
+| `zp_h_` | int32_t | 标量 | 隐藏状态 h 的零点 |
+
+**输入 x (`input.x`)**
+- **数据流位置**：GRU 输入层
+- **浮点范围**：通常为 `[-1.0, 1.0]`
+- **典型配置**：INT8 对称量化，`exp2_inv=7`，scale=1/128
+- **特殊说明**：支持动态范围更新（EMA）
+
+**隐藏状态 h (`output.h`)**
+- **数据流位置**：GRU 输出层 / 下一时间步输入
+- **浮点范围**：由 tanh 约束，理论范围 `[-1.0, 1.0]`
+- **典型配置**：INT8 对称量化，`exp2_inv=7`，scale=1/128
+- **特殊说明**：h 既是输入也是输出，共用量化参数
+
+#### B.2 权重参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_W_` | vector\<int8_t\> | per-channel | 输入权重 W 的缩放因子，size = hidden×3 |
+| `exp2_inv_R_` | vector\<int8_t\> | per-channel | 循环权重 R 的缩放因子，size = hidden×3 |
+
+**输入权重 W (`weight.W`)**
+- **维度**：`[hidden×3, input_size]`，按 z/r/g 门顺序排列
+- **量化方式**：对称量化 + per-channel（每行独立 scale）
+- **典型配置**：INT8，`exp2_inv` 通常在 8~12 之间
+- **特殊说明**：per-channel 量化可保留更多精度
+
+**循环权重 R (`weight.R`)**
+- **维度**：`[hidden×3, hidden_size]`
+- **量化方式**：对称量化 + per-channel
+- **典型配置**：与 W 类似
+
+#### B.3 偏置参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_bx_` | vector\<int8_t\> | per-channel | 输入偏置缩放因子，size = hidden×3 |
+| `exp2_inv_br_` | vector\<int8_t\> | per-channel | 循环偏置缩放因子，size = hidden×3 |
+
+**输入偏置 bx (`weight.bx`)** 和 **循环偏置 br (`weight.br`)**
+- **维度**：`[hidden×3]`
+- **量化方式**：对称量化 + per-channel
+- **特殊说明**：偏置零点恒为 0，仅需 scale 参数
+
+#### B.4 GEMM 输出参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_Wx_` | int8_t | 标量 | W×x 矩阵乘结果的缩放因子 |
+| `zp_Wx_` | int32_t | 标量 | W×x 的零点 |
+| `exp2_inv_Rh_` | int8_t | 标量 | R×h 矩阵乘结果的缩放因子 |
+| `zp_Rh_` | int32_t | 标量 | R×h 的零点 |
+
+**Wx 结果 (`matmul.Wx`)**
+- **数据流位置**：W×x GEMM 输出，后续送入门控计算
+- **浮点范围**：取决于权重和输入的分布
+- **典型配置**：INT8，`exp2_inv=6`，scale=1/64
+- **零点补偿**：需要减去 `W_sum × zp_x`
+
+**Rh 结果 (`matmul.Rh`)**
+- **数据流位置**：R×h GEMM 输出，每时间步重新计算
+- **浮点范围**：通常比 Wx 范围小（h 已被约束在 [-1,1]）
+- **典型配置**：INT8，`exp2_inv=8`，scale=1/256
+- **零点补偿**：需要减去 `R_sum × zp_h`
+
+#### B.5 门激活函数参数
+
+##### 预激活参数（激活函数输入）
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_z_pre_` | int8_t | 标量 | z 门 sigmoid 输入的缩放因子 |
+| `zp_z_pre_` | int32_t | 标量 | z 门 sigmoid 输入的零点 |
+| `exp2_inv_r_pre_` | int8_t | 标量 | r 门 sigmoid 输入的缩放因子 |
+| `zp_r_pre_` | int32_t | 标量 | r 门 sigmoid 输入的零点 |
+| `exp2_inv_g_pre_` | int8_t | 标量 | g 门 tanh 输入的缩放因子 |
+| `zp_g_pre_` | int32_t | 标量 | g 门 tanh 输入的零点 |
+
+**z_pre (`gate.z_pre`)** = `Wx_z + Rh_z + bx_z + br_z`
+- **浮点范围**：通常为 `[-4.0, 4.0]`
+- **典型配置**：INT8，`exp2_inv=6`，scale=1/64，覆盖 [-2, 2]
+- **作用**：作为 sigmoid LUT 的输入索引
+
+**r_pre (`gate.r_pre`)** = `Wx_r + Rh_r + bx_r + br_r`
+- **配置与 z_pre 相同**
+
+**g_pre (`gate.g_pre`)** = `Wx_g + r×(Rh_g + br_g) + bx_g`
+- **浮点范围**：通常为 `[-4.0, 4.0]`
+- **典型配置**：INT8，`exp2_inv=6`，scale=1/64
+- **作用**：作为 tanh LUT 的输入索引
+
+##### 后激活参数（激活函数输出）
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_z_out_` | int8_t | 标量 | z 门 sigmoid 输出的缩放因子 |
+| `zp_z_out_` | int32_t | 标量 | z 门 sigmoid 输出的零点 |
+| `exp2_inv_r_out_` | int8_t | 标量 | r 门 sigmoid 输出的缩放因子 |
+| `zp_r_out_` | int32_t | 标量 | r 门 sigmoid 输出的零点 |
+| `exp2_inv_g_out_` | int8_t | 标量 | g 门 tanh 输出的缩放因子 |
+| `zp_g_out_` | int32_t | 标量 | g 门 tanh 输出的零点（对称量化时为 0） |
+
+**z_out (`gate.z_out`)** = `sigmoid(z_pre)`
+- **浮点范围**：`[0.0, 1.0]`（sigmoid 输出恒正）
+- **典型配置**：UINT8 对称量化，`exp2_inv=8`，scale=1/256
+- **特殊说明**：由于范围为 [0,1]，用 UINT8 可充分利用 8bit
+
+**r_out (`gate.r_out`)** = `sigmoid(r_pre)`
+- **配置与 z_out 相同**
+
+**g_out (`gate.g_out`)** = `tanh(g_pre)`
+- **浮点范围**：`[-1.0, 1.0]`（tanh 输出）
+- **典型配置**：INT8 对称量化，`exp2_inv=7`，scale=1/128
+- **特殊说明**：对称量化，zp=0
+
+#### B.6 中间计算参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_Rh_add_br_` | int8_t | 标量 | Rh_g + br_g 的缩放因子 |
+| `zp_Rh_add_br_` | int32_t | 标量 | Rh_g + br_g 的零点 |
+| `exp2_inv_rRh_` | int8_t | 标量 | r × (Rh_g + br_g) 的缩放因子 |
+| `zp_rRh_` | int32_t | 标量 | r × (Rh_g + br_g) 的零点 |
+
+**Rh_add_br (`op.Rh_add_br`)** = `Rh_g + br_g`
+- **数据流位置**：候选门 g 计算的中间步骤
+- **典型配置**：INT8，`exp2_inv=8`，scale=1/256
+- **特殊说明**：该值会与 r 门输出相乘
+
+**rRh (`op.rRh`)** = `r × (Rh_g + br_g)`
+- **数据流位置**：候选门 g 计算的中间步骤
+- **浮点范围**：由于 r∈[0,1]，范围不超过 Rh_add_br
+- **典型配置**：INT8，`exp2_inv=8`，scale=1/256
+
+#### B.7 隐藏状态更新参数
+
+| 参数 | 变量名 | 类型 | 说明 |
+|------|--------|------|------|
+| `exp2_inv_old_contrib_` | int8_t | 标量 | z × h_old 的缩放因子 |
+| `zp_old_contrib_` | int32_t | 标量 | z × h_old 的零点 |
+| `exp2_inv_new_contrib_` | int8_t | 标量 | (1-z) × g 的缩放因子 |
+| `zp_new_contrib_` | int32_t | 标量 | (1-z) × g 的零点 |
+
+**old_contrib (`op.old_contrib`)** = `z × h_old`
+- **数据流位置**：隐藏状态更新公式的第一项
+- **浮点范围**：`[-1.0, 1.0]`（z∈[0,1]，h∈[-1,1]）
+- **典型配置**：INT8，`exp2_inv=8`，scale=1/256
+
+**new_contrib (`op.new_contrib`)** = `(1-z) × g`
+- **数据流位置**：隐藏状态更新公式的第二项
+- **浮点范围**：`[-1.0, 1.0]`（(1-z)∈[0,1]，g∈[-1,1]）
+- **典型配置**：INT8，`exp2_inv=7`，scale=1/128
+
+最终隐藏状态更新：`h_new = old_contrib + new_contrib`
+
+#### B.8 重缩放参数（Device 端）
+
+重缩放参数由 `GRUQuantitativeParameters` 预计算得出，存储在 `QuantGRUReScale` 结构体中，供 GPU Kernel 使用。
+
+**命名约定**：
+
+- `n_A_div_B`：表示 `scale_A / scale_B ≈ 2^(-n)`
+- `exp2_inv_A_div_B`：同上，强调指数形式
+
+**示例**：
+```cpp
+// Wx rescale 到 z_pre
+// rescale_factor = scale_Wx / scale_z_pre = 2^(-exp2_inv_Wx) / 2^(-exp2_inv_z_pre)
+//                = 2^(exp2_inv_z_pre - exp2_inv_Wx)
+// 存储 n = exp2_inv_Wx - exp2_inv_z_pre
+exp2_inv_Wx_div_z_pre_ = exp2_inv_Wx_ - exp2_inv_z_pre_;
+```
+
+**主要重缩放参数**：
+
+| 参数 | 说明 | 计算公式 |
+|------|------|----------|
+| `n_W_mul_x_div_Wx_[i]` | W×x GEMM 输出 rescale | `exp2_inv_W_[i] + exp2_inv_x_ - exp2_inv_Wx_` |
+| `n_R_mul_h_div_Rh_[i]` | R×h GEMM 输出 rescale | `exp2_inv_R_[i] + exp2_inv_h_ - exp2_inv_Rh_` |
+| `exp2_inv_Wx_div_z_pre_` | Wx 到 z_pre | `exp2_inv_Wx_ - exp2_inv_z_pre_` |
+| `exp2_inv_Rh_div_z_pre_` | Rh 到 z_pre | `exp2_inv_Rh_ - exp2_inv_z_pre_` |
+| `n_bx_div_z_[i]` | bx 到 z_pre | `exp2_inv_bx_[i] - exp2_inv_z_pre_` |
+| `one_in_z_scale_` | 常数 1 的量化表示 | `round(1.0 × 2^exp2_inv_z_out) + zp_z_out` |
+
+#### B.9 LUT 查找表
+
+激活函数采用查找表 (LUT) 实现，避免运行时计算 sigmoid/tanh：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `sigmoid_z_lut_` | SigmoidLUT | z 门 sigmoid 查找表 |
+| `sigmoid_r_lut_` | SigmoidLUT | r 门 sigmoid 查找表 |
+| `tanh_g_lut_` | TanhLUT | g 门 tanh 查找表 |
+
+LUT 在 `finalize_calibration` 时根据输入输出量化参数生成，支持分段线性插值以提高精度。
+
+### C. 代码对应关系
 
 | 计算步骤 | 代码位置 |
 |----------|----------|
@@ -444,5 +681,56 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 | 量化参数设置 | `gru_forward_gpu_quant.cu::setRescaleParam()` |
 | 校准接口 | `gru_interface.cc::calibrateGruRanges()` |
 | 参数计算 | `gru_interface.cc::calculateGRUQuantitativeParameters()` |
+| 量化参数结构体定义 | `quantize_ops_helper.h::GRUQuantitativeParameters` |
+| 重缩放参数结构体定义 | `quantize_ops_helper.h::QuantGRUReScale` |
+| LUT 生成 | `quantize_ops_helper.h::generate_piecewise_linear_lut_to_params()` |
+
+### D. JSON 配置文件格式
+
+量化参数可导出为 JSON 格式（AIMET 兼容），文件结构如下：
+
+```json
+{
+  "model_info": {
+    "input_size": 120,
+    "hidden_size": 120,
+    "bias": true
+  },
+  "operators": {
+    "input.x": {
+      "dtype": "INT8",
+      "symmetric": true,
+      "scale": 0.0078125,
+      "zero_point": 0,
+      "real_min": -1.0,
+      "real_max": 0.9921875,
+      "enc_type": "PER_TENSOR",
+      "n": 7
+    },
+    "gate.z_pre": { ... },
+    "gate.z_out": { ... },
+    "weight.W": {
+      "dtype": "INT8",
+      "symmetric": true,
+      "scale": [...],
+      "enc_type": "PER_CHANNEL",
+      "n": [...]
+    }
+  }
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `dtype` | string | 数据类型：INT8, UINT8, INT16 等 |
+| `symmetric` | bool | 是否对称量化 |
+| `scale` | float/array | 缩放因子，per-channel 时为数组 |
+| `zero_point` | int | 零点 |
+| `real_min` | float | 量化可表示的最小浮点值 |
+| `real_max` | float | 量化可表示的最大浮点值 |
+| `enc_type` | string | 编码类型：PER_TENSOR 或 PER_CHANNEL |
+| `n` | int/array | exp2_inv 值，即 scale = 2^(-n) |
 
 ---
