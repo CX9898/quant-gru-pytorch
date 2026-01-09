@@ -1866,7 +1866,6 @@ class QuantGRU(nn.Module):
     def export_quant_params(
         self,
         export_path: str,
-        scale_format: str = "exp2_inv",
         include_weights: bool = False,
         verbose: bool = False
     ) -> None:
@@ -1877,9 +1876,6 @@ class QuantGRU(nn.Module):
         
         Args:
             export_path: 导出文件路径（.json）
-            scale_format: scale 格式选择
-                - "exp2_inv": power-of-2 指数格式（默认，硬件友好）
-                - "float": 浮点 scale 格式（AIMET/ONNX 兼容）
             include_weights: 是否包含量化后的权重（默认 False）
             verbose: 是否打印详情
             
@@ -1887,7 +1883,7 @@ class QuantGRU(nn.Module):
             >>> gru.export_quant_params("quant_params.json", verbose=True)
         """
         # 调用模块级实现
-        _export_quant_params_impl(self, export_path, scale_format, include_weights, verbose)
+        _export_quant_params_impl(self, export_path, include_weights, verbose)
 
     def load_quant_params(self, import_path: str, verbose: bool = False) -> None:
         """
@@ -2090,14 +2086,13 @@ def _bitwidth_to_dtype(bitwidth: int, is_unsigned: bool = False) -> str:
     return f"{prefix}{bitwidth}"
 
 
-def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool = False) -> dict:
+def _build_operators_dict(bitwidth_config, quant_params) -> dict:
     """
     构建统一的 operators 字典（AIMET 兼容格式）
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
         quant_params: GRUQuantitativeParameters 对象
-        use_float_scale: 是否仅使用浮点 scale（不输出 n）
         
     Returns:
         operators 字典（per-channel 权重放在最后）
@@ -2110,7 +2105,7 @@ def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool =
         5. real_min: 量化表示的最小实际值
         6. real_max: 量化表示的最大实际值
         7. enc_type: "PER_TENSOR" 或 "PER_CHANNEL"
-        8. n: exp2_inv 指数（scale = 2^(-n)，仅 exp2_inv 格式）
+        8. n: exp2_inv 指数（scale = 2^(-n)）
     """
     operators = {}
     per_channel_ops = {}  # 存放 per-channel 算子，最后再添加
@@ -2174,8 +2169,8 @@ def _build_operators_dict(bitwidth_config, quant_params, use_float_scale: bool =
         # 7. enc_type
         op_data["enc_type"] = "PER_CHANNEL" if is_per_channel else "PER_TENSOR"
         
-        # 8. n（仅 exp2_inv 格式）
-        if not use_float_scale and n_value is not None:
+        # 8. n (exp2_inv 指数)
+        if n_value is not None:
             op_data["n"] = n_value
         
         # per-channel 放到最后
@@ -2261,14 +2256,10 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
 def _export_quant_params_impl(
     gru: 'QuantGRU',
     export_path: str,
-    scale_format: str = "exp2_inv",
     include_weights: bool = False,
     verbose: bool = False
 ) -> None:
     """导出量化参数到 JSON 文件（内部实现）"""
-    if scale_format not in ("exp2_inv", "float"):
-        raise ValueError(f"无效的 scale_format: '{scale_format}'，可选值: 'exp2_inv', 'float'")
-    
     if not gru.is_calibrated():
         raise RuntimeError(
             "请先完成校准。使用方法：\n"
@@ -2278,11 +2269,8 @@ def _export_quant_params_impl(
             "  4. gru.finalize_calibration()"
         )
     
-    use_float_scale = (scale_format == "float")
-    
     # 构建导出数据（统一的 operators 结构）
     export_data = {
-        "scale_format": scale_format,
         "model_info": {
             "input_size": gru.input_size,
             "hidden_size": gru.hidden_size,
@@ -2290,15 +2278,13 @@ def _export_quant_params_impl(
             "batch_first": gru.batch_first,
             "bidirectional": gru.bidirectional,
         },
-        "operators": _build_operators_dict(
-            gru._bitwidth_config, gru.quant_params, use_float_scale
-        ),
+        "operators": _build_operators_dict(gru._bitwidth_config, gru.quant_params),
     }
     
     # 双向 GRU 导出反向参数
     if gru.bidirectional and gru.quant_params_reverse is not None:
         export_data["operators_reverse"] = _build_operators_dict(
-            gru._bitwidth_config, gru.quant_params_reverse, use_float_scale
+            gru._bitwidth_config, gru.quant_params_reverse
         )
     
     # 可选：导出量化后的权重
@@ -2310,9 +2296,7 @@ def _export_quant_params_impl(
         json.dump(export_data, f, indent=2, ensure_ascii=False)
     
     if verbose:
-        format_desc = "power-of-2 (硬件友好)" if scale_format == "exp2_inv" else "float (ONNX/TensorRT 兼容)"
         print(f"\n[QuantGRU] 量化参数已导出到: {export_path}")
-        print(f"  - Scale 格式: {format_desc}")
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
         print(f"  - 双向: {gru.bidirectional}")
         if include_weights:
