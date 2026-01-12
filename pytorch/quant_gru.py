@@ -145,7 +145,6 @@ _OPERATOR_MAP = {
     "gate.g_pre": _make_op_info("g_pre_"),
     "gate.g_out": _make_op_info("g_out_"),  # Tanh [-1,1]
     # 中间操作
-    "op.Rh_add_br": _make_op_info("Rh_add_br_"),
     "op.rRh": _make_op_info("rRh_"),
     "op.old_contrib": _make_op_info("old_contrib_"),
     "op.new_contrib": _make_op_info("new_contrib_"),
@@ -1571,14 +1570,8 @@ class QuantGRU(nn.Module):
 
             # ========== g 门(New Gate / Candidate)==========
             # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
+            # 注意: Rh_add_br 量化步骤已移除（融合到 weight_hh_linear）
             Rh_add_br = Rh_g + br_g.unsqueeze(0)
-
-            # [与 CUDA 一致] 中间结果量化(从配置读取位宽)
-            Rh_add_br = fake_quantize(Rh_add_br, quant_params.exp2_inv_Rh_add_br_,
-                                      quant_params.zp_Rh_add_br_,
-                                      bitwidth=self._get_bitwidth('Rh_add_br'),
-                                      symmetric=self._get_symmetric('Rh_add_br'))
-
             rRh = r * Rh_add_br
 
             # [与 CUDA 一致] 乘积量化(从配置读取位宽)
@@ -2059,7 +2052,6 @@ def print_quant_params(gru: 'QuantGRU'):
     print(f"  [r_out] exp2_inv={params.exp2_inv_r_out_:3d}, zp={params.zp_r_out_}")
     print(f"  [g_out] exp2_inv={params.exp2_inv_g_out_:3d}, zp={params.zp_g_out_}")
     print("-" * 60)
-    print(f"  [Rh_add_br_g]        exp2_inv={params.exp2_inv_Rh_add_br_:3d}, zp={params.zp_Rh_add_br_}")
     print(f"  [rRh]              exp2_inv={params.exp2_inv_rRh_:3d}, zp={params.zp_rRh_}")
     print(f"  [new_contrib]      exp2_inv={params.exp2_inv_new_contrib_:3d}, zp={params.zp_new_contrib_}")
     print(f"  [old_contrib]      exp2_inv={params.exp2_inv_old_contrib_:3d}, zp={params.zp_old_contrib_}")
@@ -2102,7 +2094,6 @@ def print_quant_ranges(gru: 'QuantGRU'):
     print(f"  [r_out] min={r.min_r_out_:12.6f}, max={r.max_r_out_:12.6f}")
     print(f"  [g_out] min={r.min_g_out_:12.6f}, max={r.max_g_out_:12.6f}")
     print("-" * 60)
-    print(f"  [Rh_add_br_g]        min={r.min_Rh_add_br_g_:12.6f}, max={r.max_Rh_add_br_g_:12.6f}")
     print(f"  [rRh]              min={r.min_rRh_:12.6f}, max={r.max_rRh_:12.6f}")
     print(f"  [new_contrib]      min={r.min_new_contrib_:12.6f}, max={r.max_new_contrib_:12.6f}")
     print(f"  [old_contrib]      min={r.min_old_contrib_:12.6f}, max={r.max_old_contrib_:12.6f}")
@@ -2721,7 +2712,7 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
         'GEMM': ['Wx', 'Rh'],
         '门控(pre)': ['z_pre', 'r_pre', 'g_pre'],
         '门控(out)': ['z_out', 'r_out', 'g_out'],
-        '中间': ['Rh_add_br', 'rRh', 'old_contrib', 'new_contrib'],
+        '中间': ['rRh', 'old_contrib', 'new_contrib'],
     }
     
     print("\n" + "=" * 80)
@@ -2806,9 +2797,7 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     print(f"          r_out: {_format_bitwidth(config.r_out_):6s} ({_format_symmetric(config.r_out_symmetric_)})")
     print(f"          g_pre: {_format_bitwidth(config.g_pre_):6s} ({_format_symmetric(config.g_pre_symmetric_)})")
     print(f"          g_out: {_format_bitwidth(config.g_out_):6s} ({_format_symmetric(config.g_out_symmetric_)})")
-    print(
-        f"  [运算]  Rh+br: {_format_bitwidth(config.Rh_add_br_):6s} ({_format_symmetric(config.Rh_add_br_symmetric_)})")
-    print(f"          rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
+    print(f"  [运算]  rRh: {_format_bitwidth(config.rRh_):6s} ({_format_symmetric(config.rRh_symmetric_)})")
     print(
         f"  [输出]  old: {_format_bitwidth(config.old_contrib_):6s} ({_format_symmetric(config.old_contrib_symmetric_)})")
     print(

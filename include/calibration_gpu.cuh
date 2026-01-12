@@ -251,7 +251,6 @@ struct GRUGPUHistogramCollectors {
     GPUHistogramCollector new_gate_output_hist;
 
     // 中间计算结果
-    GPUHistogramCollector Rh_add_br_g_hist;
     GPUHistogramCollector mul_reset_hidden_hist;
     GPUHistogramCollector mul_new_contribution_hist;
     GPUHistogramCollector mul_old_contribution_hist;
@@ -286,7 +285,6 @@ struct GRUGPUHistogramCollectors {
         update_gate_output_hist = GPUHistogramCollector(cfg);
         reset_gate_output_hist = GPUHistogramCollector(cfg);
         new_gate_output_hist = GPUHistogramCollector(cfg);
-        Rh_add_br_g_hist = GPUHistogramCollector(cfg);
         mul_reset_hidden_hist = GPUHistogramCollector(cfg);
         mul_new_contribution_hist = GPUHistogramCollector(cfg);
         mul_old_contribution_hist = GPUHistogramCollector(cfg);
@@ -478,15 +476,14 @@ void compute_minmax_per_channel_gpu(const float* data_dev, size_t input_size, si
 /**
  * @brief 从 v 张量提取中间值并计算范围（GPU 版本）
  *
- * v 布局: [T, B, H*4] = [z, r, g, Rh_add_br]
- * 在 GPU 上提取并计算 7 个派生量的 min/max，避免大量数据传输
+ * v 布局: [T, B, H*4] = [z, r, g, weight_hh_linear_g]
+ * 在 GPU 上提取并计算 6 个派生量的 min/max，避免大量数据传输
  */
 void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t steps,
                                size_t hidden_size, size_t batch_size,
                                float& min_update_gate_out, float& max_update_gate_out,
                                float& min_reset_gate_out, float& max_reset_gate_out,
                                float& min_new_gate_out, float& max_new_gate_out,
-                               float& min_Rh_add_br, float& max_Rh_add_br,
                                float& min_mul_reset_hidden, float& max_mul_reset_hidden,
                                float& min_mul_new_contribution, float& max_mul_new_contribution,
                                float& min_mul_old_contribution, float& max_mul_old_contribution,

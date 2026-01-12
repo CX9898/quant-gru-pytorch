@@ -53,7 +53,6 @@ struct GRUQuantizationRanges {
     float min_new_gate_output_, max_new_gate_output_;
 
     // 中间计算结果
-    float min_Rh_add_br_g_, max_Rh_add_br_g_;
     float min_mul_reset_hidden_, max_mul_reset_hidden_;
 
     // 最终输出计算
@@ -98,8 +97,6 @@ inline void GRUQuantizationRanges::reset(int hidden) {
     max_reset_gate_output_ = std::numeric_limits<float>::lowest();
     min_new_gate_output_ = std::numeric_limits<float>::max();
     max_new_gate_output_ = std::numeric_limits<float>::lowest();
-    min_Rh_add_br_g_ = std::numeric_limits<float>::max();
-    max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
     min_mul_reset_hidden_ = std::numeric_limits<float>::max();
     max_mul_reset_hidden_ = std::numeric_limits<float>::lowest();
     min_mul_new_contribution_ = std::numeric_limits<float>::max();
@@ -134,7 +131,6 @@ inline void GRUQuantizationRanges::print() const {
     printf("  update_gate_output: [%f, %f]\n", min_update_gate_output_, max_update_gate_output_);
     printf("  reset_gate_output: [%f, %f]\n", min_reset_gate_output_, max_reset_gate_output_);
     printf("  new_gate_output: [%f, %f]\n", min_new_gate_output_, max_new_gate_output_);
-    printf("  Rh_add_br_g: [%f, %f]\n", min_Rh_add_br_g_, max_Rh_add_br_g_);
     printf("  mul_reset_hidden: [%f, %f]\n", min_mul_reset_hidden_, max_mul_reset_hidden_);
     printf("  mul_new_contribution: [%f, %f]\n", min_mul_new_contribution_, max_mul_new_contribution_);
     printf("  mul_old_contribution: [%f, %f]\n", min_mul_old_contribution_, max_mul_old_contribution_);

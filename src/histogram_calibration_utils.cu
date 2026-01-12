@@ -98,7 +98,7 @@ void collectAllHistograms(
         hist_collectors.update_gate_output_hist.collect(update_gate_step, NH);
         hist_collectors.reset_gate_output_hist.collect(reset_gate_step, NH);
         hist_collectors.new_gate_output_hist.collect(new_gate_step, NH);
-        hist_collectors.Rh_add_br_g_hist.collect(Rh_add_br_step, NH);
+        // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
         hist_collectors.mul_reset_hidden_hist.collect(mul_reset_hidden_step, NH);
         hist_collectors.mul_new_contribution_hist.collect(mul_new_contribution_step, NH);
         hist_collectors.mul_old_contribution_hist.collect(mul_old_contribution_step, NH);

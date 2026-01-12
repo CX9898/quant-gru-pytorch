@@ -563,7 +563,6 @@ struct GRUHistogramCollectors {
     HistogramCollector new_gate_output_hist;
 
     // 中间计算结果
-    HistogramCollector Rh_add_br_g_hist;
     HistogramCollector mul_reset_hidden_hist;
     HistogramCollector mul_new_contribution_hist;
     HistogramCollector mul_old_contribution_hist;
@@ -598,7 +597,6 @@ struct GRUHistogramCollectors {
         update_gate_output_hist = HistogramCollector(cfg);
         reset_gate_output_hist = HistogramCollector(cfg);
         new_gate_output_hist = HistogramCollector(cfg);
-        Rh_add_br_g_hist = HistogramCollector(cfg);
         mul_reset_hidden_hist = HistogramCollector(cfg);
         mul_new_contribution_hist = HistogramCollector(cfg);
         mul_old_contribution_hist = HistogramCollector(cfg);

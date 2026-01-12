@@ -102,10 +102,6 @@ struct GRUQuantitativeParameters {
     int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
 
     // -------------------- 中间计算参数 --------------------
-    // 注意：GEMM+bias 融合后，weight_hh_linear 的量化参数统一使用 (shift_weight_hh_linear_, zp_weight_hh_linear_)
-    // 以下参数保留用于兼容性
-    int8_t shift_Rh_add_br_;           ///< [已废弃] 融合后 = shift_weight_hh_linear_
-    int32_t zp_Rh_add_br_;             ///< [已废弃] 融合后 = zp_weight_hh_linear_
     int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
     int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
 
@@ -970,11 +966,12 @@ template <typename T, typename QuantT>
 void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp);
 
 /// @brief GPU 反量化 V 向量（各部分使用不同量化参数）
+/// V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                        int hidden_size, int8_t shift_update_gate, int32_t zp_update_gate, int8_t shift_reset_gate,
-                       int32_t zp_reset_gate, int8_t shift_new_gate, int32_t zp_new_gate, int8_t shift_Rh_add_br,
-                       int32_t zp_Rh_add_br);
+                       int32_t zp_reset_gate, int8_t shift_new_gate, int32_t zp_new_gate, 
+                       int8_t shift_weight_hh_linear, int32_t zp_weight_hh_linear);
 
 /// @brief GPU 量化（统一 int32_t 输出，使用位宽配置）
 void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size,
@@ -1168,8 +1165,6 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("  new_gate_output:    exp2_inv=%2d, zp=%d\n", quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_);
 
     // 中间计算
-    printf("  Rh+br:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_Rh_add_br_,
-           quant_parms.zp_Rh_add_br_);
     printf("  mul_reset_hidden:   exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_reset_hidden_, quant_parms.zp_mul_reset_hidden_);
 
     // 隐状态更新
