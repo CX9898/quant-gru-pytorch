@@ -43,9 +43,12 @@ struct QuantGRUReScaleCPU {
     int32_t zp_x_;
     int32_t zp_h_;
 
-    std::vector<int8_t> n_W_mul_x_div_Wx_;  // size = hidden * 3
+    // Linear 重缩放参数 (GEMM+bias)
+    std::vector<int8_t> n_W_mul_x_div_Wx_;  // W*x 的 per-channel 重缩放移位（到 Wx+bx）
+    std::vector<int8_t> n_bx_div_Wx_;       // bx 的 per-channel 重缩放移位（到 Wx+bx）
     int32_t zp_Wx_;
-    std::vector<int8_t> n_R_mul_h_div_Rh_;  // size = hidden * 3
+    std::vector<int8_t> n_R_mul_h_div_Rh_;  // R*h 的 per-channel 重缩放移位（到 Rh+br）
+    std::vector<int8_t> n_br_div_Rh_;       // br 的 per-channel 重缩放移位（到 Rh+br）
     int32_t zp_Rh_;
 
     // z门

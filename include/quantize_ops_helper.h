@@ -64,15 +64,15 @@ struct GRUQuantitativeParameters {
     std::vector<int8_t> exp2_inv_W_;  ///< 输入权重 W 的缩放因子，size = hidden * 3
     std::vector<int8_t> exp2_inv_R_;  ///< 循环权重 R 的缩放因子，size = hidden * 3
 
-    // -------------------- GEMM 输出参数 --------------------
-    int8_t exp2_inv_Wx_;   ///< W*x 的缩放因子指数
-    int32_t zp_Wx_;        ///< W*x 的零点
-    int8_t exp2_inv_Rh_;   ///< R*h 的缩放因子指数
-    int32_t zp_Rh_;        ///< R*h 的零点
-
     // -------------------- 偏置参数（per-channel）--------------------
     std::vector<int8_t> exp2_inv_bx_;  ///< 输入偏置缩放因子
     std::vector<int8_t> exp2_inv_br_;  ///< 循环偏置缩放因子
+
+    // -------------------- Linear 输出参数 (GEMM+bias) --------------------
+    int8_t exp2_inv_Wx_;   ///< W*x + bx 的缩放因子指数
+    int32_t zp_Wx_;        ///< W*x + bx 的零点
+    int8_t exp2_inv_Rh_;   ///< R*h + br 的缩放因子指数
+    int32_t zp_Rh_;        ///< R*h + br 的零点
 
     // -------------------- 门激活函数输入参数（pre-activation）--------------------
     int8_t exp2_inv_z_pre_;   ///< z 门激活前的缩放因子
@@ -124,11 +124,13 @@ struct QuantGRUReScale {
     int32_t zp_x_;   ///< 输入 x 的零点
     int32_t zp_h_;   ///< 隐状态 h 的零点
 
-    // -------------------- GEMM 重缩放参数 --------------------
-    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x 的 per-channel 重缩放移位
-    int32_t zp_Wx_;                          ///< W*x 的零点
-    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h 的 per-channel 重缩放移位
-    int32_t zp_Rh_;                          ///< R*h 的零点
+    // -------------------- Linear 重缩放参数 (GEMM+bias) --------------------
+    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x 的 per-channel 重缩放移位（到 Wx+bx）
+    dev::vector<int8_t> n_bx_div_Wx_;       ///< bx 的 per-channel 重缩放移位（到 Wx+bx）
+    int32_t zp_Wx_;                          ///< Wx+bx 的零点
+    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h 的 per-channel 重缩放移位（到 Rh+br）
+    dev::vector<int8_t> n_br_div_Rh_;       ///< br 的 per-channel 重缩放移位（到 Rh+br）
+    int32_t zp_Rh_;                          ///< Rh+br 的零点
 
     // -------------------- Z 门参数 --------------------
     int32_t zp_z_pre_;                ///< z 门激活前零点

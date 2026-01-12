@@ -97,21 +97,81 @@ __global__ void quantizedGemmFused(const int32_t *__restrict__ A,  // [M, K] 权
 
     // 写回结果：rshift_round + zp_out + clamp
     if (row < M && col < N) {
-        const int8_t n = shift_per_row[row];
-        int64_t result;
+        const int64_t result = rshift_round(acc, shift_per_row[row]) + zp_out;
 
-        // rshift_round
-        if (n <= 0) {
-            result = acc << (-n);
+        // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
+        C[col * M + row] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
+    }
+}
+
+// 融合 GEMM + bias: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
+// A: [M, K] 权重，列主序
+// B: [K, N] 输入，列主序
+// C: [M, N] 输出，列主序
+// bias: [M] 偏置（per-channel）
+// shift_gemm_per_row: [M] GEMM 的 per-row shift
+// shift_bias_per_row: [M] bias 的 per-row shift
+__global__ void quantizedGemmBiasFused(
+    const int32_t *__restrict__ A,               // [M, K] 权重，列主序
+    const int32_t *__restrict__ B,               // [K, N] 输入，列主序
+    int32_t *__restrict__ C,                     // [M, N] 输出，列主序
+    const int32_t *__restrict__ bias,            // [M] 偏置
+    int M, int N, int K,
+    int32_t zp_B,                                // 输入的 zero-point
+    const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
+    const int8_t *__restrict__ shift_bias_per_row,   // [M] bias per-row shift
+    int32_t zp_out,                              // 输出的 zero-point
+    QuantBitWidth output_bw                      // 输出位宽配置
+) {
+    __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
+
+    const int row = blockIdx.y * TILE_SIZE + threadIdx.y;  // m in [0, M)
+    const int col = blockIdx.x * TILE_SIZE + threadIdx.x;  // n in [0, N)
+
+    int64_t acc = 0;
+
+    const int numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; t++) {
+        // 加载 A tile（列主序：A[k*M + m]）
+        const int aK = t * TILE_SIZE + threadIdx.x;
+        if (row < M && aK < K) {
+            As[threadIdx.y][threadIdx.x] = A[aK * M + row];
         } else {
-            const int64_t offset = static_cast<int64_t>(1) << (n - 1);
-            if (acc >= 0) {
-                result = (acc + offset) >> n;
-            } else {
-                result = -((-acc + offset) >> n);
-            }
+            As[threadIdx.y][threadIdx.x] = 0;
         }
-        result += zp_out;
+
+        // 加载 B tile 并减去 zp_B（列主序：B[n*K + k]）
+        const int bK = t * TILE_SIZE + threadIdx.y;
+        if (col < N && bK < K) {
+            Bs[threadIdx.y][threadIdx.x] = B[col * K + bK] - zp_B;
+        } else {
+            Bs[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        __syncthreads();
+
+#pragma unroll
+        for (int k = 0; k < TILE_SIZE; k++) {
+            acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    // 写回结果：rshift(GEMM, shift_gemm) + rshift(bias, shift_bias) + zp_out
+    if (row < M && col < N) {
+        const int8_t n_gemm = shift_gemm_per_row[row];
+        const int8_t n_bias = shift_bias_per_row[row];
+        const int32_t bias_val = bias[row];
+
+        // 使用 rshift_round 进行 rescale
+        const int64_t gemm_result = rshift_round(acc, n_gemm);
+        const int64_t bias_result = rshift_round(static_cast<int64_t>(bias_val), n_bias);
+
+        // 合并结果
+        const int64_t result = gemm_result + bias_result + zp_out;
 
         // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
         C[col * M + row] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
@@ -920,6 +980,8 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantitativeParameters &parms) {
 
     std::vector<int8_t> n_W_mul_x_div_Wx(channel);
     std::vector<int8_t> n_R_mul_h_div_Rh(channel);
+    std::vector<int8_t> n_bx_div_Wx(channel);  // bias rescale for Linear Wx+bx
+    std::vector<int8_t> n_br_div_Rh(channel);  // bias rescale for Linear Rh+br
 
     // z门
     std::vector<int8_t> n_bx_to_z(channel);
@@ -936,6 +998,8 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantitativeParameters &parms) {
     for (int idx = 0; idx < channel; ++idx) {  // per-channel
         n_W_mul_x_div_Wx[idx] = (parms.exp2_inv_W_[idx] + parms.exp2_inv_x_) - parms.exp2_inv_Wx_;
         n_R_mul_h_div_Rh[idx] = (parms.exp2_inv_R_[idx] + parms.exp2_inv_h_) - parms.exp2_inv_Rh_;
+        n_bx_div_Wx[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_Wx_;  // bias to Linear output
+        n_br_div_Rh[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_Rh_;  // bias to Linear output
 
         // z门
         n_bx_to_z[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_z_pre_;
@@ -955,8 +1019,10 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantitativeParameters &parms) {
     rescale_param_.zp_x_ = parms.zp_x_;
     rescale_param_.zp_h_ = parms.zp_h_;
     h2d(rescale_param_.n_W_mul_x_div_Wx_, n_W_mul_x_div_Wx);
+    h2d(rescale_param_.n_bx_div_Wx_, n_bx_div_Wx);
     rescale_param_.zp_Wx_ = parms.zp_Wx_;
     h2d(rescale_param_.n_R_mul_h_div_Rh_, n_R_mul_h_div_Rh);
+    h2d(rescale_param_.n_br_div_Rh_, n_br_div_Rh);
     rescale_param_.zp_Rh_ = parms.zp_Rh_;
 
     // z门

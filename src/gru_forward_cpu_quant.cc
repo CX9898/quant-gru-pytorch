@@ -305,6 +305,8 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms
 
     std::vector<int8_t> n_W_mul_x_div_Wx(channel);
     std::vector<int8_t> n_R_mul_h_div_Rh(channel);
+    std::vector<int8_t> n_bx_div_Wx(channel);  // bias rescale for Linear Wx+bx
+    std::vector<int8_t> n_br_div_Rh(channel);  // bias rescale for Linear Rh+br
     std::vector<int8_t> n_bx_to_z(channel), n_br_to_z(channel);
     std::vector<int8_t> n_bx_to_r(channel), n_br_to_r(channel);
     std::vector<int8_t> n_br_to_Rh_add_br(channel), n_bx_to_g(channel);
@@ -312,6 +314,8 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms
     for (int idx = 0; idx < channel; ++idx) {
         n_W_mul_x_div_Wx[idx] = (parms.exp2_inv_W_[idx] + parms.exp2_inv_x_) - parms.exp2_inv_Wx_;
         n_R_mul_h_div_Rh[idx] = (parms.exp2_inv_R_[idx] + parms.exp2_inv_h_) - parms.exp2_inv_Rh_;
+        n_bx_div_Wx[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_Wx_;  // bias to Linear output
+        n_br_div_Rh[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_Rh_;  // bias to Linear output
         n_bx_to_z[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_z_pre_;
         n_br_to_z[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_z_pre_;
         n_bx_to_r[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_r_pre_;
@@ -323,8 +327,10 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms
     rescale_param_.zp_x_ = parms.zp_x_;
     rescale_param_.zp_h_ = parms.zp_h_;
     rescale_param_.n_W_mul_x_div_Wx_ = std::move(n_W_mul_x_div_Wx);
+    rescale_param_.n_bx_div_Wx_ = std::move(n_bx_div_Wx);
     rescale_param_.zp_Wx_ = parms.zp_Wx_;
     rescale_param_.n_R_mul_h_div_Rh_ = std::move(n_R_mul_h_div_Rh);
+    rescale_param_.n_br_div_Rh_ = std::move(n_br_div_Rh);
     rescale_param_.zp_Rh_ = parms.zp_Rh_;
 
     rescale_param_.zp_z_pre_ = parms.zp_z_pre_;
