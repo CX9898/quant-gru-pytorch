@@ -91,10 +91,12 @@ struct GRUQuantitativeParameters {
     int32_t zp_g_out_;        ///< g 门激活后的零点
 
     // -------------------- 中间计算参数 --------------------
-    int8_t exp2_inv_Rh_add_br_;   ///< Rh + br 的缩放因子
-    int32_t zp_Rh_add_br_;        ///< Rh + br 的零点
-    int8_t exp2_inv_rRh_;         ///< r * Rh 的缩放因子
-    int32_t zp_rRh_;              ///< r * Rh 的零点
+    // 注意：GEMM+bias 融合后，Rh_add_br 的量化参数与 Rh 相同 (exp2_inv_Rh_, zp_Rh_)
+    // 以下参数保留用于兼容性，但在融合模式下应等于 Rh 的参数
+    int8_t exp2_inv_Rh_add_br_;   ///< [已废弃] Rh + br 的缩放因子，融合后 = exp2_inv_Rh_
+    int32_t zp_Rh_add_br_;        ///< [已废弃] Rh + br 的零点，融合后 = zp_Rh_
+    int8_t exp2_inv_rRh_;         ///< r * Rh_br 的缩放因子
+    int32_t zp_rRh_;              ///< r * Rh_br 的零点
 
     // -------------------- 隐状态更新参数 --------------------
     int8_t exp2_inv_new_contrib_;   ///< (1-z)*g 的缩放因子
@@ -108,90 +110,118 @@ struct GRUQuantitativeParameters {
     SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
 };
 
+// ============================================================================
+// GRU 量化参数结构体（拆分设计）
+// ============================================================================
+//
+// 设计原则：
+//   1. GateQuantParams - 门计算使用的纯标量参数（CPU/GPU 共用）
+//   2. LinearQuantParams - Linear 层 per-channel 参数（CPU/GPU 各自版本）
+//
+// 这样做的好处：
+//   - 类型安全：每个版本使用自己的内存类型
+//   - 职责分离：GEMM 用 linear_params_，门计算用 gate_params_
+//   - 无指针问题：vector 自动管理内存
+//
+// ============================================================================
+
 /**
- * @brief GRU 量化重缩放参数结构体（Device 端）
+ * @brief 门计算量化参数（纯标量，CPU/GPU 共用）
  *
- * 存储 GPU Kernel 运行时所需的预计算重缩放参数。
- * 这些参数从 GRUQuantitativeParameters 计算得出，用于高效的定点运算。
+ * 存储 computeZ/R/G/H 等门计算函数所需的标量参数。
+ * 这些参数不涉及 per-channel 数组，可以安全地在 CPU/GPU 间共享。
  *
  * 命名约定：
  *   - n_A_div_B: 表示 scale_A / scale_B ≈ 2^(-n)，即重缩放移位量
  *   - exp2_inv_A_div_B: 同上，强调指数形式
  *   - zp_xxx: 零点
  */
-struct QuantGRUReScale {
-    // -------------------- 基础零点 --------------------
-    int32_t zp_x_;   ///< 输入 x 的零点
-    int32_t zp_h_;   ///< 隐状态 h 的零点
-
-    // -------------------- Linear 重缩放参数 (GEMM+bias) --------------------
-    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x 的 per-channel 重缩放移位（到 Wx+bx）
-    dev::vector<int8_t> n_bx_div_Wx_;       ///< bx 的 per-channel 重缩放移位（到 Wx+bx）
-    int32_t zp_Wx_;                          ///< Wx+bx 的零点
-    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h 的 per-channel 重缩放移位（到 Rh+br）
-    dev::vector<int8_t> n_br_div_Rh_;       ///< br 的 per-channel 重缩放移位（到 Rh+br）
-    int32_t zp_Rh_;                          ///< Rh+br 的零点
+struct GateQuantParams {
+    // -------------------- Linear 输出零点 --------------------
+    int32_t zp_Wx_;  ///< Wx+bx 的零点（GEMM+bias 融合输出）
+    int32_t zp_Rh_;  ///< Rh+br 的零点（GEMM+bias 融合输出）
+    int32_t zp_h_;   ///< 隐状态 h 的零点（computeH 需要）
 
     // -------------------- Z 门参数 --------------------
     int32_t zp_z_pre_;                ///< z 门激活前零点
     int32_t zp_z_out_;                ///< z 门激活后零点
-    int8_t exp2_inv_Wx_div_z_pre_;    ///< Wx 到 z_pre 的重缩放
-    int8_t exp2_inv_Wx_div_z_;        ///< Wx 到 z 的重缩放
-    int8_t exp2_inv_Rh_div_z_pre_;    ///< Rh 到 z_pre 的重缩放
-    int8_t exp2_inv_Rh_div_z_;        ///< Rh 到 z 的重缩放
-    dev::vector<int8_t> n_bx_div_z_;  ///< bx 到 z 的 per-channel 重缩放
-    dev::vector<int8_t> n_br_div_z_;  ///< br 到 z 的 per-channel 重缩放
+    int8_t exp2_inv_Wx_div_z_pre_;    ///< Wx_bx 到 z_pre 的重缩放
+    int8_t exp2_inv_Rh_div_z_pre_;    ///< Rh_br 到 z_pre 的重缩放
 
     // -------------------- R 门参数 --------------------
     int32_t zp_r_pre_;                ///< r 门激活前零点
     int32_t zp_r_out_;                ///< r 门激活后零点
-    int8_t exp2_inv_Wx_div_r_pre_;    ///< Wx 到 r_pre 的重缩放
-    int8_t exp2_inv_Rh_div_r_pre_;    ///< Rh 到 r_pre 的重缩放
-    dev::vector<int8_t> n_bx_div_r_;  ///< bx 到 r 的 per-channel 重缩放
-    dev::vector<int8_t> n_br_div_r_;  ///< br 到 r 的 per-channel 重缩放
+    int8_t exp2_inv_Wx_div_r_pre_;    ///< Wx_bx 到 r_pre 的重缩放
+    int8_t exp2_inv_Rh_div_r_pre_;    ///< Rh_br 到 r_pre 的重缩放
 
     // -------------------- G 门（候选隐状态）参数 --------------------
-    int32_t zp_g_pre_;                           ///< g 门激活前零点
-    int32_t zp_g_out_;                           ///< g 门激活后零点
-    int8_t n_Rh_div_Rh_add_br_;                  ///< Rh 到 Rh+br 的重缩放
-    int8_t exp2_inv_Rh_div_Rh_add_br_;           ///< 同上（指数形式）
-    dev::vector<int8_t> n_br_div_Rh_add_br_;     ///< br 到 Rh+br 的 per-channel 重缩放
-    int32_t zp_Rh_add_br_;                       ///< Rh+br 的零点
-    int8_t n_r_mul_Rh_add_br_div_rRh_;           ///< r*(Rh+br) 的重缩放
-    int8_t exp2_inv_r_out_mul_h_div_rRh_;        ///< r_out*h 到 rRh 的重缩放
-    int32_t zp_rRh_;                             ///< r*Rh 的零点
-    int8_t n_Wx_div_g_pre_;                      ///< Wx 到 g_pre 的重缩放
-    int8_t exp2_inv_Wx_div_g_pre_;               ///< 同上（指数形式）
-    int8_t n_rRh_div_g_pre_;                     ///< rRh 到 g_pre 的重缩放
-    int8_t exp2_inv_rRh_div_g_pre_;              ///< 同上（指数形式）
-    dev::vector<int8_t> exp2_inv_bx_div_g_pre_;  ///< bx 到 g_pre 的 per-channel 重缩放
+    int32_t zp_g_pre_;                ///< g 门激活前零点
+    int32_t zp_g_out_;                ///< g 门激活后零点
+    int8_t n_r_mul_Rh_div_rRh_;       ///< r*Rh_br 的重缩放
+    int32_t zp_rRh_;                  ///< r*Rh_br 的零点
+    int8_t n_Wx_div_g_pre_;           ///< Wx_bx 到 g_pre 的重缩放
+    int8_t n_rRh_div_g_pre_;          ///< rRh 到 g_pre 的重缩放
 
     // -------------------- 隐状态更新参数 --------------------
-    int32_t one_in_z_scale_;  ///< 常数 1 在 z_out 量化空间的表示: round(1.0 / scale_z_out) + zp_z_out
-
-    int32_t zp_new_contrib_;                   ///< (1-z)*g 的零点
-    int8_t n_z_out_mul_g_div_new_contrib_;     ///< (1-z)*g 的重缩放
-    int32_t zp_old_contrib_;                   ///< z*h 的零点
-    int8_t n_z_mul_h_div_old_contrib_;         ///< z*h 的重缩放
-    int8_t exp2_inv_z_mul_h_div_old_contrib_;  ///< 同上（指数形式）
-    int8_t n_new_contrib_div_h_;               ///< new_contrib 到 h 的重缩放
-    int8_t exp2_inv_new_contrib_div_h_;        ///< 同上（指数形式）
-    int8_t n_old_contrib_div_h_;               ///< old_contrib 到 h 的重缩放
-    int8_t exp2_inv_old_contrib_div_h_;        ///< 同上（指数形式）
+    int32_t one_in_z_scale_;               ///< 常数 1 在 z_out 量化空间的表示
+    int32_t zp_new_contrib_;               ///< (1-z)*g 的零点
+    int8_t n_z_out_mul_g_div_new_contrib_; ///< (1-z)*g 的重缩放
+    int32_t zp_old_contrib_;               ///< z*h 的零点
+    int8_t n_z_mul_h_div_old_contrib_;     ///< z*h 的重缩放
+    int8_t n_new_contrib_div_h_;           ///< new_contrib 到 h 的重缩放
+    int8_t n_old_contrib_div_h_;           ///< old_contrib 到 h 的重缩放
 
     // -------------------- 运行时配置 --------------------
-    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（运行时选择 kernel）
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
 
-    // -------------------- LUT 表--------------------
+    // -------------------- LUT 表 --------------------
     SigmoidLUT sigmoid_z_lut_;  ///< z 门 Sigmoid LUT
     SigmoidLUT sigmoid_r_lut_;  ///< r 门 Sigmoid LUT
     SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
 
 #ifdef DEBUG
-    // -------------------- 调试参数 --------------------
-    GRUQuantitativeParameters test;            ///< 保存完整量化参数用于调试
-    dev::vector<int8_t> exp2_inv_bx_dev_;      ///< Device 端 bx 缩放因子
-    dev::vector<int8_t> exp2_inv_br_dev_;      ///< Device 端 br 缩放因子
+    GRUQuantitativeParameters test;  ///< 保存完整量化参数用于调试
+#endif
+};
+
+/**
+ * @brief Linear 层量化参数（GPU 版本，使用 dev::vector）
+ *
+ * 存储 GEMM+bias 融合计算所需的 per-channel 参数。
+ * 仅在 ComputeWxBx/ComputeRhBr 等 GEMM 函数中使用。
+ */
+struct LinearQuantParamsGPU {
+    int32_t zp_x_;  ///< 输入 x 的零点
+    int32_t zp_h_;  ///< 隐状态 h 的零点
+
+    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x per-channel 重缩放
+    dev::vector<int8_t> n_bx_div_Wx_;       ///< bx per-channel 重缩放
+    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h per-channel 重缩放
+    dev::vector<int8_t> n_br_div_Rh_;       ///< br per-channel 重缩放
+
+#ifdef DEBUG
+    dev::vector<int8_t> exp2_inv_bx_;  ///< bx 缩放因子（调试用）
+    dev::vector<int8_t> exp2_inv_br_;  ///< br 缩放因子（调试用）
+#endif
+};
+
+/**
+ * @brief Linear 层量化参数（CPU 版本，使用 std::vector）
+ *
+ * 与 LinearQuantParamsGPU 结构相同，但使用 std::vector 管理内存。
+ */
+struct LinearQuantParamsCPU {
+    int32_t zp_x_;  ///< 输入 x 的零点
+    int32_t zp_h_;  ///< 隐状态 h 的零点
+
+    std::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x per-channel 重缩放
+    std::vector<int8_t> n_bx_div_Wx_;       ///< bx per-channel 重缩放
+    std::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h per-channel 重缩放
+    std::vector<int8_t> n_br_div_Rh_;       ///< br per-channel 重缩放
+
+#ifdef DEBUG
+    std::vector<int8_t> exp2_inv_bx_;  ///< bx 缩放因子（调试用）
+    std::vector<int8_t> exp2_inv_br_;  ///< br 缩放因子（调试用）
 #endif
 };
 
@@ -199,7 +229,7 @@ struct QuantGRUReScale {
  * @brief 生成分段线性量化查找表并存储到参数中
  *
  * 将 LUT 存储到 GRUQuantitativeParameters 中，避免全局 __constant__ 内存覆盖问题。
- * 在 finalize_calibration 时调用一次，然后在 setRescaleParam 时复制到 QuantGRUReScale。
+ * 在 finalize_calibration 时调用一次，然后在 setRescaleParam 时复制到 GateQuantParams。
  *
  * @param params GRU 量化参数，会被修改以存储生成的 LUT
  */
@@ -413,32 +443,33 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) {
 #endif  // DEBUG_QUANT || DEBUG_QUANT_DETAIL
 
 /**
- * @brief 计算更新门 z = sigmoid(Wx + Rh + bx + br)
+ * @brief 计算更新门 z = sigmoid(Wx_bx + Rh_br)
  * 
- * 模板函数，同时支持 QuantGRUReScale (GPU) 和 QuantGRUReScaleCPU (CPU)
- * @param debug_idx 调试索引，-1 表示不输出调试信息
+ * 使用 GEMM+bias 融合版本：Wx_bx = W*x + bx, Rh_br = R*h + br
+ * 
+ * @param Wx_bx_val  GEMM+bias 融合输出 W*x + bx
+ * @param Rh_br_val  GEMM+bias 融合输出 R*h + br
+ * @param params     门计算参数
+ * @param debug_idx  调试索引，-1 表示不输出调试信息
  */
-template <typename RescaleT>
 __host__ __device__ __forceinline__ 
-int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
-                 int32_t bx_val, int32_t br_val, const RescaleT &rescale,
+int32_t computeZ(int32_t Wx_bx_val, int32_t Rh_br_val, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_z_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_z_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_z_[channel_idx]);
-    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_z_[channel_idx]);
+    // Wx_bx 和 Rh_br 已经包含了 bias，直接重缩放到 z_pre 空间
+    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.exp2_inv_Wx_div_z_pre_);
+    const int32_t Rh_br_shifted = rshift_round(Rh_br_val - params.zp_Rh_, params.exp2_inv_Rh_div_z_pre_);
 
-    const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_z_pre_;
+    const int32_t z_pre_i32 = Wx_bx_shifted + Rh_br_shifted + params.zp_z_pre_;
 
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    const int32_t z = piecewise_linear(z_pre_i32, rescale.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
+    const auto &bw_cfg = params.bitwidth_config_;
+    const int32_t z = piecewise_linear(z_pre_i32, params.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float z_pre_fp = (float)(z_pre_i32 - rescale.zp_z_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_z_pre_);
-        float z_fp = (float)(z - rescale.zp_z_out_) /
-                     (float)(1 << rescale.test.exp2_inv_z_out_);
+        float z_pre_fp = (float)(z_pre_i32 - params.zp_z_pre_) /
+                         (float)(1 << params.test.exp2_inv_z_pre_);
+        float z_fp = (float)(z - params.zp_z_out_) /
+                     (float)(1 << params.test.exp2_inv_z_out_);
         printf("[QUANT_I32] computeZ: z_pre_q=%d, z_pre_fp=%.6f, z_q=%d, z_fp=%.6f\n", 
                z_pre_i32, z_pre_fp, z, z_fp);
     }
@@ -446,10 +477,10 @@ int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val,
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float z_pre_fp = (float)(z_pre_i32 - rescale.zp_z_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_z_pre_);
-        float z_quant_fp = (float)(z - rescale.zp_z_out_) /
-                           (float)(1 << rescale.test.exp2_inv_z_out_);
+        float z_pre_fp = (float)(z_pre_i32 - params.zp_z_pre_) /
+                         (float)(1 << params.test.exp2_inv_z_pre_);
+        float z_quant_fp = (float)(z - params.zp_z_out_) /
+                           (float)(1 << params.test.exp2_inv_z_out_);
         float z_theory = sigmoid_fp(z_pre_fp);
         float error = z_quant_fp - z_theory;
         printf("[Z] idx=%d z_pre_q=%d z_pre_fp=%.4f | z_q=%d z_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -461,29 +492,27 @@ int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val,
 }
 
 /**
- * @brief 计算重置门 r = sigmoid(Wx + Rh + bx + br)
+ * @brief 计算重置门 r = sigmoid(Wx_bx + Rh_br)
+ * 
+ * 使用 GEMM+bias 融合版本：Wx_bx = W*x + bx, Rh_br = R*h + br
  */
-template <typename RescaleT>
 __host__ __device__ __forceinline__ 
-int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
-                 int32_t bx_val, int32_t br_val, const RescaleT &rescale,
+int32_t computeR(int32_t Wx_bx_val, int32_t Rh_br_val, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_r_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_r_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_r_[channel_idx]);
-    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_r_[channel_idx]);
+    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.exp2_inv_Wx_div_r_pre_);
+    const int32_t Rh_br_shifted = rshift_round(Rh_br_val - params.zp_Rh_, params.exp2_inv_Rh_div_r_pre_);
 
-    const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_r_pre_;
+    const int32_t r_pre_i32 = Wx_bx_shifted + Rh_br_shifted + params.zp_r_pre_;
 
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    const int32_t r = piecewise_linear(r_pre_i32, rescale.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
+    const auto &bw_cfg = params.bitwidth_config_;
+    const int32_t r = piecewise_linear(r_pre_i32, params.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float r_pre_fp = (float)(r_pre_i32 - rescale.zp_r_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_r_pre_);
-        float r_fp = (float)(r - rescale.zp_r_out_) /
-                     (float)(1 << rescale.test.exp2_inv_r_out_);
+        float r_pre_fp = (float)(r_pre_i32 - params.zp_r_pre_) /
+                         (float)(1 << params.test.exp2_inv_r_pre_);
+        float r_fp = (float)(r - params.zp_r_out_) /
+                     (float)(1 << params.test.exp2_inv_r_out_);
         printf("[QUANT_I32] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n", 
                r_pre_i32, r_pre_fp, r, r_fp);
     }
@@ -491,10 +520,10 @@ int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val,
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float r_pre_fp = (float)(r_pre_i32 - rescale.zp_r_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_r_pre_);
-        float r_quant_fp = (float)(r - rescale.zp_r_out_) /
-                           (float)(1 << rescale.test.exp2_inv_r_out_);
+        float r_pre_fp = (float)(r_pre_i32 - params.zp_r_pre_) /
+                         (float)(1 << params.test.exp2_inv_r_pre_);
+        float r_quant_fp = (float)(r - params.zp_r_out_) /
+                           (float)(1 << params.test.exp2_inv_r_out_);
         float r_theory = sigmoid_fp(r_pre_fp);
         float error = r_quant_fp - r_theory;
         printf("[R] idx=%d r_pre_q=%d r_pre_fp=%.4f | r_q=%d r_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -506,62 +535,63 @@ int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val,
 }
 
 /**
- * @brief 计算候选门 g = tanh(Wx + r * (Rh + br) + bx)
+ * @brief 计算候选门 g = tanh(Wx_bx + r * Rh_br)
  * 
- * @param Rh_add_br_g [out] 中间结果 Rh + br（用于存储到 v）
+ * 使用 GEMM+bias 融合版本：
+ * - Wx_bx = W*x + bx (对应 g 门的 Wx_g + bx_g)
+ * - Rh_br = R*h + br (对应 g 门的 Rh_g + br_g，已融合，量化参数为 exp2_inv_Rh_, zp_Rh_)
+ * 
+ * 公式推导：g = tanh(Wx_g + bx_g + r * (Rh_g + br_g)) = tanh(Wx_bx_g + r * Rh_br_g)
+ * 
+ * @param Rh_br_g [out] 中间结果，用于存储到 v（训练时反向传播需要）
  */
-template <typename RescaleT>
 __host__ __device__ __forceinline__ 
-int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
-                 int32_t bx_val, int32_t br_val, int32_t r,
-                 const RescaleT &rescale, int32_t &Rh_add_br_g,
+int32_t computeG(int32_t Wx_bx_val, int32_t Rh_br_val, int32_t r,
+                 const GateQuantParams &params, int32_t &Rh_br_g,
                  [[maybe_unused]] int debug_idx = -1) {
-    // 计算 Rh + br
-    Rh_add_br_g = rshift_round(Rh_val - rescale.zp_Rh_, rescale.n_Rh_div_Rh_add_br_) +
-                  rshift_round(br_val, rescale.n_br_div_Rh_add_br_[channel_idx]) +
-                  rescale.zp_Rh_add_br_;
-    Rh_add_br_g = clamp_by_bitwidth(Rh_add_br_g, rescale.bitwidth_config_.Rh_add_br_);
+    // GEMM+bias 融合后，Rh_br_val 就是 R*h + br
+    // 量化参数为 (exp2_inv_Rh_, zp_Rh_)，不需要额外重缩放
+    Rh_br_g = Rh_br_val;
 
-    // 计算 r * (Rh + br)
-    const int64_t r_diff = static_cast<int64_t>(r) - rescale.zp_r_out_;
-    const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale.zp_Rh_add_br_;
-    const int64_t rRh_mul_i64 = r_diff * Rh_add_br_diff;
+    // 计算 r * Rh_br
+    const int64_t r_diff = static_cast<int64_t>(r) - params.zp_r_out_;
+    const int64_t Rh_br_diff = static_cast<int64_t>(Rh_br_g) - params.zp_Rh_;
+    const int64_t rRh_mul_i64 = r_diff * Rh_br_diff;
 
-    int32_t rRh = static_cast<int32_t>(rshift_round(rRh_mul_i64, rescale.n_r_mul_Rh_add_br_div_rRh_)) +
-                  rescale.zp_rRh_;
-    rRh = clamp_by_bitwidth(rRh, rescale.bitwidth_config_.rRh_);
+    int32_t rRh = static_cast<int32_t>(rshift_round(rRh_mul_i64, params.n_r_mul_Rh_div_rRh_)) +
+                  params.zp_rRh_;
+    rRh = clamp_by_bitwidth(rRh, params.bitwidth_config_.rRh_);
 
-    // 计算 g_pre = Wx + rRh + bx
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.n_Wx_div_g_pre_);
-    const int32_t rRh_shifted = rshift_round(rRh - rescale.zp_rRh_, rescale.n_rRh_div_g_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.exp2_inv_bx_div_g_pre_[channel_idx]);
+    // 计算 g_pre = Wx_bx + rRh
+    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.n_Wx_div_g_pre_);
+    const int32_t rRh_shifted = rshift_round(rRh - params.zp_rRh_, params.n_rRh_div_g_pre_);
 
-    const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale.zp_g_pre_;
+    const int32_t g_pre_i32 = Wx_bx_shifted + rRh_shifted + params.zp_g_pre_;
 
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    const int32_t g = piecewise_linear(g_pre_i32, rescale.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
+    const auto &bw_cfg = params.bitwidth_config_;
+    const int32_t g = piecewise_linear(g_pre_i32, params.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float Rh_add_br_fp = (float)(Rh_add_br_g - rescale.zp_Rh_add_br_) /
-                             (float)(1 << rescale.test.exp2_inv_Rh_add_br_);
-        float rRh_fp = (float)(rRh - rescale.zp_rRh_) / 
-                       (float)(1 << rescale.test.exp2_inv_rRh_);
-        float g_pre_fp = (float)(g_pre_i32 - rescale.zp_g_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_g_pre_);
-        float g_fp = (float)(g - rescale.zp_g_out_) /
-                     (float)(1 << rescale.test.exp2_inv_g_out_);
-        printf("[QUANT_I32] computeG: Rh_add_br_fp=%.6f, rRh_fp=%.6f, g_pre_fp=%.6f, g_fp=%.6f\n",
-               Rh_add_br_fp, rRh_fp, g_pre_fp, g_fp);
+        float Rh_br_fp = (float)(Rh_br_g - params.zp_Rh_) /
+                         (float)(1 << params.test.exp2_inv_Rh_);
+        float rRh_fp = (float)(rRh - params.zp_rRh_) / 
+                       (float)(1 << params.test.exp2_inv_rRh_);
+        float g_pre_fp = (float)(g_pre_i32 - params.zp_g_pre_) /
+                         (float)(1 << params.test.exp2_inv_g_pre_);
+        float g_fp = (float)(g - params.zp_g_out_) /
+                     (float)(1 << params.test.exp2_inv_g_out_);
+        printf("[QUANT_I32] computeG: Rh_br_fp=%.6f, rRh_fp=%.6f, g_pre_fp=%.6f, g_fp=%.6f\n",
+               Rh_br_fp, rRh_fp, g_pre_fp, g_fp);
     }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float g_pre_fp = (float)(g_pre_i32 - rescale.zp_g_pre_) /
-                         (float)(1 << rescale.test.exp2_inv_g_pre_);
-        float g_quant_fp = (float)(g - rescale.zp_g_out_) /
-                           (float)(1 << rescale.test.exp2_inv_g_out_);
+        float g_pre_fp = (float)(g_pre_i32 - params.zp_g_pre_) /
+                         (float)(1 << params.test.exp2_inv_g_pre_);
+        float g_quant_fp = (float)(g - params.zp_g_out_) /
+                           (float)(1 << params.test.exp2_inv_g_out_);
         float g_theory = tanh_fp(g_pre_fp);
         float error = g_quant_fp - g_theory;
         printf("[G] idx=%d g_pre_q=%d g_pre_fp=%.4f | g_q=%d g_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -575,49 +605,48 @@ int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val,
 /**
  * @brief 计算隐藏状态 h = z * h_old + (1 - z) * g
  */
-template <typename RescaleT>
 __host__ __device__ __forceinline__ 
-int32_t computeH(int32_t z, int32_t g, int32_t h_old, const RescaleT &rescale,
+int32_t computeH(int32_t z, int32_t g, int32_t h_old, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
     // 计算 old_contrib = z * h_old
-    const int64_t z_diff = static_cast<int64_t>(z) - rescale.zp_z_out_;
-    const int64_t h_diff = static_cast<int64_t>(h_old) - rescale.zp_h_;
+    const int64_t z_diff = static_cast<int64_t>(z) - params.zp_z_out_;
+    const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
     const int64_t old_contrib_mul_i64 = z_diff * h_diff;
 
     int32_t old_contrib = static_cast<int32_t>(
-        rshift_round(old_contrib_mul_i64, rescale.n_z_mul_h_div_old_contrib_)) +
-        rescale.zp_old_contrib_;
-    old_contrib = clamp_by_bitwidth(old_contrib, rescale.bitwidth_config_.old_contrib_);
+        rshift_round(old_contrib_mul_i64, params.n_z_mul_h_div_old_contrib_)) +
+        params.zp_old_contrib_;
+    old_contrib = clamp_by_bitwidth(old_contrib, params.bitwidth_config_.old_contrib_);
 
     // 计算 new_contrib = (1 - z) * g
     // one_minus_diff = one_in_z_scale_ - z（省去中间变量）
-    const int64_t one_minus_diff = static_cast<int64_t>(rescale.one_in_z_scale_) - z;
-    const int64_t g_diff = static_cast<int64_t>(g) - rescale.zp_g_out_;
+    const int64_t one_minus_diff = static_cast<int64_t>(params.one_in_z_scale_) - z;
+    const int64_t g_diff = static_cast<int64_t>(g) - params.zp_g_out_;
     const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
 
     int32_t new_contrib = static_cast<int32_t>(
-        rshift_round(new_contrib_mul_i64, rescale.n_z_out_mul_g_div_new_contrib_)) +
-        rescale.zp_new_contrib_;
-    new_contrib = clamp_by_bitwidth(new_contrib, rescale.bitwidth_config_.new_contrib_);
+        rshift_round(new_contrib_mul_i64, params.n_z_out_mul_g_div_new_contrib_)) +
+        params.zp_new_contrib_;
+    new_contrib = clamp_by_bitwidth(new_contrib, params.bitwidth_config_.new_contrib_);
 
     // 计算 h = old_contrib + new_contrib
     const int32_t h_i32 =
-        rshift_round(old_contrib - rescale.zp_old_contrib_, rescale.n_old_contrib_div_h_) +
-        rshift_round(new_contrib - rescale.zp_new_contrib_, rescale.n_new_contrib_div_h_) +
-        rescale.zp_h_;
+        rshift_round(old_contrib - params.zp_old_contrib_, params.n_old_contrib_div_h_) +
+        rshift_round(new_contrib - params.zp_new_contrib_, params.n_new_contrib_div_h_) +
+        params.zp_h_;
 
-    const int32_t h = clamp_by_bitwidth(h_i32, rescale.bitwidth_config_.h_);
+    const int32_t h = clamp_by_bitwidth(h_i32, params.bitwidth_config_.h_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float z_fp = (float)(z - rescale.zp_z_out_) /
-                     (float)(1 << rescale.test.exp2_inv_z_out_);
-        float g_fp = (float)(g - rescale.zp_g_out_) /
-                     (float)(1 << rescale.test.exp2_inv_g_out_);
-        float h_old_fp = (float)(h_old - rescale.zp_h_) / 
-                         (float)(1 << rescale.test.exp2_inv_h_);
-        float h_fp = (float)(h - rescale.zp_h_) / 
-                     (float)(1 << rescale.test.exp2_inv_h_);
+        float z_fp = (float)(z - params.zp_z_out_) /
+                     (float)(1 << params.test.exp2_inv_z_out_);
+        float g_fp = (float)(g - params.zp_g_out_) /
+                     (float)(1 << params.test.exp2_inv_g_out_);
+        float h_old_fp = (float)(h_old - params.zp_h_) / 
+                         (float)(1 << params.test.exp2_inv_h_);
+        float h_fp = (float)(h - params.zp_h_) / 
+                     (float)(1 << params.test.exp2_inv_h_);
         printf("[QUANT_I32] computeH: z_fp=%.6f, g_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
                z_fp, g_fp, h_old_fp, h_fp);
     }
@@ -625,14 +654,14 @@ int32_t computeH(int32_t z, int32_t g, int32_t h_old, const RescaleT &rescale,
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float z_fp = (float)(z - rescale.zp_z_out_) /
-                     (float)(1 << rescale.test.exp2_inv_z_out_);
-        float g_fp = (float)(g - rescale.zp_g_out_) /
-                     (float)(1 << rescale.test.exp2_inv_g_out_);
-        float h_old_fp = (float)(h_old - rescale.zp_h_) / 
-                         (float)(1 << rescale.test.exp2_inv_h_);
-        float h_quant_fp = (float)(h - rescale.zp_h_) / 
-                           (float)(1 << rescale.test.exp2_inv_h_);
+        float z_fp = (float)(z - params.zp_z_out_) /
+                     (float)(1 << params.test.exp2_inv_z_out_);
+        float g_fp = (float)(g - params.zp_g_out_) /
+                     (float)(1 << params.test.exp2_inv_g_out_);
+        float h_old_fp = (float)(h_old - params.zp_h_) / 
+                         (float)(1 << params.test.exp2_inv_h_);
+        float h_quant_fp = (float)(h - params.zp_h_) / 
+                           (float)(1 << params.test.exp2_inv_h_);
         printf("[H] idx=%d z_fp=%.4f g_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
                debug_idx, z_fp, g_fp, h_old_fp, h, h_quant_fp);
     }
