@@ -35,7 +35,7 @@
 // #define DEBUG
 
 // ============================================================================
-// Part 1: 量化参数结构体定义
+// 量化参数结构体定义
 // ============================================================================
 
 /**
@@ -206,7 +206,7 @@ struct QuantGRUReScale {
 void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params);
 
 // ============================================================================
-// Part 2: CPU/GPU 共用基础运算函数
+// CPU/GPU 共用基础运算函数
 // ============================================================================
 
 /**
@@ -262,7 +262,7 @@ __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
 }
 
 // ============================================================================
-// Part 3: CPU/GPU 共用饱和截断函数
+// CPU/GPU 共用饱和截断函数
 // ============================================================================
 
 /**
@@ -318,7 +318,7 @@ __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, Quant
 }
 
 // ============================================================================
-// Part 4: 分段线性近似函数（CPU/GPU 共用）
+// 分段线性近似函数（CPU/GPU 共用）
 // ============================================================================
 //
 // 【原理】将非线性函数（Sigmoid/Tanh）在每个分段内用线性函数 y = b*x + c 近似
@@ -390,7 +390,259 @@ __host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const 
 }
 
 // ============================================================================
-// Part 5: GPU Kernel 函数声明
+// GRU 门计算模板函数 (CPU/GPU 共用)
+// ============================================================================
+
+// 调试辅助函数
+#if defined(DEBUG_QUANT) || defined(DEBUG_QUANT_DETAIL)
+__host__ __device__ __forceinline__ float sigmoid_fp(float x) {
+#ifdef __CUDA_ARCH__
+    return 1.0f / (1.0f + expf(-x));
+#else
+    return 1.0f / (1.0f + std::exp(-x));
+#endif
+}
+
+__host__ __device__ __forceinline__ float tanh_fp(float x) {
+#ifdef __CUDA_ARCH__
+    return tanhf(x);
+#else
+    return std::tanh(x);
+#endif
+}
+#endif  // DEBUG_QUANT || DEBUG_QUANT_DETAIL
+
+/**
+ * @brief 计算更新门 z = sigmoid(Wx + Rh + bx + br)
+ * 
+ * 模板函数，同时支持 QuantGRUReScale (GPU) 和 QuantGRUReScaleCPU (CPU)
+ * @param debug_idx 调试索引，-1 表示不输出调试信息
+ */
+template <typename RescaleT>
+__host__ __device__ __forceinline__ 
+int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
+                 int32_t bx_val, int32_t br_val, const RescaleT &rescale,
+                 [[maybe_unused]] int debug_idx = -1) {
+    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_z_pre_);
+    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_z_pre_);
+    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_z_[channel_idx]);
+    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_z_[channel_idx]);
+
+    const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_z_pre_;
+
+    const auto &bw_cfg = rescale.bitwidth_config_;
+    const int32_t z = piecewise_linear(z_pre_i32, rescale.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
+
+#ifdef DEBUG_QUANT
+    if (debug_idx == 0) {
+        float z_pre_fp = (float)(z_pre_i32 - rescale.zp_z_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_z_pre_);
+        float z_fp = (float)(z - rescale.zp_z_out_) /
+                     (float)(1 << rescale.test.exp2_inv_z_out_);
+        printf("[QUANT_I32] computeZ: z_pre_q=%d, z_pre_fp=%.6f, z_q=%d, z_fp=%.6f\n", 
+               z_pre_i32, z_pre_fp, z, z_fp);
+    }
+#endif
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float z_pre_fp = (float)(z_pre_i32 - rescale.zp_z_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_z_pre_);
+        float z_quant_fp = (float)(z - rescale.zp_z_out_) /
+                           (float)(1 << rescale.test.exp2_inv_z_out_);
+        float z_theory = sigmoid_fp(z_pre_fp);
+        float error = z_quant_fp - z_theory;
+        printf("[Z] idx=%d z_pre_q=%d z_pre_fp=%.4f | z_q=%d z_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, z_pre_i32, z_pre_fp, z, z_quant_fp, z_theory, error);
+    }
+#endif
+
+    return z;
+}
+
+/**
+ * @brief 计算重置门 r = sigmoid(Wx + Rh + bx + br)
+ */
+template <typename RescaleT>
+__host__ __device__ __forceinline__ 
+int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
+                 int32_t bx_val, int32_t br_val, const RescaleT &rescale,
+                 [[maybe_unused]] int debug_idx = -1) {
+    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_r_pre_);
+    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_r_pre_);
+    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_r_[channel_idx]);
+    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_r_[channel_idx]);
+
+    const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_r_pre_;
+
+    const auto &bw_cfg = rescale.bitwidth_config_;
+    const int32_t r = piecewise_linear(r_pre_i32, rescale.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
+
+#ifdef DEBUG_QUANT
+    if (debug_idx == 0) {
+        float r_pre_fp = (float)(r_pre_i32 - rescale.zp_r_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_r_pre_);
+        float r_fp = (float)(r - rescale.zp_r_out_) /
+                     (float)(1 << rescale.test.exp2_inv_r_out_);
+        printf("[QUANT_I32] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n", 
+               r_pre_i32, r_pre_fp, r, r_fp);
+    }
+#endif
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float r_pre_fp = (float)(r_pre_i32 - rescale.zp_r_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_r_pre_);
+        float r_quant_fp = (float)(r - rescale.zp_r_out_) /
+                           (float)(1 << rescale.test.exp2_inv_r_out_);
+        float r_theory = sigmoid_fp(r_pre_fp);
+        float error = r_quant_fp - r_theory;
+        printf("[R] idx=%d r_pre_q=%d r_pre_fp=%.4f | r_q=%d r_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, r_pre_i32, r_pre_fp, r, r_quant_fp, r_theory, error);
+    }
+#endif
+
+    return r;
+}
+
+/**
+ * @brief 计算候选门 g = tanh(Wx + r * (Rh + br) + bx)
+ * 
+ * @param Rh_add_br_g [out] 中间结果 Rh + br（用于存储到 v）
+ */
+template <typename RescaleT>
+__host__ __device__ __forceinline__ 
+int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, 
+                 int32_t bx_val, int32_t br_val, int32_t r,
+                 const RescaleT &rescale, int32_t &Rh_add_br_g,
+                 [[maybe_unused]] int debug_idx = -1) {
+    // 计算 Rh + br
+    Rh_add_br_g = rshift_round(Rh_val - rescale.zp_Rh_, rescale.n_Rh_div_Rh_add_br_) +
+                  rshift_round(br_val, rescale.n_br_div_Rh_add_br_[channel_idx]) +
+                  rescale.zp_Rh_add_br_;
+    Rh_add_br_g = clamp_by_bitwidth(Rh_add_br_g, rescale.bitwidth_config_.Rh_add_br_);
+
+    // 计算 r * (Rh + br)
+    const int64_t r_diff = static_cast<int64_t>(r) - rescale.zp_r_out_;
+    const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale.zp_Rh_add_br_;
+    const int64_t rRh_mul_i64 = r_diff * Rh_add_br_diff;
+
+    int32_t rRh = static_cast<int32_t>(rshift_round(rRh_mul_i64, rescale.n_r_mul_Rh_add_br_div_rRh_)) +
+                  rescale.zp_rRh_;
+    rRh = clamp_by_bitwidth(rRh, rescale.bitwidth_config_.rRh_);
+
+    // 计算 g_pre = Wx + rRh + bx
+    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.n_Wx_div_g_pre_);
+    const int32_t rRh_shifted = rshift_round(rRh - rescale.zp_rRh_, rescale.n_rRh_div_g_pre_);
+    const int32_t bx_shifted = rshift_round(bx_val, rescale.exp2_inv_bx_div_g_pre_[channel_idx]);
+
+    const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale.zp_g_pre_;
+
+    const auto &bw_cfg = rescale.bitwidth_config_;
+    const int32_t g = piecewise_linear(g_pre_i32, rescale.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
+
+#ifdef DEBUG_QUANT
+    if (debug_idx == 0) {
+        float Rh_add_br_fp = (float)(Rh_add_br_g - rescale.zp_Rh_add_br_) /
+                             (float)(1 << rescale.test.exp2_inv_Rh_add_br_);
+        float rRh_fp = (float)(rRh - rescale.zp_rRh_) / 
+                       (float)(1 << rescale.test.exp2_inv_rRh_);
+        float g_pre_fp = (float)(g_pre_i32 - rescale.zp_g_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_g_pre_);
+        float g_fp = (float)(g - rescale.zp_g_out_) /
+                     (float)(1 << rescale.test.exp2_inv_g_out_);
+        printf("[QUANT_I32] computeG: Rh_add_br_fp=%.6f, rRh_fp=%.6f, g_pre_fp=%.6f, g_fp=%.6f\n",
+               Rh_add_br_fp, rRh_fp, g_pre_fp, g_fp);
+    }
+#endif
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float g_pre_fp = (float)(g_pre_i32 - rescale.zp_g_pre_) /
+                         (float)(1 << rescale.test.exp2_inv_g_pre_);
+        float g_quant_fp = (float)(g - rescale.zp_g_out_) /
+                           (float)(1 << rescale.test.exp2_inv_g_out_);
+        float g_theory = tanh_fp(g_pre_fp);
+        float error = g_quant_fp - g_theory;
+        printf("[G] idx=%d g_pre_q=%d g_pre_fp=%.4f | g_q=%d g_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, g_pre_i32, g_pre_fp, g, g_quant_fp, g_theory, error);
+    }
+#endif
+
+    return g;
+}
+
+/**
+ * @brief 计算隐藏状态 h = z * h_old + (1 - z) * g
+ */
+template <typename RescaleT>
+__host__ __device__ __forceinline__ 
+int32_t computeH(int32_t z, int32_t g, int32_t h_old, const RescaleT &rescale,
+                 [[maybe_unused]] int debug_idx = -1) {
+    // 计算 old_contrib = z * h_old
+    const int64_t z_diff = static_cast<int64_t>(z) - rescale.zp_z_out_;
+    const int64_t h_diff = static_cast<int64_t>(h_old) - rescale.zp_h_;
+    const int64_t old_contrib_mul_i64 = z_diff * h_diff;
+
+    int32_t old_contrib = static_cast<int32_t>(
+        rshift_round(old_contrib_mul_i64, rescale.n_z_mul_h_div_old_contrib_)) +
+        rescale.zp_old_contrib_;
+    old_contrib = clamp_by_bitwidth(old_contrib, rescale.bitwidth_config_.old_contrib_);
+
+    // 计算 new_contrib = (1 - z) * g
+    // one_minus_diff = one_in_z_scale_ - z（省去中间变量）
+    const int64_t one_minus_diff = static_cast<int64_t>(rescale.one_in_z_scale_) - z;
+    const int64_t g_diff = static_cast<int64_t>(g) - rescale.zp_g_out_;
+    const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
+
+    int32_t new_contrib = static_cast<int32_t>(
+        rshift_round(new_contrib_mul_i64, rescale.n_z_out_mul_g_div_new_contrib_)) +
+        rescale.zp_new_contrib_;
+    new_contrib = clamp_by_bitwidth(new_contrib, rescale.bitwidth_config_.new_contrib_);
+
+    // 计算 h = old_contrib + new_contrib
+    const int32_t h_i32 =
+        rshift_round(old_contrib - rescale.zp_old_contrib_, rescale.n_old_contrib_div_h_) +
+        rshift_round(new_contrib - rescale.zp_new_contrib_, rescale.n_new_contrib_div_h_) +
+        rescale.zp_h_;
+
+    const int32_t h = clamp_by_bitwidth(h_i32, rescale.bitwidth_config_.h_);
+
+#ifdef DEBUG_QUANT
+    if (debug_idx == 0) {
+        float z_fp = (float)(z - rescale.zp_z_out_) /
+                     (float)(1 << rescale.test.exp2_inv_z_out_);
+        float g_fp = (float)(g - rescale.zp_g_out_) /
+                     (float)(1 << rescale.test.exp2_inv_g_out_);
+        float h_old_fp = (float)(h_old - rescale.zp_h_) / 
+                         (float)(1 << rescale.test.exp2_inv_h_);
+        float h_fp = (float)(h - rescale.zp_h_) / 
+                     (float)(1 << rescale.test.exp2_inv_h_);
+        printf("[QUANT_I32] computeH: z_fp=%.6f, g_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
+               z_fp, g_fp, h_old_fp, h_fp);
+    }
+#endif
+
+#ifdef DEBUG_QUANT_DETAIL
+    if (debug_idx >= 0 && debug_idx < 3) {
+        float z_fp = (float)(z - rescale.zp_z_out_) /
+                     (float)(1 << rescale.test.exp2_inv_z_out_);
+        float g_fp = (float)(g - rescale.zp_g_out_) /
+                     (float)(1 << rescale.test.exp2_inv_g_out_);
+        float h_old_fp = (float)(h_old - rescale.zp_h_) / 
+                         (float)(1 << rescale.test.exp2_inv_h_);
+        float h_quant_fp = (float)(h - rescale.zp_h_) / 
+                           (float)(1 << rescale.test.exp2_inv_h_);
+        printf("[H] idx=%d z_fp=%.4f g_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
+               debug_idx, z_fp, g_fp, h_old_fp, h, h_quant_fp);
+    }
+#endif
+
+    return h;
+}
+
+// ============================================================================
+// GPU Kernel 函数声明
 // ============================================================================
 
 /**
@@ -427,7 +679,7 @@ void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, c
                                   int out_dim, int batch_size, cudaStream_t stream = 0);
 
 // ============================================================================
-// Part 6: 量化参数校准与量化/反量化函数
+// 量化参数校准与量化/反量化函数
 // ============================================================================
 
 /**
@@ -673,7 +925,7 @@ inline void quantificationPerChannel(const T *src, QuantT *quant_data, size_t in
 }
 
 // ============================================================================
-// Part 7: GPU 量化/反量化 Kernel 声明
+// GPU 量化/反量化 Kernel 声明
 // ============================================================================
 
 namespace dev {
@@ -721,7 +973,7 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_
 }  // namespace dev
 
 // ============================================================================
-// Part 8: 工具函数
+// 工具函数
 // ============================================================================
 
 #include <limits>
@@ -763,7 +1015,7 @@ inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min
 }
 
 // ============================================================================
-// Part 9: LUT 系数量化辅助函数
+// LUT 系数量化辅助函数
 // ============================================================================
 // 这些函数用于 LUT 生成时量化分段线性近似的系数（斜率、截距等）
 
@@ -848,7 +1100,7 @@ inline int8_t determine_shift_bits_int32(float max_val) {
 }
 
 // ============================================================================
-// Part 10: 调试函数
+// 调试函数
 // ============================================================================
 
 /// @brief 打印 GRU 量化参数（调试用）

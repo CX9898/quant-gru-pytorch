@@ -37,92 +37,11 @@ namespace cpu {
 // 可在 CPU 和 GPU 上共用。
 
 // ============================================================================
-// 2. GRU Gate Functions - 与 GPU 版本 gru_forward_gpu_quant.cu 计算一致
+// 2. GRU Gate Functions - 使用 quantize_ops_helper.h 中的模板函数
 // ============================================================================
 
-namespace {
-
-int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
-                 const QuantGRUReScaleCPU &rescale) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_z_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_z_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_z_[channel_idx]);
-    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_z_[channel_idx]);
-
-    const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_z_pre_;
-
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    return piecewise_linear(z_pre_i32, rescale.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
-}
-
-int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
-                 const QuantGRUReScaleCPU &rescale) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_r_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_r_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_r_[channel_idx]);
-    const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_r_[channel_idx]);
-
-    const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_r_pre_;
-
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    return piecewise_linear(r_pre_i32, rescale.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
-}
-
-int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
-                 int32_t r, const QuantGRUReScaleCPU &rescale, int32_t &Rh_add_br_g) {
-    Rh_add_br_g = rshift_round(Rh_val - rescale.zp_Rh_, rescale.n_Rh_div_Rh_add_br_) +
-                  rshift_round(br_val, rescale.n_br_div_Rh_add_br_[channel_idx]) +
-                  rescale.zp_Rh_add_br_;
-    Rh_add_br_g = clamp_by_bitwidth(Rh_add_br_g, rescale.bitwidth_config_.Rh_add_br_);
-
-    const int64_t r_diff = static_cast<int64_t>(r) - rescale.zp_r_out_;
-    const int64_t Rh_add_br_diff = static_cast<int64_t>(Rh_add_br_g) - rescale.zp_Rh_add_br_;
-    const int64_t rRh_mul_i64 = r_diff * Rh_add_br_diff;
-
-    int32_t rRh = static_cast<int32_t>(rshift_round(rRh_mul_i64, rescale.n_r_mul_Rh_add_br_div_rRh_)) +
-                  rescale.zp_rRh_;
-    rRh = clamp_by_bitwidth(rRh, rescale.bitwidth_config_.rRh_);
-
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.n_Wx_div_g_pre_);
-    const int32_t rRh_shifted = rshift_round(rRh - rescale.zp_rRh_, rescale.n_rRh_div_g_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.exp2_inv_bx_div_g_pre_[channel_idx]);
-
-    const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale.zp_g_pre_;
-
-    const auto &bw_cfg = rescale.bitwidth_config_;
-    return piecewise_linear(g_pre_i32, rescale.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
-}
-
-// computeH: 统一使用 int32_t 存储，通过位宽配置控制实际范围
-int32_t computeH(int32_t z, int32_t g, int32_t h_old, const QuantGRUReScaleCPU &rescale) {
-    const int64_t z_diff = static_cast<int64_t>(z) - rescale.zp_z_out_;
-    const int64_t h_diff = static_cast<int64_t>(h_old) - rescale.zp_h_;
-    const int64_t old_contrib_mul_i64 = z_diff * h_diff;
-
-    int32_t old_contrib = static_cast<int32_t>(
-        rshift_round(old_contrib_mul_i64, rescale.n_z_mul_h_div_old_contrib_)) +
-        rescale.zp_old_contrib_;
-    old_contrib = clamp_by_bitwidth(old_contrib, rescale.bitwidth_config_.old_contrib_);
-
-    const int64_t one_minus_diff = static_cast<int64_t>(rescale.one_in_z_scale_) - z;
-    const int64_t g_diff = static_cast<int64_t>(g) - rescale.zp_g_out_;
-    const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
-
-    int32_t new_contrib = static_cast<int32_t>(
-        rshift_round(new_contrib_mul_i64, rescale.n_z_out_mul_g_div_new_contrib_)) +
-        rescale.zp_new_contrib_;
-    new_contrib = clamp_by_bitwidth(new_contrib, rescale.bitwidth_config_.new_contrib_);
-
-    const int32_t h_i32 =
-        rshift_round(old_contrib - rescale.zp_old_contrib_, rescale.n_old_contrib_div_h_) +
-        rshift_round(new_contrib - rescale.zp_new_contrib_, rescale.n_new_contrib_div_h_) +
-        rescale.zp_h_;
-
-    // 根据 h 的位宽配置进行 clamp
-    return clamp_by_bitwidth(h_i32, rescale.bitwidth_config_.h_);
-}
-
-}  // namespace
+// computeZ, computeR, computeG, computeH 现在使用 quantize_ops_helper.h 中的模板函数
+// 通过模板参数 RescaleT 支持 QuantGRUReScale (GPU) 和 QuantGRUReScaleCPU (CPU)
 
 // ============================================================================
 // 3. ForwardPassQuantCPU 实现
