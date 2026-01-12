@@ -43,18 +43,18 @@ class ForwardPassQuant {
              const float zoneout_prob, const int32_t *zoneout_mask);
 
    private:
-    // 内部迭代函数
-    // cur_Wx_: 当前时间步的 W @ x 结果（指向 tmp_Wx_ 的偏移）
-    void IterateInternal(const int32_t *R, const int32_t *bx, const int32_t *br,
+    // 内部迭代函数 (GEMM+bias 融合版本)
+    // cur_Wx_bx: 当前时间步的 W*x + bx 结果（指向 tmp_Wx_bx_ 的偏移）
+    void IterateInternal(const int32_t *R, const int32_t *br,
                          const int32_t *h, int32_t *h_out, int32_t *v,
-                         const int32_t *cur_Wx_, const float zoneout_prob,
+                         const int32_t *cur_Wx_bx, const float zoneout_prob,
                          const int32_t *zoneout_mask);
 
-    // 计算 W @ x GEMM 并 rescale（输出到 tmp_Wx_）
-    void ComputeWx(const int32_t *W, const int32_t *x, int steps);
+    // 计算 W*x + bx GEMM+bias 融合（输出到 tmp_Wx_bx_）
+    void ComputeWxBx(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
 
-    // 计算 R @ h GEMM 并 rescale（输出到 tmp_Rh_）
-    void ComputeRh(const int32_t *R, const int32_t *h);
+    // 计算 R*h + br GEMM+bias 融合（输出到 tmp_Rh_br_）
+    void ComputeRhBr(const int32_t *R, const int32_t *h, const int32_t *br);
 
     // 预分配内存缓冲区
     void EnsureBuffersAllocated(int steps);
@@ -65,14 +65,16 @@ class ForwardPassQuant {
     struct private_data;
     private_data *data_;
 
-    QuantGRUReScale rescale_param_;
+    // -------------------- 量化参数（拆分设计）--------------------
+    GateQuantParams gate_params_;        ///< 门计算参数（纯标量，传给 PointwiseOperationsQuant）
+    LinearQuantParamsGPU linear_params_; ///< Linear 层参数（per-channel，用于 GEMM）
 
     // 预分配的内部缓冲区（使用 dev::vector 自动管理内存）
     int max_steps_ = 0;
 
-    // GEMM 结果（int32，rescale 后供 gate 计算使用）
-    dev::vector<int32_t> tmp_Wx_;  // [hidden*3 * max_steps * batch]
-    dev::vector<int32_t> tmp_Rh_;  // [hidden*3 * batch]
+    // GEMM+bias 融合结果（int32，供 gate 计算使用）
+    dev::vector<int32_t> tmp_Wx_bx_;  // [hidden*3 * max_steps * batch] W*x + bx
+    dev::vector<int32_t> tmp_Rh_br_;  // [hidden*3 * batch] R*h + br
 
     // 权重和常量（预计算）
     dev::vector<int64_t> W_sum_mul_x_zp_;  // [hidden*3]
