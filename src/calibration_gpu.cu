@@ -563,13 +563,13 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
     cudaStreamSynchronize(stream);
 
     // 收集直方图（使用 collect 函数，与 AIMET 行为一致：支持多批次范围扩展）
-    collectors.z_out_hist.collect(z_out_dev.data(), total_size, stream);
-    collectors.r_out_hist.collect(r_out_dev.data(), total_size, stream);
-    collectors.g_out_hist.collect(g_out_dev.data(), total_size, stream);
+    collectors.update_gate_output_hist.collect(z_out_dev.data(), total_size, stream);
+    collectors.reset_gate_output_hist.collect(r_out_dev.data(), total_size, stream);
+    collectors.new_gate_output_hist.collect(g_out_dev.data(), total_size, stream);
     collectors.Rh_add_br_g_hist.collect(Rh_add_br_dev.data(), total_size, stream);
-    collectors.rRh_hist.collect(rRh_dev.data(), total_size, stream);
-    collectors.new_contrib_hist.collect(new_contrib_dev.data(), total_size, stream);
-    collectors.old_contrib_hist.collect(old_contrib_dev.data(), total_size, stream);
+    collectors.mul_reset_hidden_hist.collect(rRh_dev.data(), total_size, stream);
+    collectors.mul_new_contribution_hist.collect(new_contrib_dev.data(), total_size, stream);
+    collectors.mul_old_contribution_hist.collect(old_contrib_dev.data(), total_size, stream);
 }
 
 void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collectors,
@@ -1709,34 +1709,34 @@ void compute_minmax_per_channel_gpu(const float* data_dev, size_t input_size, si
 
 void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t steps,
                                size_t hidden_size, size_t batch_size,
-                               float& min_z_out, float& max_z_out,
-                               float& min_r_out, float& max_r_out,
-                               float& min_g_out, float& max_g_out,
+                               float& min_update_gate_out, float& max_update_gate_out,
+                               float& min_reset_gate_out, float& max_reset_gate_out,
+                               float& min_new_gate_out, float& max_new_gate_out,
                                float& min_Rh_add_br, float& max_Rh_add_br,
-                               float& min_rRh, float& max_rRh,
-                               float& min_new_contrib, float& max_new_contrib,
-                               float& min_old_contrib, float& max_old_contrib,
+                               float& min_mul_reset_hidden, float& max_mul_reset_hidden,
+                               float& min_mul_new_contribution, float& max_mul_new_contribution,
+                               float& min_mul_old_contribution, float& max_mul_old_contribution,
                                cudaStream_t stream) {
     const size_t total_size = steps * batch_size * hidden_size;
     if (total_size == 0) return;
     
     // 分配临时 GPU 缓冲区
-    dev::vector<float> z_out_dev(total_size);
-    dev::vector<float> r_out_dev(total_size);
-    dev::vector<float> g_out_dev(total_size);
+    dev::vector<float> update_gate_out_dev(total_size);
+    dev::vector<float> reset_gate_out_dev(total_size);
+    dev::vector<float> new_gate_out_dev(total_size);
     dev::vector<float> Rh_add_br_dev(total_size);
-    dev::vector<float> rRh_dev(total_size);
-    dev::vector<float> new_contrib_dev(total_size);
-    dev::vector<float> old_contrib_dev(total_size);
+    dev::vector<float> mul_reset_hidden_dev(total_size);
+    dev::vector<float> mul_new_contribution_dev(total_size);
+    dev::vector<float> mul_old_contribution_dev(total_size);
     
     // 在 GPU 上提取并计算所有门值
     const int threads = 256;
     const int blocks = (total_size + threads - 1) / threads;
     
     extract_gate_values_kernel<<<blocks, threads, 0, stream>>>(
-        v_dev, h_dev, z_out_dev.data(), r_out_dev.data(), g_out_dev.data(), 
-        Rh_add_br_dev.data(), rRh_dev.data(), new_contrib_dev.data(), 
-        old_contrib_dev.data(), 
+        v_dev, h_dev, update_gate_out_dev.data(), reset_gate_out_dev.data(), new_gate_out_dev.data(), 
+        Rh_add_br_dev.data(), mul_reset_hidden_dev.data(), mul_new_contribution_dev.data(), 
+        mul_old_contribution_dev.data(), 
         static_cast<int>(steps), static_cast<int>(batch_size), 
         static_cast<int>(hidden_size));
     
@@ -1746,33 +1746,33 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
     // 计算 minmax 并更新范围
     float new_min, new_max;
     
-    compute_minmax(z_out_dev.data(), total_size, new_min, new_max);
-    min_z_out = std::min(min_z_out, new_min);
-    max_z_out = std::max(max_z_out, new_max);
+    compute_minmax(update_gate_out_dev.data(), total_size, new_min, new_max);
+    min_update_gate_out = std::min(min_update_gate_out, new_min);
+    max_update_gate_out = std::max(max_update_gate_out, new_max);
     
-    compute_minmax(r_out_dev.data(), total_size, new_min, new_max);
-    min_r_out = std::min(min_r_out, new_min);
-    max_r_out = std::max(max_r_out, new_max);
+    compute_minmax(reset_gate_out_dev.data(), total_size, new_min, new_max);
+    min_reset_gate_out = std::min(min_reset_gate_out, new_min);
+    max_reset_gate_out = std::max(max_reset_gate_out, new_max);
     
-    compute_minmax(g_out_dev.data(), total_size, new_min, new_max);
-    min_g_out = std::min(min_g_out, new_min);
-    max_g_out = std::max(max_g_out, new_max);
+    compute_minmax(new_gate_out_dev.data(), total_size, new_min, new_max);
+    min_new_gate_out = std::min(min_new_gate_out, new_min);
+    max_new_gate_out = std::max(max_new_gate_out, new_max);
     
     compute_minmax(Rh_add_br_dev.data(), total_size, new_min, new_max);
     min_Rh_add_br = std::min(min_Rh_add_br, new_min);
     max_Rh_add_br = std::max(max_Rh_add_br, new_max);
     
-    compute_minmax(rRh_dev.data(), total_size, new_min, new_max);
-    min_rRh = std::min(min_rRh, new_min);
-    max_rRh = std::max(max_rRh, new_max);
+    compute_minmax(mul_reset_hidden_dev.data(), total_size, new_min, new_max);
+    min_mul_reset_hidden = std::min(min_mul_reset_hidden, new_min);
+    max_mul_reset_hidden = std::max(max_mul_reset_hidden, new_max);
     
-    compute_minmax(new_contrib_dev.data(), total_size, new_min, new_max);
-    min_new_contrib = std::min(min_new_contrib, new_min);
-    max_new_contrib = std::max(max_new_contrib, new_max);
+    compute_minmax(mul_new_contribution_dev.data(), total_size, new_min, new_max);
+    min_mul_new_contribution = std::min(min_mul_new_contribution, new_min);
+    max_mul_new_contribution = std::max(max_mul_new_contribution, new_max);
     
-    compute_minmax(old_contrib_dev.data(), total_size, new_min, new_max);
-    min_old_contrib = std::min(min_old_contrib, new_min);
-    max_old_contrib = std::max(max_old_contrib, new_max);
+    compute_minmax(mul_old_contribution_dev.data(), total_size, new_min, new_max);
+    min_mul_old_contribution = std::min(min_mul_old_contribution, new_min);
+    max_mul_old_contribution = std::max(max_mul_old_contribution, new_max);
 }
 
 }  // namespace gpu_hist
@@ -1824,17 +1824,17 @@ void updateGRUQuantizationRangesGPU(
     gpu_hist::compute_minmax_per_step_gpu(
         Rh_add_br, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, stream);
     
-    // z 门预激活值（全局极值）
+    // update gate 预激活值（全局极值）
     gpu_hist::compute_minmax_per_step_gpu(
-        z_pres, time_steps, NH, quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, stream);
+        z_pres, time_steps, NH, quant_ranges.min_update_gate_input_, quant_ranges.max_update_gate_input_, stream);
     
-    // r 门预激活值（全局极值）
+    // reset gate 预激活值（全局极值）
     gpu_hist::compute_minmax_per_step_gpu(
-        r_pres, time_steps, NH, quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, stream);
+        r_pres, time_steps, NH, quant_ranges.min_reset_gate_input_, quant_ranges.max_reset_gate_input_, stream);
     
-    // g 门预激活值（全局极值）
+    // new gate 预激活值（全局极值）
     gpu_hist::compute_minmax_per_step_gpu(
-        g_pres, time_steps, NH, quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, stream);
+        g_pres, time_steps, NH, quant_ranges.min_new_gate_input_, quant_ranges.max_new_gate_input_, stream);
     
     // =====================================================================
     // 2. Per-channel 范围：使用 GPU 批量 kernel
@@ -1862,13 +1862,13 @@ void updateGRUQuantizationRangesGPU(
     
     gpu_hist::update_ranges_from_v_gpu(
         h, v, time_steps, hidden_size, batch_size,
-        quant_ranges.min_z_out_, quant_ranges.max_z_out_,
-        quant_ranges.min_r_out_, quant_ranges.max_r_out_,
-        quant_ranges.min_g_out_, quant_ranges.max_g_out_,
+        quant_ranges.min_update_gate_output_, quant_ranges.max_update_gate_output_,
+        quant_ranges.min_reset_gate_output_, quant_ranges.max_reset_gate_output_,
+        quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_,
         quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
-        quant_ranges.min_rRh_, quant_ranges.max_rRh_,
-        quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_,
-        quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_,
+        quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_,
+        quant_ranges.min_mul_new_contribution_, quant_ranges.max_mul_new_contribution_,
+        quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_,
         stream);
 }
 

@@ -31,94 +31,94 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
 
     // 辅助 lambda：简化单值校准调用
     auto calibrateSingle = [](const char* name, QuantBitWidth bw, bool symmetric,
-                              float min_val, float max_val, int8_t& exp2_inv, int32_t& zp) {
+                              float min_val, float max_val, int8_t& shift, int32_t& zp) {
         float aligned_min, aligned_max;
-        calibrateQuantParams(min_val, max_val, bw, symmetric, aligned_min, aligned_max, exp2_inv, zp, name);
+        calibrateQuantParams(min_val, max_val, bw, symmetric, aligned_min, aligned_max, shift, zp, name);
     };
 
     // 输入 x 和隐藏状态 h
     calibrateSingle("scale_x", bitwidth_config.x_, bitwidth_config.x_symmetric_,
                     quant_ranges.min_x_, quant_ranges.max_x_,
-                    quant_params.exp2_inv_x_, quant_params.zp_x_);
+                    quant_params.shift_x_, quant_params.zp_x_);
     calibrateSingle("scale_h", bitwidth_config.h_, bitwidth_config.h_symmetric_,
                     quant_ranges.min_h_, quant_ranges.max_h_,
-                    quant_params.exp2_inv_h_, quant_params.zp_h_);
+                    quant_params.shift_h_, quant_params.zp_h_);
 
     // 权重 W/R 和偏置 bx/br（per-channel）
     const int channel_size = quant_ranges.hidden_ * 3;
-    quant_params.exp2_inv_W_.resize(channel_size);
-    quant_params.exp2_inv_R_.resize(channel_size);
-    quant_params.exp2_inv_bx_.resize(channel_size);
-    quant_params.exp2_inv_br_.resize(channel_size);
+    quant_params.shift_W_.resize(channel_size);
+    quant_params.shift_R_.resize(channel_size);
+    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_br_.resize(channel_size);
 
     for (int c = 0; c < channel_size; ++c) {
         float aligned_min, aligned_max;
         int32_t zp_tmp;
         calibrateQuantParams(quant_ranges.min_W_[c], quant_ranges.max_W_[c], bitwidth_config.W_,
                              bitwidth_config.W_symmetric_, aligned_min, aligned_max,
-                             quant_params.exp2_inv_W_[c], zp_tmp);
+                             quant_params.shift_W_[c], zp_tmp);
         calibrateQuantParams(quant_ranges.min_R_[c], quant_ranges.max_R_[c], bitwidth_config.R_,
                              bitwidth_config.R_symmetric_, aligned_min, aligned_max,
-                             quant_params.exp2_inv_R_[c], zp_tmp);
+                             quant_params.shift_R_[c], zp_tmp);
         calibrateQuantParams(quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], bitwidth_config.bx_,
                              bitwidth_config.bx_symmetric_, aligned_min, aligned_max,
-                             quant_params.exp2_inv_bx_[c], zp_tmp);
+                             quant_params.shift_bx_[c], zp_tmp);
         calibrateQuantParams(quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_,
                              bitwidth_config.br_symmetric_, aligned_min, aligned_max,
-                             quant_params.exp2_inv_br_[c], zp_tmp);
+                             quant_params.shift_br_[c], zp_tmp);
     }
 
-    // GEMM 输出
-    calibrateSingle("scale_Wx", bitwidth_config.Wx_, bitwidth_config.Wx_symmetric_,
+    // Linear 输出 (GEMM+bias)
+    calibrateSingle("scale_weight_ih_linear", bitwidth_config.weight_ih_linear_, bitwidth_config.weight_ih_linear_symmetric_,
                     quant_ranges.min_Wx_, quant_ranges.max_Wx_,
-                    quant_params.exp2_inv_Wx_, quant_params.zp_Wx_);
-    calibrateSingle("scale_Rh", bitwidth_config.Rh_, bitwidth_config.Rh_symmetric_,
+                    quant_params.shift_weight_ih_linear_, quant_params.zp_weight_ih_linear_);
+    calibrateSingle("scale_weight_hh_linear", bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
                     quant_ranges.min_Rh_, quant_ranges.max_Rh_,
-                    quant_params.exp2_inv_Rh_, quant_params.zp_Rh_);
+                    quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
 
     // 门激活输入
-    calibrateSingle("scale_z_pre", bitwidth_config.z_pre_, bitwidth_config.z_pre_symmetric_,
-                    quant_ranges.min_z_pre_, quant_ranges.max_z_pre_,
-                    quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_);
-    calibrateSingle("scale_r_pre", bitwidth_config.r_pre_, bitwidth_config.r_pre_symmetric_,
-                    quant_ranges.min_r_pre_, quant_ranges.max_r_pre_,
-                    quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_);
-    calibrateSingle("scale_g_pre", bitwidth_config.g_pre_, bitwidth_config.g_pre_symmetric_,
-                    quant_ranges.min_g_pre_, quant_ranges.max_g_pre_,
-                    quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_);
+    calibrateSingle("scale_update_gate_input", bitwidth_config.update_gate_input_, bitwidth_config.update_gate_input_symmetric_,
+                    quant_ranges.min_update_gate_input_, quant_ranges.max_update_gate_input_,
+                    quant_params.shift_update_gate_input_, quant_params.zp_update_gate_input_);
+    calibrateSingle("scale_reset_gate_input", bitwidth_config.reset_gate_input_, bitwidth_config.reset_gate_input_symmetric_,
+                    quant_ranges.min_reset_gate_input_, quant_ranges.max_reset_gate_input_,
+                    quant_params.shift_reset_gate_input_, quant_params.zp_reset_gate_input_);
+    calibrateSingle("scale_new_gate_input", bitwidth_config.new_gate_input_, bitwidth_config.new_gate_input_symmetric_,
+                    quant_ranges.min_new_gate_input_, quant_ranges.max_new_gate_input_,
+                    quant_params.shift_new_gate_input_, quant_params.zp_new_gate_input_);
 
     // 激活函数输出（确保最小范围）
     constexpr float MIN_ACTIVATION_RANGE = 0.5f;
     auto calibrateWithMinRange = [&](const char* name, QuantBitWidth bw, bool symmetric,
-                                     float min_val, float max_val, int8_t& exp2_inv, int32_t& zp) {
+                                     float min_val, float max_val, int8_t& shift, int32_t& zp) {
         ensureMinRange(min_val, max_val, MIN_ACTIVATION_RANGE, name);
         float aligned_min, aligned_max;
-        calibrateQuantParams(min_val, max_val, bw, symmetric, aligned_min, aligned_max, exp2_inv, zp, name);
+        calibrateQuantParams(min_val, max_val, bw, symmetric, aligned_min, aligned_max, shift, zp, name);
     };
 
-    calibrateWithMinRange("scale_z_out", bitwidth_config.z_out_, bitwidth_config.z_out_symmetric_,
-                          quant_ranges.min_z_out_, quant_ranges.max_z_out_,
-                          quant_params.exp2_inv_z_out_, quant_params.zp_z_out_);
-    calibrateWithMinRange("scale_r_out", bitwidth_config.r_out_, bitwidth_config.r_out_symmetric_,
-                          quant_ranges.min_r_out_, quant_ranges.max_r_out_,
-                          quant_params.exp2_inv_r_out_, quant_params.zp_r_out_);
-    calibrateWithMinRange("scale_g_out", bitwidth_config.g_out_, bitwidth_config.g_out_symmetric_,
-                          quant_ranges.min_g_out_, quant_ranges.max_g_out_,
-                          quant_params.exp2_inv_g_out_, quant_params.zp_g_out_);
+    calibrateWithMinRange("scale_update_gate_output", bitwidth_config.update_gate_output_, bitwidth_config.update_gate_output_symmetric_,
+                          quant_ranges.min_update_gate_output_, quant_ranges.max_update_gate_output_,
+                          quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_);
+    calibrateWithMinRange("scale_reset_gate_output", bitwidth_config.reset_gate_output_, bitwidth_config.reset_gate_output_symmetric_,
+                          quant_ranges.min_reset_gate_output_, quant_ranges.max_reset_gate_output_,
+                          quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_);
+    calibrateWithMinRange("scale_new_gate_output", bitwidth_config.new_gate_output_, bitwidth_config.new_gate_output_symmetric_,
+                          quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_,
+                          quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_);
 
-    // 中间计算
-    calibrateSingle("scale_Rh_add_br", bitwidth_config.Rh_add_br_, bitwidth_config.Rh_add_br_symmetric_,
+    // 中间计算 (Rh_add_br 已废弃，融合后等价于 weight_hh_linear，使用其位宽配置)
+    calibrateSingle("scale_Rh_add_br", bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
                     quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
-                    quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_);
-    calibrateSingle("scale_rRh", bitwidth_config.rRh_, bitwidth_config.rRh_symmetric_,
-                    quant_ranges.min_rRh_, quant_ranges.max_rRh_,
-                    quant_params.exp2_inv_rRh_, quant_params.zp_rRh_);
-    calibrateSingle("scale_new_contrib", bitwidth_config.new_contrib_, bitwidth_config.new_contrib_symmetric_,
-                    quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_,
-                    quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_);
-    calibrateSingle("scale_old_contrib", bitwidth_config.old_contrib_, bitwidth_config.old_contrib_symmetric_,
-                    quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_,
-                    quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_);
+                    quant_params.shift_Rh_add_br_, quant_params.zp_Rh_add_br_);
+    calibrateSingle("scale_mul_reset_hidden", bitwidth_config.mul_reset_hidden_, bitwidth_config.mul_reset_hidden_symmetric_,
+                    quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_,
+                    quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_);
+    calibrateSingle("scale_mul_new_contribution", bitwidth_config.mul_new_contribution_, bitwidth_config.mul_new_contribution_symmetric_,
+                    quant_ranges.min_mul_new_contribution_, quant_ranges.max_mul_new_contribution_,
+                    quant_params.shift_mul_new_contribution_, quant_params.zp_mul_new_contribution_);
+    calibrateSingle("scale_mul_old_contribution", bitwidth_config.mul_old_contribution_, bitwidth_config.mul_old_contribution_symmetric_,
+                    quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_,
+                    quant_params.shift_mul_old_contribution_, quant_params.zp_mul_old_contribution_);
 
     // 生成 LUT 并存储到参数中
     generate_piecewise_linear_lut_to_params(quant_params);
@@ -208,21 +208,21 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
                         const GRUQuantitativeParameters &quant_parms, int32_t *W_quant,
                         int32_t *R_quant, int32_t *bx_quant, int32_t *br_quant) {
     // 显式创建dev::vector以避免临时对象问题
-    dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    dev::vector<int8_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    dev::vector<int8_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+    dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
+    dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
+    dev::vector<int8_t> shift_bx_dev(quant_parms.shift_bx_);
+    dev::vector<int8_t> shift_br_dev(quant_parms.shift_br_);
 
     // 统一 int32_t 输出，使用 clamp_by_bitwidth 限制到实际位宽
     const auto &bw_cfg = quant_parms.bitwidth_config_;
     dev::quantificationPerChannelBitwidth(W, W_quant, input_size, 3 * hidden_size, 
-                                           exp2_inv_W_dev, bw_cfg.W_);
+                                           shift_W_dev, bw_cfg.W_);
     dev::quantificationPerChannelBitwidth(R, R_quant, hidden_size, 3 * hidden_size, 
-                                           exp2_inv_R_dev, bw_cfg.R_);
+                                           shift_R_dev, bw_cfg.R_);
     dev::quantificationPerChannelBitwidth(bx, bx_quant, 1, 3 * hidden_size, 
-                                           exp2_inv_bx_dev, bw_cfg.bx_);
+                                           shift_bx_dev, bw_cfg.bx_);
     dev::quantificationPerChannelBitwidth(br, br_quant, 1, 3 * hidden_size, 
-                                           exp2_inv_br_dev, bw_cfg.br_);
+                                           shift_br_dev, bw_cfg.br_);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -248,7 +248,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     // 所有激活值使用 int32_t 存储，通过 clamp_by_bitwidth 限制到实际位宽
     const auto &bw_cfg = quant_parms.bitwidth_config_;
     dev::vector<int32_t> x_quant(x_size);
-    dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.exp2_inv_x_, 
+    dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.shift_x_, 
                                  quant_parms.zp_x_, bw_cfg.x_);
 
     dev::vector<int32_t> h_quant((time_steps + 1) * batch_size * hidden_size);
@@ -259,7 +259,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     if (h0 != nullptr) {
         // 如果提供了初始状态，直接量化到 h_quant[0]
         dev::quantificationBitwidth(h0, h_quant.data(), batch_size * hidden_size, 
-                                     quant_parms.exp2_inv_h_, quant_parms.zp_h_, bw_cfg.h_);
+                                     quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
     }
 
     dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size *
@@ -277,15 +277,15 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
                 nullptr);
 
     dev::dequantification(h_quant.data(), h, (time_steps + 1) * batch_size * hidden_size,
-                          quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+                          quant_parms.shift_h_, quant_parms.zp_h_);
 
     // 如果v不为nullptr，反量化v并输出
     if (v != nullptr) {
         dev::dequantificationV(v_quant_dev.data(), v, time_steps, batch_size, hidden_size,
-                               quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_,
-                               quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_,
-                               quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_,
-                               quant_parms.exp2_inv_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+                               quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_,
+                               quant_parms.shift_reset_gate_output_, quant_parms.zp_reset_gate_output_,
+                               quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_,
+                               quant_parms.shift_Rh_add_br_, quant_parms.zp_Rh_add_br_);
     }
 
     // 同步 CUDA 操作
@@ -317,7 +317,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     // 量化输入序列
     std::vector<int32_t> x_quant(x_size);
     for (std::size_t i = 0; i < x_size; i++) {
-        x_quant[i] = quantize(x[i], quant_parms.exp2_inv_x_, quant_parms.zp_x_, bw_cfg.x_);
+        x_quant[i] = quantize(x[i], quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
     }
 
     // 分配隐藏状态缓冲区
@@ -331,11 +331,11 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     // 如果提供了初始状态，量化到 h_quant[0]
     if (h0 != nullptr) {
         for (int i = 0; i < batch_size * hidden_size; i++) {
-            h_quant[i] = quantize(h0[i], quant_parms.exp2_inv_h_, quant_parms.zp_h_, bw_cfg.h_);
+            h_quant[i] = quantize(h0[i], quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
         }
     }
 
-    // 分配中间值缓冲区（v: z, r, g, Rh_add_br）
+    // 分配中间值缓冲区（v: update_gate, reset_gate, new_gate, weight_hh_linear_g）
     std::vector<int32_t> v_quant(time_steps * batch_size * hidden_size * 4);
 
     // 创建 CPU 版本的 ForwardPassQuantCPU
@@ -348,7 +348,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 
     // 反量化隐藏状态输出
     for (std::size_t i = 0; i < h_total_size; i++) {
-        h[i] = dequantize(h_quant[i], quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+        h[i] = dequantize(h_quant[i], quant_parms.shift_h_, quant_parms.zp_h_);
     }
 
     // 如果需要中间值，反量化 v
@@ -358,18 +358,18 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
             for (int b = 0; b < batch_size; b++) {
                 for (int j = 0; j < hidden_size; j++) {
                     const int base_idx = (t * batch_size + b) * hidden_size * 4 + j;
-                    // v[0] = z, v[1] = r, v[2] = g, v[3] = Rh_add_br
+                    // v[0] = update_gate, v[1] = reset_gate, v[2] = new_gate, v[3] = weight_hh_linear_g
                     v[base_idx + hidden_size * 0] = dequantize(
-                        v_quant[base_idx + hidden_size * 0], quant_parms.exp2_inv_z_out_,
-                        quant_parms.zp_z_out_);
+                        v_quant[base_idx + hidden_size * 0], quant_parms.shift_update_gate_output_,
+                        quant_parms.zp_update_gate_output_);
                     v[base_idx + hidden_size * 1] = dequantize(
-                        v_quant[base_idx + hidden_size * 1], quant_parms.exp2_inv_r_out_,
-                        quant_parms.zp_r_out_);
+                        v_quant[base_idx + hidden_size * 1], quant_parms.shift_reset_gate_output_,
+                        quant_parms.zp_reset_gate_output_);
                     v[base_idx + hidden_size * 2] = dequantize(
-                        v_quant[base_idx + hidden_size * 2], quant_parms.exp2_inv_g_out_,
-                        quant_parms.zp_g_out_);
+                        v_quant[base_idx + hidden_size * 2], quant_parms.shift_new_gate_output_,
+                        quant_parms.zp_new_gate_output_);
                     v[base_idx + hidden_size * 3] = dequantize(
-                        v_quant[base_idx + hidden_size * 3], quant_parms.exp2_inv_Rh_add_br_,
+                        v_quant[base_idx + hidden_size * 3], quant_parms.shift_Rh_add_br_,
                         quant_parms.zp_Rh_add_br_);
                 }
             }
@@ -392,14 +392,14 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     for (int k = 0; k < input_size; k++) {
         for (int m = 0; m < hidden3; m++) {
             int idx = k * hidden3 + m;
-            W_quant[idx] = quantize(W[idx], quant_parms.exp2_inv_W_[m], 0, bw_cfg.W_);
+            W_quant[idx] = quantize(W[idx], quant_parms.shift_W_[m], 0, bw_cfg.W_);
         }
     }
 
     for (int k = 0; k < hidden_size; k++) {
         for (int m = 0; m < hidden3; m++) {
             int idx = k * hidden3 + m;
-            R_quant[idx] = quantize(R[idx], quant_parms.exp2_inv_R_[m], 0, bw_cfg.R_);
+            R_quant[idx] = quantize(R[idx], quant_parms.shift_R_[m], 0, bw_cfg.R_);
         }
     }
 
@@ -407,8 +407,8 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     std::vector<int32_t> bx_quant(hidden3);
     std::vector<int32_t> br_quant(hidden3);
     for (int m = 0; m < hidden3; m++) {
-        bx_quant[m] = quantize(bx[m], quant_parms.exp2_inv_bx_[m], 0, bw_cfg.bx_);
-        br_quant[m] = quantize(br[m], quant_parms.exp2_inv_br_[m], 0, bw_cfg.br_);
+        bx_quant[m] = quantize(bx[m], quant_parms.shift_bx_[m], 0, bw_cfg.bx_);
+        br_quant[m] = quantize(br[m], quant_parms.shift_br_[m], 0, bw_cfg.br_);
     }
 
     // 调用量化权重版本
@@ -476,16 +476,16 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
     convert_collector(cpu_collectors.h_hist, gpu_collectors.h_hist);
     convert_collector(cpu_collectors.Wx_hist, gpu_collectors.Wx_hist);
     convert_collector(cpu_collectors.Rh_hist, gpu_collectors.Rh_hist);
-    convert_collector(cpu_collectors.z_pre_hist, gpu_collectors.z_pre_hist);
-    convert_collector(cpu_collectors.r_pre_hist, gpu_collectors.r_pre_hist);
-    convert_collector(cpu_collectors.g_pre_hist, gpu_collectors.g_pre_hist);
-    convert_collector(cpu_collectors.z_out_hist, gpu_collectors.z_out_hist);
-    convert_collector(cpu_collectors.r_out_hist, gpu_collectors.r_out_hist);
-    convert_collector(cpu_collectors.g_out_hist, gpu_collectors.g_out_hist);
+    convert_collector(cpu_collectors.update_gate_input_hist, gpu_collectors.update_gate_input_hist);
+    convert_collector(cpu_collectors.reset_gate_input_hist, gpu_collectors.reset_gate_input_hist);
+    convert_collector(cpu_collectors.new_gate_input_hist, gpu_collectors.new_gate_input_hist);
+    convert_collector(cpu_collectors.update_gate_output_hist, gpu_collectors.update_gate_output_hist);
+    convert_collector(cpu_collectors.reset_gate_output_hist, gpu_collectors.reset_gate_output_hist);
+    convert_collector(cpu_collectors.new_gate_output_hist, gpu_collectors.new_gate_output_hist);
     convert_collector(cpu_collectors.Rh_add_br_g_hist, gpu_collectors.Rh_add_br_g_hist);
-    convert_collector(cpu_collectors.rRh_hist, gpu_collectors.rRh_hist);
-    convert_collector(cpu_collectors.new_contrib_hist, gpu_collectors.new_contrib_hist);
-    convert_collector(cpu_collectors.old_contrib_hist, gpu_collectors.old_contrib_hist);
+    convert_collector(cpu_collectors.mul_reset_hidden_hist, gpu_collectors.mul_reset_hidden_hist);
+    convert_collector(cpu_collectors.mul_new_contribution_hist, gpu_collectors.mul_new_contribution_hist);
+    convert_collector(cpu_collectors.mul_old_contribution_hist, gpu_collectors.mul_old_contribution_hist);
 
     // 转换 per-channel 直方图（从批量结构）
     auto convert_batch = [](std::vector<HistogramCollector> &dst, 
@@ -531,16 +531,16 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
 
     const int channel_size = hist_collectors.hidden_ * 3;
     
-    quant_params.exp2_inv_W_.resize(channel_size);
-    quant_params.exp2_inv_R_.resize(channel_size);
-    quant_params.exp2_inv_bx_.resize(channel_size);
-    quant_params.exp2_inv_br_.resize(channel_size);
+    quant_params.shift_W_.resize(channel_size);
+    quant_params.shift_R_.resize(channel_size);
+    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_br_.resize(channel_size);
 
     // 辅助 lambda：校准单个直方图
     auto histCalibrate = [&](const HistogramCollector& hist, QuantBitWidth bw, bool sym,
-                             int8_t& exp2, int32_t& zp, const char* name) {
+                             int8_t& shift, int32_t& zp, const char* name) {
         if (!hist.is_valid()) throw std::runtime_error(std::string(name) + " is invalid.");
-        calibrateQuantParamsFromHistogram(hist.histogram(), bw, sym, exp2, zp,
+        calibrateQuantParamsFromHistogram(hist.histogram(), bw, sym, shift, zp,
                                           verbose ? name : nullptr, use_percentile, percentile_value);
     };
 
@@ -553,53 +553,53 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
         if (tid == 0) {
             for (int c = 0; c < channel_size; ++c) {
                 histCalibrate(hist_collectors.W_hist[c], bitwidth_config.W_,
-                              bitwidth_config.W_symmetric_, quant_params.exp2_inv_W_[c], zp_tmp, "W");
+                              bitwidth_config.W_symmetric_, quant_params.shift_W_[c], zp_tmp, "W");
             }
         } else if (tid == 1) {
             for (int c = 0; c < channel_size; ++c) {
                 histCalibrate(hist_collectors.R_hist[c], bitwidth_config.R_,
-                              bitwidth_config.R_symmetric_, quant_params.exp2_inv_R_[c], zp_tmp, "R");
+                              bitwidth_config.R_symmetric_, quant_params.shift_R_[c], zp_tmp, "R");
             }
         } else if (tid == 2) {
             for (int c = 0; c < channel_size; ++c) {
                 histCalibrate(hist_collectors.bx_hist[c], bitwidth_config.bx_,
-                              bitwidth_config.bx_symmetric_, quant_params.exp2_inv_bx_[c], zp_tmp, "bx");
+                              bitwidth_config.bx_symmetric_, quant_params.shift_bx_[c], zp_tmp, "bx");
             }
         } else {
             for (int c = 0; c < channel_size; ++c) {
                 histCalibrate(hist_collectors.br_hist[c], bitwidth_config.br_,
-                              bitwidth_config.br_symmetric_, quant_params.exp2_inv_br_[c], zp_tmp, "br");
+                              bitwidth_config.br_symmetric_, quant_params.shift_br_[c], zp_tmp, "br");
             }
             
             // 标量参数
             histCalibrate(hist_collectors.x_hist, bitwidth_config.x_, bitwidth_config.x_symmetric_,
-                          quant_params.exp2_inv_x_, quant_params.zp_x_, "scale_x");
+                          quant_params.shift_x_, quant_params.zp_x_, "scale_x");
             histCalibrate(hist_collectors.h_hist, bitwidth_config.h_, bitwidth_config.h_symmetric_,
-                          quant_params.exp2_inv_h_, quant_params.zp_h_, "scale_h");
-            histCalibrate(hist_collectors.Wx_hist, bitwidth_config.Wx_, bitwidth_config.Wx_symmetric_,
-                          quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, "scale_Wx");
-            histCalibrate(hist_collectors.Rh_hist, bitwidth_config.Rh_, bitwidth_config.Rh_symmetric_,
-                          quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, "scale_Rh");
-            histCalibrate(hist_collectors.z_pre_hist, bitwidth_config.z_pre_, bitwidth_config.z_pre_symmetric_,
-                          quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, "scale_z_pre");
-            histCalibrate(hist_collectors.r_pre_hist, bitwidth_config.r_pre_, bitwidth_config.r_pre_symmetric_,
-                          quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_, "scale_r_pre");
-            histCalibrate(hist_collectors.g_pre_hist, bitwidth_config.g_pre_, bitwidth_config.g_pre_symmetric_,
-                          quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_, "scale_g_pre");
-            histCalibrate(hist_collectors.z_out_hist, bitwidth_config.z_out_, bitwidth_config.z_out_symmetric_,
-                          quant_params.exp2_inv_z_out_, quant_params.zp_z_out_, "scale_z_out");
-            histCalibrate(hist_collectors.r_out_hist, bitwidth_config.r_out_, bitwidth_config.r_out_symmetric_,
-                          quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, "scale_r_out");
-            histCalibrate(hist_collectors.g_out_hist, bitwidth_config.g_out_, bitwidth_config.g_out_symmetric_,
-                          quant_params.exp2_inv_g_out_, quant_params.zp_g_out_, "scale_g_out");
-            histCalibrate(hist_collectors.Rh_add_br_g_hist, bitwidth_config.Rh_add_br_, bitwidth_config.Rh_add_br_symmetric_,
-                          quant_params.exp2_inv_Rh_add_br_, quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
-            histCalibrate(hist_collectors.rRh_hist, bitwidth_config.rRh_, bitwidth_config.rRh_symmetric_,
-                          quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, "scale_rRh");
-            histCalibrate(hist_collectors.new_contrib_hist, bitwidth_config.new_contrib_, bitwidth_config.new_contrib_symmetric_,
-                          quant_params.exp2_inv_new_contrib_, quant_params.zp_new_contrib_, "scale_new_contrib");
-            histCalibrate(hist_collectors.old_contrib_hist, bitwidth_config.old_contrib_, bitwidth_config.old_contrib_symmetric_,
-                          quant_params.exp2_inv_old_contrib_, quant_params.zp_old_contrib_, "scale_old_contrib");
+                          quant_params.shift_h_, quant_params.zp_h_, "scale_h");
+            histCalibrate(hist_collectors.Wx_hist, bitwidth_config.weight_ih_linear_, bitwidth_config.weight_ih_linear_symmetric_,
+                          quant_params.shift_weight_ih_linear_, quant_params.zp_weight_ih_linear_, "scale_weight_ih_linear");
+            histCalibrate(hist_collectors.Rh_hist, bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
+                          quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_, "scale_weight_hh_linear");
+            histCalibrate(hist_collectors.update_gate_input_hist, bitwidth_config.update_gate_input_, bitwidth_config.update_gate_input_symmetric_,
+                          quant_params.shift_update_gate_input_, quant_params.zp_update_gate_input_, "scale_update_gate_input");
+            histCalibrate(hist_collectors.reset_gate_input_hist, bitwidth_config.reset_gate_input_, bitwidth_config.reset_gate_input_symmetric_,
+                          quant_params.shift_reset_gate_input_, quant_params.zp_reset_gate_input_, "scale_reset_gate_input");
+            histCalibrate(hist_collectors.new_gate_input_hist, bitwidth_config.new_gate_input_, bitwidth_config.new_gate_input_symmetric_,
+                          quant_params.shift_new_gate_input_, quant_params.zp_new_gate_input_, "scale_new_gate_input");
+            histCalibrate(hist_collectors.update_gate_output_hist, bitwidth_config.update_gate_output_, bitwidth_config.update_gate_output_symmetric_,
+                          quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_, "scale_update_gate_output");
+            histCalibrate(hist_collectors.reset_gate_output_hist, bitwidth_config.reset_gate_output_, bitwidth_config.reset_gate_output_symmetric_,
+                          quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "scale_reset_gate_output");
+            histCalibrate(hist_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_, bitwidth_config.new_gate_output_symmetric_,
+                          quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "scale_new_gate_output");
+            histCalibrate(hist_collectors.Rh_add_br_g_hist, bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
+                          quant_params.shift_Rh_add_br_, quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
+            histCalibrate(hist_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_, bitwidth_config.mul_reset_hidden_symmetric_,
+                          quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "scale_mul_reset_hidden");
+            histCalibrate(hist_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_, bitwidth_config.mul_new_contribution_symmetric_,
+                          quant_params.shift_mul_new_contribution_, quant_params.zp_mul_new_contribution_, "scale_mul_new_contribution");
+            histCalibrate(hist_collectors.mul_old_contribution_hist, bitwidth_config.mul_old_contribution_, bitwidth_config.mul_old_contribution_symmetric_,
+                          quant_params.shift_mul_old_contribution_, quant_params.zp_mul_old_contribution_, "scale_mul_old_contribution");
         }
     }
 
@@ -621,15 +621,15 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
     quant_params.bitwidth_config_ = bitwidth_config;
     
     const int channel_size = gpu_collectors.hidden_ * 3;
-    quant_params.exp2_inv_W_.resize(channel_size);
-    quant_params.exp2_inv_R_.resize(channel_size);
-    quant_params.exp2_inv_bx_.resize(channel_size);
-    quant_params.exp2_inv_br_.resize(channel_size);
+    quant_params.shift_W_.resize(channel_size);
+    quant_params.shift_R_.resize(channel_size);
+    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_br_.resize(channel_size);
     
     // Helper: 计算单个标量直方图的 SQNR 参数
     auto compute_scalar_sqnr = [&](const GPUHistogramCollector& collector, 
                                     bool is_symmetric, QuantBitWidth quant_bw,
-                                    int8_t& out_exp2_inv, int32_t& out_zp,
+                                    int8_t& out_shift, int32_t& out_zp,
                                     const char* name) {
         if (!collector.is_valid()) {
             throw std::runtime_error(std::string("GPU histogram ") + (name ? name : "unknown") + " is invalid");
@@ -648,52 +648,52 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
             continuous_result.scale, continuous_result.min,
             quant_bw, is_symmetric);
         
-        out_exp2_inv = pot_result.exp2_inv;
+        out_shift = pot_result.exp2_inv;
         out_zp = pot_result.zero_point;
         
         if (verbose && name) {
-            printf("[GPU-SQNR][%s] bits=%d unsigned=%d range=[%.4f,%.4f] exp2_inv=%d zp=%d\n",
-                   name, quant_bw.bits_, is_unsigned, hist.min_val, hist.max_val, out_exp2_inv, out_zp);
+            printf("[GPU-SQNR][%s] bits=%d unsigned=%d range=[%.4f,%.4f] shift=%d zp=%d\n",
+                   name, quant_bw.bits_, is_unsigned, hist.min_val, hist.max_val, out_shift, out_zp);
         }
     };
     
     // 标量直方图
     compute_scalar_sqnr(gpu_collectors.x_hist, bitwidth_config.x_symmetric_, 
-                        bitwidth_config.x_, quant_params.exp2_inv_x_, quant_params.zp_x_, "x");
+                        bitwidth_config.x_, quant_params.shift_x_, quant_params.zp_x_, "x");
     compute_scalar_sqnr(gpu_collectors.h_hist, bitwidth_config.h_symmetric_,
-                        bitwidth_config.h_, quant_params.exp2_inv_h_, quant_params.zp_h_, "h");
-    compute_scalar_sqnr(gpu_collectors.Wx_hist, bitwidth_config.Wx_symmetric_,
-                        bitwidth_config.Wx_, quant_params.exp2_inv_Wx_, quant_params.zp_Wx_, "Wx");
-    compute_scalar_sqnr(gpu_collectors.Rh_hist, bitwidth_config.Rh_symmetric_,
-                        bitwidth_config.Rh_, quant_params.exp2_inv_Rh_, quant_params.zp_Rh_, "Rh");
-    compute_scalar_sqnr(gpu_collectors.z_pre_hist, bitwidth_config.z_pre_symmetric_,
-                        bitwidth_config.z_pre_, quant_params.exp2_inv_z_pre_, quant_params.zp_z_pre_, "z_pre");
-    compute_scalar_sqnr(gpu_collectors.r_pre_hist, bitwidth_config.r_pre_symmetric_,
-                        bitwidth_config.r_pre_, quant_params.exp2_inv_r_pre_, quant_params.zp_r_pre_, "r_pre");
-    compute_scalar_sqnr(gpu_collectors.g_pre_hist, bitwidth_config.g_pre_symmetric_,
-                        bitwidth_config.g_pre_, quant_params.exp2_inv_g_pre_, quant_params.zp_g_pre_, "g_pre");
-    compute_scalar_sqnr(gpu_collectors.z_out_hist, bitwidth_config.z_out_symmetric_,
-                        bitwidth_config.z_out_, quant_params.exp2_inv_z_out_, quant_params.zp_z_out_, "z_out");
-    compute_scalar_sqnr(gpu_collectors.r_out_hist, bitwidth_config.r_out_symmetric_,
-                        bitwidth_config.r_out_, quant_params.exp2_inv_r_out_, quant_params.zp_r_out_, "r_out");
-    compute_scalar_sqnr(gpu_collectors.g_out_hist, bitwidth_config.g_out_symmetric_,
-                        bitwidth_config.g_out_, quant_params.exp2_inv_g_out_, quant_params.zp_g_out_, "g_out");
-    compute_scalar_sqnr(gpu_collectors.Rh_add_br_g_hist, bitwidth_config.Rh_add_br_symmetric_,
-                        bitwidth_config.Rh_add_br_, quant_params.exp2_inv_Rh_add_br_, 
+                        bitwidth_config.h_, quant_params.shift_h_, quant_params.zp_h_, "h");
+    compute_scalar_sqnr(gpu_collectors.Wx_hist, bitwidth_config.weight_ih_linear_symmetric_,
+                        bitwidth_config.weight_ih_linear_, quant_params.shift_weight_ih_linear_, quant_params.zp_weight_ih_linear_, "weight_ih_linear");
+    compute_scalar_sqnr(gpu_collectors.Rh_hist, bitwidth_config.weight_hh_linear_symmetric_,
+                        bitwidth_config.weight_hh_linear_, quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_, "weight_hh_linear");
+    compute_scalar_sqnr(gpu_collectors.update_gate_input_hist, bitwidth_config.update_gate_input_symmetric_,
+                        bitwidth_config.update_gate_input_, quant_params.shift_update_gate_input_, quant_params.zp_update_gate_input_, "update_gate_input");
+    compute_scalar_sqnr(gpu_collectors.reset_gate_input_hist, bitwidth_config.reset_gate_input_symmetric_,
+                        bitwidth_config.reset_gate_input_, quant_params.shift_reset_gate_input_, quant_params.zp_reset_gate_input_, "reset_gate_input");
+    compute_scalar_sqnr(gpu_collectors.new_gate_input_hist, bitwidth_config.new_gate_input_symmetric_,
+                        bitwidth_config.new_gate_input_, quant_params.shift_new_gate_input_, quant_params.zp_new_gate_input_, "new_gate_input");
+    compute_scalar_sqnr(gpu_collectors.update_gate_output_hist, bitwidth_config.update_gate_output_symmetric_,
+                        bitwidth_config.update_gate_output_, quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_, "update_gate_output");
+    compute_scalar_sqnr(gpu_collectors.reset_gate_output_hist, bitwidth_config.reset_gate_output_symmetric_,
+                        bitwidth_config.reset_gate_output_, quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "reset_gate_output");
+    compute_scalar_sqnr(gpu_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_symmetric_,
+                        bitwidth_config.new_gate_output_, quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "new_gate_output");
+    compute_scalar_sqnr(gpu_collectors.Rh_add_br_g_hist, bitwidth_config.weight_hh_linear_symmetric_,
+                        bitwidth_config.weight_hh_linear_, quant_params.shift_Rh_add_br_, 
                         quant_params.zp_Rh_add_br_, "Rh_add_br");
-    compute_scalar_sqnr(gpu_collectors.rRh_hist, bitwidth_config.rRh_symmetric_,
-                        bitwidth_config.rRh_, quant_params.exp2_inv_rRh_, quant_params.zp_rRh_, "rRh");
-    compute_scalar_sqnr(gpu_collectors.new_contrib_hist, bitwidth_config.new_contrib_symmetric_,
-                        bitwidth_config.new_contrib_, quant_params.exp2_inv_new_contrib_,
-                        quant_params.zp_new_contrib_, "new_contrib");
-    compute_scalar_sqnr(gpu_collectors.old_contrib_hist, bitwidth_config.old_contrib_symmetric_,
-                        bitwidth_config.old_contrib_, quant_params.exp2_inv_old_contrib_,
-                        quant_params.zp_old_contrib_, "old_contrib");
+    compute_scalar_sqnr(gpu_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_symmetric_,
+                        bitwidth_config.mul_reset_hidden_, quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "mul_reset_hidden");
+    compute_scalar_sqnr(gpu_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_symmetric_,
+                        bitwidth_config.mul_new_contribution_, quant_params.shift_mul_new_contribution_,
+                        quant_params.zp_mul_new_contribution_, "mul_new_contribution");
+    compute_scalar_sqnr(gpu_collectors.mul_old_contribution_hist, bitwidth_config.mul_old_contribution_symmetric_,
+                        bitwidth_config.mul_old_contribution_, quant_params.shift_mul_old_contribution_,
+                        quant_params.zp_mul_old_contribution_, "mul_old_contribution");
     
     // Per-channel 直方图（使用批量 GPU SQNR + CPU POT 转换）
     auto compute_per_channel_sqnr = [&](const PerChannelHistogramBatch& batch,
                                          bool is_symmetric, QuantBitWidth quant_bw,
-                                         std::vector<int8_t>& out_exp2_inv) {
+                                         std::vector<int8_t>& out_shift) {
         if (!batch.is_valid()) return;
         
         const int64_t num_steps = quant_bw.qmax() - quant_bw.qmin();
@@ -705,23 +705,23 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
                                            SqnrConfig(), is_unsigned);
         
         // 步骤 2: CPU POT 转换（与 AIMET 一致，无位宽约束）
-        out_exp2_inv.resize(batch.channel_size);
+        out_shift.resize(batch.channel_size);
         for (int c = 0; c < batch.channel_size; ++c) {
             PotScaleResult pot_result = convertToPot(
                 continuous_results[c].scale, continuous_results[c].min,
                 quant_bw, is_symmetric);
-            out_exp2_inv[c] = pot_result.exp2_inv;
+            out_shift[c] = pot_result.exp2_inv;
         }
     };
     
     compute_per_channel_sqnr(gpu_collectors.W_batch, bitwidth_config.W_symmetric_, 
-                             bitwidth_config.W_, quant_params.exp2_inv_W_);
+                             bitwidth_config.W_, quant_params.shift_W_);
     compute_per_channel_sqnr(gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
-                             bitwidth_config.R_, quant_params.exp2_inv_R_);
+                             bitwidth_config.R_, quant_params.shift_R_);
     compute_per_channel_sqnr(gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
-                             bitwidth_config.bx_, quant_params.exp2_inv_bx_);
+                             bitwidth_config.bx_, quant_params.shift_bx_);
     compute_per_channel_sqnr(gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
-                             bitwidth_config.br_, quant_params.exp2_inv_br_);
+                             bitwidth_config.br_, quant_params.shift_br_);
     
     // 同步 CUDA 操作
     cudaDeviceSynchronize();

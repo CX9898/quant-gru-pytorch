@@ -65,8 +65,8 @@ class ForwardPassQuantCPU {
     LinearQuantParamsCPU linear_params_; ///< Linear 层参数（per-channel，用于 GEMM）
 
     int max_steps_ = 0;
-    std::vector<int32_t> tmp_Wx_bx_;   // GEMM+bias 融合: W*x + bx
-    std::vector<int32_t> tmp_Rh_br_;   // GEMM+bias 融合: R*h + br
+    std::vector<int32_t> tmp_weight_ih_linear_;  // Linear 变换: W*x + bx
+    std::vector<int32_t> tmp_weight_hh_linear_;  // Linear 变换: R*h + br
     std::vector<int64_t> W_sum_mul_x_zp_;
     std::vector<int64_t> R_sum_mul_h_zp_;
     bool weight_sums_computed_ = false;
@@ -75,10 +75,10 @@ class ForwardPassQuantCPU {
 
     void EnsureBuffersAllocated(int steps);
     void PrecomputeWeightSums(const int32_t *W, const int32_t *R);
-    void ComputeWxBx(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
-    void ComputeRhBr(const int32_t *R, const int32_t *h, const int32_t *br);
+    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
+    void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br);
     void IterateInternal(const int32_t *R, const int32_t *br, const int32_t *h,
-                         int32_t *h_out, int32_t *v, const int32_t *cur_Wx_bx, float zoneout_prob,
+                         int32_t *h_out, int32_t *v, const int32_t *cur_linear_x, float zoneout_prob,
                          const int32_t *zoneout_mask);
 };
 

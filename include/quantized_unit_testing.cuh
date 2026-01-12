@@ -194,59 +194,59 @@ template <typename QuantT>
 inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
     printf("GRUQuantitativeParameters (量化参数):\n");
     printf("  hidden_ = %d\n", quant_parms_.hidden_);
-    printf("  exp2_inv_x_ = %d, zp_x_ = %d\n", quant_parms_.exp2_inv_x_, quant_parms_.zp_x_);
-    printf("  exp2_inv_h_ = %d, zp_h_ = %d\n", quant_parms_.exp2_inv_h_, quant_parms_.zp_h_);
+    printf("  shift_x_ = %d, zp_x_ = %d\n", quant_parms_.shift_x_, quant_parms_.zp_x_);
+    printf("  shift_h_ = %d, zp_h_ = %d\n", quant_parms_.shift_h_, quant_parms_.zp_h_);
 
-    printf("  exp2_inv_W_ (size %zu): ", quant_parms_.exp2_inv_W_.size());
-    for (size_t i = 0; i < quant_parms_.exp2_inv_W_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms_.exp2_inv_W_[i]);
+    printf("  shift_W_ (size %zu): ", quant_parms_.shift_W_.size());
+    for (size_t i = 0; i < quant_parms_.shift_W_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms_.shift_W_[i]);
     }
-    if (quant_parms_.exp2_inv_W_.size() > 8) printf("...");
+    if (quant_parms_.shift_W_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_R_ (size %zu): ", quant_parms_.exp2_inv_R_.size());
-    for (size_t i = 0; i < quant_parms_.exp2_inv_R_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms_.exp2_inv_R_[i]);
+    printf("  shift_R_ (size %zu): ", quant_parms_.shift_R_.size());
+    for (size_t i = 0; i < quant_parms_.shift_R_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms_.shift_R_[i]);
     }
-    if (quant_parms_.exp2_inv_R_.size() > 8) printf("...");
+    if (quant_parms_.shift_R_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_bx_ (size %zu): ", quant_parms_.exp2_inv_bx_.size());
-    for (size_t i = 0; i < quant_parms_.exp2_inv_bx_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms_.exp2_inv_bx_[i]);
+    printf("  shift_bx_ (size %zu): ", quant_parms_.shift_bx_.size());
+    for (size_t i = 0; i < quant_parms_.shift_bx_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms_.shift_bx_[i]);
     }
-    if (quant_parms_.exp2_inv_bx_.size() > 8) printf("...");
+    if (quant_parms_.shift_bx_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_br_ (size %zu): ", quant_parms_.exp2_inv_br_.size());
-    for (size_t i = 0; i < quant_parms_.exp2_inv_br_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms_.exp2_inv_br_[i]);
+    printf("  shift_br_ (size %zu): ", quant_parms_.shift_br_.size());
+    for (size_t i = 0; i < quant_parms_.shift_br_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms_.shift_br_[i]);
     }
-    if (quant_parms_.exp2_inv_br_.size() > 8) printf("...");
+    if (quant_parms_.shift_br_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  exp2_inv_Wx_ = %d, zp_Wx_ = %d \n", quant_parms_.exp2_inv_Wx_, quant_parms_.zp_Wx_);
-    printf("  exp2_inv_Rh_ = %d, zp_Rh_ = %d \n", quant_parms_.exp2_inv_Rh_, quant_parms_.zp_Rh_);
-    printf("  exp2_inv_z_pre_ = %d, zp_z_pre_ = %d \n", quant_parms_.exp2_inv_z_pre_,
-           quant_parms_.zp_z_pre_);
-    printf("  exp2_inv_r_pre_ = %d, zp_r_pre_ = %d\n", quant_parms_.exp2_inv_r_pre_,
-           quant_parms_.zp_r_pre_);
-    printf("  exp2_inv_g_pre_ = %d, zp_g_pre_ = %d\n", quant_parms_.exp2_inv_g_pre_,
-           quant_parms_.zp_g_pre_);
-    printf("  exp2_inv_z_out_ = %d, zp_z_out_ = %d\n", quant_parms_.exp2_inv_z_out_,
-           quant_parms_.zp_z_out_);
-    printf("  exp2_inv_r_out_ = %d, zp_r_out_ = %d\n", quant_parms_.exp2_inv_r_out_,
-           quant_parms_.zp_r_out_);
-    printf("  exp2_inv_g_out_ = %d, zp_g_out_ = %d\n", quant_parms_.exp2_inv_g_out_,
-           quant_parms_.zp_g_out_);
-    printf("  exp2_inv_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", quant_parms_.exp2_inv_Rh_add_br_,
+    printf("  shift_weight_ih_linear_ = %d, zp_weight_ih_linear_ = %d \n", quant_parms_.shift_weight_ih_linear_, quant_parms_.zp_weight_ih_linear_);
+    printf("  shift_weight_hh_linear_ = %d, zp_weight_hh_linear_ = %d \n", quant_parms_.shift_weight_hh_linear_, quant_parms_.zp_weight_hh_linear_);
+    printf("  shift_update_gate_input_ = %d, zp_update_gate_input_ = %d \n", quant_parms_.shift_update_gate_input_,
+           quant_parms_.zp_update_gate_input_);
+    printf("  shift_reset_gate_input_ = %d, zp_reset_gate_input_ = %d\n", quant_parms_.shift_reset_gate_input_,
+           quant_parms_.zp_reset_gate_input_);
+    printf("  shift_new_gate_input_ = %d, zp_new_gate_input_ = %d\n", quant_parms_.shift_new_gate_input_,
+           quant_parms_.zp_new_gate_input_);
+    printf("  shift_update_gate_output_ = %d, zp_update_gate_output_ = %d\n", quant_parms_.shift_update_gate_output_,
+           quant_parms_.zp_update_gate_output_);
+    printf("  shift_reset_gate_output_ = %d, zp_reset_gate_output_ = %d\n", quant_parms_.shift_reset_gate_output_,
+           quant_parms_.zp_reset_gate_output_);
+    printf("  shift_new_gate_output_ = %d, zp_new_gate_output_ = %d\n", quant_parms_.shift_new_gate_output_,
+           quant_parms_.zp_new_gate_output_);
+    printf("  shift_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", quant_parms_.shift_Rh_add_br_,
            quant_parms_.zp_Rh_add_br_);
-    printf("  exp2_inv_rRh_ = %d, zp_rRh_ = %d\n", quant_parms_.exp2_inv_rRh_,
-           quant_parms_.zp_rRh_);
-    printf("  exp2_inv_new_contrib_ = %d, zp_new_contrib_ = %d\n",
-           quant_parms_.exp2_inv_new_contrib_, quant_parms_.zp_new_contrib_);
-    printf("  exp2_inv_old_contrib_ = %d, zp_old_contrib_ = %d\n",
-           quant_parms_.exp2_inv_old_contrib_, quant_parms_.zp_old_contrib_);
+    printf("  shift_mul_reset_hidden_ = %d, zp_mul_reset_hidden_ = %d\n", quant_parms_.shift_mul_reset_hidden_,
+           quant_parms_.zp_mul_reset_hidden_);
+    printf("  shift_mul_new_contribution_ = %d, zp_mul_new_contribution_ = %d\n",
+           quant_parms_.shift_mul_new_contribution_, quant_parms_.zp_mul_new_contribution_);
+    printf("  shift_mul_old_contribution_ = %d, zp_mul_old_contribution_ = %d\n",
+           quant_parms_.shift_mul_old_contribution_, quant_parms_.zp_mul_old_contribution_);
 }
 
 template <typename QuantT>
@@ -273,18 +273,18 @@ inline bool Quantized_unit_testing<QuantT>::checkWxGemm() {
 
     std::vector<float> Wx_requant_cpu(Wx_cpu.size());
     std::vector<int32_t> W_sum_mul_x_zp(M);
-    const int8_t exp2_inv_x_val = quant_parms_.exp2_inv_x_;
+    const int8_t shift_x_val = quant_parms_.shift_x_;
     const int32_t zp_x_val = quant_parms_.zp_x_;
 #pragma omp parallel for collapse(2)
     for (int m = 0; m < M; ++m) {
         for (int n = 0; n < N; ++n) {
-            const int8_t exp2_inv_W_val = quant_parms_.exp2_inv_W_[m];
+            const int8_t shift_W_val = quant_parms_.shift_W_[m];
             float sum = 0;
             for (int k = 0; k < K; ++k) {
                 const int8_t W_quant_val = W_quant_[lda * k + m];
                 const int8_t x_quant_val = x_quant_[n * ldb + k];
-                const float W_quant_val_float = dequantize(W_quant_val, exp2_inv_W_val, 0);
-                const float x_quant_val_float = dequantize(x_quant_val, exp2_inv_x_val, zp_x_val);
+                const float W_quant_val_float = dequantize(W_quant_val, shift_W_val, 0);
+                const float x_quant_val_float = dequantize(x_quant_val, shift_x_val, zp_x_val);
                 sum += W_quant_val_float * x_quant_val_float;
             }
             const int Wx_idx = n * ldc + m;
@@ -322,19 +322,19 @@ template <typename QuantT>
 inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
     bool is_pass = true;
 
-    is_pass &= checkScale(x_, x_quant_, quant_parms_.exp2_inv_x_, quant_parms_.zp_x_, "scale_x_");
+    is_pass &= checkScale(x_, x_quant_, quant_parms_.shift_x_, quant_parms_.zp_x_, "scale_x_");
     printf("checkScale: scale_x_ over\n");
-    is_pass &= checkScalePerChannel(W_, channels_, input_size_, W_quant_, quant_parms_.exp2_inv_W_,
+    is_pass &= checkScalePerChannel(W_, channels_, input_size_, W_quant_, quant_parms_.shift_W_,
                                     "scale_W_");
     printf("checkScalePerChannel: scale_W_ over\n");
-    is_pass &= checkScalePerChannel(R_, channels_, hidden_size_, R_quant_, quant_parms_.exp2_inv_R_,
+    is_pass &= checkScalePerChannel(R_, channels_, hidden_size_, R_quant_, quant_parms_.shift_R_,
                                     "scale_R_");
     printf("checkScalePerChannel: scale_R_ over\n");
     is_pass &=
-        checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.exp2_inv_bx_, "scale_bx_");
+        checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.shift_bx_, "scale_bx_");
     printf("checkScalePerChannel: scale_bx_ over\n");
     is_pass &=
-        checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.exp2_inv_br_, "scale_br_");
+        checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.shift_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
     is_pass &= checkWxGemm();
     printf("checkGemm: over\n");
@@ -364,14 +364,14 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
 
     {
         quantificationPerChannel(W.data(), W_quant_cpu.data(), input_size, channel_size,
-                                 quant_parms.exp2_inv_W_);
+                                 quant_parms.shift_W_);
         quantificationPerChannel(R.data(), R_quant_cpu.data(), hidden_size, channel_size,
-                                 quant_parms.exp2_inv_R_);
+                                 quant_parms.shift_R_);
         quantificationPerChannel(bx.data(), bx_quant_cpu.data(), 1, channel_size,
-                                 quant_parms.exp2_inv_bx_);
+                                 quant_parms.shift_bx_);
         quantificationPerChannel(br.data(), br_quant_cpu.data(), 1, channel_size,
-                                 quant_parms.exp2_inv_br_);
-        quantification(x.data(), x_quant_cpu.data(), x_size, quant_parms.exp2_inv_x_,
+                                 quant_parms.shift_br_);
+        quantification(x.data(), x_quant_cpu.data(), x_size, quant_parms.shift_x_,
                        quant_parms.zp_x_);
     }
 
@@ -388,21 +388,21 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
     dev::vector<int32_t> br_quant_gpu(hidden_size * 3);
     dev::vector<int8_t> x_quant_gpu(x_size);
 
-    dev::vector<int8_t> exp2_inv_W_dev(quant_parms.exp2_inv_W_);
-    dev::vector<int8_t> exp2_inv_R_dev(quant_parms.exp2_inv_R_);
-    dev::vector<int8_t> exp2_inv_bx_dev(quant_parms.exp2_inv_bx_);
-    dev::vector<int8_t> exp2_inv_br_dev(quant_parms.exp2_inv_br_);
+    dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
+    dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
+    dev::vector<int8_t> shift_bx_dev(quant_parms.shift_bx_);
+    dev::vector<int8_t> shift_br_dev(quant_parms.shift_br_);
 
     {
         dev::quantificationPerChannel(W_dev.data(), W_quant_gpu.data(), input_size, channel_size,
-                                      exp2_inv_W_dev);
+                                      shift_W_dev);
         dev::quantificationPerChannel(R_dev.data(), R_quant_gpu.data(), hidden_size, channel_size,
-                                      exp2_inv_R_dev);
+                                      shift_R_dev);
         dev::quantificationPerChannel(bx_dev.data(), bx_quant_gpu.data(), 1, channel_size,
-                                      exp2_inv_bx_dev);
+                                      shift_bx_dev);
         dev::quantificationPerChannel(br_dev.data(), br_quant_gpu.data(), 1, channel_size,
-                                      exp2_inv_br_dev);
-        dev::quantification(x_dev.data(), x_quant_gpu.data(), x_size, quant_parms.exp2_inv_x_,
+                                      shift_br_dev);
+        dev::quantification(x_dev.data(), x_quant_gpu.data(), x_size, quant_parms.shift_x_,
                             quant_parms.zp_x_);
     }
 
@@ -760,8 +760,8 @@ inline void checkHQuantizationWithCosine(
     }
 
     // 打印量化参数信息
-    printf("\n%s Quantization Parameters: exp2_inv_h_=%d, zp_h_=%d\n",
-           prefix.empty() ? "H" : prefix.c_str(), scaleParam.exp2_inv_h_, scaleParam.zp_h_);
+    printf("\n%s Quantization Parameters: shift_h_=%d, zp_h_=%d\n",
+           prefix.empty() ? "H" : prefix.c_str(), scaleParam.shift_h_, scaleParam.zp_h_);
 
     // 反量化整个量化h值（跳过初始状态t=0，只处理t=1到t=time_steps）
     std::vector<float> h_quant_dequant(time_steps * size_per_step);
@@ -772,7 +772,7 @@ inline void checkHQuantizationWithCosine(
         for (int idx = 0; idx < size_per_step; ++idx) {
             const QuantT quant_val = h_quant_inference[t_offset + idx];
             h_quant_dequant[dst_offset + idx] =
-                dequantize<QuantT>(quant_val, scaleParam.exp2_inv_h_, scaleParam.zp_h_);
+                dequantize<QuantT>(quant_val, scaleParam.shift_h_, scaleParam.zp_h_);
         }
     }
 

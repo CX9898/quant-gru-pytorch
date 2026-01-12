@@ -18,23 +18,23 @@
 void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params) {
     const auto &config = params.bitwidth_config_;
 
-    // z 门 Sigmoid
-    params.sigmoid_z_lut_ = generate_sigmoid_lut(
-        params.exp2_inv_z_pre_, params.zp_z_pre_,
-        params.exp2_inv_z_out_, params.zp_z_out_,
-        config.z_pre_, config.z_out_);
+    // update gate Sigmoid
+    params.sigmoid_update_gate_lut_ = generate_sigmoid_lut(
+        params.shift_update_gate_input_, params.zp_update_gate_input_,
+        params.shift_update_gate_output_, params.zp_update_gate_output_,
+        config.update_gate_input_, config.update_gate_output_);
 
-    // r 门 Sigmoid
-    params.sigmoid_r_lut_ = generate_sigmoid_lut(
-        params.exp2_inv_r_pre_, params.zp_r_pre_,
-        params.exp2_inv_r_out_, params.zp_r_out_,
-        config.r_pre_, config.r_out_);
+    // reset gate Sigmoid
+    params.sigmoid_reset_gate_lut_ = generate_sigmoid_lut(
+        params.shift_reset_gate_input_, params.zp_reset_gate_input_,
+        params.shift_reset_gate_output_, params.zp_reset_gate_output_,
+        config.reset_gate_input_, config.reset_gate_output_);
 
-    // g 门 Tanh
-    params.tanh_g_lut_ = generate_tanh_lut(
-        params.exp2_inv_g_pre_, params.zp_g_pre_,
-        params.exp2_inv_g_out_, params.zp_g_out_,
-        config.g_pre_, config.g_out_);
+    // new gate Tanh
+    params.tanh_new_gate_lut_ = generate_tanh_lut(
+        params.shift_new_gate_input_, params.zp_new_gate_input_,
+        params.shift_new_gate_output_, params.zp_new_gate_output_,
+        config.new_gate_input_, config.new_gate_output_);
 
 #ifdef DEBUG
     printf("[DEBUG] generate_piecewise_linear_lut_to_params: LUTs stored in params\n");
@@ -145,15 +145,15 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
 namespace kernel {
 
 // v 使用 int32_t 存储，但内部各部分使用不同的量化参数:
-// - z: 使用 exp2_inv_z, zp_z
-// - r: 使用 exp2_inv_r, zp_r
-// - g: 使用 exp2_inv_g, zp_g
-// - Rh_add_br_g: 使用 exp2_inv_Rh_add_br, zp_Rh_add_br
+// - z: 使用 shift_z, zp_z
+// - r: 使用 shift_r, zp_r
+// - g: 使用 shift_g, zp_g
+// - Rh_add_br_g: 使用 shift_Rh_add_br, zp_Rh_add_br
 template <typename T>
 __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_steps,
-                                  int batch_size, int hidden_size, int8_t exp2_inv_z, int32_t zp_z,
-                                  int8_t exp2_inv_r, int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g,
-                                  int8_t exp2_inv_Rh_add_br, int32_t zp_Rh_add_br) {
+                                  int batch_size, int hidden_size, int8_t shift_z, int32_t zp_z,
+                                  int8_t shift_r, int32_t zp_r, int8_t shift_g, int32_t zp_g,
+                                  int8_t shift_Rh_add_br, int32_t zp_Rh_add_br) {
     // 计算当前线程处理的索引
     // blockIdx.x: time_step
     // blockIdx.y: batch
@@ -175,19 +175,19 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
 
     // 反量化 z_out (第0部分) - 从 int32_t 反量化
     const int z_idx = base_idx + 0 * hidden_size + h;
-    data[z_idx] = dequantize<int32_t>(quant_data[z_idx], exp2_inv_z, zp_z);
+    data[z_idx] = dequantize<int32_t>(quant_data[z_idx], shift_z, zp_z);
 
     // 反量化 r_out (第1部分) - 从 int32_t 反量化
     const int r_idx = base_idx + 1 * hidden_size + h;
-    data[r_idx] = dequantize<int32_t>(quant_data[r_idx], exp2_inv_r, zp_r);
+    data[r_idx] = dequantize<int32_t>(quant_data[r_idx], shift_r, zp_r);
 
     // 反量化 g_out (第2部分) - 从 int32_t 反量化
     const int g_idx = base_idx + 2 * hidden_size + h;
-    data[g_idx] = dequantize<int32_t>(quant_data[g_idx], exp2_inv_g, zp_g);
+    data[g_idx] = dequantize<int32_t>(quant_data[g_idx], shift_g, zp_g);
 
     // 反量化 Rh_add_br_g (第3部分) - 从 int32_t 反量化
     const int rh_idx = base_idx + 3 * hidden_size + h;
-    data[rh_idx] = dequantize<int32_t>(quant_data[rh_idx], exp2_inv_Rh_add_br, zp_Rh_add_br);
+    data[rh_idx] = dequantize<int32_t>(quant_data[rh_idx], shift_Rh_add_br, zp_Rh_add_br);
 }
 
 template <typename T, typename QuantT>
@@ -351,8 +351,8 @@ template void dequantification<float, int32_t>(const int32_t *quant_data, float 
 // v 统一使用 int32_t 存储
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
-                       int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
-                       int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
+                       int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
+                       int32_t zp_r, int8_t shift_g, int32_t zp_g, int8_t shift_Rh_add_br,
                        int32_t zp_Rh_add_br) {
     // Launch configuration: 每个block处理一个时间步和一个batch的所有hidden单元
     // blockDim.x = hidden_size (每个线程处理一个hidden单元)
@@ -362,8 +362,8 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
     const dim3 gridDim(time_steps, batch_size);
 
     kernel::dequantificationV<<<gridDim, blockDim>>>(
-        quant_data, data, time_steps, batch_size, hidden_size, exp2_inv_z, zp_z, exp2_inv_r, zp_r,
-        exp2_inv_g, zp_g, exp2_inv_Rh_add_br, zp_Rh_add_br);
+        quant_data, data, time_steps, batch_size, hidden_size, shift_z, zp_z, shift_r, zp_r,
+        shift_g, zp_g, shift_Rh_add_br, zp_Rh_add_br);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -373,9 +373,9 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
 }
 
 template void dequantificationV<float>(const int32_t *quant_data, float *data, int time_steps,
-                                       int batch_size, int hidden_size, int8_t exp2_inv_z,
-                                       int32_t zp_z, int8_t exp2_inv_r, int32_t zp_r,
-                                       int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
+                                       int batch_size, int hidden_size, int8_t shift_z,
+                                       int32_t zp_z, int8_t shift_r, int32_t zp_r,
+                                       int8_t shift_g, int32_t zp_g, int8_t shift_Rh_add_br,
                                        int32_t zp_Rh_add_br);
 
 template <typename T, typename QuantT>

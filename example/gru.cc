@@ -303,9 +303,9 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
     compareHistogramStats("h", cpu_hist.h_hist.histogram(), gpu_hist_cpu.h_hist.histogram());
     compareHistogramStats("Wx", cpu_hist.Wx_hist.histogram(), gpu_hist_cpu.Wx_hist.histogram());
     compareHistogramStats("Rh", cpu_hist.Rh_hist.histogram(), gpu_hist_cpu.Rh_hist.histogram());
-    compareHistogramStats("z_out", cpu_hist.z_out_hist.histogram(), gpu_hist_cpu.z_out_hist.histogram());
-    compareHistogramStats("r_out", cpu_hist.r_out_hist.histogram(), gpu_hist_cpu.r_out_hist.histogram());
-    compareHistogramStats("g_out", cpu_hist.g_out_hist.histogram(), gpu_hist_cpu.g_out_hist.histogram());
+    compareHistogramStats("update_gate_output", cpu_hist.update_gate_output_hist.histogram(), gpu_hist_cpu.update_gate_output_hist.histogram());
+    compareHistogramStats("reset_gate_output", cpu_hist.reset_gate_output_hist.histogram(), gpu_hist_cpu.reset_gate_output_hist.histogram());
+    compareHistogramStats("new_gate_output", cpu_hist.new_gate_output_hist.histogram(), gpu_hist_cpu.new_gate_output_hist.histogram());
 }
 
 // ==================== 校准函数 ====================
@@ -359,28 +359,28 @@ GRUQuantitativeParameters calibrateWithHistogram(
     // 验证 GPU vs CPU SQNR 结果
     printf("\n  ----- SQNR Verification -----\n");
     VerifyResult result;
-    verifyScalarParam("x", params_cpu.exp2_inv_x_, params_gpu.exp2_inv_x_,
+    verifyScalarParam("x", params_cpu.shift_x_, params_gpu.shift_x_,
                       params_cpu.zp_x_, params_gpu.zp_x_, result);
-    verifyScalarParam("h", params_cpu.exp2_inv_h_, params_gpu.exp2_inv_h_,
+    verifyScalarParam("h", params_cpu.shift_h_, params_gpu.shift_h_,
                       params_cpu.zp_h_, params_gpu.zp_h_, result);
-    verifyScalarParam("Wx", params_cpu.exp2_inv_Wx_, params_gpu.exp2_inv_Wx_,
-                      params_cpu.zp_Wx_, params_gpu.zp_Wx_, result);
-    verifyScalarParam("Rh", params_cpu.exp2_inv_Rh_, params_gpu.exp2_inv_Rh_,
-                      params_cpu.zp_Rh_, params_gpu.zp_Rh_, result);
-    verifyScalarParam("z_out", params_cpu.exp2_inv_z_out_, params_gpu.exp2_inv_z_out_,
-                      params_cpu.zp_z_out_, params_gpu.zp_z_out_, result);
-    verifyScalarParam("r_out", params_cpu.exp2_inv_r_out_, params_gpu.exp2_inv_r_out_,
-                      params_cpu.zp_r_out_, params_gpu.zp_r_out_, result);
-    verifyScalarParam("g_out", params_cpu.exp2_inv_g_out_, params_gpu.exp2_inv_g_out_,
-                      params_cpu.zp_g_out_, params_gpu.zp_g_out_, result);
+    verifyScalarParam("weight_ih_linear", params_cpu.shift_weight_ih_linear_, params_gpu.shift_weight_ih_linear_,
+                      params_cpu.zp_weight_ih_linear_, params_gpu.zp_weight_ih_linear_, result);
+    verifyScalarParam("weight_hh_linear", params_cpu.shift_weight_hh_linear_, params_gpu.shift_weight_hh_linear_,
+                      params_cpu.zp_weight_hh_linear_, params_gpu.zp_weight_hh_linear_, result);
+    verifyScalarParam("update_gate_output", params_cpu.shift_update_gate_output_, params_gpu.shift_update_gate_output_,
+                      params_cpu.zp_update_gate_output_, params_gpu.zp_update_gate_output_, result);
+    verifyScalarParam("reset_gate_output", params_cpu.shift_reset_gate_output_, params_gpu.shift_reset_gate_output_,
+                      params_cpu.zp_reset_gate_output_, params_gpu.zp_reset_gate_output_, result);
+    verifyScalarParam("new_gate_output", params_cpu.shift_new_gate_output_, params_gpu.shift_new_gate_output_,
+                      params_cpu.zp_new_gate_output_, params_gpu.zp_new_gate_output_, result);
     printf("    Scalar: exp=%d/%d, zp=%d/%d\n", 
            result.exp_match, result.total, result.zp_match, result.total);
 
     // Per-channel 验证
-    auto [w_m, w_t] = countPerChannelMatches(params_cpu.exp2_inv_W_, params_gpu.exp2_inv_W_);
-    auto [r_m, r_t] = countPerChannelMatches(params_cpu.exp2_inv_R_, params_gpu.exp2_inv_R_);
-    auto [bx_m, bx_t] = countPerChannelMatches(params_cpu.exp2_inv_bx_, params_gpu.exp2_inv_bx_);
-    auto [br_m, br_t] = countPerChannelMatches(params_cpu.exp2_inv_br_, params_gpu.exp2_inv_br_);
+    auto [w_m, w_t] = countPerChannelMatches(params_cpu.shift_W_, params_gpu.shift_W_);
+    auto [r_m, r_t] = countPerChannelMatches(params_cpu.shift_R_, params_gpu.shift_R_);
+    auto [bx_m, bx_t] = countPerChannelMatches(params_cpu.shift_bx_, params_gpu.shift_bx_);
+    auto [br_m, br_t] = countPerChannelMatches(params_cpu.shift_br_, params_gpu.shift_br_);
     printf("    Per-channel: W=%d/%d, R=%d/%d, bx=%d/%d, br=%d/%d\n",
            w_m, w_t, r_m, r_t, bx_m, bx_t, br_m, br_t);
 

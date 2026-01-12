@@ -167,20 +167,20 @@ inline void computeMinMaxPerChannel(const T *data_dev, size_t input_size, size_t
 // =====================================================================
 
 /// 从 v 中提取各算子的中间结果并更新量化范围
-/// v 布局: [T, B, H*4] = [z, r, g, Rh_add_br_g]
+/// v 布局: [T, B, H*4] = [update_gate, reset_gate, new_gate, Rh_add_br_g]
 template <typename T>
 void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t steps,
                        size_t hidden_size, size_t batch_size, GRUQuantizationRanges &quant_ranges) {
     std::vector<T> v_host = d2h(v_dev, steps * batch_size * hidden_size * 4);
     const size_t output_size = steps * batch_size * hidden_size;
 
-    std::vector<T> z_out(output_size);
-    std::vector<T> r_out(output_size);
-    std::vector<T> g_out(output_size);
+    std::vector<T> update_gate_out(output_size);
+    std::vector<T> reset_gate_out(output_size);
+    std::vector<T> new_gate_out(output_size);
     std::vector<T> Rh_add_br_g(output_size);
-    std::vector<T> rRh_g(output_size);
-    std::vector<T> new_contrib(output_size);
-    std::vector<T> old_contrib(output_size);
+    std::vector<T> mul_reset_hidden(output_size);
+    std::vector<T> mul_new_contribution(output_size);
+    std::vector<T> mul_old_contribution(output_size);
 
 #pragma omp parallel for
     for (size_t t = 0; t < steps; ++t) {
@@ -189,54 +189,54 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
             const size_t offset_v_per_batch = b * hidden_size * 4;
             const size_t offset_v = offset_v_per_step + offset_v_per_batch;
             for (size_t h = 0; h < hidden_size; ++h) {
-                const T z_val = v_host[offset_v + hidden_size * 0 + h];
-                const T r_val = v_host[offset_v + hidden_size * 1 + h];
-                const T g_val = v_host[offset_v + hidden_size * 2 + h];
+                const T update_val = v_host[offset_v + hidden_size * 0 + h];
+                const T reset_val = v_host[offset_v + hidden_size * 1 + h];
+                const T new_val = v_host[offset_v + hidden_size * 2 + h];
                 const T Rh_add_br_g_val = v_host[offset_v + hidden_size * 3 + h];
-                const T rRh_g_val = r_val * Rh_add_br_g_val;
-                const T one_minus_update_val = 1 - z_val;
-                const T new_contrib_val = one_minus_update_val * g_val;
+                const T mul_reset_hidden_val = reset_val * Rh_add_br_g_val;
+                const T one_minus_update_val = 1 - update_val;
+                const T new_contrib_val = one_minus_update_val * new_val;
 
                 const size_t offset_h = t * batch_size * hidden_size + b * hidden_size + h;
                 const T h_old = h_host[offset_h];
-                const T old_contrib_val = z_val * h_old;
+                const T old_contrib_val = update_val * h_old;
 
-                z_out[offset_h] = z_val;
-                r_out[offset_h] = r_val;
-                g_out[offset_h] = g_val;
+                update_gate_out[offset_h] = update_val;
+                reset_gate_out[offset_h] = reset_val;
+                new_gate_out[offset_h] = new_val;
                 Rh_add_br_g[offset_h] = Rh_add_br_g_val;
-                rRh_g[offset_h] = rRh_g_val;
-                new_contrib[offset_h] = new_contrib_val;
-                old_contrib[offset_h] = old_contrib_val;
+                mul_reset_hidden[offset_h] = mul_reset_hidden_val;
+                mul_new_contribution[offset_h] = new_contrib_val;
+                mul_old_contribution[offset_h] = old_contrib_val;
             }
         }
     }
 
     // 计算并更新各中间结果的范围（全局极值，与 AIMET 一致）
-    auto [min_z, max_z] = computeMinMax(z_out);
-    updateRange(quant_ranges.min_z_out_, quant_ranges.max_z_out_, min_z, max_z);
+    auto [min_u, max_u] = computeMinMax(update_gate_out);
+    updateRange(quant_ranges.min_update_gate_output_, quant_ranges.max_update_gate_output_, min_u, max_u);
 
-    auto [min_r, max_r] = computeMinMax(r_out);
-    updateRange(quant_ranges.min_r_out_, quant_ranges.max_r_out_, min_r, max_r);
+    auto [min_r, max_r] = computeMinMax(reset_gate_out);
+    updateRange(quant_ranges.min_reset_gate_output_, quant_ranges.max_reset_gate_output_, min_r, max_r);
 
-    auto [min_g, max_g] = computeMinMax(g_out);
-    updateRange(quant_ranges.min_g_out_, quant_ranges.max_g_out_, min_g, max_g);
+    auto [min_n, max_n] = computeMinMax(new_gate_out);
+    updateRange(quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_, min_n, max_n);
 
     auto [min_Rh_add_br_g, max_Rh_add_br_g] = computeMinMax(Rh_add_br_g);
     updateRange(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_, min_Rh_add_br_g,
                 max_Rh_add_br_g);
 
-    auto [min_rRh, max_rRh] = computeMinMax(rRh_g);
-    updateRange(quant_ranges.min_rRh_, quant_ranges.max_rRh_, min_rRh, max_rRh);
+    auto [min_rh, max_rh] = computeMinMax(mul_reset_hidden);
+    updateRange(quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_, min_rh, max_rh);
 
-    // 注意: one_minus_update 不再单独记录范围，直接复用 z_out 的 scale
+    // 注意: one_minus_update 不再单独记录范围，直接复用 update_gate_output 的 scale
 
-    auto [min_new_contrib, max_new_contrib] = computeMinMax(new_contrib);
-    updateRange(quant_ranges.min_new_contrib_, quant_ranges.max_new_contrib_, min_new_contrib,
+    auto [min_new_contrib, max_new_contrib] = computeMinMax(mul_new_contribution);
+    updateRange(quant_ranges.min_mul_new_contribution_, quant_ranges.max_mul_new_contribution_, min_new_contrib,
                 max_new_contrib);
 
-    auto [min_old_contrib, max_old_contrib] = computeMinMax(old_contrib);
-    updateRange(quant_ranges.min_old_contrib_, quant_ranges.max_old_contrib_, min_old_contrib,
+    auto [min_old_contrib, max_old_contrib] = computeMinMax(mul_old_contribution);
+    updateRange(quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_, min_old_contrib,
                 max_old_contrib);
 }
 
@@ -313,17 +313,17 @@ inline void updateGRUQuantizationRanges(
     auto [min_Rh, max_Rh] = computeMinMaxDev(Rh_add_br, time_steps * NH * 3);
     updateRange(quant_ranges.min_Rh_, quant_ranges.max_Rh_, min_Rh, max_Rh);
 
-    // z 门输入的范围（全局极值）
-    auto [min_z_pre, max_z_pre] = computeMinMaxDev(z_pres, time_steps * NH);
-    updateRange(quant_ranges.min_z_pre_, quant_ranges.max_z_pre_, min_z_pre, max_z_pre);
+    // update gate 输入的范围（全局极值）
+    auto [min_update_gate_input, max_update_gate_input] = computeMinMaxDev(z_pres, time_steps * NH);
+    updateRange(quant_ranges.min_update_gate_input_, quant_ranges.max_update_gate_input_, min_update_gate_input, max_update_gate_input);
 
-    // r 门输入的范围（全局极值）
-    auto [min_r_pre, max_r_pre] = computeMinMaxDev(r_pres, time_steps * NH);
-    updateRange(quant_ranges.min_r_pre_, quant_ranges.max_r_pre_, min_r_pre, max_r_pre);
+    // reset gate 输入的范围（全局极值）
+    auto [min_reset_gate_input, max_reset_gate_input] = computeMinMaxDev(r_pres, time_steps * NH);
+    updateRange(quant_ranges.min_reset_gate_input_, quant_ranges.max_reset_gate_input_, min_reset_gate_input, max_reset_gate_input);
 
-    // g 门输入的范围（全局极值）
-    auto [min_g_pre, max_g_pre] = computeMinMaxDev(g_pres, time_steps * NH);
-    updateRange(quant_ranges.min_g_pre_, quant_ranges.max_g_pre_, min_g_pre, max_g_pre);
+    // new gate 输入的范围（全局极值）
+    auto [min_new_gate_input, max_new_gate_input] = computeMinMaxDev(g_pres, time_steps * NH);
+    updateRange(quant_ranges.min_new_gate_input_, quant_ranges.max_new_gate_input_, min_new_gate_input, max_new_gate_input);
 
     // 从 v 中计算其他中间结果的范围
     std::vector<float> h_host = d2h(h, NH * (time_steps + 1));

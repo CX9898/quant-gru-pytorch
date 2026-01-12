@@ -31,8 +31,8 @@ namespace {
 
 int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
                  const QuantGRUReScaleCPU &rescale) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_z_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_z_pre_);
+    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.shift_Wx_div_z_pre_);
+    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.shift_Rh_div_z_pre_);
     const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_z_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_z_[channel_idx]);
 
@@ -44,8 +44,8 @@ int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val
 
 int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
                  const QuantGRUReScaleCPU &rescale) {
-    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.exp2_inv_Wx_div_r_pre_);
-    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.exp2_inv_Rh_div_r_pre_);
+    const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.shift_Wx_div_r_pre_);
+    const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.shift_Rh_div_r_pre_);
     const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_r_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_r_[channel_idx]);
 
@@ -72,7 +72,7 @@ int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val
 
     const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.n_Wx_div_g_pre_);
     const int32_t rRh_shifted = rshift_round(rRh - rescale.zp_rRh_, rescale.n_rRh_div_g_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.exp2_inv_bx_div_g_pre_[channel_idx]);
+    const int32_t bx_shifted = rshift_round(bx_val, rescale.shift_bx_div_g_pre_[channel_idx]);
 
     const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale.zp_g_pre_;
 
@@ -300,14 +300,14 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeP
     std::vector<int8_t> n_br_to_Rh_add_br(channel), n_bx_to_g(channel);
 
     for (int idx = 0; idx < channel; ++idx) {
-        n_W_mul_x_div_Wx[idx] = (parms.exp2_inv_W_[idx] + parms.exp2_inv_x_) - parms.exp2_inv_Wx_;
-        n_R_mul_h_div_Rh[idx] = (parms.exp2_inv_R_[idx] + parms.exp2_inv_h_) - parms.exp2_inv_Rh_;
-        n_bx_to_z[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_z_pre_;
-        n_br_to_z[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_z_pre_;
-        n_bx_to_r[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_r_pre_;
-        n_br_to_r[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_r_pre_;
-        n_br_to_Rh_add_br[idx] = parms.exp2_inv_br_[idx] - parms.exp2_inv_Rh_add_br_;
-        n_bx_to_g[idx] = parms.exp2_inv_bx_[idx] - parms.exp2_inv_g_pre_;
+        n_W_mul_x_div_Wx[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_Wx_;
+        n_R_mul_h_div_Rh[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_Rh_;
+        n_bx_to_z[idx] = parms.shift_bx_[idx] - parms.shift_z_pre_;
+        n_br_to_z[idx] = parms.shift_br_[idx] - parms.shift_z_pre_;
+        n_bx_to_r[idx] = parms.shift_bx_[idx] - parms.shift_r_pre_;
+        n_br_to_r[idx] = parms.shift_br_[idx] - parms.shift_r_pre_;
+        n_br_to_Rh_add_br[idx] = parms.shift_br_[idx] - parms.shift_Rh_add_br_;
+        n_bx_to_g[idx] = parms.shift_bx_[idx] - parms.shift_g_pre_;
     }
 
     rescale_param_.zp_x_ = parms.zp_x_;
@@ -319,54 +319,54 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeP
 
     rescale_param_.zp_z_pre_ = parms.zp_z_pre_;
     rescale_param_.zp_z_out_ = parms.zp_z_out_;
-    rescale_param_.exp2_inv_Wx_div_z_pre_ = parms.exp2_inv_Wx_ - parms.exp2_inv_z_pre_;
-    rescale_param_.exp2_inv_Rh_div_z_pre_ = parms.exp2_inv_Rh_ - parms.exp2_inv_z_pre_;
+    rescale_param_.shift_Wx_div_z_pre_ = parms.shift_Wx_ - parms.shift_z_pre_;
+    rescale_param_.shift_Rh_div_z_pre_ = parms.shift_Rh_ - parms.shift_z_pre_;
     rescale_param_.n_bx_div_z_ = std::move(n_bx_to_z);
     rescale_param_.n_br_div_z_ = std::move(n_br_to_z);
 
     rescale_param_.zp_r_pre_ = parms.zp_r_pre_;
     rescale_param_.zp_r_out_ = parms.zp_r_out_;
-    rescale_param_.exp2_inv_Wx_div_r_pre_ = parms.exp2_inv_Wx_ - parms.exp2_inv_r_pre_;
-    rescale_param_.exp2_inv_Rh_div_r_pre_ = parms.exp2_inv_Rh_ - parms.exp2_inv_r_pre_;
+    rescale_param_.shift_Wx_div_r_pre_ = parms.shift_Wx_ - parms.shift_r_pre_;
+    rescale_param_.shift_Rh_div_r_pre_ = parms.shift_Rh_ - parms.shift_r_pre_;
     rescale_param_.n_bx_div_r_ = std::move(n_bx_to_r);
     rescale_param_.n_br_div_r_ = std::move(n_br_to_r);
 
     rescale_param_.zp_g_pre_ = parms.zp_g_pre_;
     rescale_param_.zp_g_out_ = parms.zp_g_out_;
-    rescale_param_.n_Rh_div_Rh_add_br_ = parms.exp2_inv_Rh_ - parms.exp2_inv_Rh_add_br_;
+    rescale_param_.n_Rh_div_Rh_add_br_ = parms.shift_Rh_ - parms.shift_Rh_add_br_;
     rescale_param_.n_br_div_Rh_add_br_ = std::move(n_br_to_Rh_add_br);
     rescale_param_.zp_Rh_add_br_ = parms.zp_Rh_add_br_;
     rescale_param_.n_r_mul_Rh_add_br_div_rRh_ =
-        (parms.exp2_inv_r_out_ + parms.exp2_inv_Rh_add_br_) - parms.exp2_inv_rRh_;
+        (parms.shift_r_out_ + parms.shift_Rh_add_br_) - parms.shift_rRh_;
     rescale_param_.zp_rRh_ = parms.zp_rRh_;
-    rescale_param_.n_Wx_div_g_pre_ = parms.exp2_inv_Wx_ - parms.exp2_inv_g_pre_;
-    rescale_param_.n_rRh_div_g_pre_ = parms.exp2_inv_rRh_ - parms.exp2_inv_g_pre_;
-    rescale_param_.exp2_inv_bx_div_g_pre_ = std::move(n_bx_to_g);
+    rescale_param_.n_Wx_div_g_pre_ = parms.shift_Wx_ - parms.shift_g_pre_;
+    rescale_param_.n_rRh_div_g_pre_ = parms.shift_rRh_ - parms.shift_g_pre_;
+    rescale_param_.shift_bx_div_g_pre_ = std::move(n_bx_to_g);
 
-    rescale_param_.one_in_z_scale_ = rshift_round(1, -parms.exp2_inv_z_out_) + parms.zp_z_out_;
+    rescale_param_.one_in_z_scale_ = rshift_round(1, -parms.shift_z_out_) + parms.zp_z_out_;
     rescale_param_.zp_new_contrib_ = parms.zp_new_contrib_;
     rescale_param_.n_z_out_mul_g_div_new_contrib_ =
-        (parms.exp2_inv_z_out_ + parms.exp2_inv_g_out_) - parms.exp2_inv_new_contrib_;
+        (parms.shift_z_out_ + parms.shift_g_out_) - parms.shift_new_contrib_;
     rescale_param_.zp_old_contrib_ = parms.zp_old_contrib_;
     rescale_param_.n_z_mul_h_div_old_contrib_ =
-        (parms.exp2_inv_z_out_ + parms.exp2_inv_h_) - parms.exp2_inv_old_contrib_;
-    rescale_param_.n_new_contrib_div_h_ = parms.exp2_inv_new_contrib_ - parms.exp2_inv_h_;
-    rescale_param_.n_old_contrib_div_h_ = parms.exp2_inv_old_contrib_ - parms.exp2_inv_h_;
+        (parms.shift_z_out_ + parms.shift_h_) - parms.shift_old_contrib_;
+    rescale_param_.n_new_contrib_div_h_ = parms.shift_new_contrib_ - parms.shift_h_;
+    rescale_param_.n_old_contrib_div_h_ = parms.shift_old_contrib_ - parms.shift_h_;
 
     rescale_param_.bitwidth_config_ = parms.bitwidth_config_;
 
     // 直接复用 quantize_lut_types.h 中声明的 LUT 生成函数（实现在 quantize_ops.cu）
     // CPU 版本：LUT 存储在普通变量中，不拷贝到 CUDA 常量内存
     rescale_param_.sigmoid_z_lut_ = generate_sigmoid_lut(
-        parms.exp2_inv_z_pre_, parms.zp_z_pre_, parms.exp2_inv_z_out_, parms.zp_z_out_,
+        parms.shift_z_pre_, parms.zp_z_pre_, parms.shift_z_out_, parms.zp_z_out_,
         parms.bitwidth_config_.z_pre_, parms.bitwidth_config_.z_out_);
 
     rescale_param_.sigmoid_r_lut_ = generate_sigmoid_lut(
-        parms.exp2_inv_r_pre_, parms.zp_r_pre_, parms.exp2_inv_r_out_, parms.zp_r_out_,
+        parms.shift_r_pre_, parms.zp_r_pre_, parms.shift_r_out_, parms.zp_r_out_,
         parms.bitwidth_config_.r_pre_, parms.bitwidth_config_.r_out_);
 
     rescale_param_.tanh_g_lut_ = generate_tanh_lut(
-        parms.exp2_inv_g_pre_, parms.zp_g_pre_, parms.exp2_inv_g_out_, parms.zp_g_out_,
+        parms.shift_g_pre_, parms.zp_g_pre_, parms.shift_g_out_, parms.zp_g_out_,
         parms.bitwidth_config_.g_pre_, parms.bitwidth_config_.g_out_);
 }
 

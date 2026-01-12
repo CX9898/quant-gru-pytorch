@@ -219,6 +219,14 @@ struct PerChannelHistogramBatch {
 
 /**
  * @brief GRU 所有中间张量的 GPU 直方图收集器
+ * 
+ * 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
+ *   - update_gate_input/output: update gate 的输入/输出
+ *   - reset_gate_input/output: reset gate 的输入/输出
+ *   - new_gate_input/output: new gate 的输入/输出
+ *   - mul_reset_hidden: r * h_n 的输出
+ *   - mul_new_contribution: (1-u) * n 的输出
+ *   - mul_old_contribution: u * h 的输出
  */
 struct GRUGPUHistogramCollectors {
     int hidden_ = 0;
@@ -232,21 +240,21 @@ struct GRUGPUHistogramCollectors {
     GPUHistogramCollector Wx_hist;
     GPUHistogramCollector Rh_hist;
 
-    // 门的预激活值
-    GPUHistogramCollector z_pre_hist;
-    GPUHistogramCollector r_pre_hist;
-    GPUHistogramCollector g_pre_hist;
+    // 门的预激活值（gate input）
+    GPUHistogramCollector update_gate_input_hist;
+    GPUHistogramCollector reset_gate_input_hist;
+    GPUHistogramCollector new_gate_input_hist;
 
-    // 门的输出值
-    GPUHistogramCollector z_out_hist;
-    GPUHistogramCollector r_out_hist;
-    GPUHistogramCollector g_out_hist;
+    // 门的输出值（gate output）
+    GPUHistogramCollector update_gate_output_hist;
+    GPUHistogramCollector reset_gate_output_hist;
+    GPUHistogramCollector new_gate_output_hist;
 
     // 中间计算结果
     GPUHistogramCollector Rh_add_br_g_hist;
-    GPUHistogramCollector rRh_hist;
-    GPUHistogramCollector new_contrib_hist;
-    GPUHistogramCollector old_contrib_hist;
+    GPUHistogramCollector mul_reset_hidden_hist;
+    GPUHistogramCollector mul_new_contribution_hist;
+    GPUHistogramCollector mul_old_contribution_hist;
 
     // 权重（per-channel）- 使用批量结构，共享连续内存
     PerChannelHistogramBatch W_batch;
@@ -272,16 +280,16 @@ struct GRUGPUHistogramCollectors {
         h_hist = GPUHistogramCollector(cfg);
         Wx_hist = GPUHistogramCollector(cfg);
         Rh_hist = GPUHistogramCollector(cfg);
-        z_pre_hist = GPUHistogramCollector(cfg);
-        r_pre_hist = GPUHistogramCollector(cfg);
-        g_pre_hist = GPUHistogramCollector(cfg);
-        z_out_hist = GPUHistogramCollector(cfg);
-        r_out_hist = GPUHistogramCollector(cfg);
-        g_out_hist = GPUHistogramCollector(cfg);
+        update_gate_input_hist = GPUHistogramCollector(cfg);
+        reset_gate_input_hist = GPUHistogramCollector(cfg);
+        new_gate_input_hist = GPUHistogramCollector(cfg);
+        update_gate_output_hist = GPUHistogramCollector(cfg);
+        reset_gate_output_hist = GPUHistogramCollector(cfg);
+        new_gate_output_hist = GPUHistogramCollector(cfg);
         Rh_add_br_g_hist = GPUHistogramCollector(cfg);
-        rRh_hist = GPUHistogramCollector(cfg);
-        new_contrib_hist = GPUHistogramCollector(cfg);
-        old_contrib_hist = GPUHistogramCollector(cfg);
+        mul_reset_hidden_hist = GPUHistogramCollector(cfg);
+        mul_new_contribution_hist = GPUHistogramCollector(cfg);
+        mul_old_contribution_hist = GPUHistogramCollector(cfg);
 
         int channel_size = hidden_ * 3;
         W_batch.reset(channel_size, num_bins_);
@@ -475,13 +483,13 @@ void compute_minmax_per_channel_gpu(const float* data_dev, size_t input_size, si
  */
 void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t steps,
                                size_t hidden_size, size_t batch_size,
-                               float& min_z_out, float& max_z_out,
-                               float& min_r_out, float& max_r_out,
-                               float& min_g_out, float& max_g_out,
+                               float& min_update_gate_out, float& max_update_gate_out,
+                               float& min_reset_gate_out, float& max_reset_gate_out,
+                               float& min_new_gate_out, float& max_new_gate_out,
                                float& min_Rh_add_br, float& max_Rh_add_br,
-                               float& min_rRh, float& max_rRh,
-                               float& min_new_contrib, float& max_new_contrib,
-                               float& min_old_contrib, float& max_old_contrib,
+                               float& min_mul_reset_hidden, float& max_mul_reset_hidden,
+                               float& min_mul_new_contribution, float& max_mul_new_contribution,
+                               float& min_mul_old_contribution, float& max_mul_old_contribution,
                                cudaStream_t stream = 0);
 
 }  // namespace gpu_hist

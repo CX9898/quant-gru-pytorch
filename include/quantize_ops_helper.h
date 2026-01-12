@@ -16,6 +16,16 @@
 //   - 支持对称量化（zp=0）和非对称量化（zp≠0）
 //   - CPU/GPU 共用函数使用 __host__ __device__ __forceinline__ 标记，确保行为一致
 //
+// 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
+//   - weight_ih_linear: W*x + bx 的输出
+//   - weight_hh_linear: R*h + br 的输出
+//   - reset_gate_input/output: reset gate 的输入/输出
+//   - update_gate_input/output: update gate 的输入/输出
+//   - new_gate_input/output: new gate 的输入/输出
+//   - mul_reset_hidden: r * h_n 的输出
+//   - mul_new_contribution: (1-u) * n 的输出
+//   - mul_old_contribution: u * h 的输出
+//
 // ============================================================================
 
 #include "cuda_compat.h"
@@ -44,7 +54,7 @@
  * 存储 GRU 网络量化过程中所有定点化/反量化所需的参数。
  *
  * 命名约定：
- *   - exp2_inv_xxx: 缩放因子指数，scale = 2^(-exp2_inv_xxx)
+ *   - shift_xxx: 缩放因子指数，scale = 2^(-shift_xxx)
  *   - zp_xxx: 零点（zero point）
  *
  * 量化公式：q = round(x / scale + zp)
@@ -54,60 +64,61 @@ struct GRUQuantitativeParameters {
     OperatorQuantConfig bitwidth_config_;  ///< 各算子的量化位宽配置
 
     // -------------------- 基础参数 --------------------
-    int hidden_;         ///< 隐藏层大小，channel = hidden * 3
-    int8_t exp2_inv_x_;  ///< 输入 x 的缩放因子指数
-    int32_t zp_x_;       ///< 输入 x 的零点
-    int8_t exp2_inv_h_;  ///< 隐状态 h 的缩放因子指数
-    int32_t zp_h_;       ///< 隐状态 h 的零点
+    // shift_xxx: 移位量，scale = 2^(-shift)，量化时右移，反量化时左移
+    int hidden_;       ///< 隐藏层大小，channel = hidden * 3
+    int8_t shift_x_;   ///< 输入 x 的移位量
+    int32_t zp_x_;     ///< 输入 x 的零点
+    int8_t shift_h_;   ///< 隐状态 h 的移位量
+    int32_t zp_h_;     ///< 隐状态 h 的零点
 
     // -------------------- 权重参数（per-channel）--------------------
-    std::vector<int8_t> exp2_inv_W_;  ///< 输入权重 W 的缩放因子，size = hidden * 3
-    std::vector<int8_t> exp2_inv_R_;  ///< 循环权重 R 的缩放因子，size = hidden * 3
+    std::vector<int8_t> shift_W_;   ///< 输入权重 W 的移位量，size = hidden * 3
+    std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
 
     // -------------------- 偏置参数（per-channel）--------------------
-    std::vector<int8_t> exp2_inv_bx_;  ///< 输入偏置缩放因子
-    std::vector<int8_t> exp2_inv_br_;  ///< 循环偏置缩放因子
+    std::vector<int8_t> shift_bx_;  ///< 输入偏置移位量
+    std::vector<int8_t> shift_br_;  ///< 循环偏置移位量
 
     // -------------------- Linear 输出参数 (GEMM+bias) --------------------
-    int8_t exp2_inv_Wx_;   ///< W*x + bx 的缩放因子指数
-    int32_t zp_Wx_;        ///< W*x + bx 的零点
-    int8_t exp2_inv_Rh_;   ///< R*h + br 的缩放因子指数
-    int32_t zp_Rh_;        ///< R*h + br 的零点
+    int8_t shift_weight_ih_linear_;    ///< W*x + bx 的移位量
+    int32_t zp_weight_ih_linear_;      ///< W*x + bx 的零点
+    int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
+    int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
 
     // -------------------- 门激活函数输入参数（pre-activation）--------------------
-    int8_t exp2_inv_z_pre_;   ///< z 门激活前的缩放因子
-    int32_t zp_z_pre_;        ///< z 门激活前的零点
-    int8_t exp2_inv_r_pre_;   ///< r 门激活前的缩放因子
-    int32_t zp_r_pre_;        ///< r 门激活前的零点
-    int8_t exp2_inv_g_pre_;   ///< g 门激活前的缩放因子
-    int32_t zp_g_pre_;        ///< g 门激活前的零点
+    int8_t shift_update_gate_input_;   ///< update gate 激活前的移位量
+    int32_t zp_update_gate_input_;     ///< update gate 激活前的零点
+    int8_t shift_reset_gate_input_;    ///< reset gate 激活前的移位量
+    int32_t zp_reset_gate_input_;      ///< reset gate 激活前的零点
+    int8_t shift_new_gate_input_;      ///< new gate 激活前的移位量
+    int32_t zp_new_gate_input_;        ///< new gate 激活前的零点
 
     // -------------------- 门激活函数输出参数（post-activation）--------------------
-    int8_t exp2_inv_z_out_;   ///< z 门激活后的缩放因子（sigmoid 输出）
-    int32_t zp_z_out_;        ///< z 门激活后的零点
-    int8_t exp2_inv_r_out_;   ///< r 门激活后的缩放因子（sigmoid 输出）
-    int32_t zp_r_out_;        ///< r 门激活后的零点
-    int8_t exp2_inv_g_out_;   ///< g 门激活后的缩放因子（tanh 输出）
-    int32_t zp_g_out_;        ///< g 门激活后的零点
+    int8_t shift_update_gate_output_;   ///< update gate 激活后的移位量（sigmoid 输出）
+    int32_t zp_update_gate_output_;     ///< update gate 激活后的零点
+    int8_t shift_reset_gate_output_;    ///< reset gate 激活后的移位量（sigmoid 输出）
+    int32_t zp_reset_gate_output_;      ///< reset gate 激活后的零点
+    int8_t shift_new_gate_output_;      ///< new gate 激活后的移位量（tanh 输出）
+    int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
 
     // -------------------- 中间计算参数 --------------------
-    // 注意：GEMM+bias 融合后，Rh_add_br 的量化参数与 Rh 相同 (exp2_inv_Rh_, zp_Rh_)
-    // 以下参数保留用于兼容性，但在融合模式下应等于 Rh 的参数
-    int8_t exp2_inv_Rh_add_br_;   ///< [已废弃] Rh + br 的缩放因子，融合后 = exp2_inv_Rh_
-    int32_t zp_Rh_add_br_;        ///< [已废弃] Rh + br 的零点，融合后 = zp_Rh_
-    int8_t exp2_inv_rRh_;         ///< r * Rh_br 的缩放因子
-    int32_t zp_rRh_;              ///< r * Rh_br 的零点
+    // 注意：GEMM+bias 融合后，weight_hh_linear 的量化参数统一使用 (shift_weight_hh_linear_, zp_weight_hh_linear_)
+    // 以下参数保留用于兼容性
+    int8_t shift_Rh_add_br_;           ///< [已废弃] 融合后 = shift_weight_hh_linear_
+    int32_t zp_Rh_add_br_;             ///< [已废弃] 融合后 = zp_weight_hh_linear_
+    int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
+    int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
 
     // -------------------- 隐状态更新参数 --------------------
-    int8_t exp2_inv_new_contrib_;   ///< (1-z)*g 的缩放因子
-    int32_t zp_new_contrib_;        ///< (1-z)*g 的零点
-    int8_t exp2_inv_old_contrib_;   ///< z*h 的缩放因子
-    int32_t zp_old_contrib_;        ///< z*h 的零点
+    int8_t shift_mul_new_contribution_;   ///< (1-u)*n 的移位量
+    int32_t zp_mul_new_contribution_;     ///< (1-u)*n 的零点
+    int8_t shift_mul_old_contribution_;   ///< u*h 的移位量
+    int32_t zp_mul_old_contribution_;     ///< u*h 的零点
 
     // -------------------- LUT 表（每层独立，在 finalize_calibration 时生成）--------------------
-    SigmoidLUT sigmoid_z_lut_;  ///< z 门 Sigmoid LUT
-    SigmoidLUT sigmoid_r_lut_;  ///< r 门 Sigmoid LUT
-    SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
+    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
+    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
+    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
 };
 
 // ============================================================================
@@ -128,56 +139,56 @@ struct GRUQuantitativeParameters {
 /**
  * @brief 门计算量化参数（纯标量，CPU/GPU 共用）
  *
- * 存储 computeZ/R/G/H 等门计算函数所需的标量参数。
+ * 存储 computeUpdateGate/ResetGate/NewGate/HiddenState 等门计算函数所需的标量参数。
  * 这些参数不涉及 per-channel 数组，可以安全地在 CPU/GPU 间共享。
  *
  * 命名约定：
- *   - n_A_div_B: 表示 scale_A / scale_B ≈ 2^(-n)，即重缩放移位量
- *   - exp2_inv_A_div_B: 同上，强调指数形式
+ *   - shift_A_to_B: 从 A 空间到 B 空间的移位量，= shift_A - shift_B
+ *   - shift_xxx: 右移位数
  *   - zp_xxx: 零点
  */
 struct GateQuantParams {
     // -------------------- Linear 输出零点 --------------------
-    int32_t zp_Wx_;  ///< Wx+bx 的零点（GEMM+bias 融合输出）
-    int32_t zp_Rh_;  ///< Rh+br 的零点（GEMM+bias 融合输出）
-    int32_t zp_h_;   ///< 隐状态 h 的零点（computeH 需要）
+    int32_t zp_weight_ih_linear_;  ///< W*x+bx 的零点
+    int32_t zp_weight_hh_linear_;  ///< R*h+br 的零点
+    int32_t zp_h_;                 ///< 隐状态 h 的零点
 
-    // -------------------- Z 门参数 --------------------
-    int32_t zp_z_pre_;                ///< z 门激活前零点
-    int32_t zp_z_out_;                ///< z 门激活后零点
-    int8_t exp2_inv_Wx_div_z_pre_;    ///< Wx_bx 到 z_pre 的重缩放
-    int8_t exp2_inv_Rh_div_z_pre_;    ///< Rh_br 到 z_pre 的重缩放
+    // -------------------- Update Gate 参数 --------------------
+    int32_t zp_update_gate_input_;                  ///< update gate 激活前零点
+    int32_t zp_update_gate_output_;                 ///< update gate 激活后零点
+    int8_t shift_weight_ih_linear_to_update_gate_input_;    ///< weight_ih_linear 到 update_gate_input 的移位
+    int8_t shift_weight_hh_linear_to_update_gate_input_;    ///< weight_hh_linear 到 update_gate_input 的移位
 
-    // -------------------- R 门参数 --------------------
-    int32_t zp_r_pre_;                ///< r 门激活前零点
-    int32_t zp_r_out_;                ///< r 门激活后零点
-    int8_t exp2_inv_Wx_div_r_pre_;    ///< Wx_bx 到 r_pre 的重缩放
-    int8_t exp2_inv_Rh_div_r_pre_;    ///< Rh_br 到 r_pre 的重缩放
+    // -------------------- Reset Gate 参数 --------------------
+    int32_t zp_reset_gate_input_;                  ///< reset gate 激活前零点
+    int32_t zp_reset_gate_output_;                 ///< reset gate 激活后零点
+    int8_t shift_weight_ih_linear_to_reset_gate_input_;    ///< weight_ih_linear 到 reset_gate_input 的移位
+    int8_t shift_weight_hh_linear_to_reset_gate_input_;    ///< weight_hh_linear 到 reset_gate_input 的移位
 
-    // -------------------- G 门（候选隐状态）参数 --------------------
-    int32_t zp_g_pre_;                ///< g 门激活前零点
-    int32_t zp_g_out_;                ///< g 门激活后零点
-    int8_t n_r_mul_Rh_div_rRh_;       ///< r*Rh_br 的重缩放
-    int32_t zp_rRh_;                  ///< r*Rh_br 的零点
-    int8_t n_Wx_div_g_pre_;           ///< Wx_bx 到 g_pre 的重缩放
-    int8_t n_rRh_div_g_pre_;          ///< rRh 到 g_pre 的重缩放
+    // -------------------- New Gate（候选隐状态）参数 --------------------
+    int32_t zp_new_gate_input_;                  ///< new gate 激活前零点
+    int32_t zp_new_gate_output_;                 ///< new gate 激活后零点
+    int8_t shift_reset_gate_mul_hh_to_mul_reset_hidden_;   ///< r*weight_hh_linear 的移位
+    int32_t zp_mul_reset_hidden_;                ///< r*weight_hh_linear 的零点
+    int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
+    int8_t shift_mul_reset_hidden_to_new_gate_input_;      ///< mul_reset_hidden 到 new_gate_input 的移位
 
     // -------------------- 隐状态更新参数 --------------------
-    int32_t one_in_z_scale_;               ///< 常数 1 在 z_out 量化空间的表示
-    int32_t zp_new_contrib_;               ///< (1-z)*g 的零点
-    int8_t n_z_out_mul_g_div_new_contrib_; ///< (1-z)*g 的重缩放
-    int32_t zp_old_contrib_;               ///< z*h 的零点
-    int8_t n_z_mul_h_div_old_contrib_;     ///< z*h 的重缩放
-    int8_t n_new_contrib_div_h_;           ///< new_contrib 到 h 的重缩放
-    int8_t n_old_contrib_div_h_;           ///< old_contrib 到 h 的重缩放
+    int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 在 update_gate_output 量化空间的表示
+    int32_t zp_mul_new_contribution_;            ///< (1-u)*n 的零点
+    int8_t shift_update_new_to_mul_new_contribution_;    ///< (1-u)*n 的移位
+    int32_t zp_mul_old_contribution_;            ///< u*h 的零点
+    int8_t shift_update_h_to_mul_old_contribution_;      ///< u*h 的移位
+    int8_t shift_mul_new_contribution_to_h_;     ///< mul_new_contribution 到 h 的移位
+    int8_t shift_mul_old_contribution_to_h_;     ///< mul_old_contribution 到 h 的移位
 
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
 
     // -------------------- LUT 表 --------------------
-    SigmoidLUT sigmoid_z_lut_;  ///< z 门 Sigmoid LUT
-    SigmoidLUT sigmoid_r_lut_;  ///< r 门 Sigmoid LUT
-    SigmoidLUT tanh_g_lut_;     ///< g 门 Tanh LUT
+    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
+    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
+    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
 
 #ifdef DEBUG
     GRUQuantitativeParameters test;  ///< 保存完整量化参数用于调试
@@ -188,20 +199,20 @@ struct GateQuantParams {
  * @brief Linear 层量化参数（GPU 版本，使用 dev::vector）
  *
  * 存储 GEMM+bias 融合计算所需的 per-channel 参数。
- * 仅在 ComputeWxBx/ComputeRhBr 等 GEMM 函数中使用。
+ * 仅在 ComputeLinearX/ComputeLinearH 等 GEMM 函数中使用。
  */
 struct LinearQuantParamsGPU {
     int32_t zp_x_;  ///< 输入 x 的零点
     int32_t zp_h_;  ///< 隐状态 h 的零点
 
-    dev::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x per-channel 重缩放
-    dev::vector<int8_t> n_bx_div_Wx_;       ///< bx per-channel 重缩放
-    dev::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h per-channel 重缩放
-    dev::vector<int8_t> n_br_div_Rh_;       ///< br per-channel 重缩放
+    dev::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
+    dev::vector<int8_t> shift_bx_to_weight_ih_linear_;      ///< bx per-channel 移位
+    dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
+    dev::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
 
 #ifdef DEBUG
-    dev::vector<int8_t> exp2_inv_bx_;  ///< bx 缩放因子（调试用）
-    dev::vector<int8_t> exp2_inv_br_;  ///< br 缩放因子（调试用）
+    dev::vector<int8_t> shift_bx_;  ///< bx 移位量（调试用）
+    dev::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
 #endif
 };
 
@@ -214,14 +225,14 @@ struct LinearQuantParamsCPU {
     int32_t zp_x_;  ///< 输入 x 的零点
     int32_t zp_h_;  ///< 隐状态 h 的零点
 
-    std::vector<int8_t> n_W_mul_x_div_Wx_;  ///< W*x per-channel 重缩放
-    std::vector<int8_t> n_bx_div_Wx_;       ///< bx per-channel 重缩放
-    std::vector<int8_t> n_R_mul_h_div_Rh_;  ///< R*h per-channel 重缩放
-    std::vector<int8_t> n_br_div_Rh_;       ///< br per-channel 重缩放
+    std::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
+    std::vector<int8_t> shift_bx_to_weight_ih_linear_;      ///< bx per-channel 移位
+    std::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
+    std::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
 
 #ifdef DEBUG
-    std::vector<int8_t> exp2_inv_bx_;  ///< bx 缩放因子（调试用）
-    std::vector<int8_t> exp2_inv_br_;  ///< br 缩放因子（调试用）
+    std::vector<int8_t> shift_bx_;  ///< bx 移位量（调试用）
+    std::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
 #endif
 };
 
@@ -443,227 +454,218 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) {
 #endif  // DEBUG_QUANT || DEBUG_QUANT_DETAIL
 
 /**
- * @brief 计算更新门 z = sigmoid(Wx_bx + Rh_br)
+ * @brief 计算更新门 update_gate = sigmoid(weight_ih_linear + weight_hh_linear)
  * 
- * 使用 GEMM+bias 融合版本：Wx_bx = W*x + bx, Rh_br = R*h + br
- * 
- * @param Wx_bx_val  GEMM+bias 融合输出 W*x + bx
- * @param Rh_br_val  GEMM+bias 融合输出 R*h + br
- * @param params     门计算参数
- * @param debug_idx  调试索引，-1 表示不输出调试信息
+ * @param weight_ih_linear  输入 Linear 变换结果 W*x + bx
+ * @param weight_hh_linear  隐状态 Linear 变换结果 R*h + br
+ * @param params    门计算参数
+ * @param debug_idx 调试索引，-1 表示不输出调试信息
  */
 __host__ __device__ __forceinline__ 
-int32_t computeZ(int32_t Wx_bx_val, int32_t Rh_br_val, const GateQuantParams &params,
+int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    // Wx_bx 和 Rh_br 已经包含了 bias，直接重缩放到 z_pre 空间
-    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.exp2_inv_Wx_div_z_pre_);
-    const int32_t Rh_br_shifted = rshift_round(Rh_br_val - params.zp_Rh_, params.exp2_inv_Rh_div_z_pre_);
+    // 重缩放到 update_gate_input 空间
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
+    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_update_gate_input_);
 
-    const int32_t z_pre_i32 = Wx_bx_shifted + Rh_br_shifted + params.zp_z_pre_;
+    const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t z = piecewise_linear(z_pre_i32, params.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
+    const int32_t update_gate = piecewise_linear(update_gate_input, params.sigmoid_update_gate_lut_, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float z_pre_fp = (float)(z_pre_i32 - params.zp_z_pre_) /
-                         (float)(1 << params.test.exp2_inv_z_pre_);
-        float z_fp = (float)(z - params.zp_z_out_) /
-                     (float)(1 << params.test.exp2_inv_z_out_);
-        printf("[QUANT_I32] computeZ: z_pre_q=%d, z_pre_fp=%.6f, z_q=%d, z_fp=%.6f\n", 
-               z_pre_i32, z_pre_fp, z, z_fp);
+        float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
+                         (float)(1 << params.test.shift_update_gate_input_);
+        float update_gate_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                     (float)(1 << params.test.shift_update_gate_output_);
+        printf("[QUANT_I32] computeUpdateGate: update_gate_input_q=%d, update_gate_input_fp=%.6f, update_gate_q=%d, update_gate_fp=%.6f\n", 
+               update_gate_input, update_gate_input_fp, update_gate, update_gate_fp);
     }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float z_pre_fp = (float)(z_pre_i32 - params.zp_z_pre_) /
-                         (float)(1 << params.test.exp2_inv_z_pre_);
-        float z_quant_fp = (float)(z - params.zp_z_out_) /
-                           (float)(1 << params.test.exp2_inv_z_out_);
-        float z_theory = sigmoid_fp(z_pre_fp);
-        float error = z_quant_fp - z_theory;
-        printf("[Z] idx=%d z_pre_q=%d z_pre_fp=%.4f | z_q=%d z_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, z_pre_i32, z_pre_fp, z, z_quant_fp, z_theory, error);
+        float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
+                         (float)(1 << params.test.shift_update_gate_input_);
+        float update_gate_quant_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                           (float)(1 << params.test.shift_update_gate_output_);
+        float update_gate_theory = sigmoid_fp(update_gate_input_fp);
+        float error = update_gate_quant_fp - update_gate_theory;
+        printf("[UpdateGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, update_gate_input, update_gate_input_fp, update_gate, update_gate_quant_fp, update_gate_theory, error);
     }
 #endif
 
-    return z;
+    return update_gate;
 }
 
 /**
- * @brief 计算重置门 r = sigmoid(Wx_bx + Rh_br)
- * 
- * 使用 GEMM+bias 融合版本：Wx_bx = W*x + bx, Rh_br = R*h + br
+ * @brief 计算重置门 reset_gate = sigmoid(weight_ih_linear + weight_hh_linear)
  */
 __host__ __device__ __forceinline__ 
-int32_t computeR(int32_t Wx_bx_val, int32_t Rh_br_val, const GateQuantParams &params,
+int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.exp2_inv_Wx_div_r_pre_);
-    const int32_t Rh_br_shifted = rshift_round(Rh_br_val - params.zp_Rh_, params.exp2_inv_Rh_div_r_pre_);
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
+    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
 
-    const int32_t r_pre_i32 = Wx_bx_shifted + Rh_br_shifted + params.zp_r_pre_;
+    const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t r = piecewise_linear(r_pre_i32, params.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
+    const int32_t reset_gate = piecewise_linear(reset_gate_input, params.sigmoid_reset_gate_lut_, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float r_pre_fp = (float)(r_pre_i32 - params.zp_r_pre_) /
-                         (float)(1 << params.test.exp2_inv_r_pre_);
-        float r_fp = (float)(r - params.zp_r_out_) /
-                     (float)(1 << params.test.exp2_inv_r_out_);
-        printf("[QUANT_I32] computeR: r_pre_q=%d, r_pre_fp=%.6f, r_q=%d, r_fp=%.6f\n", 
-               r_pre_i32, r_pre_fp, r, r_fp);
+        float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
+                         (float)(1 << params.test.shift_reset_gate_input_);
+        float reset_gate_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
+                     (float)(1 << params.test.shift_reset_gate_output_);
+        printf("[QUANT_I32] computeResetGate: reset_gate_input_q=%d, reset_gate_input_fp=%.6f, reset_gate_q=%d, reset_gate_fp=%.6f\n", 
+               reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_fp);
     }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float r_pre_fp = (float)(r_pre_i32 - params.zp_r_pre_) /
-                         (float)(1 << params.test.exp2_inv_r_pre_);
-        float r_quant_fp = (float)(r - params.zp_r_out_) /
-                           (float)(1 << params.test.exp2_inv_r_out_);
-        float r_theory = sigmoid_fp(r_pre_fp);
-        float error = r_quant_fp - r_theory;
-        printf("[R] idx=%d r_pre_q=%d r_pre_fp=%.4f | r_q=%d r_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, r_pre_i32, r_pre_fp, r, r_quant_fp, r_theory, error);
+        float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
+                         (float)(1 << params.test.shift_reset_gate_input_);
+        float reset_gate_quant_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
+                           (float)(1 << params.test.shift_reset_gate_output_);
+        float reset_gate_theory = sigmoid_fp(reset_gate_input_fp);
+        float error = reset_gate_quant_fp - reset_gate_theory;
+        printf("[ResetGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_quant_fp, reset_gate_theory, error);
     }
 #endif
 
-    return r;
+    return reset_gate;
 }
 
 /**
- * @brief 计算候选门 g = tanh(Wx_bx + r * Rh_br)
+ * @brief 计算候选门 new_gate = tanh(weight_ih_linear + reset_gate * weight_hh_linear)
  * 
- * 使用 GEMM+bias 融合版本：
- * - Wx_bx = W*x + bx (对应 g 门的 Wx_g + bx_g)
- * - Rh_br = R*h + br (对应 g 门的 Rh_g + br_g，已融合，量化参数为 exp2_inv_Rh_, zp_Rh_)
- * 
- * 公式推导：g = tanh(Wx_g + bx_g + r * (Rh_g + br_g)) = tanh(Wx_bx_g + r * Rh_br_g)
- * 
- * @param Rh_br_g [out] 中间结果，用于存储到 v（训练时反向传播需要）
+ * @param weight_ih_linear    输入 Linear 变换结果
+ * @param weight_hh_linear    隐状态 Linear 变换结果
+ * @param reset_gate          重置门输出
+ * @param weight_hh_linear_g  [out] 中间结果，用于存储到 v（训练时反向传播需要）
  */
 __host__ __device__ __forceinline__ 
-int32_t computeG(int32_t Wx_bx_val, int32_t Rh_br_val, int32_t r,
-                 const GateQuantParams &params, int32_t &Rh_br_g,
+int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
+                 const GateQuantParams &params, int32_t &weight_hh_linear_g,
                  [[maybe_unused]] int debug_idx = -1) {
-    // GEMM+bias 融合后，Rh_br_val 就是 R*h + br
-    // 量化参数为 (exp2_inv_Rh_, zp_Rh_)，不需要额外重缩放
-    Rh_br_g = Rh_br_val;
+    // Linear 融合后，weight_hh_linear 就是 R*h + br
+    weight_hh_linear_g = weight_hh_linear;
 
-    // 计算 r * Rh_br
-    const int64_t r_diff = static_cast<int64_t>(r) - params.zp_r_out_;
-    const int64_t Rh_br_diff = static_cast<int64_t>(Rh_br_g) - params.zp_Rh_;
-    const int64_t rRh_mul_i64 = r_diff * Rh_br_diff;
+    // 计算 reset_gate * weight_hh_linear (即 mul_reset_hidden)
+    const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
+    const int64_t reset_hidden_mul = r_diff * hh_diff;
 
-    int32_t rRh = static_cast<int32_t>(rshift_round(rRh_mul_i64, params.n_r_mul_Rh_div_rRh_)) +
-                  params.zp_rRh_;
-    rRh = clamp_by_bitwidth(rRh, params.bitwidth_config_.rRh_);
+    int32_t mul_reset_hidden = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_gate_mul_hh_to_mul_reset_hidden_)) +
+                 params.zp_mul_reset_hidden_;
+    mul_reset_hidden = clamp_by_bitwidth(mul_reset_hidden, params.bitwidth_config_.mul_reset_hidden_);
 
-    // 计算 g_pre = Wx_bx + rRh
-    const int32_t Wx_bx_shifted = rshift_round(Wx_bx_val - params.zp_Wx_, params.n_Wx_div_g_pre_);
-    const int32_t rRh_shifted = rshift_round(rRh - params.zp_rRh_, params.n_rRh_div_g_pre_);
+    // 计算 new_gate_input = weight_ih_linear + mul_reset_hidden
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
+    const int32_t rh_shifted = rshift_round(mul_reset_hidden - params.zp_mul_reset_hidden_, params.shift_mul_reset_hidden_to_new_gate_input_);
 
-    const int32_t g_pre_i32 = Wx_bx_shifted + rRh_shifted + params.zp_g_pre_;
+    const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t g = piecewise_linear(g_pre_i32, params.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
+    const int32_t new_gate = piecewise_linear(new_gate_input, params.tanh_new_gate_lut_, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float Rh_br_fp = (float)(Rh_br_g - params.zp_Rh_) /
-                         (float)(1 << params.test.exp2_inv_Rh_);
-        float rRh_fp = (float)(rRh - params.zp_rRh_) / 
-                       (float)(1 << params.test.exp2_inv_rRh_);
-        float g_pre_fp = (float)(g_pre_i32 - params.zp_g_pre_) /
-                         (float)(1 << params.test.exp2_inv_g_pre_);
-        float g_fp = (float)(g - params.zp_g_out_) /
-                     (float)(1 << params.test.exp2_inv_g_out_);
-        printf("[QUANT_I32] computeG: Rh_br_fp=%.6f, rRh_fp=%.6f, g_pre_fp=%.6f, g_fp=%.6f\n",
-               Rh_br_fp, rRh_fp, g_pre_fp, g_fp);
+        float hh_fp = (float)(weight_hh_linear_g - params.zp_weight_hh_linear_) /
+                      (float)(1 << params.test.shift_weight_hh_linear_);
+        float rh_fp = (float)(mul_reset_hidden - params.zp_mul_reset_hidden_) / 
+                      (float)(1 << params.test.shift_mul_reset_hidden_);
+        float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
+                         (float)(1 << params.test.shift_new_gate_input_);
+        float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                     (float)(1 << params.test.shift_new_gate_output_);
+        printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, rh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
+               hh_fp, rh_fp, new_gate_input_fp, new_gate_fp);
     }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float g_pre_fp = (float)(g_pre_i32 - params.zp_g_pre_) /
-                         (float)(1 << params.test.exp2_inv_g_pre_);
-        float g_quant_fp = (float)(g - params.zp_g_out_) /
-                           (float)(1 << params.test.exp2_inv_g_out_);
-        float g_theory = tanh_fp(g_pre_fp);
-        float error = g_quant_fp - g_theory;
-        printf("[G] idx=%d g_pre_q=%d g_pre_fp=%.4f | g_q=%d g_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, g_pre_i32, g_pre_fp, g, g_quant_fp, g_theory, error);
+        float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
+                         (float)(1 << params.test.shift_new_gate_input_);
+        float new_gate_quant_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                           (float)(1 << params.test.shift_new_gate_output_);
+        float new_gate_theory = tanh_fp(new_gate_input_fp);
+        float error = new_gate_quant_fp - new_gate_theory;
+        printf("[NewGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+               debug_idx, new_gate_input, new_gate_input_fp, new_gate, new_gate_quant_fp, new_gate_theory, error);
     }
 #endif
 
-    return g;
+    return new_gate;
 }
 
 /**
- * @brief 计算隐藏状态 h = z * h_old + (1 - z) * g
+ * @brief 计算隐藏状态 h_new = update_gate * h_old + (1 - update_gate) * new_gate
  */
 __host__ __device__ __forceinline__ 
-int32_t computeH(int32_t z, int32_t g, int32_t h_old, const GateQuantParams &params,
+int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    // 计算 old_contrib = z * h_old
-    const int64_t z_diff = static_cast<int64_t>(z) - params.zp_z_out_;
+    // 计算 mul_old_contribution = update_gate * h_old
+    const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
-    const int64_t old_contrib_mul_i64 = z_diff * h_diff;
+    const int64_t old_contribution_mul = u_diff * h_diff;
 
-    int32_t old_contrib = static_cast<int32_t>(
-        rshift_round(old_contrib_mul_i64, params.n_z_mul_h_div_old_contrib_)) +
-        params.zp_old_contrib_;
-    old_contrib = clamp_by_bitwidth(old_contrib, params.bitwidth_config_.old_contrib_);
+    int32_t mul_old_contribution = static_cast<int32_t>(
+        rshift_round(old_contribution_mul, params.shift_update_h_to_mul_old_contribution_)) +
+        params.zp_mul_old_contribution_;
+    mul_old_contribution = clamp_by_bitwidth(mul_old_contribution, params.bitwidth_config_.mul_old_contribution_);
 
-    // 计算 new_contrib = (1 - z) * g
-    // one_minus_diff = one_in_z_scale_ - z（省去中间变量）
-    const int64_t one_minus_diff = static_cast<int64_t>(params.one_in_z_scale_) - z;
-    const int64_t g_diff = static_cast<int64_t>(g) - params.zp_g_out_;
-    const int64_t new_contrib_mul_i64 = one_minus_diff * g_diff;
+    // 计算 mul_new_contribution = (1 - update_gate) * new_gate
+    const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
+    const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
+    const int64_t new_contribution_mul = one_minus_u * n_diff;
 
-    int32_t new_contrib = static_cast<int32_t>(
-        rshift_round(new_contrib_mul_i64, params.n_z_out_mul_g_div_new_contrib_)) +
-        params.zp_new_contrib_;
-    new_contrib = clamp_by_bitwidth(new_contrib, params.bitwidth_config_.new_contrib_);
+    int32_t mul_new_contribution = static_cast<int32_t>(
+        rshift_round(new_contribution_mul, params.shift_update_new_to_mul_new_contribution_)) +
+        params.zp_mul_new_contribution_;
+    mul_new_contribution = clamp_by_bitwidth(mul_new_contribution, params.bitwidth_config_.mul_new_contribution_);
 
-    // 计算 h = old_contrib + new_contrib
-    const int32_t h_i32 =
-        rshift_round(old_contrib - params.zp_old_contrib_, params.n_old_contrib_div_h_) +
-        rshift_round(new_contrib - params.zp_new_contrib_, params.n_new_contrib_div_h_) +
+    // 计算 h_new = mul_old_contribution + mul_new_contribution
+    const int32_t h_new =
+        rshift_round(mul_old_contribution - params.zp_mul_old_contribution_, params.shift_mul_old_contribution_to_h_) +
+        rshift_round(mul_new_contribution - params.zp_mul_new_contribution_, params.shift_mul_new_contribution_to_h_) +
         params.zp_h_;
 
-    const int32_t h = clamp_by_bitwidth(h_i32, params.bitwidth_config_.h_);
+    const int32_t h = clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
-        float z_fp = (float)(z - params.zp_z_out_) /
-                     (float)(1 << params.test.exp2_inv_z_out_);
-        float g_fp = (float)(g - params.zp_g_out_) /
-                     (float)(1 << params.test.exp2_inv_g_out_);
+        float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                     (float)(1 << params.test.shift_update_gate_output_);
+        float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                     (float)(1 << params.test.shift_new_gate_output_);
         float h_old_fp = (float)(h_old - params.zp_h_) / 
-                         (float)(1 << params.test.exp2_inv_h_);
+                         (float)(1 << params.test.shift_h_);
         float h_fp = (float)(h - params.zp_h_) / 
-                     (float)(1 << params.test.exp2_inv_h_);
-        printf("[QUANT_I32] computeH: z_fp=%.6f, g_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
-               z_fp, g_fp, h_old_fp, h_fp);
+                     (float)(1 << params.test.shift_h_);
+        printf("[QUANT_I32] computeHiddenState: u_fp=%.6f, n_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
+               u_fp, n_fp, h_old_fp, h_fp);
     }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0 && debug_idx < 3) {
-        float z_fp = (float)(z - params.zp_z_out_) /
-                     (float)(1 << params.test.exp2_inv_z_out_);
-        float g_fp = (float)(g - params.zp_g_out_) /
-                     (float)(1 << params.test.exp2_inv_g_out_);
+        float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                     (float)(1 << params.test.shift_update_gate_output_);
+        float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                     (float)(1 << params.test.shift_new_gate_output_);
         float h_old_fp = (float)(h_old - params.zp_h_) / 
-                         (float)(1 << params.test.exp2_inv_h_);
+                         (float)(1 << params.test.shift_h_);
         float h_quant_fp = (float)(h - params.zp_h_) / 
-                           (float)(1 << params.test.exp2_inv_h_);
-        printf("[H] idx=%d z_fp=%.4f g_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
-               debug_idx, z_fp, g_fp, h_old_fp, h, h_quant_fp);
+                           (float)(1 << params.test.shift_h_);
+        printf("[HiddenState] idx=%d u_fp=%.4f n_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
+               debug_idx, u_fp, n_fp, h_old_fp, h, h_quant_fp);
     }
 #endif
 
@@ -970,8 +972,8 @@ void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp
 /// @brief GPU 反量化 V 向量（各部分使用不同量化参数）
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
-                       int hidden_size, int8_t exp2_inv_z, int32_t zp_z, int8_t exp2_inv_r,
-                       int32_t zp_r, int8_t exp2_inv_g, int32_t zp_g, int8_t exp2_inv_Rh_add_br,
+                       int hidden_size, int8_t shift_update_gate, int32_t zp_update_gate, int8_t shift_reset_gate,
+                       int32_t zp_reset_gate, int8_t shift_new_gate, int32_t zp_new_gate, int8_t shift_Rh_add_br,
                        int32_t zp_Rh_add_br);
 
 /// @brief GPU 量化（统一 int32_t 输出，使用位宽配置）
@@ -1138,8 +1140,8 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     printf("  hidden = %d\n", quant_parms.hidden_);
 
     // 输入/隐状态
-    printf("  x:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_x_, quant_parms.zp_x_);
-    printf("  h:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_h_, quant_parms.zp_h_);
+    printf("  x:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_x_, quant_parms.zp_x_);
+    printf("  h:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_h_, quant_parms.zp_h_);
 
     // Per-channel 权重
     auto print_vec = [](const char *name, const std::vector<int8_t> &vec) {
@@ -1148,31 +1150,31 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
         if (vec.size() > 5) printf("...");
         printf("\n");
     };
-    print_vec("W ", quant_parms.exp2_inv_W_);
-    print_vec("R ", quant_parms.exp2_inv_R_);
-    print_vec("bx", quant_parms.exp2_inv_bx_);
-    print_vec("br", quant_parms.exp2_inv_br_);
+    print_vec("W ", quant_parms.shift_W_);
+    print_vec("R ", quant_parms.shift_R_);
+    print_vec("bx", quant_parms.shift_bx_);
+    print_vec("br", quant_parms.shift_br_);
 
-    // GEMM 输出
-    printf("  Wx: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Wx_, quant_parms.zp_Wx_);
-    printf("  Rh: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Rh_, quant_parms.zp_Rh_);
+    // Linear 输出
+    printf("  weight_ih_linear: shift=%2d, zp=%d\n", quant_parms.shift_weight_ih_linear_, quant_parms.zp_weight_ih_linear_);
+    printf("  weight_hh_linear: shift=%2d, zp=%d\n", quant_parms.shift_weight_hh_linear_, quant_parms.zp_weight_hh_linear_);
 
     // 门参数
-    printf("  z_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_z_pre_, quant_parms.zp_z_pre_);
-    printf("  z_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_z_out_, quant_parms.zp_z_out_);
-    printf("  r_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_r_pre_, quant_parms.zp_r_pre_);
-    printf("  r_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_r_out_, quant_parms.zp_r_out_);
-    printf("  g_pre:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_g_pre_, quant_parms.zp_g_pre_);
-    printf("  g_out:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_g_out_, quant_parms.zp_g_out_);
+    printf("  update_gate_input:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_update_gate_input_, quant_parms.zp_update_gate_input_);
+    printf("  update_gate_output: exp2_inv=%2d, zp=%d\n", quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_);
+    printf("  reset_gate_input:   exp2_inv=%2d, zp=%d\n", quant_parms.shift_reset_gate_input_, quant_parms.zp_reset_gate_input_);
+    printf("  reset_gate_output:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_reset_gate_output_, quant_parms.zp_reset_gate_output_);
+    printf("  new_gate_input:     exp2_inv=%2d, zp=%d\n", quant_parms.shift_new_gate_input_, quant_parms.zp_new_gate_input_);
+    printf("  new_gate_output:    exp2_inv=%2d, zp=%d\n", quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_);
 
     // 中间计算
-    printf("  Rh+br:  exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_Rh_add_br_,
+    printf("  Rh+br:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_Rh_add_br_,
            quant_parms.zp_Rh_add_br_);
-    printf("  r*Rh:   exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_rRh_, quant_parms.zp_rRh_);
+    printf("  mul_reset_hidden:   exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_reset_hidden_, quant_parms.zp_mul_reset_hidden_);
 
     // 隐状态更新
-    printf("  new_contrib: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_new_contrib_,
-           quant_parms.zp_new_contrib_);
-    printf("  old_contrib: exp2_inv=%2d, zp=%d\n", quant_parms.exp2_inv_old_contrib_,
-           quant_parms.zp_old_contrib_);
+    printf("  mul_new_contribution: exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_new_contribution_,
+           quant_parms.zp_mul_new_contribution_);
+    printf("  mul_old_contribution: exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_old_contribution_,
+           quant_parms.zp_mul_old_contribution_);
 }
