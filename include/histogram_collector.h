@@ -531,6 +531,14 @@ class HistogramCollector {
 /**
  * GRU 直方图收集器
  * 为 GRU 的每个中间张量维护一个直方图
+ * 
+ * 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
+ *   - update_gate_input/output: update gate 的输入/输出
+ *   - reset_gate_input/output: reset gate 的输入/输出
+ *   - new_gate_input/output: new gate 的输入/输出
+ *   - mul_reset_hidden: r * h_n 的输出
+ *   - mul_new_contribution: (1-u) * n 的输出
+ *   - mul_old_contribution: u * h 的输出
  */
 struct GRUHistogramCollectors {
     int hidden_ = 0;
@@ -544,21 +552,21 @@ struct GRUHistogramCollectors {
     HistogramCollector Wx_hist;
     HistogramCollector Rh_hist;
 
-    // 门的预激活值
-    HistogramCollector z_pre_hist;
-    HistogramCollector r_pre_hist;
-    HistogramCollector g_pre_hist;
+    // 门的预激活值（gate input）
+    HistogramCollector update_gate_input_hist;
+    HistogramCollector reset_gate_input_hist;
+    HistogramCollector new_gate_input_hist;
 
-    // 门的输出值
-    HistogramCollector z_out_hist;
-    HistogramCollector r_out_hist;
-    HistogramCollector g_out_hist;
+    // 门的输出值（gate output）
+    HistogramCollector update_gate_output_hist;
+    HistogramCollector reset_gate_output_hist;
+    HistogramCollector new_gate_output_hist;
 
     // 中间计算结果
     HistogramCollector Rh_add_br_g_hist;
-    HistogramCollector rRh_hist;
-    HistogramCollector new_contrib_hist;
-    HistogramCollector old_contrib_hist;
+    HistogramCollector mul_reset_hidden_hist;
+    HistogramCollector mul_new_contribution_hist;
+    HistogramCollector mul_old_contribution_hist;
 
     // 权重（per-channel，每个 channel 一个直方图）
     std::vector<HistogramCollector> W_hist;
@@ -584,16 +592,16 @@ struct GRUHistogramCollectors {
         h_hist = HistogramCollector(cfg);
         Wx_hist = HistogramCollector(cfg);
         Rh_hist = HistogramCollector(cfg);
-        z_pre_hist = HistogramCollector(cfg);
-        r_pre_hist = HistogramCollector(cfg);
-        g_pre_hist = HistogramCollector(cfg);
-        z_out_hist = HistogramCollector(cfg);
-        r_out_hist = HistogramCollector(cfg);
-        g_out_hist = HistogramCollector(cfg);
+        update_gate_input_hist = HistogramCollector(cfg);
+        reset_gate_input_hist = HistogramCollector(cfg);
+        new_gate_input_hist = HistogramCollector(cfg);
+        update_gate_output_hist = HistogramCollector(cfg);
+        reset_gate_output_hist = HistogramCollector(cfg);
+        new_gate_output_hist = HistogramCollector(cfg);
         Rh_add_br_g_hist = HistogramCollector(cfg);
-        rRh_hist = HistogramCollector(cfg);
-        new_contrib_hist = HistogramCollector(cfg);
-        old_contrib_hist = HistogramCollector(cfg);
+        mul_reset_hidden_hist = HistogramCollector(cfg);
+        mul_new_contribution_hist = HistogramCollector(cfg);
+        mul_old_contribution_hist = HistogramCollector(cfg);
 
         // Per-channel 直方图
         int channel_size = hidden_ * 3;
@@ -611,12 +619,12 @@ struct GRUHistogramCollectors {
         h_hist.histogram().print("h");
         Wx_hist.histogram().print("Wx");
         Rh_hist.histogram().print("Rh");
-        z_pre_hist.histogram().print("z_pre");
-        r_pre_hist.histogram().print("r_pre");
-        g_pre_hist.histogram().print("g_pre");
-        z_out_hist.histogram().print("z_out");
-        r_out_hist.histogram().print("r_out");
-        g_out_hist.histogram().print("g_out");
+        update_gate_input_hist.histogram().print("update_gate_input");
+        reset_gate_input_hist.histogram().print("reset_gate_input");
+        new_gate_input_hist.histogram().print("new_gate_input");
+        update_gate_output_hist.histogram().print("update_gate_output");
+        reset_gate_output_hist.histogram().print("reset_gate_output");
+        new_gate_output_hist.histogram().print("new_gate_output");
     }
 };
 

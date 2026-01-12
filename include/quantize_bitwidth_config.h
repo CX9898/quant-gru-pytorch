@@ -25,54 +25,45 @@ struct QuantBitWidth {
         return static_cast<int64_t>(qmax()) - static_cast<int64_t>(qmin());
     }
 
-    bool fitsInt8() const { return bits_ <= 8; }
-    bool fitsInt16() const { return bits_ <= 16; }
-    
     bool operator==(const QuantBitWidth& other) const {
         return bits_ == other.bits_ && is_unsigned_ == other.is_unsigned_;
     }
     bool operator!=(const QuantBitWidth& other) const {
         return !(*this == other);
     }
-    
-    static QuantBitWidth INT8() { return QuantBitWidth(8, false); }
-    static QuantBitWidth INT16() { return QuantBitWidth(16, false); }
-    static QuantBitWidth INT32() { return QuantBitWidth(32, false); }
-    static QuantBitWidth UINT8() { return QuantBitWidth(8, true); }
-    static QuantBitWidth UINT16() { return QuantBitWidth(16, true); }
 };
 
 struct OperatorQuantConfig {
     QuantBitWidth x_{8, false}, h_{8, false};
-    QuantBitWidth W_{8, false}, R_{8, false}, bx_{16, false}, br_{16, false};
-    QuantBitWidth Wx_{16, false}, Rh_{16, false};
-    QuantBitWidth z_pre_{8, false}, z_out_{8, true};   // z_out: UINT
-    QuantBitWidth r_pre_{8, false}, r_out_{8, true};   // r_out: UINT
-    QuantBitWidth g_pre_{8, false}, g_out_{8, false};
-    QuantBitWidth Rh_add_br_{16, false}, rRh_{16, false};
-    QuantBitWidth old_contrib_{16, false}, new_contrib_{16, false};
+    QuantBitWidth W_{8, false}, R_{8, false}, bx_{8, false}, br_{8, false};
+    QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};  // GEMM+bias 融合输出
+    QuantBitWidth update_gate_input_{8, false}, update_gate_output_{8, true};   // update_gate_output: UINT
+    QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{8, true};     // reset_gate_output: UINT
+    QuantBitWidth new_gate_input_{8, false}, new_gate_output_{8, false};
+    QuantBitWidth mul_reset_hidden_{8, false};  // r * weight_hh_linear (new gate中)
+    QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
 
     bool x_symmetric_ = false, h_symmetric_ = false;
     bool W_symmetric_ = true, R_symmetric_ = true, bx_symmetric_ = true, br_symmetric_ = true;
-    bool Wx_symmetric_ = false, Rh_symmetric_ = false;
-    bool z_pre_symmetric_ = false, z_out_symmetric_ = false;
-    bool r_pre_symmetric_ = false, r_out_symmetric_ = false;
-    bool g_pre_symmetric_ = false, g_out_symmetric_ = true;
-    bool Rh_add_br_symmetric_ = false, rRh_symmetric_ = false;
-    bool old_contrib_symmetric_ = false, new_contrib_symmetric_ = false;
+    bool weight_ih_linear_symmetric_ = false, weight_hh_linear_symmetric_ = false;
+    bool update_gate_input_symmetric_ = false, update_gate_output_symmetric_ = false;
+    bool reset_gate_input_symmetric_ = false, reset_gate_output_symmetric_ = false;
+    bool new_gate_input_symmetric_ = false, new_gate_output_symmetric_ = true;
+    bool mul_reset_hidden_symmetric_ = false;
+    bool mul_old_contribution_symmetric_ = false, mul_new_contribution_symmetric_ = false;
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
         QuantBitWidth* signed_members[] = {
-            &x_, &h_, &W_, &R_, &bx_, &br_, &Wx_, &Rh_,
-            &z_pre_, &r_pre_, &g_pre_, &g_out_,
-            &Rh_add_br_, &rRh_, &old_contrib_, &new_contrib_
+            &x_, &h_, &W_, &R_, &bx_, &br_, &weight_ih_linear_, &weight_hh_linear_,
+            &update_gate_input_, &reset_gate_input_, &new_gate_input_, &new_gate_output_,
+            &mul_reset_hidden_, &mul_old_contribution_, &mul_new_contribution_
         };
         for (auto* m : signed_members) {
             m->bits_ = bits;
             m->is_unsigned_ = false;  // 有符号
         }
-        z_out_ = {bits, true};   // UINT
-        r_out_ = {bits, true};   // UINT
+        update_gate_output_ = {bits, true};   // UINT
+        reset_gate_output_ = {bits, true};    // UINT
         return *this;
     }
 };

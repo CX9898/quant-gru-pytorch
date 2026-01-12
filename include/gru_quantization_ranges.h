@@ -7,6 +7,16 @@
 
 // GRU 量化范围结构体：存储GRU网络中每个算子计算 scale 前的 min/max 值
 // 用于校准（calibration）阶段记录各算子的数值范围，便于后续分析和调试
+//
+// 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
+//   - weight_ih_linear: W*x + bx 的输出
+//   - weight_hh_linear: R*h + br 的输出
+//   - reset_gate_input/output: reset gate 的输入/输出
+//   - update_gate_input/output: update gate 的输入/输出
+//   - new_gate_input/output: new gate 的输入/输出
+//   - mul_reset_hidden: r * h_n 的输出
+//   - mul_new_contribution: (1-u) * n 的输出
+//   - mul_old_contribution: u * h 的输出
 struct GRUQuantizationRanges {
     // 默认构造函数：自动初始化所有范围为无效值
     GRUQuantizationRanges() : hidden_(0) { reset(); }
@@ -33,22 +43,22 @@ struct GRUQuantizationRanges {
     std::vector<float> min_br_, max_br_;  // size = hidden * 3
 
     // 门的预激活值（sigmoid/tanh 输入）
-    float min_z_pre_, max_z_pre_;
-    float min_r_pre_, max_r_pre_;
-    float min_g_pre_, max_g_pre_;
+    float min_update_gate_input_, max_update_gate_input_;
+    float min_reset_gate_input_, max_reset_gate_input_;
+    float min_new_gate_input_, max_new_gate_input_;
 
     // 门的输出值（sigmoid/tanh 输出）
-    float min_z_out_, max_z_out_;
-    float min_r_out_, max_r_out_;
-    float min_g_out_, max_g_out_;
+    float min_update_gate_output_, max_update_gate_output_;
+    float min_reset_gate_output_, max_reset_gate_output_;
+    float min_new_gate_output_, max_new_gate_output_;
 
     // 中间计算结果
     float min_Rh_add_br_g_, max_Rh_add_br_g_;
-    float min_rRh_, max_rRh_;
+    float min_mul_reset_hidden_, max_mul_reset_hidden_;
 
     // 最终输出计算
-    float min_new_contrib_, max_new_contrib_;
-    float min_old_contrib_, max_old_contrib_;
+    float min_mul_new_contribution_, max_mul_new_contribution_;
+    float min_mul_old_contribution_, max_mul_old_contribution_;
 
     // 重置所有范围为无效值
     // 如果传入 hidden > 0，则更新 hidden_ 并重新分配 per-channel 向量
@@ -76,26 +86,26 @@ inline void GRUQuantizationRanges::reset(int hidden) {
     max_Wx_ = std::numeric_limits<float>::lowest();
     min_Rh_ = std::numeric_limits<float>::max();
     max_Rh_ = std::numeric_limits<float>::lowest();
-    min_z_pre_ = std::numeric_limits<float>::max();
-    max_z_pre_ = std::numeric_limits<float>::lowest();
-    min_r_pre_ = std::numeric_limits<float>::max();
-    max_r_pre_ = std::numeric_limits<float>::lowest();
-    min_g_pre_ = std::numeric_limits<float>::max();
-    max_g_pre_ = std::numeric_limits<float>::lowest();
-    min_z_out_ = std::numeric_limits<float>::max();
-    max_z_out_ = std::numeric_limits<float>::lowest();
-    min_r_out_ = std::numeric_limits<float>::max();
-    max_r_out_ = std::numeric_limits<float>::lowest();
-    min_g_out_ = std::numeric_limits<float>::max();
-    max_g_out_ = std::numeric_limits<float>::lowest();
+    min_update_gate_input_ = std::numeric_limits<float>::max();
+    max_update_gate_input_ = std::numeric_limits<float>::lowest();
+    min_reset_gate_input_ = std::numeric_limits<float>::max();
+    max_reset_gate_input_ = std::numeric_limits<float>::lowest();
+    min_new_gate_input_ = std::numeric_limits<float>::max();
+    max_new_gate_input_ = std::numeric_limits<float>::lowest();
+    min_update_gate_output_ = std::numeric_limits<float>::max();
+    max_update_gate_output_ = std::numeric_limits<float>::lowest();
+    min_reset_gate_output_ = std::numeric_limits<float>::max();
+    max_reset_gate_output_ = std::numeric_limits<float>::lowest();
+    min_new_gate_output_ = std::numeric_limits<float>::max();
+    max_new_gate_output_ = std::numeric_limits<float>::lowest();
     min_Rh_add_br_g_ = std::numeric_limits<float>::max();
     max_Rh_add_br_g_ = std::numeric_limits<float>::lowest();
-    min_rRh_ = std::numeric_limits<float>::max();
-    max_rRh_ = std::numeric_limits<float>::lowest();
-    min_new_contrib_ = std::numeric_limits<float>::max();
-    max_new_contrib_ = std::numeric_limits<float>::lowest();
-    min_old_contrib_ = std::numeric_limits<float>::max();
-    max_old_contrib_ = std::numeric_limits<float>::lowest();
+    min_mul_reset_hidden_ = std::numeric_limits<float>::max();
+    max_mul_reset_hidden_ = std::numeric_limits<float>::lowest();
+    min_mul_new_contribution_ = std::numeric_limits<float>::max();
+    max_mul_new_contribution_ = std::numeric_limits<float>::lowest();
+    min_mul_old_contribution_ = std::numeric_limits<float>::max();
+    max_mul_old_contribution_ = std::numeric_limits<float>::lowest();
 
     // 重置 per-channel 向量
     if (hidden_ > 0) {
@@ -118,16 +128,16 @@ inline void GRUQuantizationRanges::print() const {
     printf("  h: [%f, %f]\n", min_h_, max_h_);
     printf("  Wx: [%f, %f]\n", min_Wx_, max_Wx_);
     printf("  Rh: [%f, %f]\n", min_Rh_, max_Rh_);
-    printf("  z_pre: [%f, %f]\n", min_z_pre_, max_z_pre_);
-    printf("  r_pre: [%f, %f]\n", min_r_pre_, max_r_pre_);
-    printf("  g_pre: [%f, %f]\n", min_g_pre_, max_g_pre_);
-    printf("  z_out: [%f, %f]\n", min_z_out_, max_z_out_);
-    printf("  r_out: [%f, %f]\n", min_r_out_, max_r_out_);
-    printf("  g_out: [%f, %f]\n", min_g_out_, max_g_out_);
+    printf("  update_gate_input: [%f, %f]\n", min_update_gate_input_, max_update_gate_input_);
+    printf("  reset_gate_input: [%f, %f]\n", min_reset_gate_input_, max_reset_gate_input_);
+    printf("  new_gate_input: [%f, %f]\n", min_new_gate_input_, max_new_gate_input_);
+    printf("  update_gate_output: [%f, %f]\n", min_update_gate_output_, max_update_gate_output_);
+    printf("  reset_gate_output: [%f, %f]\n", min_reset_gate_output_, max_reset_gate_output_);
+    printf("  new_gate_output: [%f, %f]\n", min_new_gate_output_, max_new_gate_output_);
     printf("  Rh_add_br_g: [%f, %f]\n", min_Rh_add_br_g_, max_Rh_add_br_g_);
-    printf("  rRh: [%f, %f]\n", min_rRh_, max_rRh_);
-    printf("  new_contrib: [%f, %f]\n", min_new_contrib_, max_new_contrib_);
-    printf("  old_contrib: [%f, %f]\n", min_old_contrib_, max_old_contrib_);
+    printf("  mul_reset_hidden: [%f, %f]\n", min_mul_reset_hidden_, max_mul_reset_hidden_);
+    printf("  mul_new_contribution: [%f, %f]\n", min_mul_new_contribution_, max_mul_new_contribution_);
+    printf("  mul_old_contribution: [%f, %f]\n", min_mul_old_contribution_, max_mul_old_contribution_);
 
     // 打印 per-channel 向量的前几个值
     if (!min_W_.empty()) {

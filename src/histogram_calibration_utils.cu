@@ -51,13 +51,13 @@ void collectAllHistograms(
     std::vector<float> h_host = d2h(h, (time_steps + 1) * batch_size * hidden_size);
 
     const size_t output_size = time_steps * batch_size * hidden_size;
-    std::vector<float> z_out(output_size);
-    std::vector<float> r_out(output_size);
-    std::vector<float> g_out(output_size);
+    std::vector<float> update_gate_out(output_size);
+    std::vector<float> reset_gate_out(output_size);
+    std::vector<float> new_gate_out(output_size);
     std::vector<float> Rh_add_br_g(output_size);
-    std::vector<float> rRh_g(output_size);
-    std::vector<float> new_contrib(output_size);
-    std::vector<float> old_contrib(output_size);
+    std::vector<float> mul_reset_hidden(output_size);
+    std::vector<float> mul_new_contribution(output_size);
+    std::vector<float> mul_old_contribution(output_size);
 
     // 解析 v 中的值
     for (int t = 0; t < time_steps; ++t) {
@@ -66,62 +66,62 @@ void collectAllHistograms(
             const size_t out_base = t * batch_size * hidden_size + b * hidden_size;
 
             for (int hh = 0; hh < hidden_size; ++hh) {
-                const float z_val = v_host[v_base + 0 * hidden_size + hh];
-                const float r_val = v_host[v_base + 1 * hidden_size + hh];
-                const float g_val = v_host[v_base + 2 * hidden_size + hh];
+                const float update_val = v_host[v_base + 0 * hidden_size + hh];
+                const float reset_val = v_host[v_base + 1 * hidden_size + hh];
+                const float new_val = v_host[v_base + 2 * hidden_size + hh];
                 const float Rh_add_br_val = v_host[v_base + 3 * hidden_size + hh];
 
-                z_out[out_base + hh] = z_val;
-                r_out[out_base + hh] = r_val;
-                g_out[out_base + hh] = g_val;
+                update_gate_out[out_base + hh] = update_val;
+                reset_gate_out[out_base + hh] = reset_val;
+                new_gate_out[out_base + hh] = new_val;
                 Rh_add_br_g[out_base + hh] = Rh_add_br_val;
-                rRh_g[out_base + hh] = r_val * Rh_add_br_val;
-                new_contrib[out_base + hh] = (1.0f - z_val) * g_val;
+                mul_reset_hidden[out_base + hh] = reset_val * Rh_add_br_val;
+                mul_new_contribution[out_base + hh] = (1.0f - update_val) * new_val;
 
                 // h_old 是上一个时间步的隐藏状态
                 const size_t h_base = t * batch_size * hidden_size + b * hidden_size;
-                old_contrib[out_base + hh] = z_val * h_host[h_base + hh];
+                mul_old_contribution[out_base + hh] = update_val * h_host[h_base + hh];
             }
         }
     }
 
     // 分时间步收集直方图
     for (int t = 0; t < time_steps; ++t) {
-        const float *z_step = z_out.data() + t * batch_size * hidden_size;
-        const float *r_step = r_out.data() + t * batch_size * hidden_size;
-        const float *g_step = g_out.data() + t * batch_size * hidden_size;
+        const float *update_gate_step = update_gate_out.data() + t * batch_size * hidden_size;
+        const float *reset_gate_step = reset_gate_out.data() + t * batch_size * hidden_size;
+        const float *new_gate_step = new_gate_out.data() + t * batch_size * hidden_size;
         const float *Rh_add_br_step = Rh_add_br_g.data() + t * batch_size * hidden_size;
-        const float *rRh_step = rRh_g.data() + t * batch_size * hidden_size;
-        const float *new_contrib_step = new_contrib.data() + t * batch_size * hidden_size;
-        const float *old_contrib_step = old_contrib.data() + t * batch_size * hidden_size;
+        const float *mul_reset_hidden_step = mul_reset_hidden.data() + t * batch_size * hidden_size;
+        const float *mul_new_contribution_step = mul_new_contribution.data() + t * batch_size * hidden_size;
+        const float *mul_old_contribution_step = mul_old_contribution.data() + t * batch_size * hidden_size;
 
-        hist_collectors.z_out_hist.collect(z_step, NH);
-        hist_collectors.r_out_hist.collect(r_step, NH);
-        hist_collectors.g_out_hist.collect(g_step, NH);
+        hist_collectors.update_gate_output_hist.collect(update_gate_step, NH);
+        hist_collectors.reset_gate_output_hist.collect(reset_gate_step, NH);
+        hist_collectors.new_gate_output_hist.collect(new_gate_step, NH);
         hist_collectors.Rh_add_br_g_hist.collect(Rh_add_br_step, NH);
-        hist_collectors.rRh_hist.collect(rRh_step, NH);
-        hist_collectors.new_contrib_hist.collect(new_contrib_step, NH);
-        hist_collectors.old_contrib_hist.collect(old_contrib_step, NH);
+        hist_collectors.mul_reset_hidden_hist.collect(mul_reset_hidden_step, NH);
+        hist_collectors.mul_new_contribution_hist.collect(mul_new_contribution_step, NH);
+        hist_collectors.mul_old_contribution_hist.collect(mul_old_contribution_step, NH);
     }
 
-    // 7. 收集 z_pre, r_pre, g_pre 的直方图（如果提供）
+    // 7. 收集 gate input 的直方图（如果提供）
     if (pres_size > 0 && z_pres && r_pres && g_pres) {
-        std::vector<float> z_pres_host(pres_size);
-        std::vector<float> r_pres_host(pres_size);
-        std::vector<float> g_pres_host(pres_size);
+        std::vector<float> update_gate_input_host(pres_size);
+        std::vector<float> reset_gate_input_host(pres_size);
+        std::vector<float> new_gate_input_host(pres_size);
 
-        cudaMemcpy(z_pres_host.data(), z_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(r_pres_host.data(), r_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(g_pres_host.data(), g_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(update_gate_input_host.data(), z_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(reset_gate_input_host.data(), r_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(new_gate_input_host.data(), g_pres, pres_size * sizeof(float), cudaMemcpyDeviceToHost);
 
         for (int t = 0; t < time_steps; ++t) {
-            const float *z_pre_step = z_pres_host.data() + t * batch_size * hidden_size;
-            const float *r_pre_step = r_pres_host.data() + t * batch_size * hidden_size;
-            const float *g_pre_step = g_pres_host.data() + t * batch_size * hidden_size;
+            const float *update_gate_input_step = update_gate_input_host.data() + t * batch_size * hidden_size;
+            const float *reset_gate_input_step = reset_gate_input_host.data() + t * batch_size * hidden_size;
+            const float *new_gate_input_step = new_gate_input_host.data() + t * batch_size * hidden_size;
 
-            hist_collectors.z_pre_hist.collect(z_pre_step, NH);
-            hist_collectors.r_pre_hist.collect(r_pre_step, NH);
-            hist_collectors.g_pre_hist.collect(g_pre_step, NH);
+            hist_collectors.update_gate_input_hist.collect(update_gate_input_step, NH);
+            hist_collectors.reset_gate_input_hist.collect(reset_gate_input_step, NH);
+            hist_collectors.new_gate_input_hist.collect(new_gate_input_step, NH);
         }
     }
 }
@@ -175,11 +175,11 @@ void collectAllHistogramsGPU(
     gpu_hist::collect_gate_histograms(hist_collectors, v, h, time_steps, batch_size, hidden_size,
                                        stream);
 
-    // 并行收集 z_pre, r_pre, g_pre（如果提供）
+    // 并行收集 gate input（如果提供）
     if (pres_size > 0 && z_pres && r_pres && g_pres) {
-        hist_collectors.z_pre_hist.collect(z_pres, pres_size, streams[0]);
-        hist_collectors.r_pre_hist.collect(r_pres, pres_size, streams[1]);
-        hist_collectors.g_pre_hist.collect(g_pres, pres_size, streams[2]);
+        hist_collectors.update_gate_input_hist.collect(z_pres, pres_size, streams[0]);
+        hist_collectors.reset_gate_input_hist.collect(r_pres, pres_size, streams[1]);
+        hist_collectors.new_gate_input_hist.collect(g_pres, pres_size, streams[2]);
         
         for (int i = 0; i < 3; ++i) {
             cudaStreamSynchronize(streams[i]);

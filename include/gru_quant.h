@@ -43,18 +43,18 @@ class ForwardPassQuant {
              const float zoneout_prob, const int32_t *zoneout_mask);
 
    private:
-    // 内部迭代函数 (GEMM+bias 融合版本)
-    // cur_Wx_bx: 当前时间步的 W*x + bx 结果（指向 tmp_Wx_bx_ 的偏移）
+    // 内部迭代函数 (Linear 融合版本)
+    // cur_linear_x: 当前时间步的 W*x + bx 结果（指向 tmp_linear_x_ 的偏移）
     void IterateInternal(const int32_t *R, const int32_t *br,
                          const int32_t *h, int32_t *h_out, int32_t *v,
-                         const int32_t *cur_Wx_bx, const float zoneout_prob,
+                         const int32_t *cur_linear_x, const float zoneout_prob,
                          const int32_t *zoneout_mask);
 
-    // 计算 W*x + bx GEMM+bias 融合（输出到 tmp_Wx_bx_）
-    void ComputeWxBx(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
+    // 计算输入 Linear 变换: W*x + bx（输出到 tmp_linear_x_）
+    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
 
-    // 计算 R*h + br GEMM+bias 融合（输出到 tmp_Rh_br_）
-    void ComputeRhBr(const int32_t *R, const int32_t *h, const int32_t *br);
+    // 计算隐状态 Linear 变换: R*h + br（输出到 tmp_linear_h_）
+    void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br);
 
     // 预分配内存缓冲区
     void EnsureBuffersAllocated(int steps);
@@ -72,9 +72,9 @@ class ForwardPassQuant {
     // 预分配的内部缓冲区（使用 dev::vector 自动管理内存）
     int max_steps_ = 0;
 
-    // GEMM+bias 融合结果（int32，供 gate 计算使用）
-    dev::vector<int32_t> tmp_Wx_bx_;  // [hidden*3 * max_steps * batch] W*x + bx
-    dev::vector<int32_t> tmp_Rh_br_;  // [hidden*3 * batch] R*h + br
+    // Linear 变换结果（int32，供 gate 计算使用）
+    dev::vector<int32_t> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch] W*x + bx
+    dev::vector<int32_t> tmp_weight_hh_linear_;  // [hidden*3 * batch] R*h + br
 
     // 权重和常量（预计算）
     dev::vector<int64_t> W_sum_mul_x_zp_;  // [hidden*3]
