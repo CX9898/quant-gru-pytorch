@@ -68,6 +68,13 @@ class ForwardPass {
     const T* getGPres() const { return g_pres_.data(); }
     size_t getPresSize() const { return z_pres_.size(); }
 
+    // 获取中间加法结果（用于直方图收集）
+    const T* getWxAddBxZ() const { return Wx_add_bx_z_.data(); }
+    const T* getWxAddBxR() const { return Wx_add_bx_r_.data(); }
+    const T* getWxAddBxG() const { return Wx_add_bx_g_.data(); }
+    const T* getRhAddBrZ() const { return Rh_add_br_z_.data(); }
+    const T* getRhAddBrR() const { return Rh_add_br_r_.data(); }
+
    private:
     void IterateInternal(int steps, const T *R, const T *bx, const T *br, const T *h, T *h_out,
                          T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob,
@@ -80,6 +87,11 @@ class ForwardPass {
     dev::vector<T> z_pres_;
     dev::vector<T> r_pres_;
     dev::vector<T> g_pres_;
+    dev::vector<T> Wx_add_bx_z_;
+    dev::vector<T> Wx_add_bx_r_;
+    dev::vector<T> Wx_add_bx_g_;
+    dev::vector<T> Rh_add_br_z_;
+    dev::vector<T> Rh_add_br_r_;
 };
 
 template <typename T>
