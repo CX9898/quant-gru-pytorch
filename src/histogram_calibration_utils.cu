@@ -17,7 +17,7 @@
 void collectAllHistograms(
     GRUHistogramCollectors &hist_collectors,
     const float *x, const float *h, const float *v,
-    const float *tmp_Wx, const float *tmp_Rh,
+    const float *Wx_add_bx, const float *Rh_add_br,
     const float *W, const float *R, const float *bx, const float *br,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size) {
@@ -31,11 +31,11 @@ void collectAllHistograms(
     // 2. 收集隐藏状态 h 的直方图（跳过初始状态）
     collectHistogramPerStep(hist_collectors.h_hist, h + NH, time_steps, NH);
 
-    // 3. 收集 Wx 结果的直方图
-    collectHistogramPerStep(hist_collectors.Wx_hist, tmp_Wx, time_steps, NH * 3);
+    // 3. 收集 Wx+bx 结果的直方图
+    collectHistogramPerStep(hist_collectors.Wx_hist, Wx_add_bx, time_steps, NH * 3);
 
-    // 4. 收集 Rh 结果的直方图
-    collectHistogramPerStep(hist_collectors.Rh_hist, tmp_Rh, time_steps, NH * 3);
+    // 4. 收集 Rh+br 结果的直方图
+    collectHistogramPerStep(hist_collectors.Rh_hist, Rh_add_br, time_steps, NH * 3);
 
     // 5. 收集权重的 per-channel 直方图（只在首次收集）
     if (!hist_collectors.W_hist[0].is_valid()) {
@@ -133,7 +133,7 @@ void collectAllHistograms(
 void collectAllHistogramsGPU(
     GRUGPUHistogramCollectors &hist_collectors,
     const float *x, const float *h, const float *v,
-    const float *tmp_Wx, const float *tmp_Rh,
+    const float *Wx_add_bx, const float *Rh_add_br,
     const float *W, const float *R, const float *bx, const float *br,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size,
@@ -141,8 +141,8 @@ void collectAllHistogramsGPU(
     
     const size_t x_size = time_steps * batch_size * input_size;
     const size_t h_size = time_steps * batch_size * hidden_size;
-    const size_t Wx_size = time_steps * batch_size * hidden_size * 3;
-    const size_t Rh_size = time_steps * batch_size * hidden_size * 3;
+    const size_t Wx_add_bx_size = time_steps * batch_size * hidden_size * 3;
+    const size_t Rh_add_br_size = time_steps * batch_size * hidden_size * 3;
     const float *h_skip_initial = h + batch_size * hidden_size;
 
     // 创建 streams（按需数量）
@@ -152,11 +152,11 @@ void collectAllHistogramsGPU(
         cudaStreamCreate(&streams[i]);
     }
 
-    // 并行收集 x, h, Wx, Rh 的直方图
+    // 并行收集 x, h, Wx+bx, Rh+br 的直方图
     hist_collectors.x_hist.collect(x, x_size, streams[0]);
     hist_collectors.h_hist.collect(h_skip_initial, h_size, streams[1]);
-    hist_collectors.Wx_hist.collect(tmp_Wx, Wx_size, streams[2]);
-    hist_collectors.Rh_hist.collect(tmp_Rh, Rh_size, streams[3]);
+    hist_collectors.Wx_hist.collect(Wx_add_bx, Wx_add_bx_size, streams[2]);
+    hist_collectors.Rh_hist.collect(Rh_add_br, Rh_add_br_size, streams[3]);
 
     // 并行收集 per-channel 直方图（使用零拷贝批量版本）
     if (!hist_collectors.W_batch.is_valid()) {

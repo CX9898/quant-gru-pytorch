@@ -254,8 +254,8 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
 ///   x: [T, B, I] 输入序列（GPU 端）
 ///   h: [(T+1), B, H] 隐藏状态（GPU 端）
 ///   v: [T, B, H*4] 中间值（GPU 端）
-///   tmp_Wx: [T, B, H*3] Wx 计算结果（GPU 端）
-///   tmp_Rh: [T, B, H*3] Rh 计算结果（GPU 端）
+///   Wx_add_bx: [T, B, H*3] Wx+bx 计算结果（GPU 端）
+///   Rh_add_br: [T, B, H*3] Rh+br 计算结果（GPU 端）
 ///   z_pres, r_pres, g_pres: [T*B*H] 预激活值（GPU 端）
 ///   pres_size: 预激活值数组大小
 /// 输出:
@@ -264,7 +264,7 @@ inline void updateGRUQuantizationRanges(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bx, const float *br,
     const float *x, const float *h, const float *v,
-    const float *tmp_Wx, const float *tmp_Rh,
+    const float *Wx_add_bx, const float *Rh_add_br,
     const float *z_pres, const float *r_pres, const float *g_pres,
     size_t pres_size,
     GRUQuantizationRanges &quant_ranges) {
@@ -305,12 +305,12 @@ inline void updateGRUQuantizationRanges(
     // 3. 中间值：使用全局极值累积（与 AIMET 一致）
     // =====================================================================
     
-    // Wx 结果的范围（全局极值）
-    auto [min_Wx, max_Wx] = computeMinMaxDev(tmp_Wx, time_steps * NH * 3);
+    // Wx+bx 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
+    auto [min_Wx, max_Wx] = computeMinMaxDev(Wx_add_bx, time_steps * NH * 3);
     updateRange(quant_ranges.min_Wx_, quant_ranges.max_Wx_, min_Wx, max_Wx);
 
-    // Rh 结果的范围（全局极值）
-    auto [min_Rh, max_Rh] = computeMinMaxDev(tmp_Rh, time_steps * NH * 3);
+    // Rh+br 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
+    auto [min_Rh, max_Rh] = computeMinMaxDev(Rh_add_br, time_steps * NH * 3);
     updateRange(quant_ranges.min_Rh_, quant_ranges.max_Rh_, min_Rh, max_Rh);
 
     // z 门输入的范围（全局极值）
