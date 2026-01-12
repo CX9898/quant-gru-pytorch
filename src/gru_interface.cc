@@ -106,10 +106,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
                           quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_,
                           quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_);
 
-    // 中间计算 (Rh_add_br 已废弃，融合后等价于 weight_hh_linear，使用其位宽配置)
-    calibrateSingle("scale_Rh_add_br", bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
-                    quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
-                    quant_params.shift_Rh_add_br_, quant_params.zp_Rh_add_br_);
+    // 中间计算
     calibrateSingle("scale_mul_reset_hidden", bitwidth_config.mul_reset_hidden_, bitwidth_config.mul_reset_hidden_symmetric_,
                     quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_,
                     quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_);
@@ -280,12 +277,13 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
                           quant_parms.shift_h_, quant_parms.zp_h_);
 
     // 如果v不为nullptr，反量化v并输出
+    // V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
     if (v != nullptr) {
         dev::dequantificationV(v_quant_dev.data(), v, time_steps, batch_size, hidden_size,
                                quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_,
                                quant_parms.shift_reset_gate_output_, quant_parms.zp_reset_gate_output_,
                                quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_,
-                               quant_parms.shift_Rh_add_br_, quant_parms.zp_Rh_add_br_);
+                               quant_parms.shift_weight_hh_linear_, quant_parms.zp_weight_hh_linear_);
     }
 
     // 同步 CUDA 操作
@@ -369,8 +367,8 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
                         v_quant[base_idx + hidden_size * 2], quant_parms.shift_new_gate_output_,
                         quant_parms.zp_new_gate_output_);
                     v[base_idx + hidden_size * 3] = dequantize(
-                        v_quant[base_idx + hidden_size * 3], quant_parms.shift_Rh_add_br_,
-                        quant_parms.zp_Rh_add_br_);
+                        v_quant[base_idx + hidden_size * 3], quant_parms.shift_weight_hh_linear_,
+                        quant_parms.zp_weight_hh_linear_);
                 }
             }
         }
@@ -482,7 +480,6 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
     convert_collector(cpu_collectors.update_gate_output_hist, gpu_collectors.update_gate_output_hist);
     convert_collector(cpu_collectors.reset_gate_output_hist, gpu_collectors.reset_gate_output_hist);
     convert_collector(cpu_collectors.new_gate_output_hist, gpu_collectors.new_gate_output_hist);
-    convert_collector(cpu_collectors.Rh_add_br_g_hist, gpu_collectors.Rh_add_br_g_hist);
     convert_collector(cpu_collectors.mul_reset_hidden_hist, gpu_collectors.mul_reset_hidden_hist);
     convert_collector(cpu_collectors.mul_new_contribution_hist, gpu_collectors.mul_new_contribution_hist);
     convert_collector(cpu_collectors.mul_old_contribution_hist, gpu_collectors.mul_old_contribution_hist);
@@ -592,8 +589,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
                           quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "scale_reset_gate_output");
             histCalibrate(hist_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_, bitwidth_config.new_gate_output_symmetric_,
                           quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "scale_new_gate_output");
-            histCalibrate(hist_collectors.Rh_add_br_g_hist, bitwidth_config.weight_hh_linear_, bitwidth_config.weight_hh_linear_symmetric_,
-                          quant_params.shift_Rh_add_br_, quant_params.zp_Rh_add_br_, "scale_Rh_add_br");
+            // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
             histCalibrate(hist_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_, bitwidth_config.mul_reset_hidden_symmetric_,
                           quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "scale_mul_reset_hidden");
             histCalibrate(hist_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_, bitwidth_config.mul_new_contribution_symmetric_,
@@ -678,9 +674,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
                         bitwidth_config.reset_gate_output_, quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "reset_gate_output");
     compute_scalar_sqnr(gpu_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_symmetric_,
                         bitwidth_config.new_gate_output_, quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "new_gate_output");
-    compute_scalar_sqnr(gpu_collectors.Rh_add_br_g_hist, bitwidth_config.weight_hh_linear_symmetric_,
-                        bitwidth_config.weight_hh_linear_, quant_params.shift_Rh_add_br_, 
-                        quant_params.zp_Rh_add_br_, "Rh_add_br");
+    // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
     compute_scalar_sqnr(gpu_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_symmetric_,
                         bitwidth_config.mul_reset_hidden_, quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "mul_reset_hidden");
     compute_scalar_sqnr(gpu_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_symmetric_,

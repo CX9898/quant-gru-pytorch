@@ -566,7 +566,7 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
     collectors.update_gate_output_hist.collect(z_out_dev.data(), total_size, stream);
     collectors.reset_gate_output_hist.collect(r_out_dev.data(), total_size, stream);
     collectors.new_gate_output_hist.collect(g_out_dev.data(), total_size, stream);
-    collectors.Rh_add_br_g_hist.collect(Rh_add_br_dev.data(), total_size, stream);
+    // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
     collectors.mul_reset_hidden_hist.collect(rRh_dev.data(), total_size, stream);
     collectors.mul_new_contribution_hist.collect(new_contrib_dev.data(), total_size, stream);
     collectors.mul_old_contribution_hist.collect(old_contrib_dev.data(), total_size, stream);
@@ -1712,7 +1712,6 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
                                float& min_update_gate_out, float& max_update_gate_out,
                                float& min_reset_gate_out, float& max_reset_gate_out,
                                float& min_new_gate_out, float& max_new_gate_out,
-                               float& min_Rh_add_br, float& max_Rh_add_br,
                                float& min_mul_reset_hidden, float& max_mul_reset_hidden,
                                float& min_mul_new_contribution, float& max_mul_new_contribution,
                                float& min_mul_old_contribution, float& max_mul_old_contribution,
@@ -1724,7 +1723,7 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
     dev::vector<float> update_gate_out_dev(total_size);
     dev::vector<float> reset_gate_out_dev(total_size);
     dev::vector<float> new_gate_out_dev(total_size);
-    dev::vector<float> Rh_add_br_dev(total_size);
+    dev::vector<float> weight_hh_linear_g_dev(total_size);  // 用于计算 mul_reset_hidden
     dev::vector<float> mul_reset_hidden_dev(total_size);
     dev::vector<float> mul_new_contribution_dev(total_size);
     dev::vector<float> mul_old_contribution_dev(total_size);
@@ -1735,7 +1734,7 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
     
     extract_gate_values_kernel<<<blocks, threads, 0, stream>>>(
         v_dev, h_dev, update_gate_out_dev.data(), reset_gate_out_dev.data(), new_gate_out_dev.data(), 
-        Rh_add_br_dev.data(), mul_reset_hidden_dev.data(), mul_new_contribution_dev.data(), 
+        weight_hh_linear_g_dev.data(), mul_reset_hidden_dev.data(), mul_new_contribution_dev.data(), 
         mul_old_contribution_dev.data(), 
         static_cast<int>(steps), static_cast<int>(batch_size), 
         static_cast<int>(hidden_size));
@@ -1758,9 +1757,7 @@ void update_ranges_from_v_gpu(const float* h_dev, const float* v_dev, size_t ste
     min_new_gate_out = std::min(min_new_gate_out, new_min);
     max_new_gate_out = std::max(max_new_gate_out, new_max);
     
-    compute_minmax(Rh_add_br_dev.data(), total_size, new_min, new_max);
-    min_Rh_add_br = std::min(min_Rh_add_br, new_min);
-    max_Rh_add_br = std::max(max_Rh_add_br, new_max);
+    // weight_hh_linear_g 不再单独统计范围，使用 weight_hh_linear 的量化参数
     
     compute_minmax(mul_reset_hidden_dev.data(), total_size, new_min, new_max);
     min_mul_reset_hidden = std::min(min_mul_reset_hidden, new_min);
@@ -1865,7 +1862,6 @@ void updateGRUQuantizationRangesGPU(
         quant_ranges.min_update_gate_output_, quant_ranges.max_update_gate_output_,
         quant_ranges.min_reset_gate_output_, quant_ranges.max_reset_gate_output_,
         quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_,
-        quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_,
         quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_,
         quant_ranges.min_mul_new_contribution_, quant_ranges.max_mul_new_contribution_,
         quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_,

@@ -145,15 +145,15 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
 namespace kernel {
 
 // v 使用 int32_t 存储，但内部各部分使用不同的量化参数:
-// - z: 使用 shift_z, zp_z
-// - r: 使用 shift_r, zp_r
-// - g: 使用 shift_g, zp_g
-// - Rh_add_br_g: 使用 shift_Rh_add_br, zp_Rh_add_br
+// - z: 使用 shift_z, zp_z (update_gate_output)
+// - r: 使用 shift_r, zp_r (reset_gate_output)
+// - g: 使用 shift_g, zp_g (new_gate_output)
+// - weight_hh_linear_g: 使用 shift_hh, zp_hh (weight_hh_linear)
 template <typename T>
 __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_steps,
                                   int batch_size, int hidden_size, int8_t shift_z, int32_t zp_z,
                                   int8_t shift_r, int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                                  int8_t shift_Rh_add_br, int32_t zp_Rh_add_br) {
+                                  int8_t shift_hh, int32_t zp_hh) {
     // 计算当前线程处理的索引
     // blockIdx.x: time_step
     // blockIdx.y: batch
@@ -169,7 +169,7 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
     // v的布局: [time_steps, batch_size, hidden_size * 4]
     // 每个时间步内: [batch_size, hidden_size * 4]
     // 每个batch内: [hidden_size * 4]
-    // 4个部分: [z_out, r_out, g_out, Rh_add_br_g]，每个部分大小为 hidden_size
+    // 4个部分: [z_out, r_out, g_out, weight_hh_linear_g]，每个部分大小为 hidden_size
 
     const int base_idx = t * (batch_size * hidden_size * 4) + b * (hidden_size * 4);
 
@@ -185,9 +185,9 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
     const int g_idx = base_idx + 2 * hidden_size + h;
     data[g_idx] = dequantize<int32_t>(quant_data[g_idx], shift_g, zp_g);
 
-    // 反量化 Rh_add_br_g (第3部分) - 从 int32_t 反量化
-    const int rh_idx = base_idx + 3 * hidden_size + h;
-    data[rh_idx] = dequantize<int32_t>(quant_data[rh_idx], shift_Rh_add_br, zp_Rh_add_br);
+    // 反量化 weight_hh_linear_g (第3部分) - 从 int32_t 反量化
+    const int hh_idx = base_idx + 3 * hidden_size + h;
+    data[hh_idx] = dequantize<int32_t>(quant_data[hh_idx], shift_hh, zp_hh);
 }
 
 template <typename T, typename QuantT>
@@ -349,11 +349,12 @@ template void dequantification<float, int32_t>(const int32_t *quant_data, float 
                                                int8_t exp2_inv, int32_t zp);
 
 // v 统一使用 int32_t 存储
+// V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
                        int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                       int32_t zp_r, int8_t shift_g, int32_t zp_g, int8_t shift_Rh_add_br,
-                       int32_t zp_Rh_add_br) {
+                       int32_t zp_r, int8_t shift_g, int32_t zp_g, 
+                       int8_t shift_hh, int32_t zp_hh) {
     // Launch configuration: 每个block处理一个时间步和一个batch的所有hidden单元
     // blockDim.x = hidden_size (每个线程处理一个hidden单元)
     // gridDim.x = time_steps
@@ -363,7 +364,7 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
 
     kernel::dequantificationV<<<gridDim, blockDim>>>(
         quant_data, data, time_steps, batch_size, hidden_size, shift_z, zp_z, shift_r, zp_r,
-        shift_g, zp_g, shift_Rh_add_br, zp_Rh_add_br);
+        shift_g, zp_g, shift_hh, zp_hh);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -375,8 +376,8 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
 template void dequantificationV<float>(const int32_t *quant_data, float *data, int time_steps,
                                        int batch_size, int hidden_size, int8_t shift_z,
                                        int32_t zp_z, int8_t shift_r, int32_t zp_r,
-                                       int8_t shift_g, int32_t zp_g, int8_t shift_Rh_add_br,
-                                       int32_t zp_Rh_add_br);
+                                       int8_t shift_g, int32_t zp_g, 
+                                       int8_t shift_hh, int32_t zp_hh);
 
 template <typename T, typename QuantT>
 void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,

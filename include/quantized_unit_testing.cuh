@@ -239,8 +239,6 @@ inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
            quant_parms_.zp_reset_gate_output_);
     printf("  shift_new_gate_output_ = %d, zp_new_gate_output_ = %d\n", quant_parms_.shift_new_gate_output_,
            quant_parms_.zp_new_gate_output_);
-    printf("  shift_Rh_add_br_ = %d, zp_Rh_add_br_ = %d\n", quant_parms_.shift_Rh_add_br_,
-           quant_parms_.zp_Rh_add_br_);
     printf("  shift_mul_reset_hidden_ = %d, zp_mul_reset_hidden_ = %d\n", quant_parms_.shift_mul_reset_hidden_,
            quant_parms_.zp_mul_reset_hidden_);
     printf("  shift_mul_new_contribution_ = %d, zp_mul_new_contribution_ = %d\n",

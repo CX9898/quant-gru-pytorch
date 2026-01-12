@@ -73,7 +73,7 @@ struct OperatorQuantConfigPy {
     int8_t z_pre_, z_out_;
     int8_t r_pre_, r_out_;
     int8_t g_pre_, g_out_;
-    int8_t Rh_add_br_, rRh_, old_contrib_, new_contrib_;
+    int8_t rRh_, old_contrib_, new_contrib_;
 
     // 对称量化配置
     bool x_symmetric_, h_symmetric_;
@@ -82,7 +82,7 @@ struct OperatorQuantConfigPy {
     bool z_pre_symmetric_, z_out_symmetric_;
     bool r_pre_symmetric_, r_out_symmetric_;
     bool g_pre_symmetric_, g_out_symmetric_;
-    bool Rh_add_br_symmetric_, rRh_symmetric_;
+    bool rRh_symmetric_;
     bool old_contrib_symmetric_, new_contrib_symmetric_;
 
     // 无符号量化配置（与 C++ is_unsigned_ 一致，只标记例外情况）
@@ -92,7 +92,7 @@ struct OperatorQuantConfigPy {
     bool z_pre_unsigned_, z_out_unsigned_;
     bool r_pre_unsigned_, r_out_unsigned_;
     bool g_pre_unsigned_, g_out_unsigned_;
-    bool Rh_add_br_unsigned_, rRh_unsigned_;
+    bool rRh_unsigned_;
     bool old_contrib_unsigned_, new_contrib_unsigned_;
 
     // 方法声明（实现在文件末尾）
@@ -146,8 +146,6 @@ struct GRUQuantitativeParametersPy {
     int32_t zp_r_out_;
     int8_t exp2_inv_g_out_;
     int32_t zp_g_out_;
-    int8_t exp2_inv_Rh_add_br_;
-    int32_t zp_Rh_add_br_;
     int8_t exp2_inv_rRh_;
     int32_t zp_rRh_;
     int8_t exp2_inv_new_contrib_;
@@ -488,7 +486,6 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     cfg.r_out_ = toBitwidth(r_out_, r_out_unsigned_);
     cfg.g_pre_ = toBitwidth(g_pre_, g_pre_unsigned_);
     cfg.g_out_ = toBitwidth(g_out_, g_out_unsigned_);
-    cfg.Rh_add_br_ = toBitwidth(Rh_add_br_, Rh_add_br_unsigned_);
     cfg.rRh_ = toBitwidth(rRh_, rRh_unsigned_);
     cfg.old_contrib_ = toBitwidth(old_contrib_, old_contrib_unsigned_);
     cfg.new_contrib_ = toBitwidth(new_contrib_, new_contrib_unsigned_);
@@ -507,7 +504,6 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     cfg.r_out_symmetric_ = r_out_symmetric_;
     cfg.g_pre_symmetric_ = g_pre_symmetric_;
     cfg.g_out_symmetric_ = g_out_symmetric_;
-    cfg.Rh_add_br_symmetric_ = Rh_add_br_symmetric_;
     cfg.rRh_symmetric_ = rRh_symmetric_;
     cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
     cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
@@ -531,7 +527,6 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     r_out_ = cfg.r_out_.bits_;
     g_pre_ = cfg.g_pre_.bits_;
     g_out_ = cfg.g_out_.bits_;
-    Rh_add_br_ = cfg.Rh_add_br_.bits_;
     rRh_ = cfg.rRh_.bits_;
     old_contrib_ = cfg.old_contrib_.bits_;
     new_contrib_ = cfg.new_contrib_.bits_;
@@ -550,7 +545,6 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     r_out_symmetric_ = cfg.r_out_symmetric_;
     g_pre_symmetric_ = cfg.g_pre_symmetric_;
     g_out_symmetric_ = cfg.g_out_symmetric_;
-    Rh_add_br_symmetric_ = cfg.Rh_add_br_symmetric_;
     rRh_symmetric_ = cfg.rRh_symmetric_;
     old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
     new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
@@ -569,7 +563,6 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     r_out_unsigned_ = cfg.r_out_.is_unsigned_;
     g_pre_unsigned_ = cfg.g_pre_.is_unsigned_;
     g_out_unsigned_ = cfg.g_out_.is_unsigned_;
-    Rh_add_br_unsigned_ = cfg.Rh_add_br_.is_unsigned_;
     rRh_unsigned_ = cfg.rRh_.is_unsigned_;
     old_contrib_unsigned_ = cfg.old_contrib_.is_unsigned_;
     new_contrib_unsigned_ = cfg.new_contrib_.is_unsigned_;
@@ -606,8 +599,6 @@ void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_
     zp_r_out_ = cpp_params.zp_r_out_;
     exp2_inv_g_out_ = cpp_params.exp2_inv_g_out_;
     zp_g_out_ = cpp_params.zp_g_out_;
-    exp2_inv_Rh_add_br_ = cpp_params.exp2_inv_Rh_add_br_;
-    zp_Rh_add_br_ = cpp_params.zp_Rh_add_br_;
     exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
     zp_rRh_ = cpp_params.zp_rRh_;
     exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
@@ -647,8 +638,6 @@ GRUQuantitativeParameters GRUQuantitativeParametersPy::to_cpp() const {
     cpp_params.zp_r_out_ = zp_r_out_;
     cpp_params.exp2_inv_g_out_ = exp2_inv_g_out_;
     cpp_params.zp_g_out_ = zp_g_out_;
-    cpp_params.exp2_inv_Rh_add_br_ = exp2_inv_Rh_add_br_;
-    cpp_params.zp_Rh_add_br_ = zp_Rh_add_br_;
     cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
     cpp_params.zp_rRh_ = zp_rRh_;
     cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
@@ -711,8 +700,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         DEF_PROP(max_r_out_)
         DEF_PROP(min_g_out_)
         DEF_PROP(max_g_out_)
-        DEF_PROP(min_Rh_add_br_g_)
-        DEF_PROP(max_Rh_add_br_g_)
         DEF_PROP(min_rRh_)
         DEF_PROP(max_rRh_)
         DEF_PROP(min_new_contrib_)
@@ -746,7 +733,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("r_out_", &OperatorQuantConfigPy::r_out_)
         .def_readwrite("g_pre_", &OperatorQuantConfigPy::g_pre_)
         .def_readwrite("g_out_", &OperatorQuantConfigPy::g_out_)
-        .def_readwrite("Rh_add_br_", &OperatorQuantConfigPy::Rh_add_br_)
         .def_readwrite("rRh_", &OperatorQuantConfigPy::rRh_)
         .def_readwrite("old_contrib_", &OperatorQuantConfigPy::old_contrib_)
         .def_readwrite("new_contrib_", &OperatorQuantConfigPy::new_contrib_)
@@ -765,7 +751,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("r_out_symmetric_", &OperatorQuantConfigPy::r_out_symmetric_)
         .def_readwrite("g_pre_symmetric_", &OperatorQuantConfigPy::g_pre_symmetric_)
         .def_readwrite("g_out_symmetric_", &OperatorQuantConfigPy::g_out_symmetric_)
-        .def_readwrite("Rh_add_br_symmetric_", &OperatorQuantConfigPy::Rh_add_br_symmetric_)
         .def_readwrite("rRh_symmetric_", &OperatorQuantConfigPy::rRh_symmetric_)
         .def_readwrite("old_contrib_symmetric_", &OperatorQuantConfigPy::old_contrib_symmetric_)
         .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_)
@@ -784,7 +769,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("r_out_unsigned_", &OperatorQuantConfigPy::r_out_unsigned_)
         .def_readwrite("g_pre_unsigned_", &OperatorQuantConfigPy::g_pre_unsigned_)
         .def_readwrite("g_out_unsigned_", &OperatorQuantConfigPy::g_out_unsigned_)
-        .def_readwrite("Rh_add_br_unsigned_", &OperatorQuantConfigPy::Rh_add_br_unsigned_)
         .def_readwrite("rRh_unsigned_", &OperatorQuantConfigPy::rRh_unsigned_)
         .def_readwrite("old_contrib_unsigned_", &OperatorQuantConfigPy::old_contrib_unsigned_)
         .def_readwrite("new_contrib_unsigned_", &OperatorQuantConfigPy::new_contrib_unsigned_);
@@ -817,8 +801,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_r_out_", &GRUQuantitativeParametersPy::zp_r_out_)
         .def_readwrite("exp2_inv_g_out_", &GRUQuantitativeParametersPy::exp2_inv_g_out_)
         .def_readwrite("zp_g_out_", &GRUQuantitativeParametersPy::zp_g_out_)
-        .def_readwrite("exp2_inv_Rh_add_br_", &GRUQuantitativeParametersPy::exp2_inv_Rh_add_br_)
-        .def_readwrite("zp_Rh_add_br_", &GRUQuantitativeParametersPy::zp_Rh_add_br_)
         .def_readwrite("exp2_inv_rRh_", &GRUQuantitativeParametersPy::exp2_inv_rRh_)
         .def_readwrite("zp_rRh_", &GRUQuantitativeParametersPy::zp_rRh_)
         .def_readwrite("exp2_inv_new_contrib_", &GRUQuantitativeParametersPy::exp2_inv_new_contrib_)

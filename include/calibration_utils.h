@@ -222,9 +222,7 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
     auto [min_n, max_n] = computeMinMax(new_gate_out);
     updateRange(quant_ranges.min_new_gate_output_, quant_ranges.max_new_gate_output_, min_n, max_n);
 
-    auto [min_Rh_add_br_g, max_Rh_add_br_g] = computeMinMax(Rh_add_br_g);
-    updateRange(quant_ranges.min_Rh_add_br_g_, quant_ranges.max_Rh_add_br_g_, min_Rh_add_br_g,
-                max_Rh_add_br_g);
+    // weight_hh_linear_g 不再单独统计范围，使用 weight_hh_linear 的量化参数
 
     auto [min_rh, max_rh] = computeMinMax(mul_reset_hidden);
     updateRange(quant_ranges.min_mul_reset_hidden_, quant_ranges.max_mul_reset_hidden_, min_rh, max_rh);
