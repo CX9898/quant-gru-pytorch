@@ -1785,7 +1785,7 @@ void updateGRUQuantizationRangesGPU(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float* W, const float* R, const float* bx, const float* br,
     const float* x, const float* h, const float* v,
-    const float* tmp_Wx, const float* tmp_Rh,
+    const float* Wx_add_bx, const float* Rh_add_br,
     const float* z_pres, const float* r_pres, const float* g_pres,
     size_t pres_size,
     GRUQuantizationRanges& quant_ranges,
@@ -1816,13 +1816,13 @@ void updateGRUQuantizationRangesGPU(
     // 2. 中间值：使用全局极值累积（与 AIMET 一致）
     // =====================================================================
     
-    // Wx 结果的范围（全局极值）
+    // Wx+bx 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
     gpu_hist::compute_minmax_per_step_gpu(
-        tmp_Wx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_, stream);
+        Wx_add_bx, time_steps, NH * 3, quant_ranges.min_Wx_, quant_ranges.max_Wx_, stream);
     
-    // Rh 结果的范围（全局极值）
+    // Rh+br 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
     gpu_hist::compute_minmax_per_step_gpu(
-        tmp_Rh, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, stream);
+        Rh_add_br, time_steps, NH * 3, quant_ranges.min_Rh_, quant_ranges.max_Rh_, stream);
     
     // z 门预激活值（全局极值）
     gpu_hist::compute_minmax_per_step_gpu(

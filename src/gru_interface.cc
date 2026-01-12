@@ -815,17 +815,19 @@ void forwardWithCalibrationGPU(
     
     if (calib_method == CalibrationMethod::MINMAX) {
         // MINMAX: 使用 GPU 版本原地更新量化范围（避免大量 D2H 传输）
+        // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行校准
         updateGRUQuantizationRangesGPU(
             time_steps, batch_size, input_size, hidden_size,
             W, R, bx, br, x, h, v,
-            tmp_Wx_dev.data(), tmp_Rh_dev.data(),
+            forward.getWxAddBx(), forward.getRhAddBr(),
             forward.getZPres(), forward.getRPres(), forward.getGPres(),
             forward.getPresSize(),
             *quant_ranges);
     } else {
         // SQNR/Percentile: 收集直方图
+        // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
         collectAllHistogramsGPU(*gpu_hist_collectors, x, h, v,
-                                tmp_Wx_dev.data(), tmp_Rh_dev.data(),
+                                forward.getWxAddBx(), forward.getRhAddBr(),
                                 W, R, bx, br,
                                 time_steps, batch_size, input_size, hidden_size,
                                 forward.getZPres(), forward.getRPres(), forward.getGPres(),
@@ -883,8 +885,9 @@ void forwardWithHistogramCPU(
     }
     
     // CPU 直方图收集（需要先将 GPU 数据拷贝到 CPU）
+    // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
     collectAllHistograms(*hist_collectors, x, h, v,
-                         tmp_Wx_dev.data(), tmp_Rh_dev.data(),
+                         forward.getWxAddBx(), forward.getRhAddBr(),
                          W, R, bx, br,
                          time_steps, batch_size, input_size, hidden_size,
                          forward.getZPres(), forward.getRPres(), forward.getGPres(),

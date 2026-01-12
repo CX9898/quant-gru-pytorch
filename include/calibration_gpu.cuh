@@ -514,8 +514,8 @@ struct GRUQuantizationRanges;  // 前向声明
  * @param x 输入序列 [T, B, I]（GPU 端）
  * @param h 隐藏状态 [(T+1), B, H]（GPU 端）
  * @param v 中间值 [T, B, H*4]（GPU 端）
- * @param tmp_Wx Wx 计算结果 [T, B, H*3]（GPU 端）
- * @param tmp_Rh Rh 计算结果 [T, B, H*3]（GPU 端）
+ * @param Wx_add_bx Wx+bx 计算结果 [T, B, H*3]（GPU 端）
+ * @param Rh_add_br Rh+br 计算结果 [T, B, H*3]（GPU 端）
  * @param z_pres z 门预激活值 [T*B*H]（GPU 端）
  * @param r_pres r 门预激活值 [T*B*H]（GPU 端）
  * @param g_pres g 门预激活值 [T*B*H]（GPU 端）
@@ -527,7 +527,7 @@ void updateGRUQuantizationRangesGPU(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float* W, const float* R, const float* bx, const float* br,
     const float* x, const float* h, const float* v,
-    const float* tmp_Wx, const float* tmp_Rh,
+    const float* Wx_add_bx, const float* Rh_add_br,
     const float* z_pres, const float* r_pres, const float* g_pres,
     size_t pres_size,
     GRUQuantizationRanges& quant_ranges,

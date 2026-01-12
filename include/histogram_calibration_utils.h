@@ -85,7 +85,7 @@ inline void collectPerChannelHistograms(std::vector<HistogramCollector> &collect
 void collectAllHistograms(
     GRUHistogramCollectors &hist_collectors,
     const float *x, const float *h, const float *v,
-    const float *tmp_Wx, const float *tmp_Rh,
+    const float *Wx_add_bx, const float *Rh_add_br,
     const float *W, const float *R, const float *bx, const float *br,
     int time_steps, int batch_size, int input_size, int hidden_size,
     // 预激活值（z_pre, r_pre, g_pre）- 可选，传 nullptr 则跳过
@@ -101,7 +101,7 @@ void collectAllHistograms(
 void collectAllHistogramsGPU(
     GRUGPUHistogramCollectors &hist_collectors,
     const float *x, const float *h, const float *v,
-    const float *tmp_Wx, const float *tmp_Rh,
+    const float *Wx_add_bx, const float *Rh_add_br,
     const float *W, const float *R, const float *bx, const float *br,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size,
