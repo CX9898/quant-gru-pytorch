@@ -95,6 +95,11 @@ struct QuantGRUReScaleCPU {
     SigmoidLUT sigmoid_z_lut_;
     SigmoidLUT sigmoid_r_lut_;
     SigmoidLUT tanh_g_lut_;
+
+#ifdef DEBUG
+    // -------------------- 调试参数 --------------------
+    GRUQuantitativeParameters test;  ///< 保存完整量化参数用于调试
+#endif
 };
 
 // ==================== 前向传播类声明 ====================
