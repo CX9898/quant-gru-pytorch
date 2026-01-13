@@ -7,103 +7,103 @@
       "disable_quantization": false
     },
     "operator_config": {
-      "input.x": {
+      "x": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "输入序列 x, 每个时间步的输入特征"
       },
-      "output.h": {
+      "h": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "隐藏状态 h, 每个时间步的输出，同时作为下一时间步的输入"
       },
-      "weight.W": {
+      "W": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "输入权重矩阵 W (weight_ih), per-channel 量化，包含 W_z/W_r/W_n 三个门的权重"
       },
-      "weight.R": {
+      "R": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "循环权重矩阵 R (weight_hh), per-channel 量化，包含 R_z/R_r/R_n 三个门的权重"
       },
-      "weight.bw": {
+      "bw": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "输入偏置 bw (bias_ih), per-channel 量化，包含 bw_z/bw_r/bw_n 三个门的偏置"
       },
-      "weight.br": {
+      "br": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "循环偏置 br (bias_hh), per-channel 量化，包含 br_z/br_r/br_n 三个门的偏置"
       },
-      "linear.weight_ih_linear": {
+      "weight_ih_linear": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "输入 Linear 变换输出: W*x + bw, GEMM+bias 融合结果，循环外一次性计算所有时间步"
       },
-      "linear.weight_hh_linear": {
+      "weight_hh_linear": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "隐状态 Linear 变换输出: R*h + br, GEMM+bias 融合结果，每个时间步计算一次"
       },
-      "gate.update_gate_input": {
+      "update_gate_input": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "更新门(z)激活前: weight_ih_linear_z + weight_hh_linear_z, sigmoid 函数的输入"
       },
-      "gate.update_gate_output": {
+      "update_gate_output": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": true,
         "comment": "更新门(z)激活后: sigmoid(update_gate_input), 范围[0,1], 控制保留多少旧状态, 使用 UINT 充分利用量化范围"
       },
-      "gate.reset_gate_input": {
+      "reset_gate_input": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "重置门(r)激活前: weight_ih_linear_r + weight_hh_linear_r, sigmoid 函数的输入"
       },
-      "gate.reset_gate_output": {
+      "reset_gate_output": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": true,
         "comment": "重置门(r)激活后: sigmoid(reset_gate_input), 范围[0,1], 控制遗忘多少旧状态, 使用 UINT 充分利用量化范围"
       },
-      "gate.new_gate_input": {
+      "new_gate_input": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "候选门(n)激活前: weight_ih_linear_n + mul_reset_hidden, tanh 函数的输入"
       },
-      "gate.new_gate_output": {
+      "new_gate_output": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "候选门(n)激活后: tanh(new_gate_input), 范围[-1,1], 候选隐藏状态, 使用 INT 对称量化"
       },
-      "op.mul_reset_hidden": {
+      "mul_reset_hidden": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "重置门与隐状态乘积: reset_gate_output * weight_hh_linear_n, 用于候选门计算"
       },
-      "op.mul_old_contribution": {
+      "mul_old_contribution": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "旧状态贡献: u * h, 即 update_gate_output * h_old, 隐状态更新公式的第一项"
       },
-      "op.mul_new_contribution": {
+      "mul_new_contribution": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,

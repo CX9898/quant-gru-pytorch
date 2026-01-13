@@ -155,7 +155,7 @@ _VALID_BITWIDTH_ATTRS = {info["bw_attr"] for info in _OPERATOR_MAP.values()}
 _VALID_SYMMETRIC_ATTRS = {info["sym_attr"] for info in _OPERATOR_MAP.values()}
 _VALID_UNSIGNED_ATTRS = {info["unsigned_attr"] for info in _OPERATOR_MAP.values()}
 
-# 短名称到属性映射（从 _OPERATOR_MAP 提取，避免重复构建）
+# JSON key 到属性映射（从 _OPERATOR_MAP 提取，避免重复构建）
 # 例如: "x" -> {"bw_attr": "x_", "sym_attr": "x_symmetric_", ...}
 _OPERATOR_SHORT_NAME_MAP = {
     op_name.split('.')[-1]: {
@@ -165,7 +165,6 @@ _OPERATOR_SHORT_NAME_MAP = {
         'shift_attr': info["shift_attr"],
         'zp_attr': info["zp_attr"],
         'is_per_channel': info["is_per_channel"],
-        'json_key': op_name,
     }
     for op_name, info in _OPERATOR_MAP.items()
 }
@@ -924,58 +923,50 @@ class QuantGRU(nn.Module):
         op_config = gru_config.get('operator_config', {})
 
         # ========================================================================
-        # 严格配置验证：检测未知字段（提前暴露配置错误）
+        # JSON key -> _OPERATOR_MAP key 映射
+        # JSON 使用无前缀格式（如 "new_gate_output"）
+        # _OPERATOR_MAP 使用带前缀格式（如 "gate.new_gate_output"）
         # ========================================================================
-        valid_op_names = set(_OPERATOR_MAP.keys())
+        json_key_to_map_key = {k.split('.')[-1]: k for k in _OPERATOR_MAP}
+        valid_json_keys = set(json_key_to_map_key.keys())
         json_op_names = set(op_config.keys())
-        unknown_fields = json_op_names - valid_op_names
+        unknown_fields = json_op_names - valid_json_keys
         
         if unknown_fields:
-            # 尝试给出修正建议
-            suggestions = []
-            for unknown in unknown_fields:
-                # 简单的相似度匹配：检查是否是常见的拼写错误
-                for valid in valid_op_names:
-                    # 检查是否只是前缀不同（如 input.h vs output.h）
-                    if unknown.split('.')[-1] == valid.split('.')[-1]:
-                        suggestions.append(f"  '{unknown}' → 您是否想用 '{valid}'?")
-                        break
-            
-            suggestion_text = "\n".join(suggestions) if suggestions else ""
             raise ValueError(
                 f"JSON 配置文件 '{config_file}' 包含未知的算子字段:\n"
                 f"  {list(unknown_fields)}\n"
                 f"有效的字段名:\n"
-                f"  {sorted(valid_op_names)}\n"
-                f"{suggestion_text}"
+                f"  {sorted(valid_json_keys)}"
             )
 
         # 检查 JSON 中缺失的字段并发出警告
-        missing_fields = []  # [(op_name, default_bitwidth, default_symmetric, default_unsigned), ...]
-        missing_attrs = []   # [(op_name, attr_name, default_value), ...] - 算子存在但属性缺失
+        missing_fields = []  # [(json_key, default_bitwidth, default_symmetric, default_unsigned), ...]
+        missing_attrs = []   # [(json_key, attr_name, default_value), ...] - 算子存在但属性缺失
         
-        for op_name, info in _OPERATOR_MAP.items():
+        for map_key, info in _OPERATOR_MAP.items():
+            json_key = map_key.split('.')[-1]  # "gate.new_gate_output" -> "new_gate_output"
             bw_attr, sym_attr = info["bw_attr"], info["sym_attr"]
             unsigned_attr = info.get("unsigned_attr")
             default_unsigned = info.get("default_unsigned", False)
             
-            if op_name in op_config:
-                op_cfg = op_config[op_name]
+            if json_key in op_config:
+                op_cfg = op_config[json_key]
                 
                 # 检查并记录缺失的属性
                 if 'bitwidth' not in op_cfg:
-                    missing_attrs.append((op_name, 'bitwidth', 8))
+                    missing_attrs.append((json_key, 'bitwidth', 8))
                 if 'is_symmetric' not in op_cfg:
-                    missing_attrs.append((op_name, 'is_symmetric', True))
+                    missing_attrs.append((json_key, 'is_symmetric', True))
                 if unsigned_attr and 'is_unsigned' not in op_cfg:
                     unsigned_default_str = "true (UINT)" if default_unsigned else "false (INT)"
-                    missing_attrs.append((op_name, 'is_unsigned', unsigned_default_str))
+                    missing_attrs.append((json_key, 'is_unsigned', unsigned_default_str))
                 
                 bitwidth = op_cfg.get('bitwidth', 8)
                 # 验证位宽范围 (1-32)
                 if not (1 <= bitwidth <= 32):
                     raise ValueError(
-                        f"Invalid bitwidth {bitwidth} for '{op_name}'. "
+                        f"Invalid bitwidth {bitwidth} for '{json_key}'. "
                         f"Must be in range [1, 32]."
                     )
                 setattr(self._bitwidth_config, bw_attr, bitwidth)
@@ -985,7 +976,7 @@ class QuantGRU(nn.Module):
                     setattr(self._bitwidth_config, unsigned_attr, op_cfg.get('is_unsigned', default_unsigned))
             else:
                 # 记录缺失字段及其默认值
-                missing_fields.append((op_name, 8, True, default_unsigned))
+                missing_fields.append((json_key, 8, True, default_unsigned))
 
         # 报告缺失的算子（整个算子缺失）
         if missing_fields:
