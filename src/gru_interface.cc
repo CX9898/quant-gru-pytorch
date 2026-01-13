@@ -233,53 +233,100 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
     }
 }
 
-// 量化 GRU 前向传播（统一 int32_t 存储）
-// 所有量化值使用 int32_t 存储，实际值通过位宽配置限制
+// =====================================================================
+// 纯定点 GRU 前向传播（GPU 核心实现）
+// =====================================================================
+
+// GPU 纯定点 GRU 前向传播（int32 输入/输出）
+// 这是量化 GRU 的核心计算，所有高层接口都调用此函数
+void quantGRUForwardInt32(
+    bool is_training, int time_steps, int batch_size, int input_size, int hidden_size,
+    const int32_t *W_q, const int32_t *R_q, const int32_t *bw_q, const int32_t *br_q,
+    const int32_t *x_q, const int32_t *h0_q,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    int32_t *h_q, int32_t *v_q) {
+    
+    const int NH = batch_size * hidden_size;
+    
+    // 初始化 h_q[0]
+    if (h0_q != nullptr) {
+        cudaMemcpy(h_q, h0_q, NH * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+    } else {
+        dev::fill_n(h_q, NH, quant_params.zp_h_);
+    }
+    
+    // 分配中间值缓冲区
+    dev::vector<int32_t> v_internal;
+    int32_t* v_ptr = v_q;
+    if (v_q == nullptr) {
+        // 内部分配临时缓冲区
+        v_internal.resize(time_steps * batch_size * hidden_size * 4);
+        v_ptr = v_internal.data();
+    }
+    
+    // 创建 ForwardPassQuant 对象
+    gru::ForwardPassQuant forward(is_training, batch_size, input_size, hidden_size, g_blas_handle);
+    forward.setRescaleParam(quant_params);
+    
+    // 运行前向传播
+    forward.Run(time_steps, W_q, R_q, bw_q, br_q, x_q, h_q, v_ptr, 0.0f, nullptr);
+    
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+    
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantGRUForwardInt32: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForwardInt32: ") + err_str);
+    }
+}
+
+// =====================================================================
+// 量化 GRU 前向传播（浮点接口）
+// =====================================================================
+
+// 量化 GRU 前向传播（浮点输入/输出，内部调用 quantGRUForwardInt32）
 void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
                      const int input_size, const int hidden_size, const int32_t *W,
                      const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
                      const float *h0, const GRUQuantParams &quant_parms,
                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
-
-    // 所有激活值使用 int32_t 存储，通过 clamp_by_bitwidth 限制到实际位宽
+    const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
+
+    // 1. 量化输入 x
     dev::vector<int32_t> x_quant(x_size);
     dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.shift_x_, 
                                  quant_parms.zp_x_, bw_cfg.x_);
 
-    dev::vector<int32_t> h_quant((time_steps + 1) * batch_size * hidden_size);
-    // 初始化 h0 区域（第一个时间步的隐藏状态）为零点值
-    dev::fill_n(h_quant.data(), batch_size * hidden_size, quant_parms.zp_h_);
-
-    // 处理初始隐藏状态
+    // 2. 量化初始隐藏状态 h0（空 vector 的 .data() 返回 nullptr）
+    dev::vector<int32_t> h0_quant;
     if (h0 != nullptr) {
-        // 如果提供了初始状态，直接量化到 h_quant[0]
-        dev::quantificationBitwidth(h0, h_quant.data(), batch_size * hidden_size, 
+        h0_quant.resize(batch_size * hidden_size);
+        dev::quantificationBitwidth(h0, h0_quant.data(), batch_size * hidden_size, 
                                      quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
     }
 
-    dev::vector<int32_t> v_quant_dev(time_steps * batch_size * hidden_size *
-                                     4);  // v 统一使用 int32_t 存储
+    // 3. 分配输出缓冲区
+    dev::vector<int32_t> h_quant(h_size);
+    dev::vector<int32_t> v_quant(v != nullptr ? time_steps * batch_size * hidden_size * 4 : 0);
 
-    // 非模板化的 ForwardPassQuant 类
-    gru::ForwardPassQuant forward(
-            is_training,  // training: true为训练，false为推理
-            batch_size, input_size, hidden_size, g_blas_handle);
+    // 4. 调用核心定点计算
+    quantGRUForwardInt32(is_training, time_steps, batch_size, input_size, hidden_size,
+                         W, R, bw, br, x_quant.data(), h0_quant.data(),
+                         quant_parms, g_blas_handle,
+                         h_quant.data(), v != nullptr ? v_quant.data() : nullptr);
 
-    // 得到量化GRU中使用的rescale参数
-    forward.setRescaleParam(quant_parms);
+    // 5. 反量化输出 h
+    dev::dequantification(h_quant.data(), h, h_size, quant_parms.shift_h_, quant_parms.zp_h_);
 
-    forward.Run(time_steps, W, R, bw, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f,
-                nullptr);
-
-    dev::dequantification(h_quant.data(), h, (time_steps + 1) * batch_size * hidden_size,
-                          quant_parms.shift_h_, quant_parms.zp_h_);
-
-    // 如果v不为nullptr，反量化v并输出
-    // V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
+    // 6. 反量化中间值 v（如需要）
     if (v != nullptr) {
-        dev::dequantificationV(v_quant_dev.data(), v, time_steps, batch_size, hidden_size,
+        dev::dequantificationV(v_quant.data(), v, time_steps, batch_size, hidden_size,
                                quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_,
                                quant_parms.shift_reset_gate_output_, quant_parms.zp_reset_gate_output_,
                                quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_,
