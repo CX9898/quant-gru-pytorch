@@ -155,13 +155,13 @@ struct Quantized_unit_testing {
     size_t time_steps_;
     cublasHandle_t handle_;
     size_t channels_;
-    GRUQuantitativeParameters quant_parms_;
+    GRUQuantParams quant_parms_;
 
     Quantized_unit_testing(float *W, float *R, float *bw, float *br, float *x, float *dh,
                            QuantT *W_quant, QuantT *R_quant, int32_t *bw_quant, int32_t *br_quant,
                            QuantT *x_quant, size_t hidden_size, size_t input_size,
                            size_t batch_size, size_t time_steps, cublasHandle_t handle,
-                           const GRUQuantitativeParameters &quant_parms) {
+                           const GRUQuantParams &quant_parms) {
         hidden_size_ = hidden_size;
         input_size_ = input_size;
         batch_size_ = batch_size;
@@ -192,7 +192,7 @@ struct Quantized_unit_testing {
 
 template <typename QuantT>
 inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
-    printf("GRUQuantitativeParameters (量化参数):\n");
+    printf("GRUQuantParams (量化参数):\n");
     printf("  hidden_ = %d\n", quant_parms_.hidden_);
     printf("  shift_x_ = %d, zp_x_ = %d\n", quant_parms_.shift_x_, quant_parms_.zp_x_);
     printf("  shift_h_ = %d, zp_h_ = %d\n", quant_parms_.shift_h_, quant_parms_.zp_h_);
@@ -345,7 +345,7 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
 void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::vector<float> &R,
                                       const std::vector<float> &bw, const std::vector<float> &br,
                                       const std::vector<float> &x,
-                                      const GRUQuantitativeParameters &quant_parms, int time_steps,
+                                      const GRUQuantParams &quant_parms, int time_steps,
                                       int batch_size, int input_size, int hidden_size) {
     // ========== 验证CPU和GPU量化结果一致性 ==========
     printf("\n========== 验证CPU和GPU量化结果一致性 ==========\n");
@@ -741,7 +741,7 @@ inline void checkHQuantizationWithCosine(
     const std::vector<float>
         &h_inference,  // 浮点 h, size = (time_steps+1) * batch_size * hidden_size
     const std::vector<QuantT> &h_quant_inference,  // 量化 h, size 同上
-    int time_steps, int batch_size, int hidden_size, const GRUQuantitativeParameters &scaleParam,
+    int time_steps, int batch_size, int hidden_size, const GRUQuantParams &scaleParam,
     const std::string &prefix = "") {
     const int size_per_step = batch_size * hidden_size;
 

@@ -91,7 +91,7 @@ except ImportError:
 # 格式: "算子名" -> {
 #   "bw_attr": 位宽属性名,
 #   "sym_attr": 对称量化属性名,
-#   "exp2_inv_attr": exp2_inv 属性名,
+#   "shift_attr": shift 属性名 (scale = 2^(-shift)),
 #   "zp_attr": zp 属性名 (None 表示无 zp，如 per-channel 权重),
 #   "is_per_channel": 是否 per-channel
 # }
@@ -100,22 +100,22 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
     生成算子信息字典（减少重复代码）
     
     Args:
-        base_name: 基础属性名（如 "x_", "z_out_"）
+        base_name: 基础属性名（如 "x_", "update_gate_output_"）
         is_per_channel: 是否 per-channel 量化
         default_unsigned: C++ 默认是否 unsigned（False=INT, True=UINT）
     
-    属性命名规律:
+    属性命名规律（与 C++ quantize_ops_helper.h 一致）:
         - bw_attr: "{base_name}" (位宽)
         - sym_attr: "{base_name}symmetric_" (对称量化)
         - unsigned_attr: "{base_name}unsigned_" (无符号量化，只标记例外)
-        - exp2_inv_attr: "exp2_inv_{base_name}" (量化指数)
+        - shift_attr: "shift_{base_name}" (量化移位量，scale = 2^(-shift))
         - zp_attr: "zp_{base_name}" (零点，per-channel 为 None)
     """
     return {
         "bw_attr": base_name,
         "sym_attr": f"{base_name}symmetric_",
         "unsigned_attr": f"{base_name}unsigned_",
-        "exp2_inv_attr": f"exp2_inv_{base_name}",
+        "shift_attr": f"shift_{base_name}",
         "zp_attr": None if is_per_channel else f"zp_{base_name}",
         "is_per_channel": is_per_channel,
         "default_unsigned": default_unsigned,
@@ -123,7 +123,7 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
 
 
 # 算子映射表：JSON 字段名 → C++ 属性名
-# 命名与 C++ OperatorQuantConfig 保持一致
+# 命名与 C++ quantize_ops_helper.h 文档对齐
 _OPERATOR_MAP = {
     # 输入
     "input.x": _make_op_info("x_"),
@@ -134,20 +134,20 @@ _OPERATOR_MAP = {
     "weight.R": _make_op_info("R_", is_per_channel=True),
     "weight.bw": _make_op_info("bw_", is_per_channel=True),
     "weight.br": _make_op_info("br_", is_per_channel=True),
-    # GEMM+bias 融合输出
-    "matmul.Wx": _make_op_info("weight_ih_linear_"),
-    "matmul.Rh": _make_op_info("weight_hh_linear_"),
-    # 门控（激活前/后）
-    "gate.z_pre": _make_op_info("update_gate_input_"),
-    "gate.z_out": _make_op_info("update_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.r_pre": _make_op_info("reset_gate_input_"),
-    "gate.r_out": _make_op_info("reset_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.g_pre": _make_op_info("new_gate_input_"),
-    "gate.g_out": _make_op_info("new_gate_output_"),  # Tanh [-1,1]
+    # Linear 输出 (GEMM+bias 融合)
+    "linear.weight_ih_linear": _make_op_info("weight_ih_linear_"),  # W*x + bw
+    "linear.weight_hh_linear": _make_op_info("weight_hh_linear_"),  # R*h + br
+    # 门控（激活前 input / 激活后 output）
+    "gate.update_gate_input": _make_op_info("update_gate_input_"),
+    "gate.update_gate_output": _make_op_info("update_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.reset_gate_input": _make_op_info("reset_gate_input_"),
+    "gate.reset_gate_output": _make_op_info("reset_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.new_gate_input": _make_op_info("new_gate_input_"),
+    "gate.new_gate_output": _make_op_info("new_gate_output_"),  # Tanh [-1,1]
     # 中间操作
-    "op.rRh": _make_op_info("mul_reset_hidden_"),
-    "op.old_contrib": _make_op_info("mul_old_contribution_"),
-    "op.new_contrib": _make_op_info("mul_new_contribution_"),
+    "op.mul_reset_hidden": _make_op_info("mul_reset_hidden_"),        # r * weight_hh_linear
+    "op.mul_old_contribution": _make_op_info("mul_old_contribution_"),  # u * h
+    "op.mul_new_contribution": _make_op_info("mul_new_contribution_"),  # (1-u) * n
 }
 
 # 派生常量：从映射表提取的 C++ 属性名集合
@@ -162,7 +162,7 @@ _OPERATOR_SHORT_NAME_MAP = {
         'bw_attr': info["bw_attr"],
         'sym_attr': info["sym_attr"],
         'unsigned_attr': info.get("unsigned_attr"),
-        'exp2_inv_attr': info["exp2_inv_attr"],
+        'shift_attr': info["shift_attr"],
         'zp_attr': info["zp_attr"],
         'is_per_channel': info["is_per_channel"],
         'json_key': op_name,
@@ -510,7 +510,7 @@ class GRUFunction(torch.autograd.Function):
             if quant_params is None:
                 raise RuntimeError("use_quantization=True 时必须提供 quant_params")
         else:
-            quant_params = gru_ops.GRUQuantitativeParameters()
+            quant_params = gru_ops.GRUQuantParams()
 
         # 调用 C++ 前向接口
         output_full, v = gru_ops.forward(
@@ -1152,7 +1152,7 @@ class QuantGRU(nn.Module):
         获取配置属性的通用方法
         
         Args:
-            op_name: 操作名称（如 'x', 'h', 'Wx' 等）
+            op_name: 操作名称（如 'x', 'h', 'weight_ih_linear', 'update_gate_output' 等）
             suffix: 属性后缀（'_', '_symmetric_', '_unsigned_'）
             valid_set: 有效属性集合
             default: 默认值
@@ -1174,7 +1174,7 @@ class QuantGRU(nn.Module):
         return getattr(self._bitwidth_config, attr_name, default)
 
     def _get_bitwidth(self, op_name: str) -> int:
-        """获取指定操作的位宽（如 'x', 'h', 'Wx' 等），无效返回 8"""
+        """获取指定操作的位宽（如 'x', 'h', 'weight_ih_linear' 等），无效返回 8"""
         return self._get_config_attr(op_name, '_', _VALID_BITWIDTH_ATTRS, 8)
 
     def _get_symmetric(self, op_name: str) -> bool:
@@ -1421,36 +1421,37 @@ class QuantGRU(nn.Module):
 
         # ========== 量化参数提取 ==========
         # [与 CUDA 一致] 使用相同的量化参数
-        exp2_x = quant_params.exp2_inv_x_
+        # 命名与 C++ quantize_ops_helper.h 对齐
+        shift_x = quant_params.shift_x_
         zp_x = quant_params.zp_x_
-        exp2_h = quant_params.exp2_inv_h_
+        shift_h = quant_params.shift_h_
         zp_h = quant_params.zp_h_
-        exp2_Wx = quant_params.exp2_inv_Wx_
-        zp_Wx = quant_params.zp_Wx_
-        exp2_Rh = quant_params.exp2_inv_Rh_
-        zp_Rh = quant_params.zp_Rh_
+        shift_weight_ih_linear = quant_params.shift_weight_ih_linear_
+        zp_weight_ih_linear = quant_params.zp_weight_ih_linear_
+        shift_weight_hh_linear = quant_params.shift_weight_hh_linear_
+        zp_weight_hh_linear = quant_params.zp_weight_hh_linear_
 
-        # 激活函数量化参数
-        exp2_z_pre = quant_params.exp2_inv_z_pre_
-        zp_z_pre = quant_params.zp_z_pre_
-        exp2_z_out = quant_params.exp2_inv_z_out_
-        zp_z_out = quant_params.zp_z_out_
+        # 门激活函数量化参数（pre-activation / post-activation）
+        shift_update_gate_input = quant_params.shift_update_gate_input_
+        zp_update_gate_input = quant_params.zp_update_gate_input_
+        shift_update_gate_output = quant_params.shift_update_gate_output_
+        zp_update_gate_output = quant_params.zp_update_gate_output_
 
-        exp2_r_pre = quant_params.exp2_inv_r_pre_
-        zp_r_pre = quant_params.zp_r_pre_
-        exp2_r_out = quant_params.exp2_inv_r_out_
-        zp_r_out = quant_params.zp_r_out_
+        shift_reset_gate_input = quant_params.shift_reset_gate_input_
+        zp_reset_gate_input = quant_params.zp_reset_gate_input_
+        shift_reset_gate_output = quant_params.shift_reset_gate_output_
+        zp_reset_gate_output = quant_params.zp_reset_gate_output_
 
-        exp2_g_pre = quant_params.exp2_inv_g_pre_
-        zp_g_pre = quant_params.zp_g_pre_
-        exp2_g_out = quant_params.exp2_inv_g_out_
-        zp_g_out = quant_params.zp_g_out_
+        shift_new_gate_input = quant_params.shift_new_gate_input_
+        zp_new_gate_input = quant_params.zp_new_gate_input_
+        shift_new_gate_output = quant_params.shift_new_gate_output_
+        zp_new_gate_output = quant_params.zp_new_gate_output_
 
         # per-channel 量化参数
-        exp2_W = list(quant_params.exp2_inv_W_)
-        exp2_R = list(quant_params.exp2_inv_R_)
-        exp2_bw = list(quant_params.exp2_inv_bw_)
-        exp2_br = list(quant_params.exp2_inv_br_)
+        shift_W = list(quant_params.shift_W_)
+        shift_R = list(quant_params.shift_R_)
+        shift_bw = list(quant_params.shift_bw_)
+        shift_br = list(quant_params.shift_br_)
 
         # ========== 权重重排序 ==========
         # [与 CUDA 一致] PyTorch 格式 (r, z, n) -> Haste 格式 (z, r, n)
@@ -1470,17 +1471,17 @@ class QuantGRU(nn.Module):
         # ========== 权重伪量化 ==========
         # [与 CUDA 一致] per-channel 量化
         # [ONNX 兼容] 使用 fake_quantize 保持浮点格式
-        W_q = fake_quantize_per_channel(W_reordered.t(), exp2_W, zp=0,
+        W_q = fake_quantize_per_channel(W_reordered.t(), shift_W, zp=0,
                                         bitwidth=self._get_bitwidth('W'),
                                         symmetric=self._get_symmetric('W')).t()
-        R_q = fake_quantize_per_channel(R_reordered.t(), exp2_R, zp=0,
+        R_q = fake_quantize_per_channel(R_reordered.t(), shift_R, zp=0,
                                         bitwidth=self._get_bitwidth('R'),
                                         symmetric=self._get_symmetric('R')).t()
         # 偏置使用配置的位宽(注意：偏置始终使用对称量化)
-        bw_q = fake_quantize_per_channel(bw_reordered.unsqueeze(0), exp2_bw, zp=0,
+        bw_q = fake_quantize_per_channel(bw_reordered.unsqueeze(0), shift_bw, zp=0,
                                          bitwidth=self._get_bitwidth('bw'),
                                          symmetric=self._get_symmetric('bw')).squeeze(0)
-        br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), exp2_br, zp=0,
+        br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), shift_br, zp=0,
                                          bitwidth=self._get_bitwidth('br'),
                                          symmetric=self._get_symmetric('br')).squeeze(0)
 
@@ -1495,128 +1496,130 @@ class QuantGRU(nn.Module):
             h = h0
 
         # [与 CUDA 一致] 量化初始状态
-        h = fake_quantize(h, exp2_h, zp_h, bitwidth=self._get_bitwidth('h'),
+        h = fake_quantize(h, shift_h, zp_h, bitwidth=self._get_bitwidth('h'),
                           symmetric=self._get_symmetric('h'))
 
         # ========== 输入伪量化 ==========
         # [与 CUDA 一致] 所有时间步一起量化
-        x_q = fake_quantize(input, exp2_x, zp_x, bitwidth=self._get_bitwidth('x'),
+        x_q = fake_quantize(input, shift_x, zp_x, bitwidth=self._get_bitwidth('x'),
                             symmetric=self._get_symmetric('x'))
 
-        # ========== Wx GEMM(循环外一次性计算)==========
+        # ========== weight_ih_linear GEMM(循环外一次性计算)==========
         # [与 CUDA 一致] 计算顺序一致
         # [ONNX 兼容] 使用标准 matmul，推理引擎会替换为 MatMulInteger
-        # x_q: [T, B, I], W_q: [3*H, I] -> Wx: [T, B, 3*H]
-        Wx_all = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
+        # x_q: [T, B, I], W_q: [3*H, I] -> weight_ih_linear: [T, B, 3*H]
+        weight_ih_linear_all = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
 
         # [与 CUDA 一致] GEMM 输出量化
-        Wx_all = fake_quantize(Wx_all, exp2_Wx, zp_Wx, bitwidth=self._get_bitwidth('Wx'),
-                               symmetric=self._get_symmetric('Wx'))
+        weight_ih_linear_all = fake_quantize(weight_ih_linear_all, shift_weight_ih_linear, zp_weight_ih_linear,
+                                             bitwidth=self._get_bitwidth('weight_ih_linear'),
+                                             symmetric=self._get_symmetric('weight_ih_linear'))
 
         # 预分配输出张量(ONNX 友好，避免动态列表)
         outputs = torch.zeros(T, B, H, device=device, dtype=dtype)
 
         for t in range(T):
-            Wx = Wx_all[t]  # [B, 3*H]
+            weight_ih_linear = weight_ih_linear_all[t]  # [B, 3*H]
 
-            # ========== Rh GEMM ==========
-            # [与 CUDA 一致] 每个时间步计算 Rh
+            # ========== weight_hh_linear GEMM ==========
+            # [与 CUDA 一致] 每个时间步计算 R*h + br (weight_hh_linear)
             # [ONNX 兼容] 使用标准 matmul
-            Rh = torch.mm(h, R_q.t())  # [B, 3*H]
+            weight_hh_linear = torch.mm(h, R_q.t())  # [B, 3*H]
 
             # [与 CUDA 一致] GEMM 输出量化
-            Rh = fake_quantize(Rh, exp2_Rh, zp_Rh, bitwidth=self._get_bitwidth('Rh'),
-                               symmetric=self._get_symmetric('Rh'))
+            weight_hh_linear = fake_quantize(weight_hh_linear, shift_weight_hh_linear, zp_weight_hh_linear,
+                                             bitwidth=self._get_bitwidth('weight_hh_linear'),
+                                             symmetric=self._get_symmetric('weight_hh_linear'))
 
             # ========== 分割门控 ==========
-            # [与 CUDA 一致] Haste 格式 (z, r, g)
-            Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)  # 各 [B, H]
-            Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)  # 各 [B, H]
+            # [与 CUDA 一致] Haste 格式 (z, r, n) → (update, reset, new)
+            ih_z, ih_r, ih_n = weight_ih_linear.chunk(3, dim=1)  # 各 [B, H]
+            hh_z, hh_r, hh_n = weight_hh_linear.chunk(3, dim=1)  # 各 [B, H]
 
-            # ========== z 门(Update Gate)==========
-            # [与 CUDA 一致] z = sigmoid(Wx_z + Rh_z + bw_z + br_z)
-            z_pre = Wx_z + Rh_z + bw_z.unsqueeze(0) + br_z.unsqueeze(0)
+            # ========== Update Gate (z 门) ==========
+            # [与 CUDA 一致] update_gate = sigmoid(ih_z + hh_z + bw_z + br_z)
+            update_gate_input = ih_z + hh_z + bw_z.unsqueeze(0) + br_z.unsqueeze(0)
 
             # [与 CUDA 一致] 激活前量化
-            z_pre = fake_quantize(z_pre, exp2_z_pre, zp_z_pre,
-                                  bitwidth=self._get_bitwidth('z_pre'),
-                                  symmetric=self._get_symmetric('z_pre'))
+            update_gate_input = fake_quantize(update_gate_input, shift_update_gate_input, zp_update_gate_input,
+                                              bitwidth=self._get_bitwidth('update_gate_input'),
+                                              symmetric=self._get_symmetric('update_gate_input'))
 
             # [ONNX 兼容] 使用标准 sigmoid(推理引擎会用量化版本或 LUT)
-            z = torch.sigmoid(z_pre)
+            update_gate_output = torch.sigmoid(update_gate_input)
 
             # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
-            z = fake_quantize(z, exp2_z_out, zp_z_out,
-                              bitwidth=self._get_bitwidth('z_out'),
-                              symmetric=self._get_symmetric('z_out'),
-                              is_unsigned=self._get_unsigned('z_out'))
+            update_gate_output = fake_quantize(update_gate_output, shift_update_gate_output, zp_update_gate_output,
+                                               bitwidth=self._get_bitwidth('update_gate_output'),
+                                               symmetric=self._get_symmetric('update_gate_output'),
+                                               is_unsigned=self._get_unsigned('update_gate_output'))
 
-            # ========== r 门(Reset Gate)==========
-            # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bw_r + br_r)
-            r_pre = Wx_r + Rh_r + bw_r.unsqueeze(0) + br_r.unsqueeze(0)
+            # ========== Reset Gate (r 门) ==========
+            # [与 CUDA 一致] reset_gate = sigmoid(ih_r + hh_r + bw_r + br_r)
+            reset_gate_input = ih_r + hh_r + bw_r.unsqueeze(0) + br_r.unsqueeze(0)
 
-            r_pre = fake_quantize(r_pre, exp2_r_pre, zp_r_pre,
-                                  bitwidth=self._get_bitwidth('r_pre'),
-                                  symmetric=self._get_symmetric('r_pre'))
+            reset_gate_input = fake_quantize(reset_gate_input, shift_reset_gate_input, zp_reset_gate_input,
+                                             bitwidth=self._get_bitwidth('reset_gate_input'),
+                                             symmetric=self._get_symmetric('reset_gate_input'))
 
             # [ONNX 兼容] 使用标准 sigmoid
-            r = torch.sigmoid(r_pre)
+            reset_gate_output = torch.sigmoid(reset_gate_input)
 
             # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
-            r = fake_quantize(r, exp2_r_out, zp_r_out,
-                              bitwidth=self._get_bitwidth('r_out'),
-                              symmetric=self._get_symmetric('r_out'),
-                              is_unsigned=self._get_unsigned('r_out'))
+            reset_gate_output = fake_quantize(reset_gate_output, shift_reset_gate_output, zp_reset_gate_output,
+                                              bitwidth=self._get_bitwidth('reset_gate_output'),
+                                              symmetric=self._get_symmetric('reset_gate_output'),
+                                              is_unsigned=self._get_unsigned('reset_gate_output'))
 
-            # ========== g 门(New Gate / Candidate)==========
-            # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bw_g)
-            # 注意: Rh_add_br 量化步骤已移除（融合到 weight_hh_linear）
-            Rh_add_br = Rh_g + br_g.unsqueeze(0)
-            rRh = r * Rh_add_br
+            # ========== New Gate (g 门 / Candidate) ==========
+            # [与 CUDA 一致] new_gate = tanh(ih_n + reset_gate * (hh_n + br_n) + bw_n)
+            # 注意: hh_add_br 量化步骤已移除（融合到 weight_hh_linear）
+            hh_add_br = hh_n + br_g.unsqueeze(0)
+            mul_reset_hidden = reset_gate_output * hh_add_br
 
             # [与 CUDA 一致] 乘积量化(从配置读取位宽)
-            rRh = fake_quantize(rRh, quant_params.exp2_inv_rRh_,
-                                quant_params.zp_rRh_,
-                                bitwidth=self._get_bitwidth('rRh'),
-                                symmetric=self._get_symmetric('rRh'))
+            mul_reset_hidden = fake_quantize(mul_reset_hidden, quant_params.shift_mul_reset_hidden_,
+                                             quant_params.zp_mul_reset_hidden_,
+                                             bitwidth=self._get_bitwidth('mul_reset_hidden'),
+                                             symmetric=self._get_symmetric('mul_reset_hidden'))
 
-            g_pre = Wx_g + rRh + bw_g.unsqueeze(0)
+            new_gate_input = ih_n + mul_reset_hidden + bw_g.unsqueeze(0)
 
-            g_pre = fake_quantize(g_pre, exp2_g_pre, zp_g_pre,
-                                  bitwidth=self._get_bitwidth('g_pre'),
-                                  symmetric=self._get_symmetric('g_pre'))
+            new_gate_input = fake_quantize(new_gate_input, shift_new_gate_input, zp_new_gate_input,
+                                           bitwidth=self._get_bitwidth('new_gate_input'),
+                                           symmetric=self._get_symmetric('new_gate_input'))
 
             # [ONNX 兼容] 使用标准 tanh
-            g = torch.tanh(g_pre)
+            new_gate_output = torch.tanh(new_gate_input)
 
             # [与 CUDA 一致] 激活后量化，对称性从配置读取
-            g = fake_quantize(g, exp2_g_out, zp_g_out,
-                              bitwidth=self._get_bitwidth('g_out'),
-                              symmetric=self._get_symmetric('g_out'))
+            new_gate_output = fake_quantize(new_gate_output, shift_new_gate_output, zp_new_gate_output,
+                                            bitwidth=self._get_bitwidth('new_gate_output'),
+                                            symmetric=self._get_symmetric('new_gate_output'))
 
             # ========== 新隐藏状态 ==========
-            # [与 CUDA 一致] h_new = z * h + (1 - z) * g
-            # CUDA computeH 分别计算并量化 old_contrib 和 new_contrib
+            # [与 CUDA 一致] h_new = update_gate * h + (1 - update_gate) * new_gate
+            # CUDA computeHiddenState 分别计算并量化 mul_old_contribution 和 mul_new_contribution
 
-            # old_contrib = z * h(从配置读取位宽)
-            old_contrib = z * h
-            old_contrib = fake_quantize(old_contrib, quant_params.exp2_inv_old_contrib_,
-                                        quant_params.zp_old_contrib_,
-                                        bitwidth=self._get_bitwidth('old_contrib'),
-                                        symmetric=self._get_symmetric('old_contrib'))
+            # mul_old_contribution = update_gate * h(从配置读取位宽)
+            mul_old_contribution = update_gate_output * h
+            mul_old_contribution = fake_quantize(mul_old_contribution, quant_params.shift_mul_old_contribution_,
+                                                 quant_params.zp_mul_old_contribution_,
+                                                 bitwidth=self._get_bitwidth('mul_old_contribution'),
+                                                 symmetric=self._get_symmetric('mul_old_contribution'))
 
-            # new_contrib = (1 - z) * g(从配置读取位宽)
-            new_contrib = (1 - z) * g
-            new_contrib = fake_quantize(new_contrib, quant_params.exp2_inv_new_contrib_,
-                                        quant_params.zp_new_contrib_,
-                                        bitwidth=self._get_bitwidth('new_contrib'),
-                                        symmetric=self._get_symmetric('new_contrib'))
+            # mul_new_contribution = (1 - update_gate) * new_gate(从配置读取位宽)
+            mul_new_contribution = (1 - update_gate_output) * new_gate_output
+            mul_new_contribution = fake_quantize(mul_new_contribution, quant_params.shift_mul_new_contribution_,
+                                                 quant_params.zp_mul_new_contribution_,
+                                                 bitwidth=self._get_bitwidth('mul_new_contribution'),
+                                                 symmetric=self._get_symmetric('mul_new_contribution'))
 
-            # h_new = old_contrib + new_contrib
-            h_new = old_contrib + new_contrib
+            # h_new = mul_old_contribution + mul_new_contribution
+            h_new = mul_old_contribution + mul_new_contribution
 
             # [与 CUDA 一致] 输出量化
-            h_new = fake_quantize(h_new, exp2_h, zp_h,
+            h_new = fake_quantize(h_new, shift_h, zp_h,
                                   bitwidth=self._get_bitwidth('h'),
                                   symmetric=self._get_symmetric('h'))
 
@@ -2029,6 +2032,8 @@ def print_quant_params(gru: 'QuantGRU'):
     """
     打印 QuantGRU 的量化参数（scale/zero_point）
     
+    命名与 C++ quantize_ops_helper.h 对齐
+    
     Args:
         gru: 已完成校准的 QuantGRU 实例
     """
@@ -2037,33 +2042,33 @@ def print_quant_params(gru: 'QuantGRU'):
 
     params = gru.quant_params
     print("=" * 60)
-    print("GRUQuantitativeParameters (量化参数)")
+    print("GRUQuantParams (量化参数)")
     print("=" * 60)
     print(f"  hidden_ = {params.hidden_}")
-    print(f"  [x]  exp2_inv={params.exp2_inv_x_:3d}, zp={params.zp_x_}")
-    print(f"  [h]  exp2_inv={params.exp2_inv_h_:3d}, zp={params.zp_h_}")
-    print(f"  [Wx] exp2_inv={params.exp2_inv_Wx_:3d}, zp={params.zp_Wx_}")
-    print(f"  [Rh] exp2_inv={params.exp2_inv_Rh_:3d}, zp={params.zp_Rh_}")
+    print(f"  [x]                       shift={params.shift_x_:3d}, zp={params.zp_x_}")
+    print(f"  [h]                       shift={params.shift_h_:3d}, zp={params.zp_h_}")
+    print(f"  [weight_ih_linear]        shift={params.shift_weight_ih_linear_:3d}, zp={params.zp_weight_ih_linear_}")
+    print(f"  [weight_hh_linear]        shift={params.shift_weight_hh_linear_:3d}, zp={params.zp_weight_hh_linear_}")
     print("-" * 60)
-    print(f"  [z_pre] exp2_inv={params.exp2_inv_z_pre_:3d}, zp={params.zp_z_pre_}")
-    print(f"  [r_pre] exp2_inv={params.exp2_inv_r_pre_:3d}, zp={params.zp_r_pre_}")
-    print(f"  [g_pre] exp2_inv={params.exp2_inv_g_pre_:3d}, zp={params.zp_g_pre_}")
-    print(f"  [z_out] exp2_inv={params.exp2_inv_z_out_:3d}, zp={params.zp_z_out_}")
-    print(f"  [r_out] exp2_inv={params.exp2_inv_r_out_:3d}, zp={params.zp_r_out_}")
-    print(f"  [g_out] exp2_inv={params.exp2_inv_g_out_:3d}, zp={params.zp_g_out_}")
+    print(f"  [update_gate_input]       shift={params.shift_update_gate_input_:3d}, zp={params.zp_update_gate_input_}")
+    print(f"  [update_gate_output]      shift={params.shift_update_gate_output_:3d}, zp={params.zp_update_gate_output_}")
+    print(f"  [reset_gate_input]        shift={params.shift_reset_gate_input_:3d}, zp={params.zp_reset_gate_input_}")
+    print(f"  [reset_gate_output]       shift={params.shift_reset_gate_output_:3d}, zp={params.zp_reset_gate_output_}")
+    print(f"  [new_gate_input]          shift={params.shift_new_gate_input_:3d}, zp={params.zp_new_gate_input_}")
+    print(f"  [new_gate_output]         shift={params.shift_new_gate_output_:3d}, zp={params.zp_new_gate_output_}")
     print("-" * 60)
-    print(f"  [rRh]              exp2_inv={params.exp2_inv_rRh_:3d}, zp={params.zp_rRh_}")
-    print(f"  [new_contrib]      exp2_inv={params.exp2_inv_new_contrib_:3d}, zp={params.zp_new_contrib_}")
-    print(f"  [old_contrib]      exp2_inv={params.exp2_inv_old_contrib_:3d}, zp={params.zp_old_contrib_}")
+    print(f"  [mul_reset_hidden]        shift={params.shift_mul_reset_hidden_:3d}, zp={params.zp_mul_reset_hidden_}")
+    print(f"  [mul_new_contribution]    shift={params.shift_mul_new_contribution_:3d}, zp={params.zp_mul_new_contribution_}")
+    print(f"  [mul_old_contribution]    shift={params.shift_mul_old_contribution_:3d}, zp={params.zp_mul_old_contribution_}")
     print("-" * 60)
-    if params.exp2_inv_W_:
-        print(f"  [W] exp2_inv (first 5): {list(params.exp2_inv_W_[:5])} ...")
-    if params.exp2_inv_R_:
-        print(f"  [R] exp2_inv (first 5): {list(params.exp2_inv_R_[:5])} ...")
-    if params.exp2_inv_bw_:
-        print(f"  [bw] exp2_inv (first 5): {list(params.exp2_inv_bw_[:5])} ...")
-    if params.exp2_inv_br_:
-        print(f"  [br] exp2_inv (first 5): {list(params.exp2_inv_br_[:5])} ...")
+    if params.shift_W_:
+        print(f"  [W] shift (first 5): {list(params.shift_W_[:5])} ...")
+    if params.shift_R_:
+        print(f"  [R] shift (first 5): {list(params.shift_R_[:5])} ...")
+    if params.shift_bw_:
+        print(f"  [bw] shift (first 5): {list(params.shift_bw_[:5])} ...")
+    if params.shift_br_:
+        print(f"  [br] shift (first 5): {list(params.shift_br_[:5])} ...")
     print("=" * 60)
 
 
@@ -2156,7 +2161,7 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
-        quant_params: GRUQuantitativeParameters 对象
+        quant_params: GRUQuantParams 对象
         
     Returns:
         operators 字典（per-channel 权重放在最后）
@@ -2201,14 +2206,14 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         # 3. scale
         scale_value = None
         n_value = None
-        if hasattr(quant_params, op_info["exp2_inv_attr"]):
-            exp2_inv_value = getattr(quant_params, op_info["exp2_inv_attr"])
+        if hasattr(quant_params, op_info["shift_attr"]):
+            shift_value = getattr(quant_params, op_info["shift_attr"])
             if is_per_channel:
-                exp2_inv_list = list(exp2_inv_value)
-                scale_value = [_exp2_inv_to_scale(e) for e in exp2_inv_list]
-                n_value = exp2_inv_list
+                shift_list = list(shift_value)
+                scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
+                n_value = shift_list
             else:
-                n = int(exp2_inv_value)
+                n = int(shift_value)
                 scale_value = _exp2_inv_to_scale(n)
                 n_value = n
         if scale_value is not None:
@@ -2277,7 +2282,7 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
     Args:
         operators: operators 字典
         bitwidth_config: OperatorQuantConfig 对象（会被修改）
-        quant_params: GRUQuantitativeParameters 对象（会被修改）
+        quant_params: GRUQuantParams 对象（会被修改）
     """
     for op_name, op_data in operators.items():
         if op_name not in _OPERATOR_MAP:
@@ -2298,19 +2303,20 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
             setattr(bitwidth_config, op_info["sym_attr"], op_data["symmetric"])
         
         # 设置 n / scale（优先使用 n，其次从 scale 计算）
+        # n 对应 C++ 中的 shift_xxx_ 属性
         if "n" in op_data:
             value = op_data["n"]
             if op_info["is_per_channel"]:
-                setattr(quant_params, op_info["exp2_inv_attr"], list(value))
+                setattr(quant_params, op_info["shift_attr"], list(value))
             else:
-                setattr(quant_params, op_info["exp2_inv_attr"], int(value))
+                setattr(quant_params, op_info["shift_attr"], int(value))
         elif "scale" in op_data:
             value = op_data["scale"]
             if op_info["is_per_channel"]:
-                setattr(quant_params, op_info["exp2_inv_attr"], 
+                setattr(quant_params, op_info["shift_attr"], 
                         [_scale_to_exp2_inv(v) for v in value])
             else:
-                setattr(quant_params, op_info["exp2_inv_attr"], _scale_to_exp2_inv(value))
+                setattr(quant_params, op_info["shift_attr"], _scale_to_exp2_inv(value))
         
         # 设置 zero_point
         if op_info["zp_attr"] and "zero_point" in op_data:
@@ -2386,17 +2392,17 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     )
     
     # 量化权重（使用 per-channel 参数）
-    def quantize_per_channel(tensor, exp2_inv_list, bitwidth, symmetric):
+    def quantize_per_channel(tensor, shift_list, bitwidth, symmetric):
         """对每个 channel 应用量化（权重使用有符号量化）"""
         qmin, qmax = get_quant_range(bitwidth)  # 权重使用有符号量化（默认）
         result = torch.zeros_like(tensor, dtype=torch.int32)
         
-        for c in range(len(exp2_inv_list)):
-            exp2_inv = exp2_inv_list[c]
-            if exp2_inv >= 0:
-                scale = 1.0 / (1 << exp2_inv)
+        for c in range(len(shift_list)):
+            shift = shift_list[c]
+            if shift >= 0:
+                scale = 1.0 / (1 << shift)
             else:
-                scale = float(1 << (-exp2_inv))
+                scale = float(1 << (-shift))
             
             q = torch.clamp(torch.round(tensor[:, c] / scale), qmin, qmax)
             result[:, c] = q.int()
@@ -2410,16 +2416,16 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     br_bitwidth = gru._bitwidth_config.br_
     
     weights = {
-        "W": quantize_per_channel(W, list(params.exp2_inv_W_), W_bitwidth, True),
-        "R": quantize_per_channel(R, list(params.exp2_inv_R_), R_bitwidth, True),
+        "W": quantize_per_channel(W, list(params.shift_W_), W_bitwidth, True),
+        "R": quantize_per_channel(R, list(params.shift_R_), R_bitwidth, True),
     }
     
     if gru.bias:
         # 偏置是 1D，需要 unsqueeze
         bw_2d = bw.unsqueeze(0)  # [1, 3*H]
         br_2d = br.unsqueeze(0)
-        weights["bw"] = quantize_per_channel(bw_2d, list(params.exp2_inv_bw_), bw_bitwidth, True)[0]
-        weights["br"] = quantize_per_channel(br_2d, list(params.exp2_inv_br_), br_bitwidth, True)[0]
+        weights["bw"] = quantize_per_channel(bw_2d, list(params.shift_bw_), bw_bitwidth, True)[0]
+        weights["br"] = quantize_per_channel(br_2d, list(params.shift_br_), br_bitwidth, True)[0]
     
     return weights
 
@@ -2468,7 +2474,7 @@ def _load_quant_params_impl(
     
     # 解析 operators 字典
     gru._bitwidth_config = gru_ops.OperatorQuantConfig()
-    gru.quant_params = gru_ops.GRUQuantitativeParameters()
+    gru.quant_params = gru_ops.GRUQuantParams()
     gru.quant_params.hidden_ = gru.hidden_size
     
     _parse_operators_dict(data["operators"], gru._bitwidth_config, gru.quant_params)
@@ -2485,7 +2491,7 @@ def _load_quant_params_impl(
     #   3. 导出时 operators 和 operators_reverse 的 bitwidth 来自同一 _bitwidth_config，
     #      所以导入时解析两次 bitwidth 是等价的（值相同）
     if gru.bidirectional and "operators_reverse" in data:
-        gru.quant_params_reverse = gru_ops.GRUQuantitativeParameters()
+        gru.quant_params_reverse = gru_ops.GRUQuantParams()
         gru.quant_params_reverse.hidden_ = gru.hidden_size
         
         # 从 operators_reverse 解析 exp2_inv/zp，bitwidth 与正向相同（共用 _bitwidth_config）
@@ -2537,42 +2543,42 @@ def _adjust_quant_config_impl(
         setattr(gru._bitwidth_config, attrs['bw_attr'], bitwidth)
         new_values['bitwidth'] = bitwidth
         
-        # 自动计算 exp2_inv 和 zp（当 exp2_inv 未指定时）
+        # 自动计算 shift 和 zp（当 exp2_inv 未指定时）
         # 
         # 原理：保持相同的数据表示范围，但用更多/更少的量化级别
-        # - scale = 2^(-exp2_inv) 
-        # - 位宽增加 -> 量化级别增多 -> scale 应减小 -> exp2_inv 应增大
-        # - 公式: new_exp2_inv = old_exp2_inv + (new_bitwidth - old_bitwidth)
+        # - scale = 2^(-shift) 
+        # - 位宽增加 -> 量化级别增多 -> scale 应减小 -> shift 应增大
+        # - 公式: new_shift = old_shift + (new_bitwidth - old_bitwidth)
         #
         # 对于 zp:
         # - 对称量化: zp = 0（固定不变）
         # - 非对称量化: zp_new ≈ zp_old * 2^delta_bits
         #
         if exp2_inv is None and gru.quant_params is not None:
-            exp2_attr = f"exp2_inv_{operator}_"
-            zp_attr = f"zp_{operator}_"
-            is_per_channel = operator in ['W', 'R', 'bw', 'br']
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs['zp_attr']
+            is_per_channel = attrs['is_per_channel']
             is_symmetric = old_symmetric  # 使用当前的对称性设置
             
             bitwidth_delta = bitwidth - old_bitwidth
             scale_factor = 1 << abs(bitwidth_delta)  # 2^|delta|
             
-            if hasattr(gru.quant_params, exp2_attr):
+            if hasattr(gru.quant_params, shift_attr):
                 if is_per_channel:
-                    old_exp2_list = list(getattr(gru.quant_params, exp2_attr))
-                    # exp2_inv 增加 delta_bits（scale 减小）
-                    new_exp2_list = [max(-32, min(32, e + bitwidth_delta)) for e in old_exp2_list]
-                    setattr(gru.quant_params, exp2_attr, new_exp2_list)
-                    new_values['exp2_inv'] = f"auto: [{new_exp2_list[0]}, ...] (delta=+{bitwidth_delta})"
+                    old_shift_list = list(getattr(gru.quant_params, shift_attr))
+                    # shift 增加 delta_bits（scale 减小）
+                    new_shift_list = [max(-32, min(32, e + bitwidth_delta)) for e in old_shift_list]
+                    setattr(gru.quant_params, shift_attr, new_shift_list)
+                    new_values['shift'] = f"auto: [{new_shift_list[0]}, ...] (delta=+{bitwidth_delta})"
                 else:
-                    old_exp2 = int(getattr(gru.quant_params, exp2_attr))
-                    # exp2_inv 增加 delta_bits
-                    new_exp2 = max(-32, min(32, old_exp2 + bitwidth_delta))
-                    setattr(gru.quant_params, exp2_attr, new_exp2)
-                    new_values['exp2_inv'] = f"auto: {new_exp2} (was {old_exp2}, delta=+{bitwidth_delta})"
+                    old_shift = int(getattr(gru.quant_params, shift_attr))
+                    # shift 增加 delta_bits
+                    new_shift = max(-32, min(32, old_shift + bitwidth_delta))
+                    setattr(gru.quant_params, shift_attr, new_shift)
+                    new_values['shift'] = f"auto: {new_shift} (was {old_shift}, delta=+{bitwidth_delta})"
                     
                     # 同时调整 zp（非 per-channel 情况）
-                    if hasattr(gru.quant_params, zp_attr):
+                    if zp_attr and hasattr(gru.quant_params, zp_attr):
                         old_zp = int(getattr(gru.quant_params, zp_attr))
                         
                         if is_symmetric:
@@ -2598,33 +2604,31 @@ def _adjust_quant_config_impl(
     
     # 修改量化参数（如果已校准且未被 auto_scale 处理）
     if gru.quant_params is not None:
-        # 确定 exp2_inv 和 zp 的属性名
-        exp2_attr = f"exp2_inv_{operator}_"
-        zp_attr = f"zp_{operator}_"
-        
-        # 检查是否是 per-channel 参数
-        is_per_channel = operator in ['W', 'R', 'bw', 'br']
+        # 从 attrs 获取属性名
+        shift_attr = attrs['shift_attr']
+        zp_attr = attrs['zp_attr']
+        is_per_channel = attrs['is_per_channel']
         
         if is_per_channel:
-            # per-channel 参数只有 exp2_inv，没有 zp
-            if hasattr(gru.quant_params, exp2_attr):
-                old_exp2 = list(getattr(gru.quant_params, exp2_attr))
-                old_values['exp2_inv'] = f"[{old_exp2[0]}, {old_exp2[1]}, ...] (per-channel)"
+            # per-channel 参数只有 shift，没有 zp
+            if hasattr(gru.quant_params, shift_attr):
+                old_shift = list(getattr(gru.quant_params, shift_attr))
+                old_values['shift'] = f"[{old_shift[0]}, {old_shift[1]}, ...] (per-channel)"
                 
                 if exp2_inv is not None:
                     # 将所有 channel 设置为相同的值
-                    new_exp2 = [exp2_inv] * len(old_exp2)
-                    setattr(gru.quant_params, exp2_attr, new_exp2)
-                    new_values['exp2_inv'] = f"[{exp2_inv}, {exp2_inv}, ...] (all channels)"
+                    new_shift = [exp2_inv] * len(old_shift)
+                    setattr(gru.quant_params, shift_attr, new_shift)
+                    new_values['shift'] = f"[{exp2_inv}, {exp2_inv}, ...] (all channels)"
         else:
             # 标量参数
-            if hasattr(gru.quant_params, exp2_attr):
-                old_values['exp2_inv'] = int(getattr(gru.quant_params, exp2_attr))
+            if hasattr(gru.quant_params, shift_attr):
+                old_values['shift'] = int(getattr(gru.quant_params, shift_attr))
                 if exp2_inv is not None:
-                    setattr(gru.quant_params, exp2_attr, exp2_inv)
-                    new_values['exp2_inv'] = exp2_inv
+                    setattr(gru.quant_params, shift_attr, exp2_inv)
+                    new_values['shift'] = exp2_inv
             
-            if hasattr(gru.quant_params, zp_attr):
+            if zp_attr and hasattr(gru.quant_params, zp_attr):
                 old_values['zero_point'] = int(getattr(gru.quant_params, zp_attr))
                 if zero_point is not None:
                     setattr(gru.quant_params, zp_attr, zero_point)
@@ -2653,22 +2657,21 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
         }
         
         if gru.quant_params is not None:
-            exp2_attr = f"exp2_inv_{op_name}_"
-            zp_attr = f"zp_{op_name}_"
-            
-            is_per_channel = op_name in ['W', 'R', 'bw', 'br']
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs['zp_attr']
+            is_per_channel = attrs['is_per_channel']
             
             if is_per_channel:
-                if hasattr(gru.quant_params, exp2_attr):
-                    config['exp2_inv'] = list(getattr(gru.quant_params, exp2_attr))
+                if hasattr(gru.quant_params, shift_attr):
+                    config['shift'] = list(getattr(gru.quant_params, shift_attr))
                     # 计算对应的 scale
-                    config['scale'] = [_exp2_inv_to_scale(e) for e in config['exp2_inv']]
+                    config['scale'] = [_exp2_inv_to_scale(e) for e in config['shift']]
             else:
-                if hasattr(gru.quant_params, exp2_attr):
-                    exp2 = int(getattr(gru.quant_params, exp2_attr))
-                    config['exp2_inv'] = exp2
-                    config['scale'] = _exp2_inv_to_scale(exp2)
-                if hasattr(gru.quant_params, zp_attr):
+                if hasattr(gru.quant_params, shift_attr):
+                    shift = int(getattr(gru.quant_params, shift_attr))
+                    config['shift'] = shift
+                    config['scale'] = _exp2_inv_to_scale(shift)
+                if zp_attr and hasattr(gru.quant_params, zp_attr):
                     config['zero_point'] = int(getattr(gru.quant_params, zp_attr))
         
         return config
@@ -2704,15 +2707,15 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
     else:
         config = all_config
     
-    # 分组显示
+    # 分组显示（命名与 C++ quantize_ops_helper.h 对齐）
     groups = {
         '输入': ['x'],
         '输出': ['h'],
         '权重': ['W', 'R', 'bw', 'br'],
-        'GEMM': ['Wx', 'Rh'],
-        '门控(pre)': ['z_pre', 'r_pre', 'g_pre'],
-        '门控(out)': ['z_out', 'r_out', 'g_out'],
-        '中间': ['rRh', 'old_contrib', 'new_contrib'],
+        'Linear': ['weight_ih_linear', 'weight_hh_linear'],
+        '门控(input)': ['update_gate_input', 'reset_gate_input', 'new_gate_input'],
+        '门控(output)': ['update_gate_output', 'reset_gate_output', 'new_gate_output'],
+        '中间': ['mul_reset_hidden', 'mul_old_contribution', 'mul_new_contribution'],
     }
     
     print("\n" + "=" * 80)
@@ -2732,22 +2735,22 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
             bw = cfg.get('bitwidth', '?')
             sym = "对称" if cfg.get('is_symmetric', True) else "非对称"
             
-            if 'exp2_inv' in cfg:
-                exp2 = cfg['exp2_inv']
-                if isinstance(exp2, list):
+            if 'shift' in cfg:
+                shift = cfg['shift']
+                if isinstance(shift, list):
                     # per-channel
-                    exp2_str = f"[{exp2[0]}, {exp2[1]}, ...] (per-channel, len={len(exp2)})"
+                    shift_str = f"[{shift[0]}, {shift[1]}, ...] (per-channel, len={len(shift)})"
                     scale_str = f"[{cfg['scale'][0]:.6f}, ...]"
                 else:
-                    exp2_str = str(exp2)
+                    shift_str = str(shift)
                     scale_str = f"{cfg.get('scale', '?'):.6f}"
             else:
-                exp2_str = "N/A"
+                shift_str = "N/A"
                 scale_str = "N/A"
             
             zp = cfg.get('zero_point', 'N/A')
             
-            print(f"  {op:15s}: {bw:2}bit, {sym:4s}, exp2_inv={exp2_str:30s}, scale={scale_str}, zp={zp}")
+            print(f"  {op:15s}: {bw:2}bit, {sym:4s}, shift={shift_str:30s}, scale={scale_str}, zp={zp}")
     
     print("=" * 80)
     print("\n💡 使用 gru.adjust_quant_config('x', bitwidth=16) 可调整配置")

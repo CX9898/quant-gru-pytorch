@@ -49,7 +49,7 @@ class ForwardPassQuantCPU {
     ~ForwardPassQuantCPU();
 
     /// @brief 设置量化 rescale 参数（使用 quantize_ops_helper.h 中定义的通用结构）
-    void setRescaleParam(const GRUQuantitativeParameters &params);
+    void setRescaleParam(const GRUQuantParams &params);
 
     /// @brief 执行前向传播（所有量化值使用 int32_t 存储）
     void Run(int steps, const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br,

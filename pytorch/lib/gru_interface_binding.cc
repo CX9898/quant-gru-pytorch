@@ -59,8 +59,8 @@ inline QuantBitWidth toBitwidth(int8_t bitwidth, bool is_unsigned = false) {
 //                    OperatorQuantConfig Python 绑定（前置定义）
 // ============================================================================
 //
-// 注意：这个结构体需要在 GRUQuantitativeParametersPy 之前定义，
-// 因为 GRUQuantitativeParametersPy 中包含 OperatorQuantConfigPy 成员
+// 注意：这个结构体需要在 GRUQuantParamsPy 之前定义，
+// 因为 GRUQuantParamsPy 中包含 OperatorQuantConfigPy 成员
 //
 // ============================================================================
 
@@ -120,9 +120,9 @@ struct GRUQuantizationRangesPy {
     const GRUQuantizationRanges& get_cpp() const { return cpp_ranges; }
 };
 
-// GRUQuantitativeParameters 的 Python 绑定
-// 命名与 C++ GRUQuantitativeParameters 保持一致
-struct GRUQuantitativeParametersPy {
+// GRUQuantParams 的 Python 绑定
+// 命名与 C++ GRUQuantParams 保持一致
+struct GRUQuantParamsPy {
     int hidden_;
     // 基础参数
     int8_t shift_x_;
@@ -167,22 +167,22 @@ struct GRUQuantitativeParametersPy {
     OperatorQuantConfigPy bitwidth_config_;
 
     // 方法声明（实现在文件末尾）
-    void from_cpp(const GRUQuantitativeParameters &cpp_params);  // 从 C++ 结构体转换
-    GRUQuantitativeParameters to_cpp() const;                     // 转换为 C++ 结构体
+    void from_cpp(const GRUQuantParams &cpp_params);  // 从 C++ 结构体转换
+    GRUQuantParams to_cpp() const;                     // 转换为 C++ 结构体
 };
 
 // 根据量化范围计算量化参数的包装函数（支持自定义位宽配置）
-GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_wrapper(
+GRUQuantParamsPy calculate_gru_quantitative_parameters_wrapper(
     const GRUQuantizationRangesPy &quant_ranges,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy()) {
     // 直接使用包装的 C++ 对象
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
 
     // 调用 C++ 函数
-    GRUQuantitativeParameters quant_params =
+    GRUQuantParams quant_params =
         calculateGRUQuantitativeParameters(quant_ranges.cpp_ranges, cpp_bitwidth);
 
-    GRUQuantitativeParametersPy py_params;
+    GRUQuantParamsPy py_params;
     py_params.from_cpp(quant_params);
     return py_params;
 }
@@ -220,7 +220,7 @@ struct GRUHistogramCollectorsPy {
 
 // 从直方图计算量化参数的包装函数
 // 内部自动选择 GPU/CPU 实现：SQNR 用 GPU，Percentile 用 CPU
-GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
+GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
     GRUHistogramCollectorsPy &hist_collectors,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy(),
     bool verbose = false,
@@ -228,7 +228,7 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histogram
     float percentile_value = 99.99f) {
 
     OperatorQuantConfig cpp_bitwidth = bitwidth_config.to_cpp();
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     
     if (use_percentile) {
         // Percentile 方案：转换为 CPU 直方图后计算
@@ -241,7 +241,7 @@ GRUQuantitativeParametersPy calculate_gru_quantitative_parameters_from_histogram
             hist_collectors.gpu_collectors, cpp_bitwidth, verbose);
     }
 
-    GRUQuantitativeParametersPy py_params;
+    GRUQuantParamsPy py_params;
     py_params.from_cpp(quant_params);
     return py_params;
 }
@@ -259,7 +259,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
     const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
-    const GRUQuantitativeParametersPy &quant_params) {
+    const GRUQuantParamsPy &quant_params) {
     
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
@@ -289,7 +289,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
     // 只有量化推理时才调用 to_cpp()（避免非量化推理时白白生成 LUT）
-    GRUQuantitativeParameters cpp_params;
+    GRUQuantParams cpp_params;
     if (is_quant) {
         cpp_params = quant_params.to_cpp();  // 包含 LUT 生成
     }
@@ -578,11 +578,11 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
 }
 
 // ============================================================================
-//                    GRUQuantitativeParametersPy 方法实现
+//                    GRUQuantParamsPy 方法实现
 // ============================================================================
 
 // 从 C++ 结构体转换
-void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_params) {
+void GRUQuantParamsPy::from_cpp(const GRUQuantParams &cpp_params) {
     hidden_ = cpp_params.hidden_;
     // 基础参数
     shift_x_ = cpp_params.shift_x_;
@@ -627,8 +627,8 @@ void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_
 }
 
 // 转换为 C++ 结构体
-GRUQuantitativeParameters GRUQuantitativeParametersPy::to_cpp() const {
-    GRUQuantitativeParameters cpp_params;
+GRUQuantParams GRUQuantParamsPy::to_cpp() const {
+    GRUQuantParams cpp_params;
     cpp_params.hidden_ = hidden_;
     // 基础参数
     cpp_params.shift_x_ = shift_x_;
@@ -796,49 +796,49 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("mul_old_contribution_unsigned_", &OperatorQuantConfigPy::mul_old_contribution_unsigned_)
         .def_readwrite("mul_new_contribution_unsigned_", &OperatorQuantConfigPy::mul_new_contribution_unsigned_);
 
-    // GRUQuantitativeParameters 绑定
-    py::class_<GRUQuantitativeParametersPy>(m, "GRUQuantitativeParameters")
+    // GRUQuantParams 绑定
+    py::class_<GRUQuantParamsPy>(m, "GRUQuantParams")
         .def(py::init<>())
-        .def_readwrite("hidden_", &GRUQuantitativeParametersPy::hidden_)
+        .def_readwrite("hidden_", &GRUQuantParamsPy::hidden_)
         // 基础参数
-        .def_readwrite("shift_x_", &GRUQuantitativeParametersPy::shift_x_)
-        .def_readwrite("zp_x_", &GRUQuantitativeParametersPy::zp_x_)
-        .def_readwrite("shift_h_", &GRUQuantitativeParametersPy::shift_h_)
-        .def_readwrite("zp_h_", &GRUQuantitativeParametersPy::zp_h_)
+        .def_readwrite("shift_x_", &GRUQuantParamsPy::shift_x_)
+        .def_readwrite("zp_x_", &GRUQuantParamsPy::zp_x_)
+        .def_readwrite("shift_h_", &GRUQuantParamsPy::shift_h_)
+        .def_readwrite("zp_h_", &GRUQuantParamsPy::zp_h_)
         // 权重参数（per-channel）
-        .def_readwrite("shift_W_", &GRUQuantitativeParametersPy::shift_W_)
-        .def_readwrite("shift_R_", &GRUQuantitativeParametersPy::shift_R_)
-        .def_readwrite("shift_bw_", &GRUQuantitativeParametersPy::shift_bw_)
-        .def_readwrite("shift_br_", &GRUQuantitativeParametersPy::shift_br_)
+        .def_readwrite("shift_W_", &GRUQuantParamsPy::shift_W_)
+        .def_readwrite("shift_R_", &GRUQuantParamsPy::shift_R_)
+        .def_readwrite("shift_bw_", &GRUQuantParamsPy::shift_bw_)
+        .def_readwrite("shift_br_", &GRUQuantParamsPy::shift_br_)
         // Linear 输出参数 (GEMM+bias)
-        .def_readwrite("shift_weight_ih_linear_", &GRUQuantitativeParametersPy::shift_weight_ih_linear_)
-        .def_readwrite("zp_weight_ih_linear_", &GRUQuantitativeParametersPy::zp_weight_ih_linear_)
-        .def_readwrite("shift_weight_hh_linear_", &GRUQuantitativeParametersPy::shift_weight_hh_linear_)
-        .def_readwrite("zp_weight_hh_linear_", &GRUQuantitativeParametersPy::zp_weight_hh_linear_)
+        .def_readwrite("shift_weight_ih_linear_", &GRUQuantParamsPy::shift_weight_ih_linear_)
+        .def_readwrite("zp_weight_ih_linear_", &GRUQuantParamsPy::zp_weight_ih_linear_)
+        .def_readwrite("shift_weight_hh_linear_", &GRUQuantParamsPy::shift_weight_hh_linear_)
+        .def_readwrite("zp_weight_hh_linear_", &GRUQuantParamsPy::zp_weight_hh_linear_)
         // 门激活函数输入参数（pre-activation）
-        .def_readwrite("shift_update_gate_input_", &GRUQuantitativeParametersPy::shift_update_gate_input_)
-        .def_readwrite("zp_update_gate_input_", &GRUQuantitativeParametersPy::zp_update_gate_input_)
-        .def_readwrite("shift_reset_gate_input_", &GRUQuantitativeParametersPy::shift_reset_gate_input_)
-        .def_readwrite("zp_reset_gate_input_", &GRUQuantitativeParametersPy::zp_reset_gate_input_)
-        .def_readwrite("shift_new_gate_input_", &GRUQuantitativeParametersPy::shift_new_gate_input_)
-        .def_readwrite("zp_new_gate_input_", &GRUQuantitativeParametersPy::zp_new_gate_input_)
+        .def_readwrite("shift_update_gate_input_", &GRUQuantParamsPy::shift_update_gate_input_)
+        .def_readwrite("zp_update_gate_input_", &GRUQuantParamsPy::zp_update_gate_input_)
+        .def_readwrite("shift_reset_gate_input_", &GRUQuantParamsPy::shift_reset_gate_input_)
+        .def_readwrite("zp_reset_gate_input_", &GRUQuantParamsPy::zp_reset_gate_input_)
+        .def_readwrite("shift_new_gate_input_", &GRUQuantParamsPy::shift_new_gate_input_)
+        .def_readwrite("zp_new_gate_input_", &GRUQuantParamsPy::zp_new_gate_input_)
         // 门激活函数输出参数（post-activation）
-        .def_readwrite("shift_update_gate_output_", &GRUQuantitativeParametersPy::shift_update_gate_output_)
-        .def_readwrite("zp_update_gate_output_", &GRUQuantitativeParametersPy::zp_update_gate_output_)
-        .def_readwrite("shift_reset_gate_output_", &GRUQuantitativeParametersPy::shift_reset_gate_output_)
-        .def_readwrite("zp_reset_gate_output_", &GRUQuantitativeParametersPy::zp_reset_gate_output_)
-        .def_readwrite("shift_new_gate_output_", &GRUQuantitativeParametersPy::shift_new_gate_output_)
-        .def_readwrite("zp_new_gate_output_", &GRUQuantitativeParametersPy::zp_new_gate_output_)
+        .def_readwrite("shift_update_gate_output_", &GRUQuantParamsPy::shift_update_gate_output_)
+        .def_readwrite("zp_update_gate_output_", &GRUQuantParamsPy::zp_update_gate_output_)
+        .def_readwrite("shift_reset_gate_output_", &GRUQuantParamsPy::shift_reset_gate_output_)
+        .def_readwrite("zp_reset_gate_output_", &GRUQuantParamsPy::zp_reset_gate_output_)
+        .def_readwrite("shift_new_gate_output_", &GRUQuantParamsPy::shift_new_gate_output_)
+        .def_readwrite("zp_new_gate_output_", &GRUQuantParamsPy::zp_new_gate_output_)
         // 中间计算参数
-        .def_readwrite("shift_mul_reset_hidden_", &GRUQuantitativeParametersPy::shift_mul_reset_hidden_)
-        .def_readwrite("zp_mul_reset_hidden_", &GRUQuantitativeParametersPy::zp_mul_reset_hidden_)
+        .def_readwrite("shift_mul_reset_hidden_", &GRUQuantParamsPy::shift_mul_reset_hidden_)
+        .def_readwrite("zp_mul_reset_hidden_", &GRUQuantParamsPy::zp_mul_reset_hidden_)
         // 隐状态更新参数
-        .def_readwrite("shift_mul_new_contribution_", &GRUQuantitativeParametersPy::shift_mul_new_contribution_)
-        .def_readwrite("zp_mul_new_contribution_", &GRUQuantitativeParametersPy::zp_mul_new_contribution_)
-        .def_readwrite("shift_mul_old_contribution_", &GRUQuantitativeParametersPy::shift_mul_old_contribution_)
-        .def_readwrite("zp_mul_old_contribution_", &GRUQuantitativeParametersPy::zp_mul_old_contribution_)
+        .def_readwrite("shift_mul_new_contribution_", &GRUQuantParamsPy::shift_mul_new_contribution_)
+        .def_readwrite("zp_mul_new_contribution_", &GRUQuantParamsPy::zp_mul_new_contribution_)
+        .def_readwrite("shift_mul_old_contribution_", &GRUQuantParamsPy::shift_mul_old_contribution_)
+        .def_readwrite("zp_mul_old_contribution_", &GRUQuantParamsPy::zp_mul_old_contribution_)
         // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
-        .def_readwrite("bitwidth_config_", &GRUQuantitativeParametersPy::bitwidth_config_);
+        .def_readwrite("bitwidth_config_", &GRUQuantParamsPy::bitwidth_config_);
 
     // 根据量化范围计算量化参数（支持自定义位宽配置）
     m.def("calculate_gru_quantitative_parameters", &calculate_gru_quantitative_parameters_wrapper,

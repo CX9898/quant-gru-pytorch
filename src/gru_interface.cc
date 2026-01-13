@@ -23,9 +23,9 @@
 // 量化参数计算
 // =====================================================================
 
-GRUQuantitativeParameters calculateGRUQuantitativeParameters(
+GRUQuantParams calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges, const OperatorQuantConfig &bitwidth_config) {
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     quant_params.hidden_ = quant_ranges.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
@@ -202,7 +202,7 @@ void hasteGRUBackward(const int time_steps, const int batch_size, const int inpu
 
 void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
                         const float *bw, const float *br,
-                        const GRUQuantitativeParameters &quant_parms, int32_t *W_quant,
+                        const GRUQuantParams &quant_parms, int32_t *W_quant,
                         int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant) {
     // 显式创建dev::vector以避免临时对象问题
     dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
@@ -238,7 +238,7 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
                      const int input_size, const int hidden_size, const int32_t *W,
                      const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
-                     const float *h0, const GRUQuantitativeParameters &quant_parms,
+                     const float *h0, const GRUQuantParams &quant_parms,
                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
 
@@ -307,7 +307,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int input_size,
                         int hidden_size, const int32_t *W, const int32_t *R, const int32_t *bw,
                         const int32_t *br, const float *x, const float *h0,
-                        const GRUQuantitativeParameters &quant_parms, float *h, float *v) {
+                        const GRUQuantParams &quant_parms, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
     const std::size_t h_total_size = (time_steps + 1) * batch_size * hidden_size;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
@@ -379,7 +379,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int input_size,
                         int hidden_size, const float *W, const float *R, const float *bw,
                         const float *br, const float *x, const float *h0,
-                        const GRUQuantitativeParameters &quant_parms, float *h, float *v) {
+                        const GRUQuantParams &quant_parms, float *h, float *v) {
     const int hidden3 = hidden_size * 3;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
 
@@ -421,7 +421,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
                       int input_size, int hidden_size, const float *W, const float *R,
                       const float *bw, const float *br, const float *x, const float *h0,
-                      const GRUQuantitativeParameters &quant_gru_scales,
+                      const GRUQuantParams &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
                       float *h, float *v) {
     if (is_quant) {
@@ -519,10 +519,10 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
     return cpu_collectors;
 }
 
-GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
+GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors, const OperatorQuantConfig &bitwidth_config,
     bool verbose, bool use_percentile, float percentile_value) {
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     quant_params.hidden_ = hist_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
 
@@ -608,11 +608,11 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
  *
  * 直接使用 GPU 上的直方图数据计算 SQNR，避免 GPU→CPU 传输
  */
-GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
+GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors, const OperatorQuantConfig &bitwidth_config,
     bool verbose) {
     
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     quant_params.hidden_ = gpu_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
     

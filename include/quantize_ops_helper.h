@@ -1,30 +1,23 @@
 #pragma once
 
 // ============================================================================
-// quantize_ops_helper.h - GRU 量化核心定义与 CPU/GPU 共用函数
+// quantize_ops_helper.h - GRU 量化 CPU/GPU 共用函数
 // ============================================================================
 //
 // 本文件包含：
-//   1. GRU 量化参数结构体（Host 端与 Device 端）
-//   2. CPU/GPU 共用的内联函数（__host__ __device__ __forceinline__）
-//   3. 量化/反量化基础操作函数
-//   4. LUT 辅助量化函数
-//   5. 调试与工具函数
+//   1. CPU/GPU 共用的内联函数（__host__ __device__ __forceinline__）
+//   2. 量化/反量化基础操作函数
+//   3. 分段线性近似函数（Sigmoid/Tanh LUT）
+//   4. GRU 门计算模板函数
+//   5. 量化参数校准函数
+//   6. 调试与工具函数
+//
+// 量化参数结构体定义已移至 quantize_param_types.h
 //
 // 设计原则：
 //   - 所有缩放因子均为 2 的负 n 次方：scale = 2^(-exp2_inv)
 //   - 支持对称量化（zp=0）和非对称量化（zp≠0）
 //   - CPU/GPU 共用函数使用 __host__ __device__ __forceinline__ 标记，确保行为一致
-//
-// 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
-//   - weight_ih_linear: W*x + bw 的输出
-//   - weight_hh_linear: R*h + br 的输出
-//   - reset_gate_input/output: reset gate 的输入/输出
-//   - update_gate_input/output: update gate 的输入/输出
-//   - new_gate_input/output: new gate 的输入/输出
-//   - mul_reset_hidden: r * h_n 的输出
-//   - mul_new_contribution: (1-u) * n 的输出
-//   - mul_old_contribution: u * h 的输出
 //
 // ============================================================================
 
@@ -36,211 +29,21 @@
 #include <iostream>
 #include <vector>
 
-#include "dev_vector.h"
 #include "gru_quantization_ranges.h"
 #include "histogram_collector.h"  // for get_minimum_scale
-#include "quantize_bitwidth_config.h"
-#include "quantize_lut_types.h"
+#include "quantize_param_types.h" // 量化参数结构体定义
 
 // #define DEBUG
-
-// ============================================================================
-// 量化参数结构体定义
-// ============================================================================
-
-/**
- * @brief GRU 量化参数结构体（Host 端）
- *
- * 存储 GRU 网络量化过程中所有定点化/反量化所需的参数。
- *
- * 命名约定：
- *   - shift_xxx: 缩放因子指数，scale = 2^(-shift_xxx)
- *   - zp_xxx: 零点（zero point）
- *
- * 量化公式：q = round(x / scale + zp)
- * 反量化公式：x = (q - zp) * scale
- */
-struct GRUQuantitativeParameters {
-    OperatorQuantConfig bitwidth_config_;  ///< 各算子的量化位宽配置
-
-    // -------------------- 基础参数 --------------------
-    // shift_xxx: 移位量，scale = 2^(-shift)，量化时右移，反量化时左移
-    int hidden_;       ///< 隐藏层大小，channel = hidden * 3
-    int8_t shift_x_;   ///< 输入 x 的移位量
-    int32_t zp_x_;     ///< 输入 x 的零点
-    int8_t shift_h_;   ///< 隐状态 h 的移位量
-    int32_t zp_h_;     ///< 隐状态 h 的零点
-
-    // -------------------- 权重参数（per-channel）--------------------
-    std::vector<int8_t> shift_W_;   ///< 输入权重 W 的移位量，size = hidden * 3
-    std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
-
-    // -------------------- 偏置参数（per-channel）--------------------
-    std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
-    std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
-
-    // -------------------- Linear 输出参数 (GEMM+bias) --------------------
-    int8_t shift_weight_ih_linear_;    ///< W*x + bw 的移位量
-    int32_t zp_weight_ih_linear_;      ///< W*x + bw 的零点
-    int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
-    int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
-
-    // -------------------- 门激活函数输入参数（pre-activation）--------------------
-    int8_t shift_update_gate_input_;   ///< update gate 激活前的移位量
-    int32_t zp_update_gate_input_;     ///< update gate 激活前的零点
-    int8_t shift_reset_gate_input_;    ///< reset gate 激活前的移位量
-    int32_t zp_reset_gate_input_;      ///< reset gate 激活前的零点
-    int8_t shift_new_gate_input_;      ///< new gate 激活前的移位量
-    int32_t zp_new_gate_input_;        ///< new gate 激活前的零点
-
-    // -------------------- 门激活函数输出参数（post-activation）--------------------
-    int8_t shift_update_gate_output_;   ///< update gate 激活后的移位量（sigmoid 输出）
-    int32_t zp_update_gate_output_;     ///< update gate 激活后的零点
-    int8_t shift_reset_gate_output_;    ///< reset gate 激活后的移位量（sigmoid 输出）
-    int32_t zp_reset_gate_output_;      ///< reset gate 激活后的零点
-    int8_t shift_new_gate_output_;      ///< new gate 激活后的移位量（tanh 输出）
-    int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
-
-    // -------------------- 中间计算参数 --------------------
-    int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
-    int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
-
-    // -------------------- 隐状态更新参数 --------------------
-    int8_t shift_mul_new_contribution_;   ///< (1-u)*n 的移位量
-    int32_t zp_mul_new_contribution_;     ///< (1-u)*n 的零点
-    int8_t shift_mul_old_contribution_;   ///< u*h 的移位量
-    int32_t zp_mul_old_contribution_;     ///< u*h 的零点
-
-    // -------------------- LUT 表（每层独立，在 finalize_calibration 时生成）--------------------
-    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
-    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
-    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
-};
-
-// ============================================================================
-// GRU 量化参数结构体（拆分设计）
-// ============================================================================
-//
-// 设计原则：
-//   1. GateQuantParams - 门计算使用的纯标量参数（CPU/GPU 共用）
-//   2. LinearQuantParams - Linear 层 per-channel 参数（CPU/GPU 各自版本）
-//
-// 这样做的好处：
-//   - 类型安全：每个版本使用自己的内存类型
-//   - 职责分离：GEMM 用 linear_params_，门计算用 gate_params_
-//   - 无指针问题：vector 自动管理内存
-//
-// ============================================================================
-
-/**
- * @brief 门计算量化参数（纯标量，CPU/GPU 共用）
- *
- * 存储 computeUpdateGate/ResetGate/NewGate/HiddenState 等门计算函数所需的标量参数。
- * 这些参数不涉及 per-channel 数组，可以安全地在 CPU/GPU 间共享。
- *
- * 命名约定：
- *   - shift_A_to_B: 从 A 空间到 B 空间的移位量，= shift_A - shift_B
- *   - shift_xxx: 右移位数
- *   - zp_xxx: 零点
- */
-struct GateQuantParams {
-    // -------------------- Linear 输出零点 --------------------
-    int32_t zp_weight_ih_linear_;  ///< W*x+bw 的零点
-    int32_t zp_weight_hh_linear_;  ///< R*h+br 的零点
-    int32_t zp_h_;                 ///< 隐状态 h 的零点
-
-    // -------------------- Update Gate 参数 --------------------
-    int32_t zp_update_gate_input_;                  ///< update gate 激活前零点
-    int32_t zp_update_gate_output_;                 ///< update gate 激活后零点
-    int8_t shift_weight_ih_linear_to_update_gate_input_;    ///< weight_ih_linear 到 update_gate_input 的移位
-    int8_t shift_weight_hh_linear_to_update_gate_input_;    ///< weight_hh_linear 到 update_gate_input 的移位
-
-    // -------------------- Reset Gate 参数 --------------------
-    int32_t zp_reset_gate_input_;                  ///< reset gate 激活前零点
-    int32_t zp_reset_gate_output_;                 ///< reset gate 激活后零点
-    int8_t shift_weight_ih_linear_to_reset_gate_input_;    ///< weight_ih_linear 到 reset_gate_input 的移位
-    int8_t shift_weight_hh_linear_to_reset_gate_input_;    ///< weight_hh_linear 到 reset_gate_input 的移位
-
-    // -------------------- New Gate（候选隐状态）参数 --------------------
-    int32_t zp_new_gate_input_;                  ///< new gate 激活前零点
-    int32_t zp_new_gate_output_;                 ///< new gate 激活后零点
-    int8_t shift_reset_gate_mul_hh_to_mul_reset_hidden_;   ///< r*weight_hh_linear 的移位
-    int32_t zp_mul_reset_hidden_;                ///< r*weight_hh_linear 的零点
-    int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
-    int8_t shift_mul_reset_hidden_to_new_gate_input_;      ///< mul_reset_hidden 到 new_gate_input 的移位
-
-    // -------------------- 隐状态更新参数 --------------------
-    int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 在 update_gate_output 量化空间的表示
-    int32_t zp_mul_new_contribution_;            ///< (1-u)*n 的零点
-    int8_t shift_update_new_to_mul_new_contribution_;    ///< (1-u)*n 的移位
-    int32_t zp_mul_old_contribution_;            ///< u*h 的零点
-    int8_t shift_update_h_to_mul_old_contribution_;      ///< u*h 的移位
-    int8_t shift_mul_new_contribution_to_h_;     ///< mul_new_contribution 到 h 的移位
-    int8_t shift_mul_old_contribution_to_h_;     ///< mul_old_contribution 到 h 的移位
-
-    // -------------------- 运行时配置 --------------------
-    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
-
-    // -------------------- LUT 表 --------------------
-    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
-    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
-    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
-
-#ifdef DEBUG
-    GRUQuantitativeParameters test;  ///< 保存完整量化参数用于调试
-#endif
-};
-
-/**
- * @brief Linear 层量化参数（GPU 版本，使用 dev::vector）
- *
- * 存储 GEMM+bias 融合计算所需的 per-channel 参数。
- * 仅在 ComputeLinearX/ComputeLinearH 等 GEMM 函数中使用。
- */
-struct LinearQuantParamsGPU {
-    int32_t zp_x_;  ///< 输入 x 的零点
-    int32_t zp_h_;  ///< 隐状态 h 的零点
-
-    dev::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    dev::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
-    dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
-    dev::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
-
-#ifdef DEBUG
-    dev::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
-    dev::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
-#endif
-};
-
-/**
- * @brief Linear 层量化参数（CPU 版本，使用 std::vector）
- *
- * 与 LinearQuantParamsGPU 结构相同，但使用 std::vector 管理内存。
- */
-struct LinearQuantParamsCPU {
-    int32_t zp_x_;  ///< 输入 x 的零点
-    int32_t zp_h_;  ///< 隐状态 h 的零点
-
-    std::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    std::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
-    std::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
-    std::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
-
-#ifdef DEBUG
-    std::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
-    std::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
-#endif
-};
 
 /**
  * @brief 生成分段线性量化查找表并存储到参数中
  *
- * 将 LUT 存储到 GRUQuantitativeParameters 中，避免全局 __constant__ 内存覆盖问题。
+ * 将 LUT 存储到 GRUQuantParams 中，避免全局 __constant__ 内存覆盖问题。
  * 在 finalize_calibration 时调用一次，然后在 setRescaleParam 时复制到 GateQuantParams。
  *
  * @param params GRU 量化参数，会被修改以存储生成的 LUT
  */
-void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params);
+void generate_piecewise_linear_lut_to_params(GRUQuantParams &params);
 
 // ============================================================================
 // CPU/GPU 共用基础运算函数
@@ -1132,8 +935,8 @@ inline int8_t determine_shift_bits_int32(float max_val) {
 // ============================================================================
 
 /// @brief 打印 GRU 量化参数（调试用）
-inline void printParms(const GRUQuantitativeParameters &quant_parms) {
-    printf("GRUQuantitativeParameters:\n");
+inline void printParms(const GRUQuantParams &quant_parms) {
+    printf("GRUQuantParams:\n");
     printf("  hidden = %d\n", quant_parms.hidden_);
 
     // 输入/隐状态

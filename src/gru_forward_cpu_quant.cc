@@ -224,7 +224,7 @@ OMP_PARALLEL_FOR_2D
 }
 
 // setRescaleParam: 直接复用 quantize_lut_types.h 中声明的 generate_*_lut 函数
-void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms) {
+void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
 
     // ==================== Linear 层参数（per-channel）====================

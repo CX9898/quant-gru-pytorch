@@ -20,14 +20,14 @@
 
 ```json
 // 常见情况（INT）：无需配置 is_unsigned
-"gate.g_out": { "bitwidth": 8, "is_symmetric": false }
+"gate.new_gate_output": { "bitwidth": 8, "is_symmetric": false }
 
 // 特殊情况（UINT）：显式标记
-"gate.z_out": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
+"gate.update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
 ```
 
 **UINT 适用场景**：
-- Sigmoid 输出 (`z_out`, `r_out`)：范围 [0, 1]，使用 UINT 可充分利用量化范围
+- Sigmoid 输出 (`update_gate_output`, `reset_gate_output`)：范围 [0, 1]，使用 UINT 可充分利用量化范围
 
 ### 3. is_symmetric 与 is_unsigned 解耦
 
@@ -63,32 +63,31 @@ g[t] = tanh(W_g @ x[t] + bx_g + r[t] * (R_g @ h[t-1] + br_g))  # 候选状态 (c
 h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 ```
 
-### 计算流程与配置变量对应
+### 计算流程与配置变量对应（命名与 C++ quantize_ops_helper.h 对齐）
 
 ```
-步骤1: 矩阵乘法
-├─ Wx = W @ x         → matmul.Wx (Wx_)
-└─ Rh = R @ h         → matmul.Rh (Rh_)
+步骤1: Linear 层（GEMM+bias 融合）
+├─ weight_ih_linear = W @ x + bw   → linear.weight_ih_linear
+└─ weight_hh_linear = R @ h + br   → linear.weight_hh_linear
 
 步骤2: 更新门 (update gate)
-├─ z_pre = Wx_z + Rh_z + bx_z + br_z   → gate.z_pre (z_pre_)
-└─ z = sigmoid(z_pre)                   → gate.z_out (z_out_) [UINT]
+├─ update_gate_input = ih_z + hh_z + bw_z + br_z   → gate.update_gate_input
+└─ update_gate_output = sigmoid(update_gate_input) → gate.update_gate_output [UINT]
 
 步骤3: 重置门 (reset gate)
-├─ r_pre = Wx_r + Rh_r + bx_r + br_r   → gate.r_pre (r_pre_)
-└─ r = sigmoid(r_pre)                   → gate.r_out (r_out_) [UINT]
+├─ reset_gate_input = ih_r + hh_r + bw_r + br_r    → gate.reset_gate_input
+└─ reset_gate_output = sigmoid(reset_gate_input)   → gate.reset_gate_output [UINT]
 
-步骤4: 候选状态 (candidate)
-├─ Rh_br = Rh_g + br_g                 → 使用 matmul.Rh 的量化参数（已融合）
-├─ rRh = r * Rh_br                     → op.rRh (rRh_)
-├─ g_pre = Wx_g + bx_g + rRh           → gate.g_pre (g_pre_)
-└─ g = tanh(g_pre)                     → gate.g_out (g_out_)
+步骤4: 候选状态 (new gate)
+├─ mul_reset_hidden = r * (hh_n + br_n)            → op.mul_reset_hidden
+├─ new_gate_input = ih_n + bw_n + mul_reset_hidden → gate.new_gate_input
+└─ new_gate_output = tanh(new_gate_input)          → gate.new_gate_output
 
-步骤5: 最终输出
-├─ one_minus_z = 1 - z                 → 复用 gate.z_out 的 scale
-├─ old = z * h[t-1]                    → op.old_contrib (old_contrib_)
-├─ new = one_minus_z * g               → op.new_contrib (new_contrib_)
-└─ h[t] = old + new
+步骤5: 隐状态更新
+├─ one_minus_u = 1 - update_gate_output            → 复用 gate.update_gate_output 的 scale
+├─ mul_old_contribution = u * h[t-1]               → op.mul_old_contribution
+├─ mul_new_contribution = (1-u) * new_gate_output  → op.mul_new_contribution
+└─ h[t] = mul_old_contribution + mul_new_contribution
 ```
 
 ---
@@ -155,31 +154,31 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 | `weight.bw` | 输入偏置 bw | `is_symmetric: true` |
 | `weight.br` | 循环偏置 br | `is_symmetric: true` |
 
-#### 矩阵乘法类
+#### Linear 层类（GEMM+bias 融合）
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `matmul.Wx` | W @ x 结果 | `is_symmetric: false` |
-| `matmul.Rh` | R @ h 结果 | `is_symmetric: false` |
+| `linear.weight_ih_linear` | W*x + bw 输出 | `is_symmetric: false` |
+| `linear.weight_hh_linear` | R*h + br 输出 | `is_symmetric: false` |
 
 #### 门控类
 
 | 算子名 | 说明 | 量化类型 | 推荐配置 |
 |--------|------|----------|----------|
-| `gate.z_pre` | 更新门 sigmoid 前 | INT | `is_symmetric: false` |
-| `gate.z_out` | 更新门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
-| `gate.r_pre` | 重置门 sigmoid 前 | INT | `is_symmetric: false` |
-| `gate.r_out` | 重置门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
-| `gate.g_pre` | 候选门 tanh 前 | INT | `is_symmetric: false` |
-| `gate.g_out` | 候选门 tanh 后 [-1,1] | INT | `is_symmetric: false` |
+| `gate.update_gate_input` | 更新门 sigmoid 前 | INT | `is_symmetric: false` |
+| `gate.update_gate_output` | 更新门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
+| `gate.reset_gate_input` | 重置门 sigmoid 前 | INT | `is_symmetric: false` |
+| `gate.reset_gate_output` | 重置门 sigmoid 后 [0,1] | **UINT** | `is_symmetric: false, is_unsigned: true` |
+| `gate.new_gate_input` | 候选门 tanh 前 | INT | `is_symmetric: false` |
+| `gate.new_gate_output` | 候选门 tanh 后 [-1,1] | INT | `is_symmetric: false` |
 
 #### 运算类
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `op.rRh` | r * Rh 元素乘法 | `is_symmetric: false` |
-| `op.old_contrib` | z * h 旧状态贡献 | `is_symmetric: false` |
-| `op.new_contrib` | (1-z) * g 新状态贡献 | `is_symmetric: false` |
+| `op.mul_reset_hidden` | r * weight_hh_linear 元素乘法 | `is_symmetric: false` |
+| `op.mul_old_contribution` | u * h 旧状态贡献 | `is_symmetric: false` |
+| `op.mul_new_contribution` | (1-u) * n 新状态贡献 | `is_symmetric: false` |
 
 ---
 
@@ -239,10 +238,10 @@ gru2.load_state_dict(gru.state_dict(), strict=False)  # 加载权重
 gru2.load_quant_params("quant_params.json")           # 加载量化参数
 
 # 调整单个算子配置
-gru.adjust_quant_config("z_out", bitwidth=14)  # 修改位宽，自动调整 scale
+gru.adjust_quant_config("update_gate_output", bitwidth=14)  # 修改位宽，自动调整 scale
 
 # 获取算子配置
-config = gru.get_quant_config("z_out")
+config = gru.get_quant_config("update_gate_output")
 print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
 ```
 
@@ -263,17 +262,17 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
       "weight.R":      { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.bw":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.br":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "matmul.Wx":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "matmul.Rh":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "gate.z_pre":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "gate.z_out":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "gate.r_pre":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "gate.r_out":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "gate.g_pre":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "gate.g_out":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "op.rRh":        { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "op.old_contrib":{ "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "op.new_contrib":{ "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
+      "linear.weight_ih_linear":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "linear.weight_hh_linear":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "gate.update_gate_input":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "gate.update_gate_output":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "gate.reset_gate_input":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "gate.reset_gate_output":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "gate.new_gate_input":         { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "gate.new_gate_output":        { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "op.mul_reset_hidden":         { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "op.mul_old_contribution":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "op.mul_new_contribution":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
     }
   }
 }
@@ -285,8 +284,8 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
 {
   "GRU_config": {
     "operator_config": {
-      "gate.z_out": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "gate.r_out": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
+      "gate.update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "gate.reset_gate_output":  { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true }
     }
   }
 }
@@ -300,12 +299,12 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
 {
   "GRU_config": {
     "operator_config": {
-      "weight.W":   { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
-      "weight.R":   { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
-      "matmul.Wx":  { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
-      "matmul.Rh":  { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
-      "gate.z_out": { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true },
-      "gate.r_out": { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true }
+      "weight.W":                { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
+      "weight.R":                { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
+      "linear.weight_ih_linear": { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
+      "linear.weight_hh_linear": { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
+      "gate.update_gate_output": { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true },
+      "gate.reset_gate_output":  { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true }
     }
   }
 }
@@ -342,11 +341,11 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
 
 ## 注意事项
 
-1. **sigmoid 输出**（`gate.z_out`, `gate.r_out`）：
+1. **sigmoid 输出**（`gate.update_gate_output`, `gate.reset_gate_output`）：
    - 默认使用 UINT 类型（`is_unsigned: true`）
    - 建议 `is_symmetric: false`（范围 [0,1] 不对称）
 
-2. **tanh 输出**（`gate.g_out`）：
+2. **tanh 输出**（`gate.new_gate_output`）：
    - 范围 [-1,1] 理论上对称
    - 使用 INT 类型（默认，无需配置 `is_unsigned`）
 
