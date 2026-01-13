@@ -2242,11 +2242,14 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         if n_value is not None:
             op_data["n"] = n_value
         
+        # 去掉前缀（如 "gate.new_gate_output" -> "new_gate_output"）
+        short_name = op_name.split('.')[-1] if '.' in op_name else op_name
+        
         # per-channel 放到最后
         if is_per_channel:
-            per_channel_ops[op_name] = op_data
+            per_channel_ops[short_name] = op_data
         else:
-            operators[op_name] = op_data
+            operators[short_name] = op_data
     
     # 添加 per-channel 算子到最后
     operators.update(per_channel_ops)
@@ -2284,11 +2287,15 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
         bitwidth_config: OperatorQuantConfig 对象（会被修改）
         quant_params: GRUQuantParams 对象（会被修改）
     """
+    # JSON key -> _OPERATOR_MAP key 的映射
+    # 例如: "new_gate_output" -> "gate.new_gate_output"
+    json_key_to_map_key = {k.split('.')[-1]: k for k in _OPERATOR_MAP}
+    
     for op_name, op_data in operators.items():
-        if op_name not in _OPERATOR_MAP:
+        if op_name not in json_key_to_map_key:
             continue
             
-        op_info = _OPERATOR_MAP[op_name]
+        op_info = _OPERATOR_MAP[json_key_to_map_key[op_name]]
         
         # 设置 bitwidth 和 is_unsigned（从 dtype 解析，如 "INT8" → 8, False；"UINT8" → 8, True）
         if "dtype" in op_data:
