@@ -166,6 +166,21 @@ gru.percentile_value = 99.99  # 默认 99.99%
 gru.calibration_method = 'minmax'
 ```
 
+### 量化参数导入导出
+
+校准完成后，可以导出量化参数供其他模型加载使用，避免重复校准：
+
+```python
+# 导出量化参数
+gru.export_quant_params("quant_params.json", verbose=True)
+
+# 在另一个模型中加载（位宽配置自动包含在量化参数中）
+gru2 = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru2.load_state_dict(gru.state_dict(), strict=False)  # 加载权重
+gru2.load_quant_params("quant_params.json", verbose=True)  # 加载量化参数（含位宽配置）
+gru2.use_quantization = True  # 直接启用量化，无需再校准
+```
+
 ### ONNX 导出
 
 `QuantGRU` 通过 `export_mode` 属性切换到纯 PyTorch 实现，使模型可被 ONNX 追踪导出。
@@ -272,16 +287,21 @@ gru.export_mode = False  # 恢复 CUDA 模式
       "disable_quantization": false
     },
     "operator_config": {
-      "input.x": { "bitwidth": 8, "is_symmetric": false },
-      "input.h": { "bitwidth": 8, "is_symmetric": false },
-      "weight.W": { "bitwidth": 8, "is_symmetric": true },
-      "weight.R": { "bitwidth": 8, "is_symmetric": true },
-      "gate.z_out": { "bitwidth": 8, "is_symmetric": false },
+      "input.x": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "input.h": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "weight.W": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
+      "weight.R": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
+      "gate.z_out": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
       ...
     }
   }
 }
 ```
+
+> 💡 **配置说明**：
+> - `bitwidth`: 量化位宽 (1-32 bit)
+> - `is_symmetric`: 是否对称量化 (true: zero_point=0)
+> - `is_unsigned`: 是否无符号量化 (false: INT, true: UINT)，Sigmoid 输出建议用 UINT
 
 ### 可配置的算子
 
@@ -405,6 +425,8 @@ class QuantGRU(nn.Module):
 | `load_bitwidth_config(path, verbose=False)` | 从 JSON 文件加载位宽配置 |
 | `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置所有算子统一位宽 |
 | `is_calibrated()` | 检查是否已完成校准 |
+| `export_quant_params(path, include_weights=False, verbose=False)` | 导出量化参数到 JSON 文件 |
+| `load_quant_params(path, verbose=False)` | 从 JSON 文件加载量化参数 |
 
 ## 🏗️ 项目结构
 
@@ -434,6 +456,10 @@ quant-gru-pytorch/
 │   └── test_*.py               # 测试脚本
 ├── example/                    # C++ 使用示例
 │   └── gru.cc                  # 浮点/量化 GRU 对比示例
+├── quant-gru-cpu-only/         # 纯 CPU 定点 GRU 实现（Reference Model）
+│   ├── include/                # 头文件
+│   ├── src/                    # 源文件
+│   └── example/                # 使用示例
 ├── CMakeLists.txt              # CMake 构建配置
 ```
 
