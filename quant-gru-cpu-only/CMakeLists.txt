@@ -18,6 +18,10 @@ add_library(quant_gru_cpu_shared SHARED ${LIB_SOURCES})
 add_executable(gru_cpu_example example/main.cc)
 target_link_libraries(gru_cpu_example PRIVATE quant_gru_cpu_static)
 
+# 验证测试程序
+add_executable(test_runner example/test_runner.cc)
+target_link_libraries(test_runner PRIVATE quant_gru_cpu_static)
+
 install(TARGETS quant_gru_cpu_static quant_gru_cpu_shared
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib)

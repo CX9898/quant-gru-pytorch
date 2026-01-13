@@ -1,10 +1,17 @@
 #pragma once
 
+// ============================================================================
+// quantize_bitwidth_config.h - 量化位宽配置
+// ============================================================================
+
 #include <cstdint>
 
+/**
+ * @brief 量化位宽配置
+ */
 struct QuantBitWidth {
     int8_t bits_ = 8;
-    bool is_unsigned_ = false;
+    bool is_unsigned_ = false;  // false=INT(有符号), true=UINT(无符号)
 
     QuantBitWidth() = default;
     QuantBitWidth(int8_t b, bool is_unsigned = false) 
@@ -21,14 +28,17 @@ struct QuantBitWidth {
     }
 };
 
+/**
+ * @brief 各算子量化位宽配置
+ */
 struct OperatorQuantConfig {
     QuantBitWidth x_{8, false}, h_{8, false};
     QuantBitWidth W_{8, false}, R_{8, false}, bw_{8, false}, br_{8, false};
-    QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};
-    QuantBitWidth update_gate_input_{8, false}, update_gate_output_{8, true};
-    QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{8, true};
+    QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};  // GEMM+bias 融合输出
+    QuantBitWidth update_gate_input_{8, false}, update_gate_output_{8, true};   // update_gate_output: UINT
+    QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{8, true};     // reset_gate_output: UINT
     QuantBitWidth new_gate_input_{8, false}, new_gate_output_{8, false};
-    QuantBitWidth mul_reset_hidden_{8, false};
+    QuantBitWidth mul_reset_hidden_{8, false};  // r * weight_hh_linear (new gate中)
     QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
@@ -39,10 +49,10 @@ struct OperatorQuantConfig {
         };
         for (auto* m : signed_members) {
             m->bits_ = bits;
-            m->is_unsigned_ = false;
+            m->is_unsigned_ = false;  // 有符号
         }
-        update_gate_output_ = {bits, true};
-        reset_gate_output_ = {bits, true};
+        update_gate_output_ = {bits, true};   // UINT
+        reset_gate_output_ = {bits, true};    // UINT
         return *this;
     }
 };
