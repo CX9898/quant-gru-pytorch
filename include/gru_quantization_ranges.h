@@ -9,7 +9,7 @@
 // 用于校准（calibration）阶段记录各算子的数值范围，便于后续分析和调试
 //
 // 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
-//   - weight_ih_linear: W*x + bx 的输出
+//   - weight_ih_linear: W*x + bw 的输出
 //   - weight_hh_linear: R*h + br 的输出
 //   - reset_gate_input/output: reset gate 的输入/输出
 //   - update_gate_input/output: update gate 的输入/输出
@@ -39,8 +39,8 @@ struct GRUQuantizationRanges {
     float min_Rh_, max_Rh_;
 
     // 偏置（per-channel）
-    std::vector<float> min_bx_, max_bx_;  // size = hidden * 3
-    std::vector<float> min_br_, max_br_;  // size = hidden * 3
+    std::vector<float> min_bw_, max_bw_;  // size = hidden * 3 (bias for W)
+    std::vector<float> min_br_, max_br_;  // size = hidden * 3 (bias for R)
 
     // 门的预激活值（sigmoid/tanh 输入）
     float min_update_gate_input_, max_update_gate_input_;
@@ -111,8 +111,8 @@ inline void GRUQuantizationRanges::reset(int hidden) {
         max_W_.assign(channel_size, std::numeric_limits<float>::lowest());
         min_R_.assign(channel_size, std::numeric_limits<float>::max());
         max_R_.assign(channel_size, std::numeric_limits<float>::lowest());
-        min_bx_.assign(channel_size, std::numeric_limits<float>::max());
-        max_bx_.assign(channel_size, std::numeric_limits<float>::lowest());
+        min_bw_.assign(channel_size, std::numeric_limits<float>::max());
+        max_bw_.assign(channel_size, std::numeric_limits<float>::lowest());
         min_br_.assign(channel_size, std::numeric_limits<float>::max());
         max_br_.assign(channel_size, std::numeric_limits<float>::lowest());
     }

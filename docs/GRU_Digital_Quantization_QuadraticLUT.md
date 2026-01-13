@@ -522,40 +522,40 @@ $$
 
 **量化域：**
 $$
-S_{bx}(q_{bx} - Z_{bx}) = [S_b(q_b - Z_b)] \cdot [S_x(q_x - Z_x)]
+S_{bw}(q_{bw} - Z_{bw}) = [S_b(q_b - Z_b)] \cdot [S_x(q_x - Z_x)]
 $$
 
 **推导过程：**
 
 **步骤 1**: 展开乘法
 $$
-S_{bx}(q_{bx} - Z_{bx}) = S_b \cdot S_x \cdot (q_b - Z_b) \cdot (q_x - Z_x)
+S_{bw}(q_{bw} - Z_{bw}) = S_b \cdot S_x \cdot (q_b - Z_b) \cdot (q_x - Z_x)
 $$
 
-**步骤 2**: 两边同除 $S_{bx}$
+**步骤 2**: 两边同除 $S_{bw}$
 $$
-q_{bx} - Z_{bx} = \frac{S_b \cdot S_x}{S_{bx}} \cdot (q_b - Z_b) \cdot (q_x - Z_x)
+q_{bw} - Z_{bw} = \frac{S_b \cdot S_x}{S_{bw}} \cdot (q_b - Z_b) \cdot (q_x - Z_x)
 $$
 
 **步骤 3**: 定义缩放因子
 
 令：
 $$
-M_{bx} = \frac{S_b \cdot S_x}{S_{bx}} = 2^{-n_{bx}}
+M_{bw} = \frac{S_b \cdot S_x}{S_{bw}} = 2^{-n_{bw}}
 $$
 
 **步骤 4**: 整数化计算
 
 $$
-q_{bx} = \big[(q_b - Z_b) \cdot (q_x - Z_x) \;\texttt{>>}\; n_{bx}\big] + Z_{bx}
+q_{bw} = \big[(q_b - Z_b) \cdot (q_x - Z_x) \;\texttt{>>}\; n_{bw}\big] + Z_{bw}
 $$
 
-**简化（对称量化，$Z_b = 0, Z_x = 0, Z_{bx} = 0$）：**
+**简化（对称量化，$Z_b = 0, Z_x = 0, Z_{bw} = 0$）：**
 $$
-q_{bx} = (q_b \cdot q_x) \;\texttt{>>}\; n_{bx}
+q_{bw} = (q_b \cdot q_x) \;\texttt{>>}\; n_{bw}
 $$
 
-### **第七步：最终加法 $y = ax^2 + bx + c$**
+### **第七步：最终加法 $y = ax^2 + bw + c$**
 
 **浮点域：**
 $$
@@ -564,44 +564,44 @@ $$
 
 **量化域：**
 $$
-S_y(q_y - Z_y) = S_{ax2}(q_{ax2} - Z_{ax2}) + S_{bx}(q_{bx} - Z_{bx}) + S_c(q_c - Z_c)
+S_y(q_y - Z_y) = S_{ax2}(q_{ax2} - Z_{ax2}) + S_{bw}(q_{bw} - Z_{bw}) + S_c(q_c - Z_c)
 $$
 
 **推导过程：**
 
 **步骤 1**: 展开量化关系
 $$
-S_y(q_y - Z_y) = S_{ax2} q_{ax2} - S_{ax2} Z_{ax2} + S_{bx} q_{bx} - S_{bx} Z_{bx} + S_c q_c - S_c Z_c
+S_y(q_y - Z_y) = S_{ax2} q_{ax2} - S_{ax2} Z_{ax2} + S_{bw} q_{bw} - S_{bw} Z_{bw} + S_c q_c - S_c Z_c
 $$
 
 **步骤 2**: 两边同除 $S_y$
 $$
-q_y - Z_y = \frac{S_{ax2}}{S_y} q_{ax2} + \frac{S_{bx}}{S_y} q_{bx} + \frac{S_c}{S_y} q_c - \left(\frac{S_{ax2}}{S_y} Z_{ax2} + \frac{S_{bx}}{S_y} Z_{bx} + \frac{S_c}{S_y} Z_c\right)
+q_y - Z_y = \frac{S_{ax2}}{S_y} q_{ax2} + \frac{S_{bw}}{S_y} q_{bw} + \frac{S_c}{S_y} q_c - \left(\frac{S_{ax2}}{S_y} Z_{ax2} + \frac{S_{bw}}{S_y} Z_{bw} + \frac{S_c}{S_y} Z_c\right)
 $$
 
 **步骤 3**: 定义缩放因子
 
 令：
 $$
-M_{ya} = \frac{S_{ax2}}{S_y} = 2^{-n_{ya}}, \quad M_{yb} = \frac{S_{bx}}{S_y} = 2^{-n_{yb}}, \quad M_{yc} = \frac{S_c}{S_y} = 2^{-n_{yc}}
+M_{ya} = \frac{S_{ax2}}{S_y} = 2^{-n_{ya}}, \quad M_{yb} = \frac{S_{bw}}{S_y} = 2^{-n_{yb}}, \quad M_{yc} = \frac{S_c}{S_y} = 2^{-n_{yc}}
 $$
 
 **步骤 4**: 预融合优化（离线计算）
 
 定义预融合常量：
 $$
-C_y = Z_y - (Z_{ax2} \;\texttt{>>}\; n_{ya} + Z_{bx} \;\texttt{>>}\; n_{yb} + Z_c \;\texttt{>>}\; n_{yc})
+C_y = Z_y - (Z_{ax2} \;\texttt{>>}\; n_{ya} + Z_{bw} \;\texttt{>>}\; n_{yb} + Z_c \;\texttt{>>}\; n_{yc})
 $$
 
 **步骤 5**: 最终公式
 
 $$
-q_y = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bx} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + C_y
+q_y = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bw} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + C_y
 $$
 
 **简化（对称量化且所有零点为 0）：**
 $$
-q_y = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bx} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + Z_y
+q_y = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bw} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + Z_y
 $$
 
 ### **完整的INT16定点计算流程总结**
@@ -620,7 +620,7 @@ $$
 
 **步骤 3**: 读取第 $i$ 段的右移位数
 $$
-n_{x2} = n_{x2,i}, \quad n_{ax2} = n_{ax2,i}, \quad n_{bx} = n_{bx,i}
+n_{x2} = n_{x2,i}, \quad n_{ax2} = n_{ax2,i}, \quad n_{bw} = n_{bw,i}
 $$
 $$
 n_{ya} = n_{ya,i}, \quad n_{yb} = n_{yb,i}, \quad n_{yc} = n_{yc,i}
@@ -638,12 +638,12 @@ $$
 
 **步骤 6**: 计算 $b \cdot x$（INT16 × INT16 → INT32 → 右移 → INT16）
 $$
-q_{bx} = (q_b \cdot q_x) \;\texttt{>>}\; n_{bx}
+q_{bw} = (q_b \cdot q_x) \;\texttt{>>}\; n_{bw}
 $$
 
 **步骤 7**: 最终加法（INT32 加法 + 饱和）
 $$
-y_{tmp} = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bx} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + Z_y
+y_{tmp} = (q_{ax2} \;\texttt{>>}\; n_{ya}) + (q_{bw} \;\texttt{>>}\; n_{yb}) + (q_c \;\texttt{>>}\; n_{yc}) + Z_y
 $$
 $$
 q_y = \text{saturate}_{[-32768, 32767]}(y_{tmp})
@@ -892,10 +892,10 @@ $$
 ax2_q = (a_q \cdot x^2_q) \;\texttt{>>}\; 15
 $$
 $$
-bx_q = (b_q \cdot q_n) \;\texttt{>>}\; 15
+bw_q = (b_q \cdot q_n) \;\texttt{>>}\; 15
 $$
 $$
-q_{n\_gate} = \text{saturate}(ax2_q + bx_q + c_q)
+q_{n\_gate} = \text{saturate}(ax2_q + bw_q + c_q)
 $$
 
 **最终量化公式：**
@@ -1220,8 +1220,8 @@ $$
 │           ↓                                                      │
 │  ┌─────────────────┐                                            │
 │  │ 多项式计算单元   │  → ax2 = (a * x2_q) >> 15                 │
-│  │ (MAC Units)     │  → bx = (b * q_input) >> 15               │
-│  │                 │  → y = ax2 + bx + c                        │
+│  │ (MAC Units)     │  → bw = (b * q_input) >> 15               │
+│  │                 │  → y = ax2 + bw + c                        │
 │  └─────────────────┘                                            │
 │           ↓                                                      │
 │  ┌─────────────────┐                                            │
@@ -1244,7 +1244,7 @@ $$
 **计算复杂度：**
 - **段索引查找**: 最多32次比较（可用二分查找优化到5次）
 - **乘法操作**: 3次（$x^2$, $a \cdot x^2$, $b \cdot x$）
-- **加法操作**: 2次（$ax^2 + bx + c$）
+- **加法操作**: 2次（$ax^2 + bw + c$）
 - **右移操作**: 3次
 - **总计**: 约 10-15 个时钟周期（流水线实现）
 
@@ -1253,7 +1253,7 @@ $$
 Stage 1: 段索引查找 (1 cycle)
 Stage 2: 系数读取 (1 cycle)
 Stage 3: x^2 计算 (1 cycle)
-Stage 4: ax^2 和 bx 并行计算 (2 cycles)
+Stage 4: ax^2 和 bw 并行计算 (2 cycles)
 Stage 5: 最终求和 + 饱和 (1 cycle)
 ────────────────────────────────────
 总延迟: 6 cycles (流水线吞吐率: 1 output/cycle)
@@ -1516,10 +1516,10 @@ $$
 
 **步骤 3**: $b \cdot x$ 计算
 $$
-bx_{32} = 2500 \times 20000 = 50,000,000 \quad (\text{INT32})
+bw_{32} = 2500 \times 20000 = 50,000,000 \quad (\text{INT32})
 $$
 $$
-bx_q = 50,000,000 \;\texttt{>>}\; 15 = 1,525 \quad (\text{INT16})
+bw_q = 50,000,000 \;\texttt{>>}\; 15 = 1,525 \quad (\text{INT16})
 $$
 
 **步骤 4**: 最终求和
@@ -1566,8 +1566,8 @@ reg [31:0] x_squared_32;
 reg [15:0] x_squared_16;
 reg [31:0] ax2_32;
 reg [15:0] ax2_16;
-reg [31:0] bx_32;
-reg [15:0] bx_16;
+reg [31:0] bw_32;
+reg [15:0] bw_16;
 reg [31:0] y_32;
 
 // Stage 1: 段索引查找
@@ -1599,18 +1599,18 @@ always @(posedge clk) begin
     x_squared_16 <= x_squared_32 >>> n_x2;
 end
 
-// Stage 4-5: ax^2 和 bx 计算
+// Stage 4-5: ax^2 和 bw 计算
 always @(posedge clk) begin
     ax2_32 <= a * x_squared_16;
     ax2_16 <= ax2_32 >>> n_ax2;
     
-    bx_32 <= b * x_int16;
-    bx_16 <= bx_32 >>> n_bx;
+    bw_32 <= b * x_int16;
+    bw_16 <= bw_32 >>> n_bx;
 end
 
 // Stage 6: 最终求和 + 饱和
 always @(posedge clk) begin
-    y_32 <= ax2_16 + bx_16 + c;
+    y_32 <= ax2_16 + bw_16 + c;
     
     // 饱和处理
     if (y_32 > 32767)

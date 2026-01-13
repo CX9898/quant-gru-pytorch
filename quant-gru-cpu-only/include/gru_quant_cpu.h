@@ -83,7 +83,7 @@ class ForwardPassQuantCPU {
 
     void setRescaleParam(const GRUQuantitativeParameters &params);
 
-    void Run(int steps, const WT *W, const RT *R, const int32_t *bx, const int32_t *br,
+    void Run(int steps, const WT *W, const RT *R, const int32_t *bw, const int32_t *br,
              const XT *x, HT *h, int32_t *v, float zoneout_prob, const HT *zoneout_mask);
 
    private:
@@ -105,7 +105,7 @@ class ForwardPassQuantCPU {
     void PrecomputeWeightSums(const WT *W, const RT *R);
     void ComputeWx(const WT *W, const XT *x, int steps);
     void ComputeRh(const RT *R, const HT *h);
-    void IterateInternal(const RT *R, const int32_t *bx, const int32_t *br, const HT *h, HT *h_out,
+    void IterateInternal(const RT *R, const int32_t *bw, const int32_t *br, const HT *h, HT *h_out,
                          int32_t *v, const int32_t *cur_Wx, float zoneout_prob,
                          const HT *zoneout_mask);
 };

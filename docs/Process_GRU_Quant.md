@@ -15,16 +15,16 @@
 
 ```cpp
 // 更新门 z
-const T z_pre = Wx[z_idx] + Rh[z_idx] + bx[bz_idx] + br[bz_idx];
+const T z_pre = Wx[z_idx] + Rh[z_idx] + bw[bz_idx] + br[bz_idx];
 const T z = sigmoid(z_pre);
 
 // 重置门 r
-const T r_pre = Wx[r_idx] + Rh[r_idx] + bx[br_idx] + br[br_idx];
+const T r_pre = Wx[r_idx] + Rh[r_idx] + bw[br_idx] + br[br_idx];
 const T r = sigmoid(r_pre);
 
-// 候选门 g（注意：r 先乘以 Rh+br，再加 Wx 和 bx）
+// 候选门 g（注意：r 先乘以 Rh+br，再加 Wx 和 bw）
 const T Rh_add_br_g = Rh[g_idx] + br[bg_idx];
-const T g_pre = Wx[g_idx] + r * Rh_add_br_g + bx[bg_idx];
+const T g_pre = Wx[g_idx] + r * Rh_add_br_g + bw[bg_idx];
 const T g = tanh(g_pre);
 
 // 新隐藏状态
@@ -131,7 +131,7 @@ $$\boxed{q_z = \frac{S_x \cdot S_y}{S_z}(q_x - Z_x)(q_y - Z_y) + Z_z}$$
 | h | [(T+1)×N, H] | H=隐藏维度, 包含初始 h0 |
 | W | [H×3, C] | 输入权重矩阵 |
 | R | [H×3, H] | 隐藏状态权重矩阵 |
-| bx, br | [H×3] | 偏置向量 |
+| bw, br | [H×3] | 偏置向量 |
 | Wx | [T×N, H×3] | W @ x 结果 |
 | Rh | [N, H×3] | R @ h 结果（每时间步） |
 | v | [T×N, H×4] | 中间激活值 [z, r, g, Rh_add_br] |
@@ -155,7 +155,7 @@ const int g_idx = weight_idx + 2 * hidden_dim;  // [2H, 3H)
 因此：
 - `Wx[z_idx]` = Wx_z, `Wx[r_idx]` = Wx_r, `Wx[g_idx]` = Wx_g
 - `Rh[z_idx]` = Rh_z, `Rh[r_idx]` = Rh_r, `Rh[g_idx]` = Rh_g
-- `bx[b_z_idx]` = bx_z, `bx[b_r_idx]` = bx_r, `bx[b_g_idx]` = bx_g
+- `bw[b_z_idx]` = bw_z, `bw[b_r_idx]` = bw_r, `bw[b_g_idx]` = bw_g
 
 ---
 
@@ -189,9 +189,9 @@ const int g_idx = weight_idx + 2 * hidden_dim;  // [2H, 3H)
 │  │                              ↓                                    │   │
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
 │  │  │ Step C: 门控计算（CUDA Kernel 逐元素）                       │  │   │
-│  │  │   z = sigmoid(Wx_z + Rh_z + bx_z + br_z)                   │  │   │
-│  │  │   r = sigmoid(Wx_r + Rh_r + bx_r + br_r)                   │  │   │
-│  │  │   g = tanh(Wx_g + r*(Rh_g + br_g) + bx_g)                  │  │   │
+│  │  │   z = sigmoid(Wx_z + Rh_z + bw_z + br_z)                   │  │   │
+│  │  │   r = sigmoid(Wx_r + Rh_r + bw_r + br_r)                   │  │   │
+│  │  │   g = tanh(Wx_g + r*(Rh_g + br_g) + bw_g)                  │  │   │
 │  │  │   h[t+1] = z*h[t] + (1-z)*g                                │  │   │
 │  │  └────────────────────────────────────────────────────────────┘  │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
@@ -261,21 +261,21 @@ $$q_{Rh_\gamma} = \frac{S_{R[\gamma\_idx]} \cdot S_h}{S_{Rh}} (q_{Rh\_tmp[\gamma
 
 #### C-1. 更新门 z（Update Gate）
 
-**浮点公式**：`z = sigmoid(Wx_z + Rh_z + bx_z + br_z)`
+**浮点公式**：`z = sigmoid(Wx_z + Rh_z + bw_z + br_z)`
 
 **推导过程**
 
-设 `z_pre = Wx_z + Rh_z + bx_z + br_z`，根据**量化加法**公式，四个不同 scale 的量化值相加：
+设 `z_pre = Wx_z + Rh_z + bw_z + br_z`，根据**量化加法**公式，四个不同 scale 的量化值相加：
 
-$$z\_pre = (q_{Wx_z} - Z_{Wx}) \cdot S_{Wx} + (q_{Rh_z} - Z_{Rh}) \cdot S_{Rh} + q_{bx_z} \cdot S_{bx} + q_{br_z} \cdot S_{br}$$
+$$z\_pre = (q_{Wx_z} - Z_{Wx}) \cdot S_{Wx} + (q_{Rh_z} - Z_{Rh}) \cdot S_{Rh} + q_{bw_z} \cdot S_{bw} + q_{br_z} \cdot S_{br}$$
 
 将 $z\_pre$ 量化到参数 $(S_{z\_pre}, Z_{z\_pre})$：
 
 $$q_{z\_pre} = \frac{z\_pre}{S_{z\_pre}} + Z_{z\_pre}$$
 
-$$= \frac{S_{Wx}}{S_{z\_pre}}(q_{Wx_z} - Z_{Wx}) + \frac{S_{Rh}}{S_{z\_pre}}(q_{Rh_z} - Z_{Rh}) + \frac{S_{bx}}{S_{z\_pre}}q_{bx_z} + \frac{S_{br}}{S_{z\_pre}}q_{br_z} + Z_{z\_pre}$$
+$$= \frac{S_{Wx}}{S_{z\_pre}}(q_{Wx_z} - Z_{Wx}) + \frac{S_{Rh}}{S_{z\_pre}}(q_{Rh_z} - Z_{Rh}) + \frac{S_{bw}}{S_{z\_pre}}q_{bw_z} + \frac{S_{br}}{S_{z\_pre}}q_{br_z} + Z_{z\_pre}$$
 
-> 注：偏置 $bx$, $br$ 是对称量化（zp=0），所以没有减零点项。
+> 注：偏置 $bw$, $br$ 是对称量化（zp=0），所以没有减零点项。
 
 **量化计算公式**（使用 z_idx 索引）：
 
@@ -285,13 +285,13 @@ $$q_{Wx\_z\_shifted} = \frac{S_{Wx}}{S_{z\_pre}} (q_{Wx_z} - Z_{Wx})$$
 
 $$q_{Rh\_z\_shifted} = \frac{S_{Rh}}{S_{z\_pre}} (q_{Rh_z} - Z_{Rh})$$
 
-$$q_{bx\_z\_shifted} = \frac{S_{bx[z\_idx]}}{S_{z\_pre}} q_{bx_z}$$
+$$q_{bw\_z\_shifted} = \frac{S_{bw[z\_idx]}}{S_{z\_pre}} q_{bw_z}$$
 
 $$q_{br\_z\_shifted} = \frac{S_{br[z\_idx]}}{S_{z\_pre}} q_{br_z}$$
 
 最终相加：
 
-$$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bx\_z\_shifted} + q_{br\_z\_shifted} + Z_{z\_pre}$$
+$$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bw\_z\_shifted} + q_{br\_z\_shifted} + Z_{z\_pre}$$
 
 **激活函数**（根据位宽配置）：
 - INT8: `z = sigmoid_int8_lut(clamp<int8>(q_z_pre))`
@@ -301,7 +301,7 @@ $$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bx\_z\_shifted} + q_
 
 #### C-2. 重置门 r（Reset Gate）
 
-**浮点公式**：`r = sigmoid(Wx_r + Rh_r + bx_r + br_r)`
+**浮点公式**：`r = sigmoid(Wx_r + Rh_r + bw_r + br_r)`
 
 **量化计算**：与 z 门结构完全相同，仅将索引和 scale 替换为 r 对应的参数。
 
@@ -309,7 +309,7 @@ $$q_{z\_pre} = q_{Wx\_z\_shifted} + q_{Rh\_z\_shifted} + q_{bx\_z\_shifted} + q_
 
 #### C-3. 候选门 g（Candidate Gate）
 
-**浮点公式**：`g = tanh(Wx_g + r × (Rh_g + br_g) + bx_g)`
+**浮点公式**：`g = tanh(Wx_g + r × (Rh_g + br_g) + bw_g)`
 
 > **注意**：haste 实现中，重置门 r 仅作用于 $(Rh_g + br_g)$，不作用于 $Wx_g$。
 
@@ -333,13 +333,13 @@ $$rRh = r \times Rh\_add\_br\_g = (q_r - Z_{r\_out}) \cdot S_{r\_out} \times (q_
 
 $$q_{rRh} = \frac{rRh}{S_{rRh}} + Z_{rRh} = \frac{S_{r\_out} \cdot S_{Rh\_add\_br}}{S_{rRh}} (q_r - Z_{r\_out})(q_{Rh\_add\_br\_g} - Z_{Rh\_add\_br}) + Z_{rRh}$$
 
-**Step 3: 计算 $g\_pre = Wx_g + rRh + bx_g$（量化加法）**
+**Step 3: 计算 $g\_pre = Wx_g + rRh + bw_g$（量化加法）**
 
-$$g\_pre = (q_{Wx_g} - Z_{Wx}) \cdot S_{Wx} + (q_{rRh} - Z_{rRh}) \cdot S_{rRh} + q_{bx_g} \cdot S_{bx}$$
+$$g\_pre = (q_{Wx_g} - Z_{Wx}) \cdot S_{Wx} + (q_{rRh} - Z_{rRh}) \cdot S_{rRh} + q_{bw_g} \cdot S_{bw}$$
 
 量化到参数 $(S_{g\_pre}, Z_{g\_pre})$：
 
-$$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bx}}{S_{g\_pre}}q_{bx_g} + Z_{g\_pre}$$
+$$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bw}}{S_{g\_pre}}q_{bw_g} + Z_{g\_pre}$$
 
 **量化计算公式汇总**（使用 g_idx 索引）：
 
@@ -347,7 +347,7 @@ $$q_{Rh\_add\_br\_g} = \frac{S_{Rh}}{S_{Rh\_add\_br}} (q_{Rh_g} - Z_{Rh}) + \fra
 
 $$q_{rRh} = \frac{S_{r\_out} \cdot S_{Rh\_add\_br}}{S_{rRh}} (q_r - Z_{r\_out})(q_{Rh\_add\_br\_g} - Z_{Rh\_add\_br}) + Z_{rRh}$$
 
-$$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bx[g\_idx]}}{S_{g\_pre}}q_{bx_g} + Z_{g\_pre}$$
+$$q_{g\_pre} = \frac{S_{Wx}}{S_{g\_pre}}(q_{Wx_g} - Z_{Wx}) + \frac{S_{rRh}}{S_{g\_pre}}(q_{rRh} - Z_{rRh}) + \frac{S_{bw[g\_idx]}}{S_{g\_pre}}q_{bw_g} + Z_{g\_pre}$$
 
 **激活函数**（根据位宽配置）：
 - INT8: `g = tanh_int8_lut(clamp<int8>(q_g_pre))`
@@ -446,17 +446,17 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 | 隐藏状态 h | INT | 非对称 + 动态 | `exp2_inv_h_` | `zp_h_` | - | GRU 输出/下一步输入 |
 | 权重 W | INT | 对称 + per-channel | `exp2_inv_W_[i]` | 0 | - | GEMM: W×x |
 | 权重 R | INT | 对称 + per-channel | `exp2_inv_R_[i]` | 0 | - | GEMM: R×h |
-| 偏置 bx | INT | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | - | 门控加法 |
+| 偏置 bw | INT | 对称 + per-channel | `exp2_inv_bx_[i]` | 0 | - | 门控加法 |
 | 偏置 br | INT | 对称 + per-channel | `exp2_inv_br_[i]` | 0 | - | 门控加法 |
 | Wx | INT | 非对称 | `exp2_inv_Wx_` | `zp_Wx_` | W × x | z/r/g 门输入 |
 | Rh | INT | 非对称 | `exp2_inv_Rh_` | `zp_Rh_` | R × h | z/r/g 门输入 |
-| z_pre | INT | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | Wx_z + Rh_z + bx_z + br_z | sigmoid 输入 |
+| z_pre | INT | 非对称 | `exp2_inv_z_pre_` | `zp_z_pre_` | Wx_z + Rh_z + bw_z + br_z | sigmoid 输入 |
 | z_out | **UINT** | 非对称 | `exp2_inv_z_out_` | `zp_z_out_` | sigmoid(z_pre) | h 更新门控 |
-| r_pre | INT | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | Wx_r + Rh_r + bx_r + br_r | sigmoid 输入 |
+| r_pre | INT | 非对称 | `exp2_inv_r_pre_` | `zp_r_pre_` | Wx_r + Rh_r + bw_r + br_r | sigmoid 输入 |
 | r_out | **UINT** | 非对称 | `exp2_inv_r_out_` | `zp_r_out_` | sigmoid(r_pre) | g 门乘法输入 |
 | Rh_add_br | INT | 非对称 | `exp2_inv_Rh_add_br_` | `zp_Rh_add_br_` | Rh_g + br_g | g 门中间加法 |
 | rRh | INT | 非对称 | `exp2_inv_rRh_` | `zp_rRh_` | r_out × Rh_add_br | g 门中间乘法 |
-| g_pre | INT | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | Wx_g + rRh + bx_g | tanh 输入 |
+| g_pre | INT | 非对称 | `exp2_inv_g_pre_` | `zp_g_pre_` | Wx_g + rRh + bw_g | tanh 输入 |
 | g_out | INT | 对称 | `exp2_inv_g_out_` | 0 | tanh(g_pre) | h 更新候选值 |
 | old_contrib | INT | 非对称 | `exp2_inv_old_contrib_` | `zp_old_contrib_` | z_out × h_old | h 更新旧状态贡献 |
 | new_contrib | INT | 非对称 | `exp2_inv_new_contrib_` | `zp_new_contrib_` | (1 - z_out) × g_out | h 更新新状态贡献 |
@@ -513,7 +513,7 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 | `exp2_inv_bx_` | vector\<int8_t\> | per-channel | 输入偏置缩放因子，size = hidden×3 |
 | `exp2_inv_br_` | vector\<int8_t\> | per-channel | 循环偏置缩放因子，size = hidden×3 |
 
-**输入偏置 bx (`weight.bx`)** 和 **循环偏置 br (`weight.br`)**
+**输入偏置 bw (`weight.bw`)** 和 **循环偏置 br (`weight.br`)**
 - **维度**：`[hidden×3]`
 - **量化方式**：对称量化 + per-channel
 - **特殊说明**：偏置零点恒为 0，仅需 scale 参数
@@ -552,15 +552,15 @@ $$q_{h\_new} = \frac{h_{new}}{S_h} + Z_h = \frac{S_{old\_contrib}}{S_h}(q_{old\_
 | `exp2_inv_g_pre_` | int8_t | 标量 | g 门 tanh 输入的缩放因子 |
 | `zp_g_pre_` | int32_t | 标量 | g 门 tanh 输入的零点 |
 
-**z_pre (`gate.z_pre`)** = `Wx_z + Rh_z + bx_z + br_z`
+**z_pre (`gate.z_pre`)** = `Wx_z + Rh_z + bw_z + br_z`
 - **浮点范围**：通常为 `[-4.0, 4.0]`
 - **典型配置**：INT8，`exp2_inv=6`，scale=1/64，覆盖 [-2, 2]
 - **作用**：作为 sigmoid LUT 的输入索引
 
-**r_pre (`gate.r_pre`)** = `Wx_r + Rh_r + bx_r + br_r`
+**r_pre (`gate.r_pre`)** = `Wx_r + Rh_r + bw_r + br_r`
 - **配置与 z_pre 相同**
 
-**g_pre (`gate.g_pre`)** = `Wx_g + r×(Rh_g + br_g) + bx_g`
+**g_pre (`gate.g_pre`)** = `Wx_g + r×(Rh_g + br_g) + bw_g`
 - **浮点范围**：通常为 `[-4.0, 4.0]`
 - **典型配置**：INT8，`exp2_inv=6`，scale=1/64
 - **作用**：作为 tanh LUT 的输入索引
@@ -655,7 +655,7 @@ exp2_inv_Wx_div_z_pre_ = exp2_inv_Wx_ - exp2_inv_z_pre_;
 | `n_R_mul_h_div_Rh_[i]` | R×h GEMM 输出 rescale | `exp2_inv_R_[i] + exp2_inv_h_ - exp2_inv_Rh_` |
 | `exp2_inv_Wx_div_z_pre_` | Wx 到 z_pre | `exp2_inv_Wx_ - exp2_inv_z_pre_` |
 | `exp2_inv_Rh_div_z_pre_` | Rh 到 z_pre | `exp2_inv_Rh_ - exp2_inv_z_pre_` |
-| `n_bx_div_z_[i]` | bx 到 z_pre | `exp2_inv_bx_[i] - exp2_inv_z_pre_` |
+| `n_bx_div_z_[i]` | bw 到 z_pre | `exp2_inv_bx_[i] - exp2_inv_z_pre_` |
 | `one_in_z_scale_` | 常数 1 的量化表示 | `round(1.0 × 2^exp2_inv_z_out) + zp_z_out` |
 
 #### B.9 LUT 查找表

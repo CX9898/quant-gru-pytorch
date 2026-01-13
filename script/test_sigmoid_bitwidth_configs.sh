@@ -24,7 +24,7 @@ echo "测试时间: $(date)" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
 # CSV 头
-echo "config_name,z_pre,z_out,r_pre,r_out,g_pre,g_out,z_pre_sym,z_out_sym,r_pre_sym,r_out_sym,g_pre_sym,g_out_sym,mse,cosine_similarity" > "$CSV_FILE"
+echo "config_name,update_gate_input,update_gate_output,reset_gate_input,reset_gate_output,new_gate_input,new_gate_output,update_gate_input_sym,update_gate_output_sym,reset_gate_input_sym,reset_gate_output_sym,new_gate_input_sym,new_gate_output_sym,mse,cosine_similarity" > "$CSV_FILE"
 
 # 计数器
 TEST_COUNT=0
@@ -37,57 +37,57 @@ COSINE_THRESHOLD=0.999    # 余弦相似度 >= 此值
 MSE_THRESHOLD=1e-4        # MSE <= 此值
 
 # 函数：修改配置文件中的位宽
-# 新格式: QuantBitWidth z_pre_{bits, is_unsigned}
+# 新格式: QuantBitWidth update_gate_input_{bits, is_unsigned}
 modify_bitwidth() {
-    local z_pre=$1
-    local z_out=$2
-    local r_pre=$3
-    local r_out=$4
-    local g_pre=$5
-    local g_out=$6
+    local update_gate_input=$1
+    local update_gate_output=$2
+    local reset_gate_input=$3
+    local reset_gate_output=$4
+    local new_gate_input=$5
+    local new_gate_output=$6
     
-    # z_pre, r_pre, g_pre, g_out: 有符号 (false)
-    # z_out, r_out: 无符号 (true)，sigmoid 输出范围 [0, 1]
-    sed -i "s/z_pre_{[0-9]*, [a-z]*}/z_pre_{${z_pre}, false}/g" "$CONFIG_FILE"
-    sed -i "s/z_out_{[0-9]*, [a-z]*}/z_out_{${z_out}, true}/g" "$CONFIG_FILE"
-    sed -i "s/r_pre_{[0-9]*, [a-z]*}/r_pre_{${r_pre}, false}/g" "$CONFIG_FILE"
-    sed -i "s/r_out_{[0-9]*, [a-z]*}/r_out_{${r_out}, true}/g" "$CONFIG_FILE"
-    sed -i "s/g_pre_{[0-9]*, [a-z]*}/g_pre_{${g_pre}, false}/g" "$CONFIG_FILE"
-    sed -i "s/g_out_{[0-9]*, [a-z]*}/g_out_{${g_out}, false}/g" "$CONFIG_FILE"
+    # update_gate_input, reset_gate_input, new_gate_input, new_gate_output: 有符号 (false)
+    # update_gate_output, reset_gate_output: 无符号 (true)，sigmoid 输出范围 [0, 1]
+    sed -i "s/update_gate_input_{[0-9]*, [a-z]*}/update_gate_input_{${update_gate_input}, false}/g" "$CONFIG_FILE"
+    sed -i "s/update_gate_output_{[0-9]*, [a-z]*}/update_gate_output_{${update_gate_output}, true}/g" "$CONFIG_FILE"
+    sed -i "s/reset_gate_input_{[0-9]*, [a-z]*}/reset_gate_input_{${reset_gate_input}, false}/g" "$CONFIG_FILE"
+    sed -i "s/reset_gate_output_{[0-9]*, [a-z]*}/reset_gate_output_{${reset_gate_output}, true}/g" "$CONFIG_FILE"
+    sed -i "s/new_gate_input_{[0-9]*, [a-z]*}/new_gate_input_{${new_gate_input}, false}/g" "$CONFIG_FILE"
+    sed -i "s/new_gate_output_{[0-9]*, [a-z]*}/new_gate_output_{${new_gate_output}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改对称配置
 modify_symmetric() {
-    local z_pre_sym=$1
-    local z_out_sym=$2
-    local r_pre_sym=$3
-    local r_out_sym=$4
-    local g_pre_sym=$5
-    local g_out_sym=$6
+    local update_gate_input_sym=$1
+    local update_gate_output_sym=$2
+    local reset_gate_input_sym=$3
+    local reset_gate_output_sym=$4
+    local new_gate_input_sym=$5
+    local new_gate_output_sym=$6
     
-    sed -i "s/bool z_pre_symmetric_ = [a-z]*;/bool z_pre_symmetric_ = ${z_pre_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool z_out_symmetric_ = [a-z]*;/bool z_out_symmetric_ = ${z_out_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool r_pre_symmetric_ = [a-z]*;/bool r_pre_symmetric_ = ${r_pre_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool r_out_symmetric_ = [a-z]*;/bool r_out_symmetric_ = ${r_out_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool g_pre_symmetric_ = [a-z]*;/bool g_pre_symmetric_ = ${g_pre_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool g_out_symmetric_ = [a-z]*;/bool g_out_symmetric_ = ${g_out_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool update_gate_input_symmetric_ = [a-z]*;/bool update_gate_input_symmetric_ = ${update_gate_input_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool update_gate_output_symmetric_ = [a-z]*;/bool update_gate_output_symmetric_ = ${update_gate_output_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool reset_gate_input_symmetric_ = [a-z]*;/bool reset_gate_input_symmetric_ = ${reset_gate_input_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool reset_gate_output_symmetric_ = [a-z]*;/bool reset_gate_output_symmetric_ = ${reset_gate_output_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool new_gate_input_symmetric_ = [a-z]*;/bool new_gate_input_symmetric_ = ${new_gate_input_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool new_gate_output_symmetric_ = [a-z]*;/bool new_gate_output_symmetric_ = ${new_gate_output_sym};/" "$CONFIG_FILE"
 }
 
 # 函数：编译并运行测试
 run_test() {
     local config_name=$1
-    local z_pre=$2
-    local z_out=$3
-    local r_pre=$4
-    local r_out=$5
-    local g_pre=$6
-    local g_out=$7
-    local z_pre_sym=$8
-    local z_out_sym=$9
-    local r_pre_sym=${10}
-    local r_out_sym=${11}
-    local g_pre_sym=${12}
-    local g_out_sym=${13}
+    local update_gate_input=$2
+    local update_gate_output=$3
+    local reset_gate_input=$4
+    local reset_gate_output=$5
+    local new_gate_input=$6
+    local new_gate_output=$7
+    local update_gate_input_sym=$8
+    local update_gate_output_sym=$9
+    local reset_gate_input_sym=${10}
+    local reset_gate_output_sym=${11}
+    local new_gate_input_sym=${12}
+    local new_gate_output_sym=${13}
     
     TEST_COUNT=$((TEST_COUNT + 1))
     
@@ -100,7 +100,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 编译失败" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$update_gate_input,$update_gate_output,$reset_gate_input,$reset_gate_output,$new_gate_input,$new_gate_output,$update_gate_input_sym,$update_gate_output_sym,$reset_gate_input_sym,$reset_gate_output_sym,$new_gate_input_sym,$new_gate_output_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -119,7 +119,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 运行失败 - $error_msg" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$update_gate_input,$update_gate_output,$reset_gate_input,$reset_gate_output,$new_gate_input,$new_gate_output,$update_gate_input_sym,$update_gate_output_sym,$reset_gate_input_sym,$reset_gate_output_sym,$new_gate_input_sym,$new_gate_output_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -170,13 +170,13 @@ run_test() {
     
     # 记录到结果文件
     echo "配置: $config_name" >> "$RESULT_FILE"
-    echo "  位宽: z_pre=$z_pre, z_out=$z_out, r_pre=$r_pre, r_out=$r_out, g_pre=$g_pre, g_out=$g_out" >> "$RESULT_FILE"
-    echo "  对称: z_pre=$z_pre_sym, z_out=$z_out_sym, r_pre=$r_pre_sym, r_out=$r_out_sym, g_pre=$g_pre_sym, g_out=$g_out_sym" >> "$RESULT_FILE"
+    echo "  位宽: update_gate_input=$update_gate_input, update_gate_output=$update_gate_output, reset_gate_input=$reset_gate_input, reset_gate_output=$reset_gate_output, new_gate_input=$new_gate_input, new_gate_output=$new_gate_output" >> "$RESULT_FILE"
+    echo "  对称: update_gate_input=$update_gate_input_sym, update_gate_output=$update_gate_output_sym, reset_gate_input=$reset_gate_input_sym, reset_gate_output=$reset_gate_output_sym, new_gate_input=$new_gate_input_sym, new_gate_output=$new_gate_output_sym" >> "$RESULT_FILE"
     echo "  MSE: $mse, Cosine Similarity: $cos" >> "$RESULT_FILE"
     echo "" >> "$RESULT_FILE"
     
     # 记录到 CSV
-    echo "$config_name,$z_pre,$z_out,$r_pre,$r_out,$g_pre,$g_out,$z_pre_sym,$z_out_sym,$r_pre_sym,$r_out_sym,$g_pre_sym,$g_out_sym,$mse,$cos" >> "$CSV_FILE"
+    echo "$config_name,$update_gate_input,$update_gate_output,$reset_gate_input,$reset_gate_output,$new_gate_input,$new_gate_output,$update_gate_input_sym,$update_gate_output_sym,$reset_gate_input_sym,$reset_gate_output_sym,$new_gate_input_sym,$new_gate_output_sym,$mse,$cos" >> "$CSV_FILE"
 }
 
 # ==================== 第一部分：8-16位完整基准测试 ====================
@@ -216,15 +216,15 @@ echo "==================== 第1.1部分：标准64种激活位宽配置 ========
 echo "" >> "$RESULT_FILE"
 
 # 枚举所有64种标准位宽配置 (8/16位)
-for z_pre in "${BITWIDTHS_STANDARD[@]}"; do
-    for z_out in "${BITWIDTHS_STANDARD[@]}"; do
-        for r_pre in "${BITWIDTHS_STANDARD[@]}"; do
-            for r_out in "${BITWIDTHS_STANDARD[@]}"; do
-                for g_pre in "${BITWIDTHS_STANDARD[@]}"; do
-                    for g_out in "${BITWIDTHS_STANDARD[@]}"; do
-                        config_name="BW_z${z_pre}${z_out}_r${r_pre}${r_out}_g${g_pre}${g_out}"
-                        modify_bitwidth $z_pre $z_out $r_pre $r_out $g_pre $g_out
-                        run_test "$config_name" $z_pre $z_out $r_pre $r_out $g_pre $g_out false false false false false false
+for update_gate_input in "${BITWIDTHS_STANDARD[@]}"; do
+    for update_gate_output in "${BITWIDTHS_STANDARD[@]}"; do
+        for reset_gate_input in "${BITWIDTHS_STANDARD[@]}"; do
+            for reset_gate_output in "${BITWIDTHS_STANDARD[@]}"; do
+                for new_gate_input in "${BITWIDTHS_STANDARD[@]}"; do
+                    for new_gate_output in "${BITWIDTHS_STANDARD[@]}"; do
+                        config_name="BW_z${update_gate_input}${update_gate_output}_r${reset_gate_input}${reset_gate_output}_g${new_gate_input}${new_gate_output}"
+                        modify_bitwidth $update_gate_input $update_gate_output $reset_gate_input $reset_gate_output $new_gate_input $new_gate_output
+                        run_test "$config_name" $update_gate_input $update_gate_output $reset_gate_input $reset_gate_output $new_gate_input $new_gate_output false false false false false false
                     done
                 done
             done
@@ -314,23 +314,23 @@ modify_bitwidth 16 16 16 16 16 16
 SYMMETRICS=(false true)
 
 # 枚举所有64种对称配置
-for z_pre_sym in "${SYMMETRICS[@]}"; do
-    for z_out_sym in "${SYMMETRICS[@]}"; do
-        for r_pre_sym in "${SYMMETRICS[@]}"; do
-            for r_out_sym in "${SYMMETRICS[@]}"; do
-                for g_pre_sym in "${SYMMETRICS[@]}"; do
-                    for g_out_sym in "${SYMMETRICS[@]}"; do
+for update_gate_input_sym in "${SYMMETRICS[@]}"; do
+    for update_gate_output_sym in "${SYMMETRICS[@]}"; do
+        for reset_gate_input_sym in "${SYMMETRICS[@]}"; do
+            for reset_gate_output_sym in "${SYMMETRICS[@]}"; do
+                for new_gate_input_sym in "${SYMMETRICS[@]}"; do
+                    for new_gate_output_sym in "${SYMMETRICS[@]}"; do
                         # 将 true/false 转为 T/F 用于命名
-                        z_pre_s=$([ "$z_pre_sym" = "true" ] && echo "T" || echo "F")
-                        z_out_s=$([ "$z_out_sym" = "true" ] && echo "T" || echo "F")
-                        r_pre_s=$([ "$r_pre_sym" = "true" ] && echo "T" || echo "F")
-                        r_out_s=$([ "$r_out_sym" = "true" ] && echo "T" || echo "F")
-                        g_pre_s=$([ "$g_pre_sym" = "true" ] && echo "T" || echo "F")
-                        g_out_s=$([ "$g_out_sym" = "true" ] && echo "T" || echo "F")
+                        update_gate_input_s=$([ "$update_gate_input_sym" = "true" ] && echo "T" || echo "F")
+                        update_gate_output_s=$([ "$update_gate_output_sym" = "true" ] && echo "T" || echo "F")
+                        reset_gate_input_s=$([ "$reset_gate_input_sym" = "true" ] && echo "T" || echo "F")
+                        reset_gate_output_s=$([ "$reset_gate_output_sym" = "true" ] && echo "T" || echo "F")
+                        new_gate_input_s=$([ "$new_gate_input_sym" = "true" ] && echo "T" || echo "F")
+                        new_gate_output_s=$([ "$new_gate_output_sym" = "true" ] && echo "T" || echo "F")
                         
-                        config_name="SYM_z${z_pre_s}${z_out_s}_r${r_pre_s}${r_out_s}_g${g_pre_s}${g_out_s}"
-                        modify_symmetric $z_pre_sym $z_out_sym $r_pre_sym $r_out_sym $g_pre_sym $g_out_sym
-                        run_test "$config_name" 16 16 16 16 16 16 $z_pre_sym $z_out_sym $r_pre_sym $r_out_sym $g_pre_sym $g_out_sym
+                        config_name="SYM_z${update_gate_input_s}${update_gate_output_s}_r${reset_gate_input_s}${reset_gate_output_s}_g${new_gate_input_s}${new_gate_output_s}"
+                        modify_symmetric $update_gate_input_sym $update_gate_output_sym $reset_gate_input_sym $reset_gate_output_sym $new_gate_input_sym $new_gate_output_sym
+                        run_test "$config_name" 16 16 16 16 16 16 $update_gate_input_sym $update_gate_output_sym $reset_gate_input_sym $reset_gate_output_sym $new_gate_input_sym $new_gate_output_sym
                     done
                 done
             done
@@ -346,7 +346,7 @@ echo "==================== 第三部分：典型位宽+对称组合测试 ======
 echo "" >> "$RESULT_FILE"
 
 # 典型组合测试
-# 格式: z_pre z_out r_pre r_out g_pre g_out z_pre_sym z_out_sym r_pre_sym r_out_sym g_pre_sym g_out_sym name
+# 格式: update_gate_input update_gate_output reset_gate_input reset_gate_output new_gate_input new_gate_output update_gate_input_sym update_gate_output_sym reset_gate_input_sym reset_gate_output_sym new_gate_input_sym new_gate_output_sym name
 TYPICAL_CONFIGS=(
     # 全8位 + 不同对称配置
     "8 8 8 8 8 8 false false false false false false FULL8_ASYM"
@@ -374,11 +374,11 @@ TYPICAL_CONFIGS=(
 )
 
 for config in "${TYPICAL_CONFIGS[@]}"; do
-    read -r z_pre z_out r_pre r_out g_pre g_out z_pre_sym z_out_sym r_pre_sym r_out_sym g_pre_sym g_out_sym name <<< "$config"
+    read -r update_gate_input update_gate_output reset_gate_input reset_gate_output new_gate_input new_gate_output update_gate_input_sym update_gate_output_sym reset_gate_input_sym reset_gate_output_sym new_gate_input_sym new_gate_output_sym name <<< "$config"
     config_name="COMBO_${name}"
-    modify_bitwidth $z_pre $z_out $r_pre $r_out $g_pre $g_out
-    modify_symmetric $z_pre_sym $z_out_sym $r_pre_sym $r_out_sym $g_pre_sym $g_out_sym
-    run_test "$config_name" $z_pre $z_out $r_pre $r_out $g_pre $g_out $z_pre_sym $z_out_sym $r_pre_sym $r_out_sym $g_pre_sym $g_out_sym
+    modify_bitwidth $update_gate_input $update_gate_output $reset_gate_input $reset_gate_output $new_gate_input $new_gate_output
+    modify_symmetric $update_gate_input_sym $update_gate_output_sym $reset_gate_input_sym $reset_gate_output_sym $new_gate_input_sym $new_gate_output_sym
+    run_test "$config_name" $update_gate_input $update_gate_output $reset_gate_input $reset_gate_output $new_gate_input $new_gate_output $update_gate_input_sym $update_gate_output_sym $reset_gate_input_sym $reset_gate_output_sym $new_gate_input_sym $new_gate_output_sym
 done
 
 # 恢复原始配置
@@ -431,7 +431,7 @@ if [ $FAIL_COUNT -gt 0 ]; then
         printf "%-4s | %-40s | %-15s | %-12s\n" "$rank" "$name" "$mse" "$cos" | tee -a "$RESULT_FILE"
     done
     # 还要显示精度不达标的配置
-    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name z_pre z_out r_pre r_out g_pre g_out z_pre_sym z_out_sym r_pre_sym r_out_sym g_pre_sym g_out_sym mse cos; do
+    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name update_gate_input update_gate_output reset_gate_input reset_gate_output new_gate_input new_gate_output update_gate_input_sym update_gate_output_sym reset_gate_input_sym reset_gate_output_sym new_gate_input_sym new_gate_output_sym mse cos; do
         if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
             # 检查是否不满足阈值
             if ! awk -v val="$cos" -v threshold="$COSINE_THRESHOLD" 'BEGIN {exit !(val >= threshold)}' || ! awk -v val="$mse" -v threshold="$MSE_THRESHOLD" 'BEGIN {exit !(val <= threshold)}'; then

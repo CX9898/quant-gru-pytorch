@@ -31,27 +31,27 @@ class ForwardPassQuant {
     //
     // W: [C,H*3] 输入权重矩阵（量化后，int32_t 存储）
     // R: [H,H*3] 循环权重矩阵（量化后，int32_t 存储）
-    // bx: [H*3] 输入偏置（量化后）
+    // bw: [H*3] 输入偏置（量化后）
     // br: [H*3] 循环偏置（量化后）
     // x: [N*T,C] 输入序列（量化后，int32_t 存储）
     // h: [(T+1)*N,H] 初始和输出隐藏状态（量化后，int32_t 存储）
     // v: [T*N,H*4] 中间激活值（训练模式需要）
     // zoneout_prob: Zoneout 概率
     // zoneout_mask: [T*N,H] Zoneout mask（int32_t 存储）
-    void Run(const int steps, const int32_t *W, const int32_t *R, const int32_t *bx,
+    void Run(const int steps, const int32_t *W, const int32_t *R, const int32_t *bw,
              const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
              const float zoneout_prob, const int32_t *zoneout_mask);
 
    private:
     // 内部迭代函数 (Linear 融合版本)
-    // cur_linear_x: 当前时间步的 W*x + bx 结果（指向 tmp_linear_x_ 的偏移）
+    // cur_linear_x: 当前时间步的 W*x + bw 结果（指向 tmp_linear_x_ 的偏移）
     void IterateInternal(const int32_t *R, const int32_t *br,
                          const int32_t *h, int32_t *h_out, int32_t *v,
                          const int32_t *cur_linear_x, const float zoneout_prob,
                          const int32_t *zoneout_mask);
 
-    // 计算输入 Linear 变换: W*x + bx（输出到 tmp_linear_x_）
-    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bx, int steps);
+    // 计算输入 Linear 变换: W*x + bw（输出到 tmp_linear_x_）
+    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps);
 
     // 计算隐状态 Linear 变换: R*h + br（输出到 tmp_linear_h_）
     void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br);
@@ -73,7 +73,7 @@ class ForwardPassQuant {
     int max_steps_ = 0;
 
     // Linear 变换结果（int32，供 gate 计算使用）
-    dev::vector<int32_t> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch] W*x + bx
+    dev::vector<int32_t> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch] W*x + bw
     dev::vector<int32_t> tmp_weight_hh_linear_;  // [hidden*3 * batch] R*h + br
 
     // 权重和常量（预计算）

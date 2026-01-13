@@ -17,7 +17,7 @@
 //   - CPU/GPU 共用函数使用 __host__ __device__ __forceinline__ 标记，确保行为一致
 //
 // 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
-//   - weight_ih_linear: W*x + bx 的输出
+//   - weight_ih_linear: W*x + bw 的输出
 //   - weight_hh_linear: R*h + br 的输出
 //   - reset_gate_input/output: reset gate 的输入/输出
 //   - update_gate_input/output: update gate 的输入/输出
@@ -76,12 +76,12 @@ struct GRUQuantitativeParameters {
     std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
 
     // -------------------- 偏置参数（per-channel）--------------------
-    std::vector<int8_t> shift_bx_;  ///< 输入偏置移位量
-    std::vector<int8_t> shift_br_;  ///< 循环偏置移位量
+    std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
+    std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
 
     // -------------------- Linear 输出参数 (GEMM+bias) --------------------
-    int8_t shift_weight_ih_linear_;    ///< W*x + bx 的移位量
-    int32_t zp_weight_ih_linear_;      ///< W*x + bx 的零点
+    int8_t shift_weight_ih_linear_;    ///< W*x + bw 的移位量
+    int32_t zp_weight_ih_linear_;      ///< W*x + bw 的零点
     int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
     int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
 
@@ -145,7 +145,7 @@ struct GRUQuantitativeParameters {
  */
 struct GateQuantParams {
     // -------------------- Linear 输出零点 --------------------
-    int32_t zp_weight_ih_linear_;  ///< W*x+bx 的零点
+    int32_t zp_weight_ih_linear_;  ///< W*x+bw 的零点
     int32_t zp_weight_hh_linear_;  ///< R*h+br 的零点
     int32_t zp_h_;                 ///< 隐状态 h 的零点
 
@@ -202,12 +202,12 @@ struct LinearQuantParamsGPU {
     int32_t zp_h_;  ///< 隐状态 h 的零点
 
     dev::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    dev::vector<int8_t> shift_bx_to_weight_ih_linear_;      ///< bx per-channel 移位
+    dev::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
     dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
     dev::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
 
 #ifdef DEBUG
-    dev::vector<int8_t> shift_bx_;  ///< bx 移位量（调试用）
+    dev::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
     dev::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
 #endif
 };
@@ -222,12 +222,12 @@ struct LinearQuantParamsCPU {
     int32_t zp_h_;  ///< 隐状态 h 的零点
 
     std::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    std::vector<int8_t> shift_bx_to_weight_ih_linear_;      ///< bx per-channel 移位
+    std::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
     std::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
     std::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
 
 #ifdef DEBUG
-    std::vector<int8_t> shift_bx_;  ///< bx 移位量（调试用）
+    std::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
     std::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
 #endif
 };
@@ -365,8 +365,8 @@ __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, Quant
 // 【计算流程】
 //   1. find_segment: 根据输入找到所属分段
 //   2. x_offset = q_x - zp_x: 去零点
-//   3. bx = q_b * x_offset: 乘以斜率（INT64 避免溢出）
-//   4. term_bx = bx >> n_BX_total: 重缩放
+//   3. bw = q_b * x_offset: 乘以斜率（INT64 避免溢出）
+//   4. term_bx = bw >> n_BX_total: 重缩放
 //   5. q_y = term_bx + term_c_precomputed: 加上预计算的截距项
 //
 // ============================================================================
@@ -452,7 +452,7 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) {
 /**
  * @brief 计算更新门 update_gate = sigmoid(weight_ih_linear + weight_hh_linear)
  * 
- * @param weight_ih_linear  输入 Linear 变换结果 W*x + bx
+ * @param weight_ih_linear  输入 Linear 变换结果 W*x + bw
  * @param weight_hh_linear  隐状态 Linear 变换结果 R*h + br
  * @param params    门计算参数
  * @param debug_idx 调试索引，-1 表示不输出调试信息
@@ -1149,7 +1149,7 @@ inline void printParms(const GRUQuantitativeParameters &quant_parms) {
     };
     print_vec("W ", quant_parms.shift_W_);
     print_vec("R ", quant_parms.shift_R_);
-    print_vec("bx", quant_parms.shift_bx_);
+    print_vec("bw", quant_parms.shift_bw_);
     print_vec("br", quant_parms.shift_br_);
 
     // Linear 输出

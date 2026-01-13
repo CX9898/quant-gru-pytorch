@@ -23,9 +23,9 @@ namespace {
 namespace op {
 template <typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
 __device__ __forceinline__ void PointwiseOperations(
-    int steps_idx, const int batch_dim, const int hidden_dim, const T *Wx, const T *Rh, const T *bx,
+    int steps_idx, const int batch_dim, const int hidden_dim, const T *Wx, const T *Rh, const T *bw,
     const T *br, const T *h, T *h_out, T *v, const T zoneout_prob, const T *zoneout_mask, T *z_pres,
-    T *r_pres, T *g_pres, T *Wx_add_bx_, T *Rh_add_br_) {  // Zoneout mask (only used if ApplyZoneout==true)
+    T *r_pres, T *g_pres, T *Wx_add_bw_, T *Rh_add_br_) {  // Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x;  // 当前线程对应的隐藏单元. hidden_idx
     const int col = blockDim.y * blockIdx.y + threadIdx.y;  // 当前线程对应的batch样本. batch_idx
 
@@ -46,26 +46,26 @@ __device__ __forceinline__ void PointwiseOperations(
     const int br_idx = row + 1 * hidden_dim;
     const int bg_idx = row + 2 * hidden_dim;
 
-    const T Wx_add_bx_z = Wx[z_idx] + bx[bz_idx];
-    const T Rh_add_bx_z = Rh[z_idx] + br[bz_idx];
-    const T z_pre = Wx_add_bx_z + Rh_add_bx_z;
+    const T Wx_add_bw_z = Wx[z_idx] + bw[bz_idx];
+    const T Rh_add_br_z = Rh[z_idx] + br[bz_idx];
+    const T z_pre = Wx_add_bw_z + Rh_add_br_z;
     const T z = sigmoid(z_pre);
 
-    const T Wx_add_bx_r = Wx[r_idx] + bx[br_idx];
-    const T Rh_add_bx_r = Rh[r_idx] + br[br_idx];
-    const T r_pre = Wx_add_bx_r + Rh_add_bx_r;
+    const T Wx_add_bw_r = Wx[r_idx] + bw[br_idx];
+    const T Rh_add_br_r = Rh[r_idx] + br[br_idx];
+    const T r_pre = Wx_add_bw_r + Rh_add_br_r;
     const T r = sigmoid(r_pre);
 
-    const T Wx_add_bx_g = Wx[g_idx] + bx[bg_idx];
+    const T Wx_add_bw_g = Wx[g_idx] + bw[bg_idx];
     const T Rh_add_br_g = Rh[g_idx] + br[bg_idx];
-    const T g_pre = Wx_add_bx_g + r * Rh_add_br_g;
+    const T g_pre = Wx_add_bw_g + r * Rh_add_br_g;
     const T g = tanh(g_pre);
 
 #ifdef DEBUG_QUANT
     // 调试输出：只在第一个时间步的第一个元素输出
     if (row == 0 && col == 0 && steps_idx == 0) {
-        printf("[FLOAT] step=%d: Wx_z=%.6f, Rh_z=%.6f, bx_z=%.6f, br_z=%.6f\n", steps_idx,
-               (float)Wx[z_idx], (float)Rh[z_idx], (float)bx[bz_idx], (float)br[bz_idx]);
+        printf("[FLOAT] step=%d: Wx_z=%.6f, Rh_z=%.6f, bw_z=%.6f, br_z=%.6f\n", steps_idx,
+               (float)Wx[z_idx], (float)Rh[z_idx], (float)bw[bz_idx], (float)br[bz_idx]);
         printf("[FLOAT]   z_pre=%.6f, z=%.6f\n", (float)z_pre, (float)z);
         printf("[FLOAT]   r_pre=%.6f, r=%.6f\n", (float)r_pre, (float)r);
         printf("[FLOAT]   Rh_add_br_g=%.6f, g_pre=%.6f, g=%.6f\n", (float)Rh_add_br_g, (float)g_pre,
@@ -111,45 +111,45 @@ __device__ __forceinline__ void PointwiseOperations(
         g_pres[output_idx] = g_pre;
         // 使用与 tmp_Wx/tmp_Rh 相同的布局: [batch, hidden*3]
         // weight_idx = col * (hidden_dim * 3) + row
-        Wx_add_bx_[z_idx] = Wx_add_bx_z;
-        Wx_add_bx_[r_idx] = Wx_add_bx_r;
-        Wx_add_bx_[g_idx] = Wx_add_bx_g;
-        Rh_add_br_[z_idx] = Rh_add_bx_z;
-        Rh_add_br_[r_idx] = Rh_add_bx_r;
+        Wx_add_bw_[z_idx] = Wx_add_bw_z;
+        Wx_add_bw_[r_idx] = Wx_add_bw_r;
+        Wx_add_bw_[g_idx] = Wx_add_bw_g;
+        Rh_add_br_[z_idx] = Rh_add_br_z;
+        Rh_add_br_[r_idx] = Rh_add_br_r;
         Rh_add_br_[g_idx] = Rh_add_br_g;
     }
 
     h_out[output_idx] = cur_h_value;
     //    printf("h_out = %f, z = %f, r = %f, g = %f,z_pre = %f, r_pre = %f, g_pre = %f, h_old =
     //    %f\n", cur_h_value, z, r, g,z_pre,r_pre,g_pre, h[output_idx]); printf("Wx_z = %f, Rh_z =
-    //    %f, bx_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bx[z_idx], br[bz_idx]);
+    //    %f, bw_z = %f, br_z = %f\n", Wx[z_idx], Rh[z_idx], bw[z_idx], br[bz_idx]);
 }
 }  // namespace op
 
 template <typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
 __global__ void PointwiseOperations(const int batch_dim, const int hidden_dim, const T *Wx,
-                                    const T *Rh, const T *bx, const T *br, const T *h, T *h_out,
+                                    const T *Rh, const T *bw, const T *br, const T *h, T *h_out,
                                     T *v, const T zoneout_prob, const T *zoneout_mask) {
     op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(
-        0, batch_dim, hidden_dim, Wx, Rh, bx, br, h, h_out, v, zoneout_prob, zoneout_mask, nullptr,
+        0, batch_dim, hidden_dim, Wx, Rh, bw, br, h, h_out, v, zoneout_prob, zoneout_mask, nullptr,
         nullptr, nullptr, nullptr, nullptr);
 }
 
 template <typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
 __global__ void PointwiseOperations(int steps_idx, const int batch_dim, const int hidden_dim,
-                                    const T *Wx, const T *Rh, const T *bx, const T *br, const T *h,
+                                    const T *Wx, const T *Rh, const T *bw, const T *br, const T *h,
                                     T *h_out, T *v, const T zoneout_prob, const T *zoneout_mask,
-                                    T *z_pres, T *r_pres, T *g_pres, T *Wx_add_bx_, T *Rh_add_br_) {
+                                    T *z_pres, T *r_pres, T *g_pres, T *Wx_add_bw_, T *Rh_add_br_) {
     op::PointwiseOperations<T, Training, ApplyZoneout, Calibration>(
-        steps_idx, batch_dim, hidden_dim, Wx, Rh, bx, br, h, h_out, v, zoneout_prob, zoneout_mask,
-        z_pres, r_pres, g_pres, Wx_add_bx_, Rh_add_br_);
+        steps_idx, batch_dim, hidden_dim, Wx, Rh, bw, br, h, h_out, v, zoneout_prob, zoneout_mask,
+        z_pres, r_pres, g_pres, Wx_add_bw_, Rh_add_br_);
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
 
 template <typename T, bool Training, bool ApplyZoneout, bool Calibration = false>
 __global__ void PointwiseOperations(const int batch_dim, const int hidden_dim, const half *Wx,
-                                    const half *Rh, const half *bx, const half *br, const half *h,
+                                    const half *Rh, const half *bw, const half *br, const half *h,
                                     half *h_out, half *v, const half zoneout_prob,
                                     const half *zoneout_mask) {
     device_assert_fail("FP16 is not supported on compute capability < 7.0.");
@@ -209,7 +209,7 @@ ForwardPass<T>::~ForwardPass() {
 template <typename T>
 void ForwardPass<T>::Iterate(const T *W,   // [C,H*3]
                              const T *R,   // [H,H*3]
-                             const T *bx,  // [H*3]
+                             const T *bw,  // [H*3]
                              const T *br,  // [H*3]
                              const T *x,   // [N,C]
                              const T *h,   // [N,H]
@@ -239,7 +239,7 @@ void ForwardPass<T>::Iterate(const T *W,   // [C,H*3]
                   &alpha, W, hidden_size * 3, x, input_size, &beta, tmp_Wx, hidden_size * 3);
     cudaEventRecord(event, stream2);
 
-    IterateInternal(0, R, bx, br, h, h_out, v, tmp_Wx, tmp_Rh, zoneout_prob, zoneout_mask);
+    IterateInternal(0, R, bw, br, h, h_out, v, tmp_Wx, tmp_Rh, zoneout_prob, zoneout_mask);
 
     cublasSetStream(blas_handle, save_stream);
 }
@@ -247,7 +247,7 @@ void ForwardPass<T>::Iterate(const T *W,   // [C,H*3]
 template <typename T>
 void ForwardPass<T>::IterateInternal(int steps_idx,
                                      const T *R,   // [H,H*3]
-                                     const T *bx,  // [H*3]
+                                     const T *bw,  // [H*3]
                                      const T *br,  // [H*3]
                                      const T *h,   // [N,H]
                                      T *h_out,     // [N,H]
@@ -304,14 +304,14 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
         const int offset_3 = steps_idx * batch_size * hidden_size * 3;
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, true, true, true><<<gridDim, blockDim, 0, stream1>>>(
-                steps_idx, batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br, h, h_out, v,
+                steps_idx, batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br, h, h_out, v,
                 zoneout_prob, zoneout_mask, z_pres_.data() + offset, r_pres_.data() + offset,
-                g_pres_.data() + offset, Wx_add_bx_.data() + offset_3, Rh_add_br_.data() + offset_3);
+                g_pres_.data() + offset, Wx_add_bw_.data() + offset_3, Rh_add_br_.data() + offset_3);
         } else {
             PointwiseOperations<T, true, false, true><<<gridDim, blockDim, 0, stream1>>>(
-                steps_idx, batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br, h, h_out, v, 0.0f,
+                steps_idx, batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br, h, h_out, v, 0.0f,
                 nullptr, z_pres_.data() + offset, r_pres_.data() + offset, g_pres_.data() + offset,
-                Wx_add_bx_.data() + offset_3, Rh_add_br_.data() + offset_3);
+                Wx_add_bw_.data() + offset_3, Rh_add_br_.data() + offset_3);
         }
         return;
     }
@@ -319,20 +319,20 @@ void ForwardPass<T>::IterateInternal(int steps_idx,
     if (training) {
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, true, true>
-                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br,
+                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br,
                                                     h, h_out, v, zoneout_prob, zoneout_mask);
         } else {
             PointwiseOperations<T, true, false><<<gridDim, blockDim, 0, stream1>>>(
-                batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br, h, h_out, v, 0.0f, nullptr);
+                batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br, h, h_out, v, 0.0f, nullptr);
         }
     } else {
         if (zoneout_prob && zoneout_mask) {
             PointwiseOperations<T, false, true>
-                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br,
+                <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br,
                                                     h, h_out, nullptr, zoneout_prob, zoneout_mask);
         } else {
             PointwiseOperations<T, false, false><<<gridDim, blockDim, 0, stream1>>>(
-                batch_size, hidden_size, tmp_Wx, tmp_Rh, bx, br, h, h_out, nullptr, 0.0f, nullptr);
+                batch_size, hidden_size, tmp_Wx, tmp_Rh, bw, br, h, h_out, nullptr, 0.0f, nullptr);
         }
     }
 }
@@ -343,7 +343,7 @@ template <typename T>
 void ForwardPass<T>::Run(const int steps,
                          const T *W,   // [C,H*3]
                          const T *R,   // [H,H*3]
-                         const T *bx,  // [H*3]
+                         const T *bw,  // [H*3]
                          const T *br,  // [H*3]
                          const T *x,   // [N,C]
                          T *h,         // [N,H]
@@ -370,9 +370,9 @@ void ForwardPass<T>::Run(const int steps,
         z_pres_.resize(size);
         r_pres_.resize(size);
         g_pres_.resize(size);
-        // Wx_add_bx_ 和 Rh_add_br_ 使用与 tmp_Wx/tmp_Rh 相同的布局: [steps * batch, hidden * 3]
+        // Wx_add_bw_ 和 Rh_add_br_ 使用与 tmp_Wx/tmp_Rh 相同的布局: [steps * batch, hidden * 3]
         const size_t size_3 = steps * batch_size * hidden_size * 3;
-        Wx_add_bx_.resize(size_3);
+        Wx_add_bw_.resize(size_3);
         Rh_add_br_.resize(size_3);
     }
 
@@ -403,7 +403,7 @@ void ForwardPass<T>::Run(const int steps,
     const int NH = batch_size * hidden_size;
     for (int i = 0; i < steps; ++i) {
         const int Rh_offset = calibration_mode_ ? i * NH * 3 : 0;
-        IterateInternal(i, R, bx, br, h + i * NH, h + (i + 1) * NH, v + i * NH * 4,
+        IterateInternal(i, R, bw, br, h + i * NH, h + (i + 1) * NH, v + i * NH * 4,
                         tmp_Wx + i * NH * 3, tmp_Rh + Rh_offset, zoneout_prob,
                         zoneout_mask ? zoneout_mask + i * NH : nullptr);
         //        break;

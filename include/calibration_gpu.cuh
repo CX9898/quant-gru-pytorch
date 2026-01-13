@@ -258,7 +258,7 @@ struct GRUGPUHistogramCollectors {
     // 权重（per-channel）- 使用批量结构，共享连续内存
     PerChannelHistogramBatch W_batch;
     PerChannelHistogramBatch R_batch;
-    PerChannelHistogramBatch bx_batch;
+    PerChannelHistogramBatch bw_batch;
     PerChannelHistogramBatch br_batch;
 
     GRUGPUHistogramCollectors() = default;
@@ -292,7 +292,7 @@ struct GRUGPUHistogramCollectors {
         int channel_size = hidden_ * 3;
         W_batch.reset(channel_size, num_bins_);
         R_batch.reset(channel_size, num_bins_);
-        bx_batch.reset(channel_size, num_bins_);
+        bw_batch.reset(channel_size, num_bins_);
         br_batch.reset(channel_size, num_bins_);
     }
 
@@ -514,12 +514,12 @@ struct GRUQuantizationRanges;  // 前向声明
  * @param hidden_size 隐藏层维度
  * @param W 输入权重 [I, H*3]（GPU 端）
  * @param R 隐藏权重 [H, H*3]（GPU 端）
- * @param bx 输入偏置 [H*3]（GPU 端）
+ * @param bw 输入偏置 [H*3]（GPU 端）
  * @param br 隐藏偏置 [H*3]（GPU 端）
  * @param x 输入序列 [T, B, I]（GPU 端）
  * @param h 隐藏状态 [(T+1), B, H]（GPU 端）
  * @param v 中间值 [T, B, H*4]（GPU 端）
- * @param Wx_add_bx Wx+bx 计算结果 [T, B, H*3]（GPU 端）
+ * @param Wx_add_bw Wx+bw 计算结果 [T, B, H*3]（GPU 端）
  * @param Rh_add_br Rh+br 计算结果 [T, B, H*3]（GPU 端）
  * @param z_pres z 门预激活值 [T*B*H]（GPU 端）
  * @param r_pres r 门预激活值 [T*B*H]（GPU 端）
@@ -530,9 +530,9 @@ struct GRUQuantizationRanges;  // 前向声明
  */
 void updateGRUQuantizationRangesGPU(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float* W, const float* R, const float* bx, const float* br,
+    const float* W, const float* R, const float* bw, const float* br,
     const float* x, const float* h, const float* v,
-    const float* Wx_add_bx, const float* Rh_add_br,
+    const float* Wx_add_bw, const float* Rh_add_br,
     const float* z_pres, const float* r_pres, const float* g_pres,
     size_t pres_size,
     GRUQuantizationRanges& quant_ranges,

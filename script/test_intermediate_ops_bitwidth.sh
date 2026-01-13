@@ -1,17 +1,17 @@
 #!/bin/bash
 # 中间运算算子位宽及对称配置测试脚本
 # 测试内容：
-# 1. GEMM 结果位宽: Wx_, Rh_
-# 2. 偏置位宽: bx_, br_
-# 3. 中间运算位宽: Rh_add_br_, rRh_, old_contrib_, new_contrib_
+# 1. GEMM 结果位宽: weight_ih_linear_, weight_hh_linear_
+# 2. 偏置位宽: bw_, br_
+# 3. 中间运算位宽: weight_hh_linear_add_br_, mul_reset_hidden_, mul_old_contribution_, mul_new_contribution_
 # 4. 各算子的对称配置
 # 5. 不同位宽和对称组合对精度的影响
 #
 # 配置变量说明：
-#   GEMM结果类:    Wx_, Rh_               (W@x 和 R@h 的结果)
-#   偏置类:        bx_, br_               (输入偏置和循环偏置)
-#   中间运算类:    Rh_add_br_, rRh_       (Rh+br 和 r×Rh)
-#                  old_contrib_, new_contrib_ (z×h[t-1] 和 (1-z)×g)
+#   GEMM结果类:    weight_ih_linear_, weight_hh_linear_               (W@x 和 R@h 的结果)
+#   偏置类:        bw_, br_               (输入偏置和循环偏置)
+#   中间运算类:    weight_hh_linear_add_br_, mul_reset_hidden_       (weight_hh_linear+br 和 r×weight_hh_linear)
+#                  mul_old_contribution_, mul_new_contribution_ (z×h[t-1] 和 (1-z)×g)
 
 set -e
 
@@ -33,7 +33,7 @@ echo "测试时间: $(date)" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
 # CSV 头
-echo "config_name,x,h,W,R,Wx,Rh,bx,br,Rh_add_br,rRh,old_contrib,new_contrib,Wx_sym,Rh_sym,Rh_add_br_sym,rRh_sym,old_contrib_sym,new_contrib_sym,mse,cosine_similarity" > "$CSV_FILE"
+echo "config_name,x,h,W,R,weight_ih_linear,weight_hh_linear,bx,br,weight_hh_linear_add_br,mul_reset_hidden,old_contrib,new_contrib,weight_ih_linear_sym,weight_hh_linear_sym,weight_hh_linear_add_br_sym,mul_reset_hidden_sym,mul_old_contribution_sym,mul_new_contribution_sym,mse,cosine_similarity" > "$CSV_FILE"
 
 # 计数器
 TEST_COUNT=0
@@ -59,127 +59,127 @@ modify_core_bitwidth() {
     sed -i "s/R_{[0-9]*, [a-z]*}/R_{${R_bits}, false}/g" "$CONFIG_FILE"
 }
 
-# 函数：修改 GEMM 结果位宽 (Wx_, Rh_)
+# 函数：修改 GEMM 结果位宽 (weight_ih_linear_, weight_hh_linear_)
 # 注意：GEMM 结果应该是有符号的 (false)，因为权重和输入都可能是负的
 modify_gemm_bitwidth() {
-    local Wx_bits=$1
-    local Rh_bits=$2
+    local weight_ih_linear_bits=$1
+    local weight_hh_linear_bits=$2
     
-    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${Wx_bits}, false}/g" "$CONFIG_FILE"
-    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${Rh_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/weight_ih_linear_{[0-9]*, [a-z]*}/weight_ih_linear_{${weight_ih_linear_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/weight_hh_linear_{[0-9]*, [a-z]*}/weight_hh_linear_{${weight_hh_linear_bits}, false}/g" "$CONFIG_FILE"
 }
 
-# 函数：修改偏置位宽 (bx_, br_)
+# 函数：修改偏置位宽 (bw_, br_)
 # 注意：偏置应该是有符号的 (false)
 modify_bias_bitwidth() {
-    local bx_bits=$1
+    local bw_bits=$1
     local br_bits=$2
     
-    sed -i "s/bx_{[0-9]*, [a-z]*}/bx_{${bx_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/bw_{[0-9]*, [a-z]*}/bw_{${bw_bits}, false}/g" "$CONFIG_FILE"
     sed -i "s/br_{[0-9]*, [a-z]*}/br_{${br_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改中间运算位宽
 # 注意：中间运算结果应该是有符号的 (false)
 modify_intermediate_bitwidth() {
-    local Rh_add_br_bits=$1
-    local rRh_bits=$2
-    local old_contrib_bits=$3
-    local new_contrib_bits=$4
+    local weight_hh_linear_add_br_bits=$1
+    local mul_reset_hidden_bits=$2
+    local mul_old_contribution_bits=$3
+    local mul_new_contribution_bits=$4
     
-    sed -i "s/Rh_add_br_{[0-9]*, [a-z]*}/Rh_add_br_{${Rh_add_br_bits}, false}/g" "$CONFIG_FILE"
-    sed -i "s/rRh_{[0-9]*, [a-z]*}/rRh_{${rRh_bits}, false}/g" "$CONFIG_FILE"
-    sed -i "s/old_contrib_{[0-9]*, [a-z]*}/old_contrib_{${old_contrib_bits}, false}/g" "$CONFIG_FILE"
-    sed -i "s/new_contrib_{[0-9]*, [a-z]*}/new_contrib_{${new_contrib_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/weight_hh_linear_add_br_{[0-9]*, [a-z]*}/weight_hh_linear_add_br_{${weight_hh_linear_add_br_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/mul_reset_hidden_{[0-9]*, [a-z]*}/mul_reset_hidden_{${mul_reset_hidden_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/mul_old_contribution_{[0-9]*, [a-z]*}/mul_old_contribution_{${mul_old_contribution_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/mul_new_contribution_{[0-9]*, [a-z]*}/mul_new_contribution_{${mul_new_contribution_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：修改 GEMM 结果对称配置
 modify_gemm_symmetric() {
-    local Wx_sym=$1
-    local Rh_sym=$2
+    local weight_ih_linear_sym=$1
+    local weight_hh_linear_sym=$2
     
-    sed -i "s/bool Wx_symmetric_ = [a-z]*;/bool Wx_symmetric_ = ${Wx_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool Rh_symmetric_ = [a-z]*;/bool Rh_symmetric_ = ${Rh_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool weight_ih_linear_symmetric_ = [a-z]*;/bool weight_ih_linear_symmetric_ = ${weight_ih_linear_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool weight_hh_linear_symmetric_ = [a-z]*;/bool weight_hh_linear_symmetric_ = ${weight_hh_linear_sym};/" "$CONFIG_FILE"
 }
 
 # 函数：修改中间运算对称配置
 modify_intermediate_symmetric() {
-    local Rh_add_br_sym=$1
-    local rRh_sym=$2
-    local old_contrib_sym=$3
-    local new_contrib_sym=$4
+    local weight_hh_linear_add_br_sym=$1
+    local mul_reset_hidden_sym=$2
+    local mul_old_contribution_sym=$3
+    local mul_new_contribution_sym=$4
     
-    sed -i "s/bool Rh_add_br_symmetric_ = [a-z]*;/bool Rh_add_br_symmetric_ = ${Rh_add_br_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool rRh_symmetric_ = [a-z]*;/bool rRh_symmetric_ = ${rRh_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool old_contrib_symmetric_ = [a-z]*;/bool old_contrib_symmetric_ = ${old_contrib_sym};/" "$CONFIG_FILE"
-    sed -i "s/bool new_contrib_symmetric_ = [a-z]*;/bool new_contrib_symmetric_ = ${new_contrib_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool weight_hh_linear_add_br_symmetric_ = [a-z]*;/bool weight_hh_linear_add_br_symmetric_ = ${weight_hh_linear_add_br_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool mul_reset_hidden_symmetric_ = [a-z]*;/bool mul_reset_hidden_symmetric_ = ${mul_reset_hidden_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool mul_old_contribution_symmetric_ = [a-z]*;/bool mul_old_contribution_symmetric_ = ${mul_old_contribution_sym};/" "$CONFIG_FILE"
+    sed -i "s/bool mul_new_contribution_symmetric_ = [a-z]*;/bool mul_new_contribution_symmetric_ = ${mul_new_contribution_sym};/" "$CONFIG_FILE"
 }
 
 # 函数：设置所有位宽配置
-# 参数顺序: x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+# 参数顺序: x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
 set_all_bitwidth() {
     local x=$1
     local h=$2
     local W=$3
     local R=$4
-    local Wx=$5
-    local Rh=$6
+    local weight_ih_linear=$5
+    local weight_hh_linear=$6
     local bx=$7
     local br=$8
-    local Rh_add_br=$9
-    local rRh=${10}
+    local weight_hh_linear_add_br=$9
+    local mul_reset_hidden=${10}
     local old_contrib=${11}
     local new_contrib=${12}
     
     modify_core_bitwidth $x $h $W $R
-    modify_gemm_bitwidth $Wx $Rh
+    modify_gemm_bitwidth $weight_ih_linear $weight_hh_linear
     modify_bias_bitwidth $bx $br
-    modify_intermediate_bitwidth $Rh_add_br $rRh $old_contrib $new_contrib
+    modify_intermediate_bitwidth $weight_hh_linear_add_br $mul_reset_hidden $old_contrib $new_contrib
 }
 
 # 函数：设置所有对称配置
 set_all_symmetric() {
-    local Wx_sym=$1
-    local Rh_sym=$2
-    local Rh_add_br_sym=$3
-    local rRh_sym=$4
-    local old_contrib_sym=$5
-    local new_contrib_sym=$6
+    local weight_ih_linear_sym=$1
+    local weight_hh_linear_sym=$2
+    local weight_hh_linear_add_br_sym=$3
+    local mul_reset_hidden_sym=$4
+    local mul_old_contribution_sym=$5
+    local mul_new_contribution_sym=$6
     
-    modify_gemm_symmetric $Wx_sym $Rh_sym
-    modify_intermediate_symmetric $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
+    modify_gemm_symmetric $weight_ih_linear_sym $weight_hh_linear_sym
+    modify_intermediate_symmetric $weight_hh_linear_add_br_sym $mul_reset_hidden_sym $mul_old_contribution_sym $mul_new_contribution_sym
 }
 
 # 函数：编译并运行测试
-# 参数顺序: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym
+# 参数顺序: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib weight_ih_linear_sym weight_hh_linear_sym weight_hh_linear_add_br_sym mul_reset_hidden_sym mul_old_contribution_sym mul_new_contribution_sym
 run_test() {
     local config_name=$1
     local x=$2
     local h=$3
     local W=$4
     local R=$5
-    local Wx=$6
-    local Rh=$7
+    local weight_ih_linear=$6
+    local weight_hh_linear=$7
     local bx=$8
     local br=$9
-    local Rh_add_br=${10}
-    local rRh=${11}
+    local weight_hh_linear_add_br=${10}
+    local mul_reset_hidden=${11}
     local old_contrib=${12}
     local new_contrib=${13}
-    local Wx_sym=${14}
-    local Rh_sym=${15}
-    local Rh_add_br_sym=${16}
-    local rRh_sym=${17}
-    local old_contrib_sym=${18}
-    local new_contrib_sym=${19}
+    local weight_ih_linear_sym=${14}
+    local weight_hh_linear_sym=${15}
+    local weight_hh_linear_add_br_sym=${16}
+    local mul_reset_hidden_sym=${17}
+    local mul_old_contribution_sym=${18}
+    local mul_new_contribution_sym=${19}
     
     TEST_COUNT=$((TEST_COUNT + 1))
     
     echo "[$TEST_COUNT/$TOTAL_TESTS] 测试: $config_name"
     
     # 设置配置
-    set_all_bitwidth $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib
-    set_all_symmetric $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
+    set_all_bitwidth $x $h $W $R $weight_ih_linear $weight_hh_linear $bx $br $weight_hh_linear_add_br $mul_reset_hidden $old_contrib $new_contrib
+    set_all_symmetric $weight_ih_linear_sym $weight_hh_linear_sym $weight_hh_linear_add_br_sym $mul_reset_hidden_sym $mul_old_contribution_sym $mul_new_contribution_sym
     
     # 重新编译（静默模式）
     cd "$BUILD_DIR"
@@ -188,7 +188,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 编译失败" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$x,$h,$W,$R,$weight_ih_linear,$weight_hh_linear,$bx,$br,$weight_hh_linear_add_br,$mul_reset_hidden,$old_contrib,$new_contrib,$weight_ih_linear_sym,$weight_hh_linear_sym,$weight_hh_linear_add_br_sym,$mul_reset_hidden_sym,$mul_old_contribution_sym,$mul_new_contribution_sym,COMPILE_ERROR,COMPILE_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -207,7 +207,7 @@ run_test() {
         echo "配置: $config_name" >> "$RESULT_FILE"
         echo "  状态: 运行失败 - $error_msg" >> "$RESULT_FILE"
         echo "" >> "$RESULT_FILE"
-        echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
+        echo "$config_name,$x,$h,$W,$R,$weight_ih_linear,$weight_hh_linear,$bx,$br,$weight_hh_linear_add_br,$mul_reset_hidden,$old_contrib,$new_contrib,$weight_ih_linear_sym,$weight_hh_linear_sym,$weight_hh_linear_add_br_sym,$mul_reset_hidden_sym,$mul_old_contribution_sym,$mul_new_contribution_sym,RUNTIME_ERROR,RUNTIME_ERROR" >> "$CSV_FILE"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         return
     fi
@@ -257,49 +257,49 @@ run_test() {
     # 记录到结果文件
     echo "配置: $config_name" >> "$RESULT_FILE"
     echo "  核心位宽: x=$x, h=$h, W=$W, R=$R" >> "$RESULT_FILE"
-    echo "  中间位宽: Wx=$Wx, Rh=$Rh, bx=$bx, br=$br" >> "$RESULT_FILE"
-    echo "            Rh_add_br=$Rh_add_br, rRh=$rRh, old_contrib=$old_contrib, new_contrib=$new_contrib" >> "$RESULT_FILE"
-    echo "  对称: Wx=$Wx_sym, Rh=$Rh_sym, Rh_add_br=$Rh_add_br_sym, rRh=$rRh_sym" >> "$RESULT_FILE"
-    echo "        old_contrib=$old_contrib_sym, new_contrib=$new_contrib_sym" >> "$RESULT_FILE"
+    echo "  中间位宽: weight_ih_linear=$weight_ih_linear, weight_hh_linear=$weight_hh_linear, bx=$bx, br=$br" >> "$RESULT_FILE"
+    echo "            weight_hh_linear_add_br=$weight_hh_linear_add_br, mul_reset_hidden=$mul_reset_hidden, old_contrib=$old_contrib, new_contrib=$new_contrib" >> "$RESULT_FILE"
+    echo "  对称: weight_ih_linear=$weight_ih_linear_sym, weight_hh_linear=$weight_hh_linear_sym, weight_hh_linear_add_br=$weight_hh_linear_add_br_sym, mul_reset_hidden=$mul_reset_hidden_sym" >> "$RESULT_FILE"
+    echo "        old_contrib=$mul_old_contribution_sym, new_contrib=$mul_new_contribution_sym" >> "$RESULT_FILE"
     echo "  MSE: $mse, Cosine Similarity: $cos" >> "$RESULT_FILE"
     echo "" >> "$RESULT_FILE"
     
     # 记录到 CSV
-    echo "$config_name,$x,$h,$W,$R,$Wx,$Rh,$bx,$br,$Rh_add_br,$rRh,$old_contrib,$new_contrib,$Wx_sym,$Rh_sym,$Rh_add_br_sym,$rRh_sym,$old_contrib_sym,$new_contrib_sym,$mse,$cos" >> "$CSV_FILE"
+    echo "$config_name,$x,$h,$W,$R,$weight_ih_linear,$weight_hh_linear,$bx,$br,$weight_hh_linear_add_br,$mul_reset_hidden,$old_contrib,$new_contrib,$weight_ih_linear_sym,$weight_hh_linear_sym,$weight_hh_linear_add_br_sym,$mul_reset_hidden_sym,$mul_old_contribution_sym,$mul_new_contribution_sym,$mse,$cos" >> "$CSV_FILE"
 }
 
 # 简化版 run_test（位宽测试，对称全部使用默认 false）
-# 参数顺序: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+# 参数顺序: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
 run_bitwidth_test() {
     local config_name=$1
     local x=$2
     local h=$3
     local W=$4
     local R=$5
-    local Wx=$6
-    local Rh=$7
+    local weight_ih_linear=$6
+    local weight_hh_linear=$7
     local bx=$8
     local br=$9
-    local Rh_add_br=${10}
-    local rRh=${11}
+    local weight_hh_linear_add_br=${10}
+    local mul_reset_hidden=${11}
     local old_contrib=${12}
     local new_contrib=${13}
     
-    run_test "$config_name" $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old_contrib $new_contrib false false false false false false
+    run_test "$config_name" $x $h $W $R $weight_ih_linear $weight_hh_linear $bx $br $weight_hh_linear_add_br $mul_reset_hidden $old_contrib $new_contrib false false false false false false
 }
 
 # 简化版 run_test（对称测试，位宽全部使用 16 位）
 run_symmetric_test() {
     local config_name=$1
-    local Wx_sym=$2
-    local Rh_sym=$3
-    local Rh_add_br_sym=$4
-    local rRh_sym=$5
-    local old_contrib_sym=$6
-    local new_contrib_sym=$7
+    local weight_ih_linear_sym=$2
+    local weight_hh_linear_sym=$3
+    local weight_hh_linear_add_br_sym=$4
+    local mul_reset_hidden_sym=$5
+    local mul_old_contribution_sym=$6
+    local mul_new_contribution_sym=$7
     
-    # x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
-    run_test "$config_name" 16 16 16 16 16 16 16 16 16 16 16 16 $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
+    # x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
+    run_test "$config_name" 16 16 16 16 16 16 16 16 16 16 16 16 $weight_ih_linear_sym $weight_hh_linear_sym $weight_hh_linear_add_br_sym $mul_reset_hidden_sym $mul_old_contribution_sym $mul_new_contribution_sym
 }
 
 # ==================== 开始测试 ====================
@@ -348,7 +348,7 @@ echo "==================== 第一部分：8-16位完整基准测试 ============
 set_all_symmetric false false false false false false
 
 # 测试 8-16 位之间所有位宽（所有算子位宽统一）
-# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+# 参数: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
 for bits in "${BITWIDTHS_8_TO_16[@]}"; do
     run_bitwidth_test "BASELINE_INT${bits}" $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits $bits
 done
@@ -371,27 +371,27 @@ done
 
 # ==================== 第二部分：GEMM 结果位宽测试 ====================
 echo ""
-echo "==================== 第二部分：GEMM 结果位宽测试 (Wx_, Rh_) ===================="
+echo "==================== 第二部分：GEMM 结果位宽测试 (weight_ih_linear_, weight_hh_linear_) ===================="
 echo ""
 echo "==================== 第二部分：GEMM 结果位宽测试 ====================" >> "$RESULT_FILE"
 
 # 核心位宽固定为 8 位，测试 GEMM 结果的不同组合
-# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
-for Wx in "${BITWIDTHS_STANDARD[@]}"; do
-    for Rh in "${BITWIDTHS_STANDARD[@]}"; do
-        config_name="GEMM_Wx${Wx}_Rh${Rh}"
-        run_bitwidth_test "$config_name" 8 8 8 8 $Wx $Rh 8 8 8 8 8 8
+# 参数: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
+for weight_ih_linear in "${BITWIDTHS_STANDARD[@]}"; do
+    for weight_hh_linear in "${BITWIDTHS_STANDARD[@]}"; do
+        config_name="GEMM_Wx${weight_ih_linear}_Rh${weight_hh_linear}"
+        run_bitwidth_test "$config_name" 8 8 8 8 $weight_ih_linear $weight_hh_linear 8 8 8 8 8 8
     done
 done
 
 # ==================== 第三部分：偏置位宽测试 ====================
 echo ""
-echo "==================== 第三部分：偏置位宽测试 (bx_, br_) ===================="
+echo "==================== 第三部分：偏置位宽测试 (bw_, br_) ===================="
 echo ""
 echo "==================== 第三部分：偏置位宽测试 ====================" >> "$RESULT_FILE"
 
 # 核心位宽固定为 8 位，测试偏置的不同组合
-# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+# 参数: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
 for bx in "${BITWIDTHS_STANDARD[@]}"; do
     for br in "${BITWIDTHS_STANDARD[@]}"; do
         config_name="BIAS_bx${bx}_br${br}"
@@ -406,15 +406,15 @@ echo ""
 echo "==================== 第四部分：中间运算位宽单独测试 ====================" >> "$RESULT_FILE"
 
 # 每个中间算子单独升级到不同位宽
-# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
-run_bitwidth_test "INTER_Rh_add_br_4" 8 8 8 8 8 8 8 8 4 8 8 8
-run_bitwidth_test "INTER_Rh_add_br_16" 8 8 8 8 8 8 8 8 16 8 8 8
-run_bitwidth_test "INTER_rRh_4" 8 8 8 8 8 8 8 8 8 4 8 8
-run_bitwidth_test "INTER_rRh_16" 8 8 8 8 8 8 8 8 8 16 8 8
-run_bitwidth_test "INTER_old_contrib_4" 8 8 8 8 8 8 8 8 8 8 4 8
-run_bitwidth_test "INTER_old_contrib_16" 8 8 8 8 8 8 8 8 8 8 16 8
-run_bitwidth_test "INTER_new_contrib_4" 8 8 8 8 8 8 8 8 8 8 8 4
-run_bitwidth_test "INTER_new_contrib_16" 8 8 8 8 8 8 8 8 8 8 8 16
+# 参数: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
+run_bitwidth_test "INTER_weight_hh_linear_4" 8 8 8 8 8 8 8 8 4 8 8 8
+run_bitwidth_test "INTER_weight_hh_linear_16" 8 8 8 8 8 8 8 8 16 8 8 8
+run_bitwidth_test "INTER_mul_reset_hidden_4" 8 8 8 8 8 8 8 8 8 4 8 8
+run_bitwidth_test "INTER_mul_reset_hidden_16" 8 8 8 8 8 8 8 8 8 16 8 8
+run_bitwidth_test "INTER_mul_old_contribution_4" 8 8 8 8 8 8 8 8 8 8 4 8
+run_bitwidth_test "INTER_mul_old_contribution_16" 8 8 8 8 8 8 8 8 8 8 16 8
+run_bitwidth_test "INTER_mul_new_contribution_4" 8 8 8 8 8 8 8 8 8 8 8 4
+run_bitwidth_test "INTER_mul_new_contribution_16" 8 8 8 8 8 8 8 8 8 8 8 16
 
 # ==================== 第五部分：关键路径位宽测试 ====================
 echo ""
@@ -422,7 +422,7 @@ echo "==================== 第五部分：关键路径位宽测试 =============
 echo ""
 echo "==================== 第五部分：关键路径位宽测试 ====================" >> "$RESULT_FILE"
 
-# 参数: config_name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib
+# 参数: config_name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib
 
 # GEMM 16 位，中间运算 8 位
 run_bitwidth_test "PATH_GEMM16_INTER8" 8 8 8 8 16 16 8 8 8 8 8 8
@@ -433,13 +433,13 @@ run_bitwidth_test "PATH_GEMM8_INTER16" 8 8 8 8 8 8 8 8 16 16 16 16
 # 偏置 16 位，其他 8 位
 run_bitwidth_test "PATH_BIAS16" 8 8 8 8 8 8 16 16 8 8 8 8
 
-# 候选门路径 (Rh_add_br -> rRh) 16 位
+# 候选门路径 (weight_hh_linear_add_br -> mul_reset_hidden) 16 位
 run_bitwidth_test "PATH_CANDIDATE_16" 8 8 8 8 8 16 8 16 16 16 8 8
 
 # 输出路径 (old_contrib, new_contrib) 16 位
 run_bitwidth_test "PATH_OUTPUT_16" 8 8 8 8 8 8 8 8 8 8 16 16
 
-# Rh 相关路径全 16 位 (Rh, br, Rh_add_br, rRh)
+# weight_hh_linear 相关路径全 16 位 (weight_hh_linear, br, weight_hh_linear_add_br, mul_reset_hidden)
 run_bitwidth_test "PATH_RH_CHAIN_16" 8 8 8 8 8 16 8 16 16 16 8 8
 
 # 混合：GEMM 16 位 + 输出路径 16 位
@@ -467,22 +467,22 @@ echo ""
 echo "==================== 第六部分：对称配置测试 ====================" >> "$RESULT_FILE"
 
 # 枚举所有 64 种对称配置（6 个布尔变量）
-for Wx_sym in "${SYMMETRICS[@]}"; do
-    for Rh_sym in "${SYMMETRICS[@]}"; do
-        for Rh_add_br_sym in "${SYMMETRICS[@]}"; do
-            for rRh_sym in "${SYMMETRICS[@]}"; do
-                for old_contrib_sym in "${SYMMETRICS[@]}"; do
-                    for new_contrib_sym in "${SYMMETRICS[@]}"; do
+for weight_ih_linear_sym in "${SYMMETRICS[@]}"; do
+    for weight_hh_linear_sym in "${SYMMETRICS[@]}"; do
+        for weight_hh_linear_add_br_sym in "${SYMMETRICS[@]}"; do
+            for mul_reset_hidden_sym in "${SYMMETRICS[@]}"; do
+                for mul_old_contribution_sym in "${SYMMETRICS[@]}"; do
+                    for mul_new_contribution_sym in "${SYMMETRICS[@]}"; do
                         # 将 true/false 转为 T/F 用于命名
-                        Wx_s=$([ "$Wx_sym" = "true" ] && echo "T" || echo "F")
-                        Rh_s=$([ "$Rh_sym" = "true" ] && echo "T" || echo "F")
-                        Rh_add_br_s=$([ "$Rh_add_br_sym" = "true" ] && echo "T" || echo "F")
-                        rRh_s=$([ "$rRh_sym" = "true" ] && echo "T" || echo "F")
-                        old_s=$([ "$old_contrib_sym" = "true" ] && echo "T" || echo "F")
-                        new_s=$([ "$new_contrib_sym" = "true" ] && echo "T" || echo "F")
+                        weight_ih_linear_s=$([ "$weight_ih_linear_sym" = "true" ] && echo "T" || echo "F")
+                        weight_hh_linear_s=$([ "$weight_hh_linear_sym" = "true" ] && echo "T" || echo "F")
+                        weight_hh_linear_add_br_s=$([ "$weight_hh_linear_add_br_sym" = "true" ] && echo "T" || echo "F")
+                        mul_reset_hidden_s=$([ "$mul_reset_hidden_sym" = "true" ] && echo "T" || echo "F")
+                        old_s=$([ "$mul_old_contribution_sym" = "true" ] && echo "T" || echo "F")
+                        new_s=$([ "$mul_new_contribution_sym" = "true" ] && echo "T" || echo "F")
                         
-                        config_name="SYM_${Wx_s}${Rh_s}_${Rh_add_br_s}${rRh_s}_${old_s}${new_s}"
-                        run_symmetric_test "$config_name" $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_contrib_sym $new_contrib_sym
+                        config_name="SYM_${weight_ih_linear_s}${weight_hh_linear_s}_${weight_hh_linear_add_br_s}${mul_reset_hidden_s}_${old_s}${new_s}"
+                        run_symmetric_test "$config_name" $weight_ih_linear_sym $weight_hh_linear_sym $weight_hh_linear_add_br_sym $mul_reset_hidden_sym $mul_old_contribution_sym $mul_new_contribution_sym
                     done
                 done
             done
@@ -497,7 +497,7 @@ echo ""
 echo "==================== 第七部分：典型组合测试 ====================" >> "$RESULT_FILE"
 
 # 典型组合测试
-# 格式: x h W R Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name
+# 格式: x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old new weight_ih_linear_sym weight_hh_linear_sym weight_hh_linear_add_br_sym mul_reset_hidden_sym old_sym new_sym name
 TYPICAL_CONFIGS=(
     # 全 8 位 + 不同对称配置
     "8 8 8 8 8 8 8 8 8 8 8 8 false false false false false false FULL8_ASYM"
@@ -531,9 +531,9 @@ TYPICAL_CONFIGS=(
 )
 
 for config in "${TYPICAL_CONFIGS[@]}"; do
-    read -r x h W R Wx Rh bx br Rh_add_br rRh old new Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_sym new_sym name <<< "$config"
+    read -r x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old new weight_ih_linear_sym weight_hh_linear_sym weight_hh_linear_add_br_sym mul_reset_hidden_sym old_sym new_sym name <<< "$config"
     config_name="COMBO_${name}"
-    run_test "$config_name" $x $h $W $R $Wx $Rh $bx $br $Rh_add_br $rRh $old $new $Wx_sym $Rh_sym $Rh_add_br_sym $rRh_sym $old_sym $new_sym
+    run_test "$config_name" $x $h $W $R $weight_ih_linear $weight_hh_linear $bx $br $weight_hh_linear_add_br $mul_reset_hidden $old $new $weight_ih_linear_sym $weight_hh_linear_sym $weight_hh_linear_add_br_sym $mul_reset_hidden_sym $old_sym $new_sym
 done
 
 # 恢复原始配置
@@ -616,7 +616,7 @@ if [ $FAIL_COUNT -gt 0 ]; then
     done
     # 显示精度不达标的配置
     FAIL_IDX=0
-    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name x h W R Wx Rh bx br Rh_add_br rRh old_contrib new_contrib Wx_sym Rh_sym Rh_add_br_sym rRh_sym old_contrib_sym new_contrib_sym mse cos; do
+    tail -n +2 "$CSV_FILE" | grep -v "ERROR" | while IFS=',' read -r name x h W R weight_ih_linear weight_hh_linear bx br weight_hh_linear_add_br mul_reset_hidden old_contrib new_contrib weight_ih_linear_sym weight_hh_linear_sym weight_hh_linear_add_br_sym mul_reset_hidden_sym mul_old_contribution_sym mul_new_contribution_sym mse cos; do
         if [ "$cos" != "N/A" ] && [ "$mse" != "N/A" ]; then
             # 检查是否不满足阈值
             cos_fail=false

@@ -25,7 +25,7 @@ namespace kernel {
 
 template <typename T, bool ApplyZoneout>
 __global__ void PointwiseOperations(
-    const int batch_dim, const int hidden_dim, const T *h, const T *v, const T *dh_new, T *dbx_out,
+    const int batch_dim, const int hidden_dim, const T *h, const T *v, const T *dh_new, T *dbw_out,
     T *dbr_out, T *dh_inout, T *dp_out, T *dq_out,
     const T *zoneout_mask) {  // Zoneout mask (only used if ApplyZoneout==true)
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
@@ -77,9 +77,9 @@ __global__ void PointwiseOperations(
     dq_out[idx + 1 * hidden_dim] = dq_r;
     dq_out[idx + 2 * hidden_dim] = dq_g;
 
-    atomicAdd(&dbx_out[row + 0 * hidden_dim], dp_z);
-    atomicAdd(&dbx_out[row + 1 * hidden_dim], dp_r);
-    atomicAdd(&dbx_out[row + 2 * hidden_dim], dp_g);
+    atomicAdd(&dbw_out[row + 0 * hidden_dim], dp_z);
+    atomicAdd(&dbw_out[row + 1 * hidden_dim], dp_r);
+    atomicAdd(&dbw_out[row + 2 * hidden_dim], dp_g);
 
     atomicAdd(&dbr_out[row + 0 * hidden_dim], dq_z);
     atomicAdd(&dbr_out[row + 1 * hidden_dim], dq_r);
@@ -89,7 +89,7 @@ __global__ void PointwiseOperations(
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
 template <typename T, bool ApplyZoneout>
 __global__ void PointwiseOperations(const int batch_dim, const int hidden_dim, const half *h,
-                                    const half *v, const half *dh_new, half *dbx_out, half *dbr_out,
+                                    const half *v, const half *dh_new, half *dbw_out, half *dbr_out,
                                     half *dh_inout, half *dp_out, half *dq_out,
                                     const half *zoneout_mask) {
     device_assert_fail("FP16 is not supported on compute capability < 7.0.");
@@ -145,7 +145,7 @@ BackwardPass<T>::~BackwardPass() {
 template <typename T>
 void BackwardPass<T>::Iterate(const T *W_t,             // [H*3,C]
                               const T *R_t,             // [H*3,H]
-                              const T *bx,              // [H*3]
+                              const T *bw,              // [H*3]
                               const T *br,              // [H*3]
                               const T *x_t,             // [C,N]
                               const T *h,               // [N,H]
@@ -154,7 +154,7 @@ void BackwardPass<T>::Iterate(const T *W_t,             // [H*3,C]
                               T *dx,                    // [N,C]
                               T *dW,                    // [C,H*3]
                               T *dR,                    // [H,H*3]
-                              T *dbx,                   // [H*3]
+                              T *dbw,                   // [H*3]
                               T *dbr,                   // [H*3]
                               T *dh,                    // [N,H]
                               T *dp,                    // [N,H*3]
@@ -177,7 +177,7 @@ void BackwardPass<T>::Iterate(const T *W_t,             // [H*3,C]
     cudaStream_t save_stream;
     cublasGetStream(blas_handle, &save_stream);
 
-    IterateInternal(R_t, h, v, dh_new, dbx, dbr, dh, dp, dq, zoneout_mask);
+    IterateInternal(R_t, h, v, dh_new, dbw, dbr, dh, dp, dq, zoneout_mask);
 
     cublasSetStream(blas_handle, stream1);
     blas<T>::gemm(blas_handle, CUBLAS_OP_N, CUBLAS_OP_N, hidden_size * 3, input_size, batch_size,
@@ -203,7 +203,7 @@ void BackwardPass<T>::IterateInternal(const T *R_t,             // [H*3,H]
                                       const T *h,               // [N,H]
                                       const T *v,               // [N,H*4]
                                       const T *dh_new,          // [N,H]
-                                      T *dbx,                   // [H*3]
+                                      T *dbw,                   // [H*3]
                                       T *dbr,                   // [H*3]
                                       T *dh,                    // [N,H]
                                       T *dp,                    // [N,H*3]
@@ -225,10 +225,10 @@ void BackwardPass<T>::IterateInternal(const T *R_t,             // [H*3,H]
 
     if (zoneout_mask) {
         kernel::PointwiseOperations<T, true><<<gridDim, blockDim, 0, stream1>>>(
-            batch_size, hidden_size, h, v, dh_new, dbx, dbr, dh, dp, dq, zoneout_mask);
+            batch_size, hidden_size, h, v, dh_new, dbw, dbr, dh, dp, dq, zoneout_mask);
     } else {
         kernel::PointwiseOperations<T, false><<<gridDim, blockDim, 0, stream1>>>(
-            batch_size, hidden_size, h, v, dh_new, dbx, dbr, dh, dp, dq, nullptr);
+            batch_size, hidden_size, h, v, dh_new, dbw, dbr, dh, dp, dq, nullptr);
     }
     cudaEventRecord(event, stream1);
 
@@ -238,9 +238,9 @@ void BackwardPass<T>::IterateInternal(const T *R_t,             // [H*3,H]
 }
 
 template <typename T>
-void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *bx, const T *br,
+void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *bw, const T *br,
                           const T *x_t, const T *h, const T *v, const T *dh_new, T *dx, T *dW,
-                          T *dR, T *dbx, T *dbr, T *dh, T *dp, T *dq, const T *zoneout_mask) {
+                          T *dR, T *dbw, T *dbr, T *dh, T *dp, T *dq, const T *zoneout_mask) {
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
@@ -261,7 +261,7 @@ void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *
 
     const int NH = batch_size * hidden_size;
     for (int i = steps - 1; i >= 0; --i) {
-        IterateInternal(R_t, h + i * NH, v + i * NH * 4, dh_new + (i + 1) * NH, dbx, dbr, dh,
+        IterateInternal(R_t, h + i * NH, v + i * NH * 4, dh_new + (i + 1) * NH, dbw, dbr, dh,
                         dp + i * NH * 3, dq + i * NH * 3,
                         zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }

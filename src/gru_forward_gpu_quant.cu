@@ -221,12 +221,12 @@ __global__ void rescaleGemmI32(
 // ============================================================================
 // 每个线程处理一个 (batch, hidden) 位置
 // 所有量化值使用 int32_t 存储
-// weight_ih_linear = W*x + bx, weight_hh_linear = R*h + br (Linear 变换)
+// weight_ih_linear = W*x + bw, weight_hh_linear = R*h + br (Linear 变换)
 
 template <bool Training, bool ApplyZoneout>
 __global__ void PointwiseOperationsQuant(
     const int batch_dim, const int hidden_dim, 
-    const int32_t *weight_ih_linear,  // 输入 Linear 变换: W*x + bx [batch, hidden*3]
+    const int32_t *weight_ih_linear,  // 输入 Linear 变换: W*x + bw [batch, hidden*3]
     const int32_t *weight_hh_linear,  // 隐状态 Linear 变换: R*h + br [batch, hidden*3]
     const int32_t *h, int32_t *h_out, int32_t *v,
     const float zoneout_prob, const int32_t *zoneout_mask, const GateQuantParams gate_params) {
@@ -493,7 +493,7 @@ void ForwardPassQuant::PrecomputeWeightSums(const int32_t *W, const int32_t *R) 
     weight_sums_computed_ = true;
 }
 
-void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bx, int steps) {
+void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -503,16 +503,16 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     const int N = steps * batch_size;
     const int K = input_size;
 
-    // 使用 GEMM+bias 融合 kernel: W*x + bx
+    // 使用 GEMM+bias 融合 kernel: W*x + bw
     dim3 blockDim(kernel::TILE_SIZE, kernel::TILE_SIZE);
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
     kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
-        W, x, tmp_weight_ih_linear_.data(), bx, M, N, K,
+        W, x, tmp_weight_ih_linear_.data(), bw, M, N, K,
         linear_params_.zp_x_,
         linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
-        linear_params_.shift_bx_to_weight_ih_linear_.data(),
+        linear_params_.shift_bw_to_weight_ih_linear_.data(),
         gate_params_.zp_weight_ih_linear_,
         gate_params_.bitwidth_config_.weight_ih_linear_);
 }
@@ -546,7 +546,7 @@ void ForwardPassQuant::IterateInternal(
     const int32_t *h,           // [N,H]
     int32_t *h_out,             // [N,H]
     int32_t *v,                 // [N,H*4]
-    const int32_t *cur_weight_ih_linear, // [N,H*3] 当前时间步的 W*x + bx 结果
+    const int32_t *cur_weight_ih_linear, // [N,H*3] 当前时间步的 W*x + bw 结果
     const float zoneout_prob,
     const int32_t *zoneout_mask  // Zoneout mask [N,H]
 ) {
@@ -607,23 +607,23 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantitativeParameters &parms) {
     // 计算 per-channel 移位参数
     std::vector<int8_t> shift_gemm_x(channel);
     std::vector<int8_t> shift_gemm_h(channel);
-    std::vector<int8_t> shift_bx(channel);
+    std::vector<int8_t> shift_bw(channel);
     std::vector<int8_t> shift_br(channel);
 
     for (int idx = 0; idx < channel; ++idx) {
         shift_gemm_x[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
         shift_gemm_h[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        shift_bx[idx] = parms.shift_bx_[idx] - parms.shift_weight_ih_linear_;
+        shift_bw[idx] = parms.shift_bw_[idx] - parms.shift_weight_ih_linear_;
         shift_br[idx] = parms.shift_br_[idx] - parms.shift_weight_hh_linear_;
     }
 
     linear_params_.shift_gemm_x_to_weight_ih_linear_ = dev::vector<int8_t>(shift_gemm_x);
-    linear_params_.shift_bx_to_weight_ih_linear_ = dev::vector<int8_t>(shift_bx);
+    linear_params_.shift_bw_to_weight_ih_linear_ = dev::vector<int8_t>(shift_bw);
     linear_params_.shift_gemm_h_to_weight_hh_linear_ = dev::vector<int8_t>(shift_gemm_h);
     linear_params_.shift_br_to_weight_hh_linear_ = dev::vector<int8_t>(shift_br);
 
 #ifdef DEBUG
-    linear_params_.shift_bx_ = dev::vector<int8_t>(parms.shift_bx_);
+    linear_params_.shift_bw_ = dev::vector<int8_t>(parms.shift_bw_);
     linear_params_.shift_br_ = dev::vector<int8_t>(parms.shift_br_);
 #endif
 
@@ -679,7 +679,7 @@ void ForwardPassQuant::Run(
     const int steps,              // 时间步数, 序列长度T
     const int32_t *W,             // [C,H*3], 输入到隐藏状态的权重矩阵（int32_t 存储）
     const int32_t *R,             // [H,H*3], 隐状态到隐藏状态的权重矩阵（int32_t 存储）
-    const int32_t *bx,            // [H*3], 输入偏置
+    const int32_t *bw,            // [H*3], 输入偏置
     const int32_t *br,            // [H*3], 隐状态偏置
     const int32_t *x,             // [N*T,C], 输入序列（int32_t 存储）
     int32_t *h,                   // [(T+1)*N,H], 输出隐藏状态（int32_t 存储）
@@ -707,7 +707,7 @@ void ForwardPassQuant::Run(
     cublasSetStream(data_->blas_handle, stream2);
 
     // 计算输入 Linear 变换（所有时间步一次性计算，结果存入 tmp_weight_ih_linear_）
-    ComputeLinearX(W, x, bx, steps);
+    ComputeLinearX(W, x, bw, steps);
 
     // 同步 Linear 计算
     cudaEventRecord(event, stream2);
@@ -720,7 +720,7 @@ void ForwardPassQuant::Run(
                         h + i * NH,                      // 输入 h
                         h + (i + 1) * NH,                // 输出 h
                         v + i * NH * 4,                  // 中间激活
-                        tmp_weight_ih_linear_.data() + i * NH3,  // 当前时间步的 W*x + bx
+                        tmp_weight_ih_linear_.data() + i * NH3,  // 当前时间步的 W*x + bw
                         zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
     }
 

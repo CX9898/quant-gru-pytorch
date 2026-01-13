@@ -3,12 +3,12 @@
 # 测试内容：
 # 1. 支持的基础模式：W8A8, W8A16, W16A16
 # 2. 验证不支持的模式会正确报错（如 W16A8）
-# 3. 测试 Wx/Rh (GEMM结果) 位宽配置
+# 3. 测试 weight_ih_linear/weight_hh_linear (GEMM结果) 位宽配置
 #
 # 配置的变量：
 #   权重类 (weight_bits): W_, R_
 #   激活类 (activation_bits): x_, h_
-#   GEMM结果类 (gemm_result_bits): Wx_, Rh_
+#   GEMM结果类 (gemm_result_bits): weight_ih_linear_, weight_hh_linear_
 
 set -e
 
@@ -30,7 +30,7 @@ echo "测试时间: $(date)" >> "$RESULT_FILE"
 echo "" >> "$RESULT_FILE"
 
 # CSV 头
-echo "config_name,weight_bits,activation_bits,gemm_result_bits,W_,R_,x_,h_,Wx_,Rh_,status,mse,cosine_similarity,error_msg" > "$CSV_FILE"
+echo "config_name,weight_bits,activation_bits,gemm_result_bits,W_,R_,x_,h_,weight_ih_linear_,weight_hh_linear_,status,mse,cosine_similarity,error_msg" > "$CSV_FILE"
 
 # 计数器
 TEST_COUNT=0
@@ -57,9 +57,9 @@ modify_weight_activation_bitwidth() {
     sed -i "s/x_{[0-9]*, [a-z]*}/x_{${activation_bits}, false}/g" "$CONFIG_FILE"
     sed -i "s/h_{[0-9]*, [a-z]*}/h_{${activation_bits}, false}/g" "$CONFIG_FILE"
     
-    # 修改 GEMM 结果位宽 (Wx_, Rh_) - 有符号 (false)
-    sed -i "s/Wx_{[0-9]*, [a-z]*}/Wx_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
-    sed -i "s/Rh_{[0-9]*, [a-z]*}/Rh_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
+    # 修改 GEMM 结果位宽 (weight_ih_linear_, weight_hh_linear_) - 有符号 (false)
+    sed -i "s/weight_ih_linear_{[0-9]*, [a-z]*}/weight_ih_linear_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
+    sed -i "s/weight_hh_linear_{[0-9]*, [a-z]*}/weight_hh_linear_{${gemm_result_bits}, false}/g" "$CONFIG_FILE"
 }
 
 # 函数：编译项目
@@ -88,7 +88,7 @@ run_test() {
     echo "配置: $config_name" >> "$RESULT_FILE"
     echo "  权重位宽: ${weight_bits}-bit (W_, R_)" >> "$RESULT_FILE"
     echo "  激活位宽: ${activation_bits}-bit (x_, h_)" >> "$RESULT_FILE"
-    echo "  GEMM结果位宽: ${gemm_result_bits}-bit (Wx_, Rh_)" >> "$RESULT_FILE"
+    echo "  GEMM结果位宽: ${gemm_result_bits}-bit (weight_ih_linear_, weight_hh_linear_)" >> "$RESULT_FILE"
     
     # 修改配置
     modify_weight_activation_bitwidth $weight_bits $activation_bits $gemm_result_bits
@@ -256,11 +256,11 @@ run_test "W16A24" 16 24 "pass"
 run_test "W24A16" 24 16 "pass"
 
 echo ""
-echo "==================== 第五部分：Wx/Rh 位宽测试 ===================="
+echo "==================== 第五部分：weight_ih_linear/weight_hh_linear 位宽测试 ===================="
 echo ""
-echo "==================== 第五部分：Wx/Rh 位宽测试 ====================" >> "$RESULT_FILE"
+echo "==================== 第五部分：weight_ih_linear/weight_hh_linear 位宽测试 ====================" >> "$RESULT_FILE"
 
-# 测试 GEMM 结果（Wx_, Rh_）使用不同精度
+# 测试 GEMM 结果（weight_ih_linear_, weight_hh_linear_）使用不同精度
 run_test "W8A8_GEMM16" 8 8 "pass" 16
 run_test "W8A16_GEMM8" 8 16 "pass" 8
 run_test "W16A16_GEMM8" 16 16 "pass" 8
@@ -287,10 +287,10 @@ echo "" | tee -a "$RESULT_FILE"
 # 显示支持的配置结果
 echo "支持的配置结果:" | tee -a "$RESULT_FILE"
 echo "" | tee -a "$RESULT_FILE"
-printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-12s\n" "配置" "权重" "激活" "Wx/Rh" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
+printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-12s\n" "配置" "权重" "激活" "weight_ih_linear/weight_hh_linear" "MSE" "余弦相似度" | tee -a "$RESULT_FILE"
 printf "%-14s-+-%-6s-+-%-6s-+-%-6s-+-%-15s-+-%-12s\n" "--------------" "------" "------" "------" "---------------" "------------" | tee -a "$RESULT_FILE"
-# CSV 格式: config_name,weight_bits,activation_bits,gemm_result_bits,W_,R_,x_,h_,Wx_,Rh_,status,mse,cosine_similarity,error_msg
-grep ",PASS," "$CSV_FILE" | while IFS=',' read -r name w a g W R x h Wx Rh status mse cos err; do
+# CSV 格式: config_name,weight_bits,activation_bits,gemm_result_bits,W_,R_,x_,h_,weight_ih_linear_,weight_hh_linear_,status,mse,cosine_similarity,error_msg
+grep ",PASS," "$CSV_FILE" | while IFS=',' read -r name w a g W R x h weight_ih_linear weight_hh_linear status mse cos err; do
     printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-12s\n" "$name" "${w}-bit" "${a}-bit" "${g}-bit" "$mse" "$cos" | tee -a "$RESULT_FILE"
 done
 
@@ -299,10 +299,10 @@ if [ $FAIL_COUNT -gt 0 ]; then
     echo "" | tee -a "$RESULT_FILE"
     echo "失败测试列表:" | tee -a "$RESULT_FILE"
     echo "" | tee -a "$RESULT_FILE"
-    printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-20s\n" "配置" "权重" "激活" "Wx/Rh" "状态" "错误信息" | tee -a "$RESULT_FILE"
+    printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-20s\n" "配置" "权重" "激活" "weight_ih_linear/weight_hh_linear" "状态" "错误信息" | tee -a "$RESULT_FILE"
     printf "%-14s-+-%-6s-+-%-6s-+-%-6s-+-%-15s-+-%-20s\n" "--------------" "------" "------" "------" "---------------" "--------------------" | tee -a "$RESULT_FILE"
     # 显示非 PASS 的配置
-    grep -v ",PASS," "$CSV_FILE" | tail -n +2 | while IFS=',' read -r name w a g W R x h Wx Rh status mse cos err; do
+    grep -v ",PASS," "$CSV_FILE" | tail -n +2 | while IFS=',' read -r name w a g W R x h weight_ih_linear weight_hh_linear status mse cos err; do
         printf "%-14s | %-6s | %-6s | %-6s | %-15s | %-20s\n" "$name" "${w}-bit" "${a}-bit" "${g}-bit" "$status" "$err" | tee -a "$RESULT_FILE"
     done
     echo "" | tee -a "$RESULT_FILE"

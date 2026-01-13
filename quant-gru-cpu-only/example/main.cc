@@ -64,14 +64,14 @@ int main(int argc, char* argv[]) {
     std::vector<float> x_float(seq_len * batch_size * input_size);
     std::vector<float> W_float(input_size * hidden3);
     std::vector<float> R_float(hidden_size * hidden3);
-    std::vector<float> bx_float(hidden3);
+    std::vector<float> bw_float(hidden3);
     std::vector<float> br_float(hidden3);
 
     // 随机初始化
     for (auto& v : x_float) v = dist(gen);
     for (auto& v : W_float) v = dist(gen) * 0.1f;
     for (auto& v : R_float) v = dist(gen) * 0.1f;
-    for (auto& v : bx_float) v = dist(gen) * 0.1f;
+    for (auto& v : bw_float) v = dist(gen) * 0.1f;
     for (auto& v : br_float) v = dist(gen) * 0.1f;
 
     // 量化参数设置（示例值）
@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
     std::vector<int8_t> h_quant((seq_len + 1) * batch_size * hidden_size, 0);  // 初始化为0
     std::vector<int8_t> W_quant(input_size * hidden3);
     std::vector<int8_t> R_quant(hidden_size * hidden3);
-    std::vector<int32_t> bx_quant(hidden3);
+    std::vector<int32_t> bw_quant(hidden3);
     std::vector<int32_t> br_quant(hidden3);
 
     // 量化
@@ -132,7 +132,7 @@ int main(int argc, char* argv[]) {
                              quant_params.exp2_inv_R_);
 
     for (int i = 0; i < hidden3; i++) {
-        bx_quant[i] = quantize<int32_t>(bx_float[i], quant_params.exp2_inv_bx_[i], 0);
+        bw_quant[i] = quantize<int32_t>(bw_float[i], quant_params.exp2_inv_bx_[i], 0);
         br_quant[i] = quantize<int32_t>(br_float[i], quant_params.exp2_inv_br_[i], 0);
     }
 
@@ -154,7 +154,7 @@ int main(int argc, char* argv[]) {
     auto start = std::chrono::high_resolution_clock::now();
 
     forward_pass.Run(seq_len, W_quant.data(), R_quant.data(),
-                     bx_quant.data(), br_quant.data(),
+                     bw_quant.data(), br_quant.data(),
                      x_quant.data(), h_quant.data(),
                      nullptr, 0.0f, nullptr);
 
