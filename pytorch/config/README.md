@@ -79,7 +79,7 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 └─ r = sigmoid(r_pre)                   → gate.r_out (r_out_) [UINT]
 
 步骤4: 候选状态 (candidate)
-├─ Rh_br = Rh_g + br_g                 → op.Rh_add_br (Rh_add_br_)
+├─ Rh_br = Rh_g + br_g                 → 使用 matmul.Rh 的量化参数（已融合）
 ├─ rRh = r * Rh_br                     → op.rRh (rRh_)
 ├─ g_pre = Wx_g + bx_g + rRh           → gate.g_pre (g_pre_)
 └─ g = tanh(g_pre)                     → gate.g_out (g_out_)
@@ -152,7 +152,7 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 |--------|------|----------|
 | `weight.W` | 输入权重 W | `is_symmetric: true` |
 | `weight.R` | 循环权重 R | `is_symmetric: true` |
-| `weight.bx` | 输入偏置 bx | `is_symmetric: true` |
+| `weight.bw` | 输入偏置 bw | `is_symmetric: true` |
 | `weight.br` | 循环偏置 br | `is_symmetric: true` |
 
 #### 矩阵乘法类
@@ -177,7 +177,6 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `op.Rh_add_br` | Rh + br 加法 | `is_symmetric: false` |
 | `op.rRh` | r * Rh 元素乘法 | `is_symmetric: false` |
 | `op.old_contrib` | z * h 旧状态贡献 | `is_symmetric: false` |
 | `op.new_contrib` | (1-z) * g 新状态贡献 | `is_symmetric: false` |
@@ -262,7 +261,7 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
       "output.h":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "weight.W":      { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.R":      { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "weight.bx":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
+      "weight.bw":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "weight.br":     { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
       "matmul.Wx":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "matmul.Rh":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
@@ -272,7 +271,6 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'exp2_inv': ..., ...}
       "gate.r_out":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
       "gate.g_pre":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "gate.g_out":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "op.Rh_add_br":  { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "op.rRh":        { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "op.old_contrib":{ "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
       "op.new_contrib":{ "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
