@@ -37,9 +37,9 @@ struct OperatorQuantConfig {
     QuantBitWidth x_{8, false}, h_{8, false};
     QuantBitWidth W_{8, false}, R_{8, false}, bw_{8, false}, br_{8, false};
     QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};  // GEMM+bias 融合输出
-    QuantBitWidth update_gate_input_{16, false}, update_gate_output_{8, true};   // update_gate_output: UINT
-    QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{16, true};     // reset_gate_output: UINT
-    QuantBitWidth new_gate_input_{16, false}, new_gate_output_{8, false};
+    QuantBitWidth update_gate_input_{8, false}, update_gate_output_{8, true};   // update_gate_output: UINT
+    QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{8, true};     // reset_gate_output: UINT
+    QuantBitWidth new_gate_input_{8, false}, new_gate_output_{8, false};
     QuantBitWidth mul_reset_hidden_{8, false};  // r * weight_hh_linear (new gate中)
     QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
 
