@@ -162,11 +162,11 @@ inline int32_t piecewise_linear_raw(int32_t q_x, const SigmoidLUT &lut) {
     const SegmentParams &seg = lut.segments[seg_id];
 
     int32_t x_offset = q_x - lut.zp_x;
-    int64_t bx_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
+    int64_t bw_64 = static_cast<int64_t>(seg.q_b) * static_cast<int64_t>(x_offset);
 
     int32_t term_bx = (seg.n_BX_total >= 0)
-                          ? static_cast<int32_t>(rshift_round(bx_64, seg.n_BX_total))
-                          : static_cast<int32_t>(bx_64 << (-seg.n_BX_total));
+                          ? static_cast<int32_t>(rshift_round(bw_64, seg.n_BX_total))
+                          : static_cast<int32_t>(bw_64 << (-seg.n_BX_total));
 
     return term_bx + seg.term_c_precomputed;
 }

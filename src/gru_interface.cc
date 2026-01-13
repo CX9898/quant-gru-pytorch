@@ -44,11 +44,11 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
                     quant_ranges.min_h_, quant_ranges.max_h_,
                     quant_params.shift_h_, quant_params.zp_h_);
 
-    // 权重 W/R 和偏置 bx/br（per-channel）
+    // 权重 W/R 和偏置 bw/br（per-channel）
     const int channel_size = quant_ranges.hidden_ * 3;
     quant_params.shift_W_.resize(channel_size);
     quant_params.shift_R_.resize(channel_size);
-    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_bw_.resize(channel_size);
     quant_params.shift_br_.resize(channel_size);
 
     for (int c = 0; c < channel_size; ++c) {
@@ -60,9 +60,9 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
         calibrateQuantParams(quant_ranges.min_R_[c], quant_ranges.max_R_[c], bitwidth_config.R_,
                              bitwidth_config.R_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_R_[c], zp_tmp);
-        calibrateQuantParams(quant_ranges.min_bx_[c], quant_ranges.max_bx_[c], bitwidth_config.bx_,
-                             bitwidth_config.bx_symmetric_, aligned_min, aligned_max,
-                             quant_params.shift_bx_[c], zp_tmp);
+        calibrateQuantParams(quant_ranges.min_bw_[c], quant_ranges.max_bw_[c], bitwidth_config.bw_,
+                             bitwidth_config.bw_symmetric_, aligned_min, aligned_max,
+                             quant_params.shift_bw_[c], zp_tmp);
         calibrateQuantParams(quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_,
                              bitwidth_config.br_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_br_[c], zp_tmp);
@@ -129,7 +129,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParameters(
 
 void hasteGRUForward(bool is_training, const int time_steps, const int batch_size,
                      const int input_size, const int hidden_size, const float *W, const float *R,
-                     const float *bx, const float *br, const float *x, const float *h0,
+                     const float *bw, const float *br, const float *x, const float *h0,
                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
     dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size *
                                   3);                             // 用于存放W * x的中间结果
@@ -149,7 +149,7 @@ void hasteGRUForward(bool is_training, const int time_steps, const int batch_siz
         gru::ForwardPass<float>(is_training,  // training: true为训练，false为推理
                                 batch_size, input_size, hidden_size, g_blas_handle);
 
-    forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
+    forward.Run(time_steps, W, R, bw, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f,
                 nullptr);
 
     // 同步 CUDA 操作
@@ -170,10 +170,10 @@ void hasteGRUForward(bool is_training, const int time_steps, const int batch_siz
 
 // ★★★ 重要：W_t、R_t、x_t 需要传入【转置后】的数据！★★★
 void hasteGRUBackward(const int time_steps, const int batch_size, const int input_size,
-                      const int hidden_size, const float *W_t, const float *R_t, const float *bx,
+                      const int hidden_size, const float *W_t, const float *R_t, const float *bw,
                       const float *br, const float *x_t, const float *dh_new, const float *h,
                       const float *v, const cublasHandle_t &g_blas_handle, float *dx, float *dW,
-                      float *dR, float *dbx, float *dbr, float *dh) {
+                      float *dR, float *dbw, float *dbr, float *dh) {
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size *
                               3);  // 临时缓存梯度（内部结构用）
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size *
@@ -181,7 +181,7 @@ void hasteGRUBackward(const int time_steps, const int batch_size, const int inpu
 
     gru::BackwardPass<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
 
-    backward.Run(time_steps, W_t, R_t, bx, br, x_t, h, v, dh_new, dx, dW, dR, dbx, dbr, dh,
+    backward.Run(time_steps, W_t, R_t, bw, br, x_t, h, v, dh_new, dx, dW, dR, dbw, dbr, dh,
                  dp_dev.data(), dq_dev.data(), nullptr);
 
     // 同步 CUDA 操作
@@ -201,13 +201,13 @@ void hasteGRUBackward(const int time_steps, const int batch_size, const int inpu
 // =====================================================================
 
 void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
-                        const float *bx, const float *br,
+                        const float *bw, const float *br,
                         const GRUQuantitativeParameters &quant_parms, int32_t *W_quant,
-                        int32_t *R_quant, int32_t *bx_quant, int32_t *br_quant) {
+                        int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant) {
     // 显式创建dev::vector以避免临时对象问题
     dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
     dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
-    dev::vector<int8_t> shift_bx_dev(quant_parms.shift_bx_);
+    dev::vector<int8_t> shift_bw_dev(quant_parms.shift_bw_);
     dev::vector<int8_t> shift_br_dev(quant_parms.shift_br_);
 
     // 统一 int32_t 输出，使用 clamp_by_bitwidth 限制到实际位宽
@@ -216,8 +216,8 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
                                            shift_W_dev, bw_cfg.W_);
     dev::quantificationPerChannelBitwidth(R, R_quant, hidden_size, 3 * hidden_size, 
                                            shift_R_dev, bw_cfg.R_);
-    dev::quantificationPerChannelBitwidth(bx, bx_quant, 1, 3 * hidden_size, 
-                                           shift_bx_dev, bw_cfg.bx_);
+    dev::quantificationPerChannelBitwidth(bw, bw_quant, 1, 3 * hidden_size, 
+                                           shift_bw_dev, bw_cfg.bw_);
     dev::quantificationPerChannelBitwidth(br, br_quant, 1, 3 * hidden_size, 
                                            shift_br_dev, bw_cfg.br_);
 
@@ -237,7 +237,7 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 // 所有量化值使用 int32_t 存储，实际值通过位宽配置限制
 void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
                      const int input_size, const int hidden_size, const int32_t *W,
-                     const int32_t *R, const int32_t *bx, const int32_t *br, const float *x,
+                     const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
                      const float *h0, const GRUQuantitativeParameters &quant_parms,
                      const cublasHandle_t &g_blas_handle, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
@@ -270,7 +270,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     // 得到量化GRU中使用的rescale参数
     forward.setRescaleParam(quant_parms);
 
-    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f,
+    forward.Run(time_steps, W, R, bw, br, x_quant.data(), h_quant.data(), v_quant_dev.data(), 0.0f,
                 nullptr);
 
     dev::dequantification(h_quant.data(), h, (time_steps + 1) * batch_size * hidden_size,
@@ -305,7 +305,7 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
 // CPU 量化 GRU 前向传播（量化权重输入版本）
 // 所有量化值使用 int32_t 存储，实际值通过位宽配置限制
 void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int input_size,
-                        int hidden_size, const int32_t *W, const int32_t *R, const int32_t *bx,
+                        int hidden_size, const int32_t *W, const int32_t *R, const int32_t *bw,
                         const int32_t *br, const float *x, const float *h0,
                         const GRUQuantitativeParameters &quant_parms, float *h, float *v) {
     const std::size_t x_size = time_steps * batch_size * input_size;
@@ -341,7 +341,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     forward.setRescaleParam(quant_parms);
 
     // 运行前向传播
-    forward.Run(time_steps, W, R, bx, br, x_quant.data(), h_quant.data(),
+    forward.Run(time_steps, W, R, bw, br, x_quant.data(), h_quant.data(),
                 v != nullptr ? v_quant.data() : nullptr, 0.0f, nullptr);
 
     // 反量化隐藏状态输出
@@ -377,7 +377,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 
 // CPU 量化 GRU 前向传播（浮点权重输入版本，内部量化）
 void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int input_size,
-                        int hidden_size, const float *W, const float *R, const float *bx,
+                        int hidden_size, const float *W, const float *R, const float *bw,
                         const float *br, const float *x, const float *h0,
                         const GRUQuantitativeParameters &quant_parms, float *h, float *v) {
     const int hidden3 = hidden_size * 3;
@@ -402,16 +402,16 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
     }
 
     // 量化偏置（per-channel）
-    std::vector<int32_t> bx_quant(hidden3);
+    std::vector<int32_t> bw_quant(hidden3);
     std::vector<int32_t> br_quant(hidden3);
     for (int m = 0; m < hidden3; m++) {
-        bx_quant[m] = quantize(bx[m], quant_parms.shift_bx_[m], 0, bw_cfg.bx_);
+        bw_quant[m] = quantize(bw[m], quant_parms.shift_bw_[m], 0, bw_cfg.bw_);
         br_quant[m] = quantize(br[m], quant_parms.shift_br_[m], 0, bw_cfg.br_);
     }
 
     // 调用量化权重版本
     quantGRUForwardCPU(is_training, time_steps, batch_size, input_size, hidden_size,
-                       W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data(), x, h0,
+                       W_quant.data(), R_quant.data(), bw_quant.data(), br_quant.data(), x, h0,
                        quant_parms, h, v);
 }
 
@@ -420,7 +420,7 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 // 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
 void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
                       int input_size, int hidden_size, const float *W, const float *R,
-                      const float *bx, const float *br, const float *x, const float *h0,
+                      const float *bw, const float *br, const float *x, const float *h0,
                       const GRUQuantitativeParameters &quant_gru_scales,
                       const cublasHandle_t &g_blas_handle,
                       float *h, float *v) {
@@ -428,20 +428,20 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
         // 所有权重和激活统一使用 int32_t 存储
         dev::vector<int32_t> W_quant(hidden_size * 3 * input_size);
         dev::vector<int32_t> R_quant(hidden_size * 3 * hidden_size);
-        dev::vector<int32_t> bx_quant(hidden_size * 3);
+        dev::vector<int32_t> bw_quant(hidden_size * 3);
         dev::vector<int32_t> br_quant(hidden_size * 3);
 
         // 量化权重（统一输出 int32_t）
-        quantitativeWeight(input_size, hidden_size, W, R, bx, br, quant_gru_scales,
-                           W_quant.data(), R_quant.data(), bx_quant.data(), br_quant.data());
+        quantitativeWeight(input_size, hidden_size, W, R, bw, br, quant_gru_scales,
+                           W_quant.data(), R_quant.data(), bw_quant.data(), br_quant.data());
         
         // 调用统一的量化前向传播（非模板）
         quantGRUForward(is_training, time_steps, batch_size, input_size,
                         hidden_size, W_quant.data(), R_quant.data(),
-                        bx_quant.data(), br_quant.data(), x, h0,
+                        bw_quant.data(), br_quant.data(), x, h0,
                         quant_gru_scales, g_blas_handle, h, v);
     } else {
-        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bx, br,
+        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bw, br,
                         x, h0, g_blas_handle, h, v);
     }
 }
@@ -505,7 +505,7 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
 
     convert_batch(cpu_collectors.W_hist, gpu_collectors.W_batch);
     convert_batch(cpu_collectors.R_hist, gpu_collectors.R_batch);
-    convert_batch(cpu_collectors.bx_hist, gpu_collectors.bx_batch);
+    convert_batch(cpu_collectors.bw_hist, gpu_collectors.bw_batch);
     convert_batch(cpu_collectors.br_hist, gpu_collectors.br_batch);
 
     // 检查 CUDA 错误
@@ -530,7 +530,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
     
     quant_params.shift_W_.resize(channel_size);
     quant_params.shift_R_.resize(channel_size);
-    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_bw_.resize(channel_size);
     quant_params.shift_br_.resize(channel_size);
 
     // 辅助 lambda：校准单个直方图
@@ -559,8 +559,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
             }
         } else if (tid == 2) {
             for (int c = 0; c < channel_size; ++c) {
-                histCalibrate(hist_collectors.bx_hist[c], bitwidth_config.bx_,
-                              bitwidth_config.bx_symmetric_, quant_params.shift_bx_[c], zp_tmp, "bx");
+                histCalibrate(hist_collectors.bw_hist[c], bitwidth_config.bw_,
+                              bitwidth_config.bw_symmetric_, quant_params.shift_bw_[c], zp_tmp, "bw");
             }
         } else {
             for (int c = 0; c < channel_size; ++c) {
@@ -619,7 +619,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
     const int channel_size = gpu_collectors.hidden_ * 3;
     quant_params.shift_W_.resize(channel_size);
     quant_params.shift_R_.resize(channel_size);
-    quant_params.shift_bx_.resize(channel_size);
+    quant_params.shift_bw_.resize(channel_size);
     quant_params.shift_br_.resize(channel_size);
     
     // Helper: 计算单个标量直方图的 SQNR 参数
@@ -712,8 +712,8 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
                              bitwidth_config.W_, quant_params.shift_W_);
     compute_per_channel_sqnr(gpu_collectors.R_batch, bitwidth_config.R_symmetric_,
                              bitwidth_config.R_, quant_params.shift_R_);
-    compute_per_channel_sqnr(gpu_collectors.bx_batch, bitwidth_config.bx_symmetric_,
-                             bitwidth_config.bx_, quant_params.shift_bx_);
+    compute_per_channel_sqnr(gpu_collectors.bw_batch, bitwidth_config.bw_symmetric_,
+                             bitwidth_config.bw_, quant_params.shift_bw_);
     compute_per_channel_sqnr(gpu_collectors.br_batch, bitwidth_config.br_symmetric_,
                              bitwidth_config.br_, quant_params.shift_br_);
     
@@ -743,7 +743,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
 void forwardWithCalibrationGPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     CalibrationMethod calib_method,
@@ -792,7 +792,7 @@ void forwardWithCalibrationGPU(
     forward.setCalibrationMode(true);
 
     // 执行前向传播
-    forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
+    forward.Run(time_steps, W, R, bw, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -809,20 +809,20 @@ void forwardWithCalibrationGPU(
     
     if (calib_method == CalibrationMethod::MINMAX) {
         // MINMAX: 使用 GPU 版本原地更新量化范围（避免大量 D2H 传输）
-        // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行校准
+        // 使用 Wx+bw 和 Rh+br 的结果（而非纯 GEMM 输出）进行校准
         updateGRUQuantizationRangesGPU(
             time_steps, batch_size, input_size, hidden_size,
-            W, R, bx, br, x, h, v,
-            forward.getWxAddBx(), forward.getRhAddBr(),
+            W, R, bw, br, x, h, v,
+            forward.getWxAddBw(), forward.getRhAddBr(),
             forward.getZPres(), forward.getRPres(), forward.getGPres(),
             forward.getPresSize(),
             *quant_ranges);
     } else {
         // SQNR/Percentile: 收集直方图
-        // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
+        // 使用 Wx+bw 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
         collectAllHistogramsGPU(*gpu_hist_collectors, x, h, v,
-                                forward.getWxAddBx(), forward.getRhAddBr(),
-                                W, R, bx, br,
+                                forward.getWxAddBw(), forward.getRhAddBr(),
+                                W, R, bw, br,
                                 time_steps, batch_size, input_size, hidden_size,
                                 forward.getZPres(), forward.getRPres(), forward.getGPres(),
                                 forward.getPresSize());
@@ -836,7 +836,7 @@ void forwardWithCalibrationGPU(
 void forwardWithHistogramCPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     GRUHistogramCollectors *hist_collectors,
@@ -865,7 +865,7 @@ void forwardWithHistogramCPU(
     forward.setCalibrationMode(true);
 
     // 执行前向传播
-    forward.Run(time_steps, W, R, bx, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
+    forward.Run(time_steps, W, R, bw, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -879,10 +879,10 @@ void forwardWithHistogramCPU(
     }
     
     // CPU 直方图收集（需要先将 GPU 数据拷贝到 CPU）
-    // 使用 Wx+bx 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
+    // 使用 Wx+bw 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
     collectAllHistograms(*hist_collectors, x, h, v,
-                         forward.getWxAddBx(), forward.getRhAddBr(),
-                         W, R, bx, br,
+                         forward.getWxAddBw(), forward.getRhAddBr(),
+                         W, R, bw, br,
                          time_steps, batch_size, input_size, hidden_size,
                          forward.getZPres(), forward.getRPres(), forward.getGPres(),
                          forward.getPresSize());

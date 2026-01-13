@@ -18,7 +18,7 @@ struct GRUTrainGradients {
     std::vector<float> dx;   // 输入序列梯度 [time_steps * batch_size * input_size]
     std::vector<float> dW;   // 对输入权重的梯度 [input_size * hidden_size * 3]
     std::vector<float> dR;   // 对循环权重的梯度 [hidden_size * hidden_size * 3]
-    std::vector<float> dbx;  // 对输入偏置的梯度 [hidden_size * 3]
+    std::vector<float> dbw;  // 对输入偏置的梯度 [hidden_size * 3]
     std::vector<float> dbr;  // 对循环偏置的梯度 [hidden_size * 3]
     std::vector<float> dh;   // 对最后隐藏状态的梯度 [batch_size * hidden_size]
     std::vector<float> v;    // V中间值 [time_steps * batch_size * hidden_size * 4]
@@ -140,13 +140,13 @@ template <typename QuantT>
 struct Quantized_unit_testing {
     std::vector<float> W_;
     std::vector<float> R_;
-    std::vector<float> bx_;
+    std::vector<float> bw_;
     std::vector<float> br_;
     std::vector<float> x_;
     std::vector<float> dh_;
     std::vector<QuantT> W_quant_;
     std::vector<QuantT> R_quant_;
-    std::vector<int32_t> bx_quant_;
+    std::vector<int32_t> bw_quant_;
     std::vector<int32_t> br_quant_;
     std::vector<QuantT> x_quant_;
     size_t hidden_size_;
@@ -157,8 +157,8 @@ struct Quantized_unit_testing {
     size_t channels_;
     GRUQuantitativeParameters quant_parms_;
 
-    Quantized_unit_testing(float *W, float *R, float *bx, float *br, float *x, float *dh,
-                           QuantT *W_quant, QuantT *R_quant, int32_t *bx_quant, int32_t *br_quant,
+    Quantized_unit_testing(float *W, float *R, float *bw, float *br, float *x, float *dh,
+                           QuantT *W_quant, QuantT *R_quant, int32_t *bw_quant, int32_t *br_quant,
                            QuantT *x_quant, size_t hidden_size, size_t input_size,
                            size_t batch_size, size_t time_steps, cublasHandle_t handle,
                            const GRUQuantitativeParameters &quant_parms) {
@@ -170,13 +170,13 @@ struct Quantized_unit_testing {
         quant_parms_ = quant_parms;
         W_ = std::vector<float>(W, W + hidden_size * 3 * input_size);
         R_ = std::vector<float>(R, R + hidden_size * 3 * hidden_size);
-        bx_ = std::vector<float>(bx, bx + hidden_size * 3);
+        bw_ = std::vector<float>(bw, bw + hidden_size * 3);
         br_ = std::vector<float>(br, br + hidden_size * 3);
         x_ = std::vector<float>(x, x + input_size * batch_size * time_steps);
         dh_ = std::vector<float>(dh, dh + hidden_size * batch_size * time_steps);
         W_quant_ = std::vector<QuantT>(W_quant, W_quant + hidden_size * 3 * input_size);
         R_quant_ = std::vector<QuantT>(R_quant, R_quant + hidden_size * 3 * hidden_size);
-        bx_quant_ = std::vector<int32_t>(bx_quant, bx_quant + hidden_size * 3);
+        bw_quant_ = std::vector<int32_t>(bw_quant, bw_quant + hidden_size * 3);
         br_quant_ = std::vector<int32_t>(br_quant, br_quant + hidden_size * 3);
         x_quant_ = std::vector<QuantT>(x_quant, x_quant + input_size * batch_size * time_steps);
 
@@ -211,11 +211,11 @@ inline void Quantized_unit_testing<QuantT>::printGRUQuantitativeParameters() {
     if (quant_parms_.shift_R_.size() > 8) printf("...");
     printf("\n");
 
-    printf("  shift_bx_ (size %zu): ", quant_parms_.shift_bx_.size());
-    for (size_t i = 0; i < quant_parms_.shift_bx_.size() && i < 5; ++i) {
-        printf("%d ", quant_parms_.shift_bx_[i]);
+    printf("  shift_bw_ (size %zu): ", quant_parms_.shift_bw_.size());
+    for (size_t i = 0; i < quant_parms_.shift_bw_.size() && i < 5; ++i) {
+        printf("%d ", quant_parms_.shift_bw_[i]);
     }
-    if (quant_parms_.shift_bx_.size() > 8) printf("...");
+    if (quant_parms_.shift_bw_.size() > 8) printf("...");
     printf("\n");
 
     printf("  shift_br_ (size %zu): ", quant_parms_.shift_br_.size());
@@ -329,8 +329,8 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
                                     "scale_R_");
     printf("checkScalePerChannel: scale_R_ over\n");
     is_pass &=
-        checkScalePerChannel(bx_, channels_, 1, bx_quant_, quant_parms_.shift_bx_, "scale_bx_");
-    printf("checkScalePerChannel: scale_bx_ over\n");
+        checkScalePerChannel(bw_, channels_, 1, bw_quant_, quant_parms_.shift_bw_, "scale_bw_");
+    printf("checkScalePerChannel: scale_bw_ over\n");
     is_pass &=
         checkScalePerChannel(br_, channels_, 1, br_quant_, quant_parms_.shift_br_, "scale_br_");
     printf("checkScalePerChannel: scale_br_ over\n");
@@ -343,7 +343,7 @@ inline bool Quantized_unit_testing<QuantT>::checkQuantParameters() {
 }
 
 void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::vector<float> &R,
-                                      const std::vector<float> &bx, const std::vector<float> &br,
+                                      const std::vector<float> &bw, const std::vector<float> &br,
                                       const std::vector<float> &x,
                                       const GRUQuantitativeParameters &quant_parms, int time_steps,
                                       int batch_size, int input_size, int hidden_size) {
@@ -356,7 +356,7 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
     // CPU版本量化结果
     std::vector<int8_t> W_quant_cpu(input_size * hidden_size * 3);
     std::vector<int8_t> R_quant_cpu(hidden_size * hidden_size * 3);
-    std::vector<int32_t> bx_quant_cpu(hidden_size * 3);
+    std::vector<int32_t> bw_quant_cpu(hidden_size * 3);
     std::vector<int32_t> br_quant_cpu(hidden_size * 3);
     std::vector<int8_t> x_quant_cpu(x_size);
 
@@ -365,8 +365,8 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
                                  quant_parms.shift_W_);
         quantificationPerChannel(R.data(), R_quant_cpu.data(), hidden_size, channel_size,
                                  quant_parms.shift_R_);
-        quantificationPerChannel(bx.data(), bx_quant_cpu.data(), 1, channel_size,
-                                 quant_parms.shift_bx_);
+        quantificationPerChannel(bw.data(), bw_quant_cpu.data(), 1, channel_size,
+                                 quant_parms.shift_bw_);
         quantificationPerChannel(br.data(), br_quant_cpu.data(), 1, channel_size,
                                  quant_parms.shift_br_);
         quantification(x.data(), x_quant_cpu.data(), x_size, quant_parms.shift_x_,
@@ -376,19 +376,19 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
     // GPU版本量化结果
     dev::vector<float> W_dev(W);
     dev::vector<float> R_dev(R);
-    dev::vector<float> bx_dev(bx);
+    dev::vector<float> bw_dev(bw);
     dev::vector<float> br_dev(br);
     dev::vector<float> x_dev(x);
 
     dev::vector<int8_t> W_quant_gpu(input_size * hidden_size * 3);
     dev::vector<int8_t> R_quant_gpu(hidden_size * hidden_size * 3);
-    dev::vector<int32_t> bx_quant_gpu(hidden_size * 3);
+    dev::vector<int32_t> bw_quant_gpu(hidden_size * 3);
     dev::vector<int32_t> br_quant_gpu(hidden_size * 3);
     dev::vector<int8_t> x_quant_gpu(x_size);
 
     dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
     dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
-    dev::vector<int8_t> shift_bx_dev(quant_parms.shift_bx_);
+    dev::vector<int8_t> shift_bw_dev(quant_parms.shift_bw_);
     dev::vector<int8_t> shift_br_dev(quant_parms.shift_br_);
 
     {
@@ -396,8 +396,8 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
                                       shift_W_dev);
         dev::quantificationPerChannel(R_dev.data(), R_quant_gpu.data(), hidden_size, channel_size,
                                       shift_R_dev);
-        dev::quantificationPerChannel(bx_dev.data(), bx_quant_gpu.data(), 1, channel_size,
-                                      shift_bx_dev);
+        dev::quantificationPerChannel(bw_dev.data(), bw_quant_gpu.data(), 1, channel_size,
+                                      shift_bw_dev);
         dev::quantificationPerChannel(br_dev.data(), br_quant_gpu.data(), 1, channel_size,
                                       shift_br_dev);
         dev::quantification(x_dev.data(), x_quant_gpu.data(), x_size, quant_parms.shift_x_,
@@ -407,7 +407,7 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
     // 将GPU结果复制到CPU进行比较
     std::vector<int8_t> W_quant_gpu_host = d2h(W_quant_gpu);
     std::vector<int8_t> R_quant_gpu_host = d2h(R_quant_gpu);
-    std::vector<int32_t> bx_quant_gpu_host = d2h(bx_quant_gpu);
+    std::vector<int32_t> bw_quant_gpu_host = d2h(bw_quant_gpu);
     std::vector<int32_t> br_quant_gpu_host = d2h(br_quant_gpu);
     std::vector<int8_t> x_quant_gpu_host = d2h(x_quant_gpu);
 
@@ -450,21 +450,21 @@ void checkQuantificationHostAndDevice(const std::vector<float> &W, const std::ve
         printf("  ✗ R量化结果有 %d 个不匹配\n", mismatch_count);
     }
 
-    // 比较bx
+    // 比较bw
     mismatch_count = 0;
-    printf("\n比较bx量化结果 (大小: %zu):\n", bx_quant_cpu.size());
-    for (size_t i = 0; i < bx_quant_cpu.size(); ++i) {
-        if (bx_quant_cpu[i] != bx_quant_gpu_host[i]) {
+    printf("\n比较bw量化结果 (大小: %zu):\n", bw_quant_cpu.size());
+    for (size_t i = 0; i < bw_quant_cpu.size(); ++i) {
+        if (bw_quant_cpu[i] != bw_quant_gpu_host[i]) {
             if (mismatch_count < max_show_mismatches) {
-                printf("  bx[%zu]: CPU=%d, GPU=%d\n", i, bx_quant_cpu[i], bx_quant_gpu_host[i]);
+                printf("  bw[%zu]: CPU=%d, GPU=%d\n", i, bw_quant_cpu[i], bw_quant_gpu_host[i]);
             }
             mismatch_count++;
         }
     }
     if (mismatch_count == 0) {
-        printf("  ✓ bx量化结果完全一致\n");
+        printf("  ✓ bw量化结果完全一致\n");
     } else {
-        printf("  ✗ bx量化结果有 %d 个不匹配\n", mismatch_count);
+        printf("  ✗ bw量化结果有 %d 个不匹配\n", mismatch_count);
     }
 
     // 比较br
@@ -701,11 +701,11 @@ inline void compareGRUTrainGradients(const GRUTrainGradients &gradients_float,
         printf("dR: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
     }
 
-    // 比较 dbx
+    // 比较 dbw
     {
-        const float mse = computeMSE(gradients_float.dbx, gradients_quant.dbx);
-        const float cos_sim = computeCosineSimilarity(gradients_float.dbx, gradients_quant.dbx);
-        printf("dbx: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
+        const float mse = computeMSE(gradients_float.dbw, gradients_quant.dbw);
+        const float cos_sim = computeCosineSimilarity(gradients_float.dbw, gradients_quant.dbw);
+        printf("dbw: MSE = %e, Cosine Similarity = %f\n", mse, cos_sim);
     }
 
     // 比较 dbr

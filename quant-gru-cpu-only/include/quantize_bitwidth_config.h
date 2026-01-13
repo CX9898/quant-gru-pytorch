@@ -57,7 +57,7 @@ struct OperatorQuantConfig {
     QuantBitWidth h_ = QuantBitWidth::INT8;
     QuantBitWidth W_ = QuantBitWidth::INT8;
     QuantBitWidth R_ = QuantBitWidth::INT8;
-    QuantBitWidth bx_ = QuantBitWidth::INT8;
+    QuantBitWidth bw_ = QuantBitWidth::INT8;
     QuantBitWidth br_ = QuantBitWidth::INT8;
     QuantBitWidth Wx_ = QuantBitWidth::INT8;
     QuantBitWidth Rh_ = QuantBitWidth::INT8;
@@ -77,7 +77,7 @@ struct OperatorQuantConfig {
     bool h_symmetric_ = false;
     bool W_symmetric_ = true;
     bool R_symmetric_ = true;
-    bool bx_symmetric_ = true;
+    bool bw_symmetric_ = true;
     bool br_symmetric_ = true;
     bool Wx_symmetric_ = false;
     bool Rh_symmetric_ = false;
@@ -122,7 +122,7 @@ inline OperatorQuantConfig& OperatorQuantConfig::setAllBitWidths(int bits) {
     QuantBitWidth unsigned_bw = (bits == 32) ? QuantBitWidth::UINT16 : bitsToUnsignedQuantBitWidth(bits);
 
     x_ = signed_bw; h_ = signed_bw;
-    W_ = signed_bw; R_ = signed_bw; bx_ = signed_bw; br_ = signed_bw;
+    W_ = signed_bw; R_ = signed_bw; bw_ = signed_bw; br_ = signed_bw;
     Wx_ = signed_bw; Rh_ = signed_bw;
     z_pre_ = signed_bw; z_out_ = unsigned_bw;
     r_pre_ = signed_bw; r_out_ = unsigned_bw;

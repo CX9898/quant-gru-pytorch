@@ -32,11 +32,11 @@
         "is_unsigned": false,
         "comment": "循环权重 R (per-channel)"
       },
-      "weight.bx": {
+      "weight.bw": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
-        "comment": "输入偏置 bx (per-channel)"
+        "comment": "输入偏置 bw (per-channel)"
       },
       "weight.br": {
         "bitwidth": 8,
@@ -91,12 +91,6 @@
         "is_symmetric": true,
         "is_unsigned": false,
         "comment": "候选门 tanh 激活后 [-1,1]"
-      },
-      "op.Rh_add_br": {
-        "bitwidth": 8,
-        "is_symmetric": true,
-        "is_unsigned": false,
-        "comment": "Rh + br 加法运算"
       },
       "op.rRh": {
         "bitwidth": 8,

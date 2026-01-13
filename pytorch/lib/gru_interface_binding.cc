@@ -66,34 +66,35 @@ inline QuantBitWidth toBitwidth(int8_t bitwidth, bool is_unsigned = false) {
 
 struct OperatorQuantConfigPy {
     // 位宽配置（存储位宽数量 1-32）
-    // 注意：不再硬编码默认值，而是通过构造函数从 C++ 默认值初始化
+    // 命名与 C++ OperatorQuantConfig 保持一致
     int8_t x_, h_;
-    int8_t W_, R_, bx_, br_;
-    int8_t Wx_, Rh_;
-    int8_t z_pre_, z_out_;
-    int8_t r_pre_, r_out_;
-    int8_t g_pre_, g_out_;
-    int8_t rRh_, old_contrib_, new_contrib_;
+    int8_t W_, R_, bw_, br_;
+    int8_t weight_ih_linear_, weight_hh_linear_;  // GEMM+bias 融合输出
+    int8_t update_gate_input_, update_gate_output_;
+    int8_t reset_gate_input_, reset_gate_output_;
+    int8_t new_gate_input_, new_gate_output_;
+    int8_t mul_reset_hidden_;
+    int8_t mul_old_contribution_, mul_new_contribution_;
 
     // 对称量化配置
     bool x_symmetric_, h_symmetric_;
-    bool W_symmetric_, R_symmetric_, bx_symmetric_, br_symmetric_;
-    bool Wx_symmetric_, Rh_symmetric_;
-    bool z_pre_symmetric_, z_out_symmetric_;
-    bool r_pre_symmetric_, r_out_symmetric_;
-    bool g_pre_symmetric_, g_out_symmetric_;
-    bool rRh_symmetric_;
-    bool old_contrib_symmetric_, new_contrib_symmetric_;
+    bool W_symmetric_, R_symmetric_, bw_symmetric_, br_symmetric_;
+    bool weight_ih_linear_symmetric_, weight_hh_linear_symmetric_;
+    bool update_gate_input_symmetric_, update_gate_output_symmetric_;
+    bool reset_gate_input_symmetric_, reset_gate_output_symmetric_;
+    bool new_gate_input_symmetric_, new_gate_output_symmetric_;
+    bool mul_reset_hidden_symmetric_;
+    bool mul_old_contribution_symmetric_, mul_new_contribution_symmetric_;
 
     // 无符号量化配置（与 C++ is_unsigned_ 一致，只标记例外情况）
     bool x_unsigned_, h_unsigned_;
-    bool W_unsigned_, R_unsigned_, bx_unsigned_, br_unsigned_;
-    bool Wx_unsigned_, Rh_unsigned_;
-    bool z_pre_unsigned_, z_out_unsigned_;
-    bool r_pre_unsigned_, r_out_unsigned_;
-    bool g_pre_unsigned_, g_out_unsigned_;
-    bool rRh_unsigned_;
-    bool old_contrib_unsigned_, new_contrib_unsigned_;
+    bool W_unsigned_, R_unsigned_, bw_unsigned_, br_unsigned_;
+    bool weight_ih_linear_unsigned_, weight_hh_linear_unsigned_;
+    bool update_gate_input_unsigned_, update_gate_output_unsigned_;
+    bool reset_gate_input_unsigned_, reset_gate_output_unsigned_;
+    bool new_gate_input_unsigned_, new_gate_output_unsigned_;
+    bool mul_reset_hidden_unsigned_;
+    bool mul_old_contribution_unsigned_, mul_new_contribution_unsigned_;
 
     // 方法声明（实现在文件末尾）
     OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
@@ -120,38 +121,46 @@ struct GRUQuantizationRangesPy {
 };
 
 // GRUQuantitativeParameters 的 Python 绑定
+// 命名与 C++ GRUQuantitativeParameters 保持一致
 struct GRUQuantitativeParametersPy {
     int hidden_;
-    int8_t exp2_inv_x_;
+    // 基础参数
+    int8_t shift_x_;
     int32_t zp_x_;
-    int8_t exp2_inv_h_;
+    int8_t shift_h_;
     int32_t zp_h_;
-    std::vector<int8_t> exp2_inv_W_;
-    std::vector<int8_t> exp2_inv_R_;
-    int8_t exp2_inv_Wx_;
-    int32_t zp_Wx_;
-    int8_t exp2_inv_Rh_;
-    int32_t zp_Rh_;
-    std::vector<int8_t> exp2_inv_bx_;
-    std::vector<int8_t> exp2_inv_br_;
-    int8_t exp2_inv_z_pre_;
-    int32_t zp_z_pre_;
-    int8_t exp2_inv_r_pre_;
-    int32_t zp_r_pre_;
-    int8_t exp2_inv_g_pre_;
-    int32_t zp_g_pre_;
-    int8_t exp2_inv_z_out_;
-    int32_t zp_z_out_;
-    int8_t exp2_inv_r_out_;
-    int32_t zp_r_out_;
-    int8_t exp2_inv_g_out_;
-    int32_t zp_g_out_;
-    int8_t exp2_inv_rRh_;
-    int32_t zp_rRh_;
-    int8_t exp2_inv_new_contrib_;
-    int32_t zp_new_contrib_;
-    int8_t exp2_inv_old_contrib_;
-    int32_t zp_old_contrib_;
+    // 权重参数（per-channel）
+    std::vector<int8_t> shift_W_;
+    std::vector<int8_t> shift_R_;
+    std::vector<int8_t> shift_bw_;
+    std::vector<int8_t> shift_br_;
+    // Linear 输出参数 (GEMM+bias)
+    int8_t shift_weight_ih_linear_;
+    int32_t zp_weight_ih_linear_;
+    int8_t shift_weight_hh_linear_;
+    int32_t zp_weight_hh_linear_;
+    // 门激活函数输入参数（pre-activation）
+    int8_t shift_update_gate_input_;
+    int32_t zp_update_gate_input_;
+    int8_t shift_reset_gate_input_;
+    int32_t zp_reset_gate_input_;
+    int8_t shift_new_gate_input_;
+    int32_t zp_new_gate_input_;
+    // 门激活函数输出参数（post-activation）
+    int8_t shift_update_gate_output_;
+    int32_t zp_update_gate_output_;
+    int8_t shift_reset_gate_output_;
+    int32_t zp_reset_gate_output_;
+    int8_t shift_new_gate_output_;
+    int32_t zp_new_gate_output_;
+    // 中间计算参数
+    int8_t shift_mul_reset_hidden_;
+    int32_t zp_mul_reset_hidden_;
+    // 隐状态更新参数
+    int8_t shift_mul_new_contribution_;
+    int32_t zp_mul_new_contribution_;
+    int8_t shift_mul_old_contribution_;
+    int32_t zp_mul_old_contribution_;
 
     // ⚠️ 关键字段：位宽配置必须在 Python 和 C++ 之间正确传递
     // 否则 forwardInterface 会使用默认的 8 位配置
@@ -247,14 +256,14 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
     bool is_training,  // 是否开启训练模式
     bool is_quant,     // 是否使用量化推理
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
     const GRUQuantitativeParametersPy &quant_params) {
     
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
 
@@ -287,7 +296,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
     
     forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
                      W.data_ptr<float>(), R.data_ptr<float>(), 
-                     bx.data_ptr<float>(), br.data_ptr<float>(), 
+                     bw.data_ptr<float>(), br.data_ptr<float>(), 
                      x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
                      h.data_ptr<float>(), v.data_ptr<float>());
 
@@ -307,7 +316,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_wrapper(
 std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,
     const std::string &calib_method_str,  // 校准方法: 'minmax', 'sqnr', 'percentile'
@@ -316,7 +325,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
 
@@ -361,7 +370,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     forwardWithCalibrationGPU(
         is_training, time_steps, batch_size, input_size, hidden_size,
         W.data_ptr<float>(), R.data_ptr<float>(), 
-        bx.data_ptr<float>(), br.data_ptr<float>(), 
+        bw.data_ptr<float>(), br.data_ptr<float>(), 
         x.data_ptr<float>(), h0_ptr, g_blas_handle,
         calib_method,
         quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr,
@@ -374,7 +383,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
 // GRU 反向传播包装函数
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int hidden_size,
-                           const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bx,
+                           const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
                            const torch::Tensor &br, const torch::Tensor &x,
                            const torch::Tensor &dh_new,  // 来自上层网络或损失函数的反向梯度
                            const torch::Tensor &h,       // 前向传播的隐藏状态
@@ -383,7 +392,7 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
     // 检查输入张量的类型和设备
     TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
     TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bx.is_cuda() && bx.dtype() == torch::kFloat32, "bx must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
     TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
     TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
     TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
@@ -412,8 +421,8 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
                 "R must have shape [hidden_size, hidden_size * 3]");
     torch::Tensor R_t = R.t().contiguous();  // [H, H*3] -> [H*3, H]
 
-    TORCH_CHECK(bx.sizes() == torch::IntArrayRef({hidden_size * 3}),
-                "bx must have shape [hidden_size * 3]");
+    TORCH_CHECK(bw.sizes() == torch::IntArrayRef({hidden_size * 3}),
+                "bw must have shape [hidden_size * 3]");
     TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
                 "br must have shape [hidden_size * 3]");
     TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
@@ -435,7 +444,7 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
                            torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dR = torch::zeros({hidden_size, hidden_size * 3},
                            torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dbx = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dbw = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dbr = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
     auto dh =
         torch::zeros({batch_size, hidden_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
@@ -447,14 +456,14 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
     hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
                      W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W
                      R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R
-                     bx.data_ptr<float>(), br.data_ptr<float>(),
+                     bw.data_ptr<float>(), br.data_ptr<float>(),
                      x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x
                      dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
                      g_blas_handle, dx.data_ptr<float>(), dW.data_ptr<float>(),
-                     dR.data_ptr<float>(), dbx.data_ptr<float>(), dbr.data_ptr<float>(),
+                     dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
                      dh.data_ptr<float>());
 
-    return std::make_tuple(dx, dW, dR, dbx, dbr, dh);
+    return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
 }
 
 // ============================================================================
@@ -476,37 +485,37 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     cfg.h_ = toBitwidth(h_, h_unsigned_);
     cfg.W_ = toBitwidth(W_, W_unsigned_);
     cfg.R_ = toBitwidth(R_, R_unsigned_);
-    cfg.bx_ = toBitwidth(bx_, bx_unsigned_);
+    cfg.bw_ = toBitwidth(bw_, bw_unsigned_);
     cfg.br_ = toBitwidth(br_, br_unsigned_);
-    cfg.Wx_ = toBitwidth(Wx_, Wx_unsigned_);
-    cfg.Rh_ = toBitwidth(Rh_, Rh_unsigned_);
-    cfg.z_pre_ = toBitwidth(z_pre_, z_pre_unsigned_);
-    cfg.z_out_ = toBitwidth(z_out_, z_out_unsigned_);
-    cfg.r_pre_ = toBitwidth(r_pre_, r_pre_unsigned_);
-    cfg.r_out_ = toBitwidth(r_out_, r_out_unsigned_);
-    cfg.g_pre_ = toBitwidth(g_pre_, g_pre_unsigned_);
-    cfg.g_out_ = toBitwidth(g_out_, g_out_unsigned_);
-    cfg.rRh_ = toBitwidth(rRh_, rRh_unsigned_);
-    cfg.old_contrib_ = toBitwidth(old_contrib_, old_contrib_unsigned_);
-    cfg.new_contrib_ = toBitwidth(new_contrib_, new_contrib_unsigned_);
+    cfg.weight_ih_linear_ = toBitwidth(weight_ih_linear_, weight_ih_linear_unsigned_);
+    cfg.weight_hh_linear_ = toBitwidth(weight_hh_linear_, weight_hh_linear_unsigned_);
+    cfg.update_gate_input_ = toBitwidth(update_gate_input_, update_gate_input_unsigned_);
+    cfg.update_gate_output_ = toBitwidth(update_gate_output_, update_gate_output_unsigned_);
+    cfg.reset_gate_input_ = toBitwidth(reset_gate_input_, reset_gate_input_unsigned_);
+    cfg.reset_gate_output_ = toBitwidth(reset_gate_output_, reset_gate_output_unsigned_);
+    cfg.new_gate_input_ = toBitwidth(new_gate_input_, new_gate_input_unsigned_);
+    cfg.new_gate_output_ = toBitwidth(new_gate_output_, new_gate_output_unsigned_);
+    cfg.mul_reset_hidden_ = toBitwidth(mul_reset_hidden_, mul_reset_hidden_unsigned_);
+    cfg.mul_old_contribution_ = toBitwidth(mul_old_contribution_, mul_old_contribution_unsigned_);
+    cfg.mul_new_contribution_ = toBitwidth(mul_new_contribution_, mul_new_contribution_unsigned_);
     // 对称量化配置
     cfg.x_symmetric_ = x_symmetric_;
     cfg.h_symmetric_ = h_symmetric_;
     cfg.W_symmetric_ = W_symmetric_;
     cfg.R_symmetric_ = R_symmetric_;
-    cfg.bx_symmetric_ = bx_symmetric_;
+    cfg.bw_symmetric_ = bw_symmetric_;
     cfg.br_symmetric_ = br_symmetric_;
-    cfg.Wx_symmetric_ = Wx_symmetric_;
-    cfg.Rh_symmetric_ = Rh_symmetric_;
-    cfg.z_pre_symmetric_ = z_pre_symmetric_;
-    cfg.z_out_symmetric_ = z_out_symmetric_;
-    cfg.r_pre_symmetric_ = r_pre_symmetric_;
-    cfg.r_out_symmetric_ = r_out_symmetric_;
-    cfg.g_pre_symmetric_ = g_pre_symmetric_;
-    cfg.g_out_symmetric_ = g_out_symmetric_;
-    cfg.rRh_symmetric_ = rRh_symmetric_;
-    cfg.old_contrib_symmetric_ = old_contrib_symmetric_;
-    cfg.new_contrib_symmetric_ = new_contrib_symmetric_;
+    cfg.weight_ih_linear_symmetric_ = weight_ih_linear_symmetric_;
+    cfg.weight_hh_linear_symmetric_ = weight_hh_linear_symmetric_;
+    cfg.update_gate_input_symmetric_ = update_gate_input_symmetric_;
+    cfg.update_gate_output_symmetric_ = update_gate_output_symmetric_;
+    cfg.reset_gate_input_symmetric_ = reset_gate_input_symmetric_;
+    cfg.reset_gate_output_symmetric_ = reset_gate_output_symmetric_;
+    cfg.new_gate_input_symmetric_ = new_gate_input_symmetric_;
+    cfg.new_gate_output_symmetric_ = new_gate_output_symmetric_;
+    cfg.mul_reset_hidden_symmetric_ = mul_reset_hidden_symmetric_;
+    cfg.mul_old_contribution_symmetric_ = mul_old_contribution_symmetric_;
+    cfg.mul_new_contribution_symmetric_ = mul_new_contribution_symmetric_;
     return cfg;
 }
 
@@ -517,55 +526,55 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     h_ = cfg.h_.bits_;
     W_ = cfg.W_.bits_;
     R_ = cfg.R_.bits_;
-    bx_ = cfg.bx_.bits_;
+    bw_ = cfg.bw_.bits_;
     br_ = cfg.br_.bits_;
-    Wx_ = cfg.Wx_.bits_;
-    Rh_ = cfg.Rh_.bits_;
-    z_pre_ = cfg.z_pre_.bits_;
-    z_out_ = cfg.z_out_.bits_;
-    r_pre_ = cfg.r_pre_.bits_;
-    r_out_ = cfg.r_out_.bits_;
-    g_pre_ = cfg.g_pre_.bits_;
-    g_out_ = cfg.g_out_.bits_;
-    rRh_ = cfg.rRh_.bits_;
-    old_contrib_ = cfg.old_contrib_.bits_;
-    new_contrib_ = cfg.new_contrib_.bits_;
+    weight_ih_linear_ = cfg.weight_ih_linear_.bits_;
+    weight_hh_linear_ = cfg.weight_hh_linear_.bits_;
+    update_gate_input_ = cfg.update_gate_input_.bits_;
+    update_gate_output_ = cfg.update_gate_output_.bits_;
+    reset_gate_input_ = cfg.reset_gate_input_.bits_;
+    reset_gate_output_ = cfg.reset_gate_output_.bits_;
+    new_gate_input_ = cfg.new_gate_input_.bits_;
+    new_gate_output_ = cfg.new_gate_output_.bits_;
+    mul_reset_hidden_ = cfg.mul_reset_hidden_.bits_;
+    mul_old_contribution_ = cfg.mul_old_contribution_.bits_;
+    mul_new_contribution_ = cfg.mul_new_contribution_.bits_;
     // 对称量化配置
     x_symmetric_ = cfg.x_symmetric_;
     h_symmetric_ = cfg.h_symmetric_;
     W_symmetric_ = cfg.W_symmetric_;
     R_symmetric_ = cfg.R_symmetric_;
-    bx_symmetric_ = cfg.bx_symmetric_;
+    bw_symmetric_ = cfg.bw_symmetric_;
     br_symmetric_ = cfg.br_symmetric_;
-    Wx_symmetric_ = cfg.Wx_symmetric_;
-    Rh_symmetric_ = cfg.Rh_symmetric_;
-    z_pre_symmetric_ = cfg.z_pre_symmetric_;
-    z_out_symmetric_ = cfg.z_out_symmetric_;
-    r_pre_symmetric_ = cfg.r_pre_symmetric_;
-    r_out_symmetric_ = cfg.r_out_symmetric_;
-    g_pre_symmetric_ = cfg.g_pre_symmetric_;
-    g_out_symmetric_ = cfg.g_out_symmetric_;
-    rRh_symmetric_ = cfg.rRh_symmetric_;
-    old_contrib_symmetric_ = cfg.old_contrib_symmetric_;
-    new_contrib_symmetric_ = cfg.new_contrib_symmetric_;
+    weight_ih_linear_symmetric_ = cfg.weight_ih_linear_symmetric_;
+    weight_hh_linear_symmetric_ = cfg.weight_hh_linear_symmetric_;
+    update_gate_input_symmetric_ = cfg.update_gate_input_symmetric_;
+    update_gate_output_symmetric_ = cfg.update_gate_output_symmetric_;
+    reset_gate_input_symmetric_ = cfg.reset_gate_input_symmetric_;
+    reset_gate_output_symmetric_ = cfg.reset_gate_output_symmetric_;
+    new_gate_input_symmetric_ = cfg.new_gate_input_symmetric_;
+    new_gate_output_symmetric_ = cfg.new_gate_output_symmetric_;
+    mul_reset_hidden_symmetric_ = cfg.mul_reset_hidden_symmetric_;
+    mul_old_contribution_symmetric_ = cfg.mul_old_contribution_symmetric_;
+    mul_new_contribution_symmetric_ = cfg.mul_new_contribution_symmetric_;
     // 无符号配置（直接从 C++ is_unsigned_ 读取，无需转换）
     x_unsigned_ = cfg.x_.is_unsigned_;
     h_unsigned_ = cfg.h_.is_unsigned_;
     W_unsigned_ = cfg.W_.is_unsigned_;
     R_unsigned_ = cfg.R_.is_unsigned_;
-    bx_unsigned_ = cfg.bx_.is_unsigned_;
+    bw_unsigned_ = cfg.bw_.is_unsigned_;
     br_unsigned_ = cfg.br_.is_unsigned_;
-    Wx_unsigned_ = cfg.Wx_.is_unsigned_;
-    Rh_unsigned_ = cfg.Rh_.is_unsigned_;
-    z_pre_unsigned_ = cfg.z_pre_.is_unsigned_;
-    z_out_unsigned_ = cfg.z_out_.is_unsigned_;
-    r_pre_unsigned_ = cfg.r_pre_.is_unsigned_;
-    r_out_unsigned_ = cfg.r_out_.is_unsigned_;
-    g_pre_unsigned_ = cfg.g_pre_.is_unsigned_;
-    g_out_unsigned_ = cfg.g_out_.is_unsigned_;
-    rRh_unsigned_ = cfg.rRh_.is_unsigned_;
-    old_contrib_unsigned_ = cfg.old_contrib_.is_unsigned_;
-    new_contrib_unsigned_ = cfg.new_contrib_.is_unsigned_;
+    weight_ih_linear_unsigned_ = cfg.weight_ih_linear_.is_unsigned_;
+    weight_hh_linear_unsigned_ = cfg.weight_hh_linear_.is_unsigned_;
+    update_gate_input_unsigned_ = cfg.update_gate_input_.is_unsigned_;
+    update_gate_output_unsigned_ = cfg.update_gate_output_.is_unsigned_;
+    reset_gate_input_unsigned_ = cfg.reset_gate_input_.is_unsigned_;
+    reset_gate_output_unsigned_ = cfg.reset_gate_output_.is_unsigned_;
+    new_gate_input_unsigned_ = cfg.new_gate_input_.is_unsigned_;
+    new_gate_output_unsigned_ = cfg.new_gate_output_.is_unsigned_;
+    mul_reset_hidden_unsigned_ = cfg.mul_reset_hidden_.is_unsigned_;
+    mul_old_contribution_unsigned_ = cfg.mul_old_contribution_.is_unsigned_;
+    mul_new_contribution_unsigned_ = cfg.mul_new_contribution_.is_unsigned_;
 }
 
 // ============================================================================
@@ -575,36 +584,43 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
 // 从 C++ 结构体转换
 void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_params) {
     hidden_ = cpp_params.hidden_;
-    exp2_inv_x_ = cpp_params.exp2_inv_x_;
+    // 基础参数
+    shift_x_ = cpp_params.shift_x_;
     zp_x_ = cpp_params.zp_x_;
-    exp2_inv_h_ = cpp_params.exp2_inv_h_;
+    shift_h_ = cpp_params.shift_h_;
     zp_h_ = cpp_params.zp_h_;
-    exp2_inv_W_ = cpp_params.exp2_inv_W_;
-    exp2_inv_R_ = cpp_params.exp2_inv_R_;
-    exp2_inv_Wx_ = cpp_params.exp2_inv_Wx_;
-    zp_Wx_ = cpp_params.zp_Wx_;
-    exp2_inv_Rh_ = cpp_params.exp2_inv_Rh_;
-    zp_Rh_ = cpp_params.zp_Rh_;
-    exp2_inv_bx_ = cpp_params.exp2_inv_bx_;
-    exp2_inv_br_ = cpp_params.exp2_inv_br_;
-    exp2_inv_z_pre_ = cpp_params.exp2_inv_z_pre_;
-    zp_z_pre_ = cpp_params.zp_z_pre_;
-    exp2_inv_r_pre_ = cpp_params.exp2_inv_r_pre_;
-    zp_r_pre_ = cpp_params.zp_r_pre_;
-    exp2_inv_g_pre_ = cpp_params.exp2_inv_g_pre_;
-    zp_g_pre_ = cpp_params.zp_g_pre_;
-    exp2_inv_z_out_ = cpp_params.exp2_inv_z_out_;
-    zp_z_out_ = cpp_params.zp_z_out_;
-    exp2_inv_r_out_ = cpp_params.exp2_inv_r_out_;
-    zp_r_out_ = cpp_params.zp_r_out_;
-    exp2_inv_g_out_ = cpp_params.exp2_inv_g_out_;
-    zp_g_out_ = cpp_params.zp_g_out_;
-    exp2_inv_rRh_ = cpp_params.exp2_inv_rRh_;
-    zp_rRh_ = cpp_params.zp_rRh_;
-    exp2_inv_new_contrib_ = cpp_params.exp2_inv_new_contrib_;
-    zp_new_contrib_ = cpp_params.zp_new_contrib_;
-    exp2_inv_old_contrib_ = cpp_params.exp2_inv_old_contrib_;
-    zp_old_contrib_ = cpp_params.zp_old_contrib_;
+    // 权重参数
+    shift_W_ = cpp_params.shift_W_;
+    shift_R_ = cpp_params.shift_R_;
+    shift_bw_ = cpp_params.shift_bw_;
+    shift_br_ = cpp_params.shift_br_;
+    // Linear 输出参数
+    shift_weight_ih_linear_ = cpp_params.shift_weight_ih_linear_;
+    zp_weight_ih_linear_ = cpp_params.zp_weight_ih_linear_;
+    shift_weight_hh_linear_ = cpp_params.shift_weight_hh_linear_;
+    zp_weight_hh_linear_ = cpp_params.zp_weight_hh_linear_;
+    // 门激活函数输入参数
+    shift_update_gate_input_ = cpp_params.shift_update_gate_input_;
+    zp_update_gate_input_ = cpp_params.zp_update_gate_input_;
+    shift_reset_gate_input_ = cpp_params.shift_reset_gate_input_;
+    zp_reset_gate_input_ = cpp_params.zp_reset_gate_input_;
+    shift_new_gate_input_ = cpp_params.shift_new_gate_input_;
+    zp_new_gate_input_ = cpp_params.zp_new_gate_input_;
+    // 门激活函数输出参数
+    shift_update_gate_output_ = cpp_params.shift_update_gate_output_;
+    zp_update_gate_output_ = cpp_params.zp_update_gate_output_;
+    shift_reset_gate_output_ = cpp_params.shift_reset_gate_output_;
+    zp_reset_gate_output_ = cpp_params.zp_reset_gate_output_;
+    shift_new_gate_output_ = cpp_params.shift_new_gate_output_;
+    zp_new_gate_output_ = cpp_params.zp_new_gate_output_;
+    // 中间计算参数
+    shift_mul_reset_hidden_ = cpp_params.shift_mul_reset_hidden_;
+    zp_mul_reset_hidden_ = cpp_params.zp_mul_reset_hidden_;
+    // 隐状态更新参数
+    shift_mul_new_contribution_ = cpp_params.shift_mul_new_contribution_;
+    zp_mul_new_contribution_ = cpp_params.zp_mul_new_contribution_;
+    shift_mul_old_contribution_ = cpp_params.shift_mul_old_contribution_;
+    zp_mul_old_contribution_ = cpp_params.zp_mul_old_contribution_;
 
     // ⚠️ 关键：复制位宽配置
     bitwidth_config_.from_cpp(cpp_params.bitwidth_config_);
@@ -614,36 +630,43 @@ void GRUQuantitativeParametersPy::from_cpp(const GRUQuantitativeParameters &cpp_
 GRUQuantitativeParameters GRUQuantitativeParametersPy::to_cpp() const {
     GRUQuantitativeParameters cpp_params;
     cpp_params.hidden_ = hidden_;
-    cpp_params.exp2_inv_x_ = exp2_inv_x_;
+    // 基础参数
+    cpp_params.shift_x_ = shift_x_;
     cpp_params.zp_x_ = zp_x_;
-    cpp_params.exp2_inv_h_ = exp2_inv_h_;
+    cpp_params.shift_h_ = shift_h_;
     cpp_params.zp_h_ = zp_h_;
-    cpp_params.exp2_inv_W_ = exp2_inv_W_;
-    cpp_params.exp2_inv_R_ = exp2_inv_R_;
-    cpp_params.exp2_inv_Wx_ = exp2_inv_Wx_;
-    cpp_params.zp_Wx_ = zp_Wx_;
-    cpp_params.exp2_inv_Rh_ = exp2_inv_Rh_;
-    cpp_params.zp_Rh_ = zp_Rh_;
-    cpp_params.exp2_inv_bx_ = exp2_inv_bx_;
-    cpp_params.exp2_inv_br_ = exp2_inv_br_;
-    cpp_params.exp2_inv_z_pre_ = exp2_inv_z_pre_;
-    cpp_params.zp_z_pre_ = zp_z_pre_;
-    cpp_params.exp2_inv_r_pre_ = exp2_inv_r_pre_;
-    cpp_params.zp_r_pre_ = zp_r_pre_;
-    cpp_params.exp2_inv_g_pre_ = exp2_inv_g_pre_;
-    cpp_params.zp_g_pre_ = zp_g_pre_;
-    cpp_params.exp2_inv_z_out_ = exp2_inv_z_out_;
-    cpp_params.zp_z_out_ = zp_z_out_;
-    cpp_params.exp2_inv_r_out_ = exp2_inv_r_out_;
-    cpp_params.zp_r_out_ = zp_r_out_;
-    cpp_params.exp2_inv_g_out_ = exp2_inv_g_out_;
-    cpp_params.zp_g_out_ = zp_g_out_;
-    cpp_params.exp2_inv_rRh_ = exp2_inv_rRh_;
-    cpp_params.zp_rRh_ = zp_rRh_;
-    cpp_params.exp2_inv_new_contrib_ = exp2_inv_new_contrib_;
-    cpp_params.zp_new_contrib_ = zp_new_contrib_;
-    cpp_params.exp2_inv_old_contrib_ = exp2_inv_old_contrib_;
-    cpp_params.zp_old_contrib_ = zp_old_contrib_;
+    // 权重参数
+    cpp_params.shift_W_ = shift_W_;
+    cpp_params.shift_R_ = shift_R_;
+    cpp_params.shift_bw_ = shift_bw_;
+    cpp_params.shift_br_ = shift_br_;
+    // Linear 输出参数
+    cpp_params.shift_weight_ih_linear_ = shift_weight_ih_linear_;
+    cpp_params.zp_weight_ih_linear_ = zp_weight_ih_linear_;
+    cpp_params.shift_weight_hh_linear_ = shift_weight_hh_linear_;
+    cpp_params.zp_weight_hh_linear_ = zp_weight_hh_linear_;
+    // 门激活函数输入参数
+    cpp_params.shift_update_gate_input_ = shift_update_gate_input_;
+    cpp_params.zp_update_gate_input_ = zp_update_gate_input_;
+    cpp_params.shift_reset_gate_input_ = shift_reset_gate_input_;
+    cpp_params.zp_reset_gate_input_ = zp_reset_gate_input_;
+    cpp_params.shift_new_gate_input_ = shift_new_gate_input_;
+    cpp_params.zp_new_gate_input_ = zp_new_gate_input_;
+    // 门激活函数输出参数
+    cpp_params.shift_update_gate_output_ = shift_update_gate_output_;
+    cpp_params.zp_update_gate_output_ = zp_update_gate_output_;
+    cpp_params.shift_reset_gate_output_ = shift_reset_gate_output_;
+    cpp_params.zp_reset_gate_output_ = zp_reset_gate_output_;
+    cpp_params.shift_new_gate_output_ = shift_new_gate_output_;
+    cpp_params.zp_new_gate_output_ = zp_new_gate_output_;
+    // 中间计算参数
+    cpp_params.shift_mul_reset_hidden_ = shift_mul_reset_hidden_;
+    cpp_params.zp_mul_reset_hidden_ = zp_mul_reset_hidden_;
+    // 隐状态更新参数
+    cpp_params.shift_mul_new_contribution_ = shift_mul_new_contribution_;
+    cpp_params.zp_mul_new_contribution_ = zp_mul_new_contribution_;
+    cpp_params.shift_mul_old_contribution_ = shift_mul_old_contribution_;
+    cpp_params.zp_mul_old_contribution_ = zp_mul_old_contribution_;
 
     // ⚠️ 关键：复制位宽配置
     cpp_params.bitwidth_config_ = bitwidth_config_.to_cpp();
@@ -684,28 +707,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         DEF_PROP(max_Wx_)
         DEF_PROP(min_Rh_)
         DEF_PROP(max_Rh_)
-        DEF_PROP(min_bx_)
-        DEF_PROP(max_bx_)
+        DEF_PROP(min_bw_)
+        DEF_PROP(max_bw_)
         DEF_PROP(min_br_)
         DEF_PROP(max_br_)
-        DEF_PROP(min_z_pre_)
-        DEF_PROP(max_z_pre_)
-        DEF_PROP(min_r_pre_)
-        DEF_PROP(max_r_pre_)
-        DEF_PROP(min_g_pre_)
-        DEF_PROP(max_g_pre_)
-        DEF_PROP(min_z_out_)
-        DEF_PROP(max_z_out_)
-        DEF_PROP(min_r_out_)
-        DEF_PROP(max_r_out_)
-        DEF_PROP(min_g_out_)
-        DEF_PROP(max_g_out_)
-        DEF_PROP(min_rRh_)
-        DEF_PROP(max_rRh_)
-        DEF_PROP(min_new_contrib_)
-        DEF_PROP(max_new_contrib_)
-        DEF_PROP(min_old_contrib_)
-        DEF_PROP(max_old_contrib_)
+        DEF_PROP(min_update_gate_input_)
+        DEF_PROP(max_update_gate_input_)
+        DEF_PROP(min_reset_gate_input_)
+        DEF_PROP(max_reset_gate_input_)
+        DEF_PROP(min_new_gate_input_)
+        DEF_PROP(max_new_gate_input_)
+        DEF_PROP(min_update_gate_output_)
+        DEF_PROP(max_update_gate_output_)
+        DEF_PROP(min_reset_gate_output_)
+        DEF_PROP(max_reset_gate_output_)
+        DEF_PROP(min_new_gate_output_)
+        DEF_PROP(max_new_gate_output_)
+        DEF_PROP(min_mul_reset_hidden_)
+        DEF_PROP(max_mul_reset_hidden_)
+        DEF_PROP(min_mul_new_contribution_)
+        DEF_PROP(max_mul_new_contribution_)
+        DEF_PROP(min_mul_old_contribution_)
+        DEF_PROP(max_mul_old_contribution_)
         .def("reset", &GRUQuantizationRangesPy::reset,
              "Reset all ranges to invalid values. If hidden > 0, also update hidden_ and resize "
              "per-channel vectors.",
@@ -723,90 +746,97 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("h_", &OperatorQuantConfigPy::h_)
         .def_readwrite("W_", &OperatorQuantConfigPy::W_)
         .def_readwrite("R_", &OperatorQuantConfigPy::R_)
-        .def_readwrite("bx_", &OperatorQuantConfigPy::bx_)
+        .def_readwrite("bw_", &OperatorQuantConfigPy::bw_)
         .def_readwrite("br_", &OperatorQuantConfigPy::br_)
-        .def_readwrite("Wx_", &OperatorQuantConfigPy::Wx_)
-        .def_readwrite("Rh_", &OperatorQuantConfigPy::Rh_)
-        .def_readwrite("z_pre_", &OperatorQuantConfigPy::z_pre_)
-        .def_readwrite("z_out_", &OperatorQuantConfigPy::z_out_)
-        .def_readwrite("r_pre_", &OperatorQuantConfigPy::r_pre_)
-        .def_readwrite("r_out_", &OperatorQuantConfigPy::r_out_)
-        .def_readwrite("g_pre_", &OperatorQuantConfigPy::g_pre_)
-        .def_readwrite("g_out_", &OperatorQuantConfigPy::g_out_)
-        .def_readwrite("rRh_", &OperatorQuantConfigPy::rRh_)
-        .def_readwrite("old_contrib_", &OperatorQuantConfigPy::old_contrib_)
-        .def_readwrite("new_contrib_", &OperatorQuantConfigPy::new_contrib_)
+        .def_readwrite("weight_ih_linear_", &OperatorQuantConfigPy::weight_ih_linear_)
+        .def_readwrite("weight_hh_linear_", &OperatorQuantConfigPy::weight_hh_linear_)
+        .def_readwrite("update_gate_input_", &OperatorQuantConfigPy::update_gate_input_)
+        .def_readwrite("update_gate_output_", &OperatorQuantConfigPy::update_gate_output_)
+        .def_readwrite("reset_gate_input_", &OperatorQuantConfigPy::reset_gate_input_)
+        .def_readwrite("reset_gate_output_", &OperatorQuantConfigPy::reset_gate_output_)
+        .def_readwrite("new_gate_input_", &OperatorQuantConfigPy::new_gate_input_)
+        .def_readwrite("new_gate_output_", &OperatorQuantConfigPy::new_gate_output_)
+        .def_readwrite("mul_reset_hidden_", &OperatorQuantConfigPy::mul_reset_hidden_)
+        .def_readwrite("mul_old_contribution_", &OperatorQuantConfigPy::mul_old_contribution_)
+        .def_readwrite("mul_new_contribution_", &OperatorQuantConfigPy::mul_new_contribution_)
         // 对称量化配置
         .def_readwrite("x_symmetric_", &OperatorQuantConfigPy::x_symmetric_)
         .def_readwrite("h_symmetric_", &OperatorQuantConfigPy::h_symmetric_)
         .def_readwrite("W_symmetric_", &OperatorQuantConfigPy::W_symmetric_)
         .def_readwrite("R_symmetric_", &OperatorQuantConfigPy::R_symmetric_)
-        .def_readwrite("bx_symmetric_", &OperatorQuantConfigPy::bx_symmetric_)
+        .def_readwrite("bw_symmetric_", &OperatorQuantConfigPy::bw_symmetric_)
         .def_readwrite("br_symmetric_", &OperatorQuantConfigPy::br_symmetric_)
-        .def_readwrite("Wx_symmetric_", &OperatorQuantConfigPy::Wx_symmetric_)
-        .def_readwrite("Rh_symmetric_", &OperatorQuantConfigPy::Rh_symmetric_)
-        .def_readwrite("z_pre_symmetric_", &OperatorQuantConfigPy::z_pre_symmetric_)
-        .def_readwrite("z_out_symmetric_", &OperatorQuantConfigPy::z_out_symmetric_)
-        .def_readwrite("r_pre_symmetric_", &OperatorQuantConfigPy::r_pre_symmetric_)
-        .def_readwrite("r_out_symmetric_", &OperatorQuantConfigPy::r_out_symmetric_)
-        .def_readwrite("g_pre_symmetric_", &OperatorQuantConfigPy::g_pre_symmetric_)
-        .def_readwrite("g_out_symmetric_", &OperatorQuantConfigPy::g_out_symmetric_)
-        .def_readwrite("rRh_symmetric_", &OperatorQuantConfigPy::rRh_symmetric_)
-        .def_readwrite("old_contrib_symmetric_", &OperatorQuantConfigPy::old_contrib_symmetric_)
-        .def_readwrite("new_contrib_symmetric_", &OperatorQuantConfigPy::new_contrib_symmetric_)
+        .def_readwrite("weight_ih_linear_symmetric_", &OperatorQuantConfigPy::weight_ih_linear_symmetric_)
+        .def_readwrite("weight_hh_linear_symmetric_", &OperatorQuantConfigPy::weight_hh_linear_symmetric_)
+        .def_readwrite("update_gate_input_symmetric_", &OperatorQuantConfigPy::update_gate_input_symmetric_)
+        .def_readwrite("update_gate_output_symmetric_", &OperatorQuantConfigPy::update_gate_output_symmetric_)
+        .def_readwrite("reset_gate_input_symmetric_", &OperatorQuantConfigPy::reset_gate_input_symmetric_)
+        .def_readwrite("reset_gate_output_symmetric_", &OperatorQuantConfigPy::reset_gate_output_symmetric_)
+        .def_readwrite("new_gate_input_symmetric_", &OperatorQuantConfigPy::new_gate_input_symmetric_)
+        .def_readwrite("new_gate_output_symmetric_", &OperatorQuantConfigPy::new_gate_output_symmetric_)
+        .def_readwrite("mul_reset_hidden_symmetric_", &OperatorQuantConfigPy::mul_reset_hidden_symmetric_)
+        .def_readwrite("mul_old_contribution_symmetric_", &OperatorQuantConfigPy::mul_old_contribution_symmetric_)
+        .def_readwrite("mul_new_contribution_symmetric_", &OperatorQuantConfigPy::mul_new_contribution_symmetric_)
         // 无符号配置（与 C++ is_unsigned_ 语义一致，只标记例外）
         .def_readwrite("x_unsigned_", &OperatorQuantConfigPy::x_unsigned_)
         .def_readwrite("h_unsigned_", &OperatorQuantConfigPy::h_unsigned_)
         .def_readwrite("W_unsigned_", &OperatorQuantConfigPy::W_unsigned_)
         .def_readwrite("R_unsigned_", &OperatorQuantConfigPy::R_unsigned_)
-        .def_readwrite("bx_unsigned_", &OperatorQuantConfigPy::bx_unsigned_)
+        .def_readwrite("bw_unsigned_", &OperatorQuantConfigPy::bw_unsigned_)
         .def_readwrite("br_unsigned_", &OperatorQuantConfigPy::br_unsigned_)
-        .def_readwrite("Wx_unsigned_", &OperatorQuantConfigPy::Wx_unsigned_)
-        .def_readwrite("Rh_unsigned_", &OperatorQuantConfigPy::Rh_unsigned_)
-        .def_readwrite("z_pre_unsigned_", &OperatorQuantConfigPy::z_pre_unsigned_)
-        .def_readwrite("z_out_unsigned_", &OperatorQuantConfigPy::z_out_unsigned_)
-        .def_readwrite("r_pre_unsigned_", &OperatorQuantConfigPy::r_pre_unsigned_)
-        .def_readwrite("r_out_unsigned_", &OperatorQuantConfigPy::r_out_unsigned_)
-        .def_readwrite("g_pre_unsigned_", &OperatorQuantConfigPy::g_pre_unsigned_)
-        .def_readwrite("g_out_unsigned_", &OperatorQuantConfigPy::g_out_unsigned_)
-        .def_readwrite("rRh_unsigned_", &OperatorQuantConfigPy::rRh_unsigned_)
-        .def_readwrite("old_contrib_unsigned_", &OperatorQuantConfigPy::old_contrib_unsigned_)
-        .def_readwrite("new_contrib_unsigned_", &OperatorQuantConfigPy::new_contrib_unsigned_);
+        .def_readwrite("weight_ih_linear_unsigned_", &OperatorQuantConfigPy::weight_ih_linear_unsigned_)
+        .def_readwrite("weight_hh_linear_unsigned_", &OperatorQuantConfigPy::weight_hh_linear_unsigned_)
+        .def_readwrite("update_gate_input_unsigned_", &OperatorQuantConfigPy::update_gate_input_unsigned_)
+        .def_readwrite("update_gate_output_unsigned_", &OperatorQuantConfigPy::update_gate_output_unsigned_)
+        .def_readwrite("reset_gate_input_unsigned_", &OperatorQuantConfigPy::reset_gate_input_unsigned_)
+        .def_readwrite("reset_gate_output_unsigned_", &OperatorQuantConfigPy::reset_gate_output_unsigned_)
+        .def_readwrite("new_gate_input_unsigned_", &OperatorQuantConfigPy::new_gate_input_unsigned_)
+        .def_readwrite("new_gate_output_unsigned_", &OperatorQuantConfigPy::new_gate_output_unsigned_)
+        .def_readwrite("mul_reset_hidden_unsigned_", &OperatorQuantConfigPy::mul_reset_hidden_unsigned_)
+        .def_readwrite("mul_old_contribution_unsigned_", &OperatorQuantConfigPy::mul_old_contribution_unsigned_)
+        .def_readwrite("mul_new_contribution_unsigned_", &OperatorQuantConfigPy::mul_new_contribution_unsigned_);
 
     // GRUQuantitativeParameters 绑定
     py::class_<GRUQuantitativeParametersPy>(m, "GRUQuantitativeParameters")
         .def(py::init<>())
         .def_readwrite("hidden_", &GRUQuantitativeParametersPy::hidden_)
-        .def_readwrite("exp2_inv_x_", &GRUQuantitativeParametersPy::exp2_inv_x_)
+        // 基础参数
+        .def_readwrite("shift_x_", &GRUQuantitativeParametersPy::shift_x_)
         .def_readwrite("zp_x_", &GRUQuantitativeParametersPy::zp_x_)
-        .def_readwrite("exp2_inv_h_", &GRUQuantitativeParametersPy::exp2_inv_h_)
+        .def_readwrite("shift_h_", &GRUQuantitativeParametersPy::shift_h_)
         .def_readwrite("zp_h_", &GRUQuantitativeParametersPy::zp_h_)
-        .def_readwrite("exp2_inv_W_", &GRUQuantitativeParametersPy::exp2_inv_W_)
-        .def_readwrite("exp2_inv_R_", &GRUQuantitativeParametersPy::exp2_inv_R_)
-        .def_readwrite("exp2_inv_Wx_", &GRUQuantitativeParametersPy::exp2_inv_Wx_)
-        .def_readwrite("zp_Wx_", &GRUQuantitativeParametersPy::zp_Wx_)
-        .def_readwrite("exp2_inv_Rh_", &GRUQuantitativeParametersPy::exp2_inv_Rh_)
-        .def_readwrite("zp_Rh_", &GRUQuantitativeParametersPy::zp_Rh_)
-        .def_readwrite("exp2_inv_bx_", &GRUQuantitativeParametersPy::exp2_inv_bx_)
-        .def_readwrite("exp2_inv_br_", &GRUQuantitativeParametersPy::exp2_inv_br_)
-        .def_readwrite("exp2_inv_z_pre_", &GRUQuantitativeParametersPy::exp2_inv_z_pre_)
-        .def_readwrite("zp_z_pre_", &GRUQuantitativeParametersPy::zp_z_pre_)
-        .def_readwrite("exp2_inv_r_pre_", &GRUQuantitativeParametersPy::exp2_inv_r_pre_)
-        .def_readwrite("zp_r_pre_", &GRUQuantitativeParametersPy::zp_r_pre_)
-        .def_readwrite("exp2_inv_g_pre_", &GRUQuantitativeParametersPy::exp2_inv_g_pre_)
-        .def_readwrite("zp_g_pre_", &GRUQuantitativeParametersPy::zp_g_pre_)
-        .def_readwrite("exp2_inv_z_out_", &GRUQuantitativeParametersPy::exp2_inv_z_out_)
-        .def_readwrite("zp_z_out_", &GRUQuantitativeParametersPy::zp_z_out_)
-        .def_readwrite("exp2_inv_r_out_", &GRUQuantitativeParametersPy::exp2_inv_r_out_)
-        .def_readwrite("zp_r_out_", &GRUQuantitativeParametersPy::zp_r_out_)
-        .def_readwrite("exp2_inv_g_out_", &GRUQuantitativeParametersPy::exp2_inv_g_out_)
-        .def_readwrite("zp_g_out_", &GRUQuantitativeParametersPy::zp_g_out_)
-        .def_readwrite("exp2_inv_rRh_", &GRUQuantitativeParametersPy::exp2_inv_rRh_)
-        .def_readwrite("zp_rRh_", &GRUQuantitativeParametersPy::zp_rRh_)
-        .def_readwrite("exp2_inv_new_contrib_", &GRUQuantitativeParametersPy::exp2_inv_new_contrib_)
-        .def_readwrite("zp_new_contrib_", &GRUQuantitativeParametersPy::zp_new_contrib_)
-        .def_readwrite("exp2_inv_old_contrib_", &GRUQuantitativeParametersPy::exp2_inv_old_contrib_)
-        .def_readwrite("zp_old_contrib_", &GRUQuantitativeParametersPy::zp_old_contrib_)
+        // 权重参数（per-channel）
+        .def_readwrite("shift_W_", &GRUQuantitativeParametersPy::shift_W_)
+        .def_readwrite("shift_R_", &GRUQuantitativeParametersPy::shift_R_)
+        .def_readwrite("shift_bw_", &GRUQuantitativeParametersPy::shift_bw_)
+        .def_readwrite("shift_br_", &GRUQuantitativeParametersPy::shift_br_)
+        // Linear 输出参数 (GEMM+bias)
+        .def_readwrite("shift_weight_ih_linear_", &GRUQuantitativeParametersPy::shift_weight_ih_linear_)
+        .def_readwrite("zp_weight_ih_linear_", &GRUQuantitativeParametersPy::zp_weight_ih_linear_)
+        .def_readwrite("shift_weight_hh_linear_", &GRUQuantitativeParametersPy::shift_weight_hh_linear_)
+        .def_readwrite("zp_weight_hh_linear_", &GRUQuantitativeParametersPy::zp_weight_hh_linear_)
+        // 门激活函数输入参数（pre-activation）
+        .def_readwrite("shift_update_gate_input_", &GRUQuantitativeParametersPy::shift_update_gate_input_)
+        .def_readwrite("zp_update_gate_input_", &GRUQuantitativeParametersPy::zp_update_gate_input_)
+        .def_readwrite("shift_reset_gate_input_", &GRUQuantitativeParametersPy::shift_reset_gate_input_)
+        .def_readwrite("zp_reset_gate_input_", &GRUQuantitativeParametersPy::zp_reset_gate_input_)
+        .def_readwrite("shift_new_gate_input_", &GRUQuantitativeParametersPy::shift_new_gate_input_)
+        .def_readwrite("zp_new_gate_input_", &GRUQuantitativeParametersPy::zp_new_gate_input_)
+        // 门激活函数输出参数（post-activation）
+        .def_readwrite("shift_update_gate_output_", &GRUQuantitativeParametersPy::shift_update_gate_output_)
+        .def_readwrite("zp_update_gate_output_", &GRUQuantitativeParametersPy::zp_update_gate_output_)
+        .def_readwrite("shift_reset_gate_output_", &GRUQuantitativeParametersPy::shift_reset_gate_output_)
+        .def_readwrite("zp_reset_gate_output_", &GRUQuantitativeParametersPy::zp_reset_gate_output_)
+        .def_readwrite("shift_new_gate_output_", &GRUQuantitativeParametersPy::shift_new_gate_output_)
+        .def_readwrite("zp_new_gate_output_", &GRUQuantitativeParametersPy::zp_new_gate_output_)
+        // 中间计算参数
+        .def_readwrite("shift_mul_reset_hidden_", &GRUQuantitativeParametersPy::shift_mul_reset_hidden_)
+        .def_readwrite("zp_mul_reset_hidden_", &GRUQuantitativeParametersPy::zp_mul_reset_hidden_)
+        // 隐状态更新参数
+        .def_readwrite("shift_mul_new_contribution_", &GRUQuantitativeParametersPy::shift_mul_new_contribution_)
+        .def_readwrite("zp_mul_new_contribution_", &GRUQuantitativeParametersPy::zp_mul_new_contribution_)
+        .def_readwrite("shift_mul_old_contribution_", &GRUQuantitativeParametersPy::shift_mul_old_contribution_)
+        .def_readwrite("zp_mul_old_contribution_", &GRUQuantitativeParametersPy::zp_mul_old_contribution_)
         // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
         .def_readwrite("bitwidth_config_", &GRUQuantitativeParametersPy::bitwidth_config_);
 
@@ -852,7 +882,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  is_training: Enable training mode (saves intermediate values)\n"
           "  is_quant: Use quantized inference (requires quant_params)\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
-          "  W, R, bx, br: Weight matrices and biases\n"
+          "  W, R, bw, br: Weight matrices and biases\n"
           "  x: Input tensor [T, B, I]\n"
           "  h0: Initial hidden state [B, H], optional\n"
           "  quant_params: Quantization parameters (used when is_quant=True)\n"
@@ -863,7 +893,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  - v: Intermediate values [T, B, H*4]",
           py::arg("is_training"), py::arg("is_quant"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
-          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),
           py::arg("quant_params"));
 
@@ -877,7 +907,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Args:\n"
           "  is_training: Enable training mode\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
-          "  W, R, bx, br: Weight matrices and biases (float)\n"
+          "  W, R, bw, br: Weight matrices and biases (float)\n"
           "  x: Input tensor [T, B, I]\n"
           "  h0: Initial hidden state [B, H], optional\n"
           "  calib_method: Calibration method ('minmax', 'sqnr', 'percentile')\n"
@@ -903,7 +933,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  params = calculate_gru_quantitative_parameters_from_histograms(hist)",
           py::arg("is_training"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
-          py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"), py::arg("x"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),
           py::arg("calib_method"),
           py::arg("quant_ranges") = nullptr,
@@ -912,7 +942,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bx"), py::arg("br"),
+          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"),
           py::arg("x"), py::arg("dh_new"), py::arg("h"),
-          py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbx, dbr, dh) 元组
+          py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbw, dbr, dh) 元组
 }

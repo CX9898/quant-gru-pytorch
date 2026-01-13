@@ -570,7 +570,7 @@ struct GRUHistogramCollectors {
     // 权重（per-channel，每个 channel 一个直方图）
     std::vector<HistogramCollector> W_hist;
     std::vector<HistogramCollector> R_hist;
-    std::vector<HistogramCollector> bx_hist;
+    std::vector<HistogramCollector> bw_hist;
     std::vector<HistogramCollector> br_hist;
 
     GRUHistogramCollectors() = default;
@@ -605,7 +605,7 @@ struct GRUHistogramCollectors {
         int channel_size = hidden_ * 3;
         W_hist.assign(channel_size, HistogramCollector(cfg));
         R_hist.assign(channel_size, HistogramCollector(cfg));
-        bx_hist.assign(channel_size, HistogramCollector(cfg));
+        bw_hist.assign(channel_size, HistogramCollector(cfg));
         br_hist.assign(channel_size, HistogramCollector(cfg));
     }
 

@@ -123,7 +123,7 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
 
 
 # 算子映射表：JSON 字段名 → C++ 属性名
-# 每个算子的属性命名遵循统一规律
+# 命名与 C++ OperatorQuantConfig 保持一致
 _OPERATOR_MAP = {
     # 输入
     "input.x": _make_op_info("x_"),
@@ -132,22 +132,22 @@ _OPERATOR_MAP = {
     # 权重（per-channel）
     "weight.W": _make_op_info("W_", is_per_channel=True),
     "weight.R": _make_op_info("R_", is_per_channel=True),
-    "weight.bx": _make_op_info("bx_", is_per_channel=True),
+    "weight.bw": _make_op_info("bw_", is_per_channel=True),
     "weight.br": _make_op_info("br_", is_per_channel=True),
-    # 矩阵乘法结果
-    "matmul.Wx": _make_op_info("Wx_"),
-    "matmul.Rh": _make_op_info("Rh_"),
+    # GEMM+bias 融合输出
+    "matmul.Wx": _make_op_info("weight_ih_linear_"),
+    "matmul.Rh": _make_op_info("weight_hh_linear_"),
     # 门控（激活前/后）
-    "gate.z_pre": _make_op_info("z_pre_"),
-    "gate.z_out": _make_op_info("z_out_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.r_pre": _make_op_info("r_pre_"),
-    "gate.r_out": _make_op_info("r_out_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.g_pre": _make_op_info("g_pre_"),
-    "gate.g_out": _make_op_info("g_out_"),  # Tanh [-1,1]
+    "gate.z_pre": _make_op_info("update_gate_input_"),
+    "gate.z_out": _make_op_info("update_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.r_pre": _make_op_info("reset_gate_input_"),
+    "gate.r_out": _make_op_info("reset_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "gate.g_pre": _make_op_info("new_gate_input_"),
+    "gate.g_out": _make_op_info("new_gate_output_"),  # Tanh [-1,1]
     # 中间操作
-    "op.rRh": _make_op_info("rRh_"),
-    "op.old_contrib": _make_op_info("old_contrib_"),
-    "op.new_contrib": _make_op_info("new_contrib_"),
+    "op.rRh": _make_op_info("mul_reset_hidden_"),
+    "op.old_contrib": _make_op_info("mul_old_contribution_"),
+    "op.new_contrib": _make_op_info("mul_new_contribution_"),
 }
 
 # 派生常量：从映射表提取的 C++ 属性名集合
@@ -173,7 +173,7 @@ _OPERATOR_SHORT_NAME_MAP = {
 # 对称量化属性分类（用于 set_all_bitwidth）
 # - 权重/偏置：始终使用对称量化（zero_point=0），计算效率更高
 # - 激活值：可配置，非对称量化可能提高精度但增加计算开销
-_WEIGHT_SYMMETRIC_ATTRS = {'W_symmetric_', 'R_symmetric_', 'bx_symmetric_', 'br_symmetric_'}
+_WEIGHT_SYMMETRIC_ATTRS = {'W_symmetric_', 'R_symmetric_', 'bw_symmetric_', 'br_symmetric_'}
 _ACTIVATION_SYMMETRIC_ATTRS = _VALID_SYMMETRIC_ATTRS - _WEIGHT_SYMMETRIC_ATTRS
 
 
@@ -295,10 +295,10 @@ def convert_weights_to_haste_format(
         device: 目标设备
         
     Returns:
-        (W, R, bx, br): Haste 格式的权重和偏置
+        (W, R, bw, br): Haste 格式的权重和偏置
             - W: [I, 3*H] 转置后的输入权重
             - R: [H, 3*H] 转置后的循环权重
-            - bx: [3*H] 输入偏置
+            - bw: [3*H] 输入偏置 (bias for W)
             - br: [3*H] 循环偏置
     """
     # 权重转换: 重排序 (r,z,n) -> (z,r,n) 并转置
@@ -311,13 +311,13 @@ def convert_weights_to_haste_format(
     if bias_ih is not None and bias_hh is not None:
         bias_ih = ensure_cuda_float32(bias_ih, device)
         bias_hh = ensure_cuda_float32(bias_hh, device)
-        bx = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+        bw = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
         br = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
     else:
-        bx = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
+        bw = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
         br = torch.zeros(3 * hidden_size, device=device, dtype=torch.float32)
 
-    return W, R, bx, br
+    return W, R, bw, br
 
 
 # ============================================================
@@ -497,7 +497,7 @@ class GRUFunction(torch.autograd.Function):
         input = ensure_cuda_float32(input, device)
 
         # 权重格式转换(使用统一工具函数)
-        W, R, bx, br = convert_weights_to_haste_format(
+        W, R, bw, br = convert_weights_to_haste_format(
             weight_ih, weight_hh, bias_ih, bias_hh, hidden_size, device
         )
 
@@ -522,7 +522,7 @@ class GRUFunction(torch.autograd.Function):
             hidden_size=hidden_size,
             W=W,
             R=R,
-            bx=bx,
+            bw=bw,
             br=br,
             x=input,
             h0=h0_tensor,
@@ -534,7 +534,7 @@ class GRUFunction(torch.autograd.Function):
         h_n = output_full[-1:]
 
         # 保存反向传播所需的中间结果
-        ctx.save_for_backward(W, R, bx, br, input, output_full, v)
+        ctx.save_for_backward(W, R, bw, br, input, output_full, v)
 
         return output, h_n
 
@@ -550,14 +550,14 @@ class GRUFunction(torch.autograd.Function):
         Returns:
             对应 forward 各参数的梯度
         """
-        W, R, bx, br, input, h, v = ctx.saved_tensors
+        W, R, bw, br, input, h, v = ctx.saved_tensors
         time_steps, batch_size = ctx.time_steps, ctx.batch_size
         input_size, hidden_size = ctx.input_size, ctx.hidden_size
 
         # 确保所有张量在 CUDA 上
         device = grad_output.device
-        tensors = [W, R, bx, br, input, h]
-        W, R, bx, br, input, h = [t.to(device) if not t.is_cuda else t for t in tensors]
+        tensors = [W, R, bw, br, input, h]
+        W, R, bw, br, input, h = [t.to(device) if not t.is_cuda else t for t in tensors]
         if v is not None and not v.is_cuda:
             v = v.to(device)
         if not grad_output.is_cuda:
@@ -579,22 +579,22 @@ class GRUFunction(torch.autograd.Function):
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
         # 调用 C++ 反向接口(绑定层会处理格式转换)
-        dx, dW, dR, dbx, dbr, dh = gru_ops.haste_gru_backward(
+        dx, dW, dR, dbw, dbr, dh = gru_ops.haste_gru_backward(
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
-            W=W, R=R, bx=bx, br=br, x=input,
+            W=W, R=R, bw=bw, br=br, x=input,
             dh_new=dh_new, h=h, v=v
         )
 
         # 梯度格式转换: Haste (z,r,n) -> PyTorch (r,z,n)
         dW_pytorch = reorder_weights_haste_to_pytorch(dW.t()).contiguous()
         dR_pytorch = reorder_weights_haste_to_pytorch(dR.t()).contiguous()
-        dbx_pytorch = reorder_weights_haste_to_pytorch(dbx).contiguous() if not ctx.bias_ih_is_none else None
+        dbw_pytorch = reorder_weights_haste_to_pytorch(dbw).contiguous() if not ctx.bias_ih_is_none else None
         dbr_pytorch = reorder_weights_haste_to_pytorch(dbr).contiguous() if not ctx.bias_hh_is_none else None
         grad_h0 = None if ctx.h0_is_none else dh
 
         # 返回梯度(对应 forward 的 9 个参数)
-        return dx, dW_pytorch, dR_pytorch, dbx_pytorch, dbr_pytorch, grad_h0, None, None, None
+        return dx, dW_pytorch, dR_pytorch, dbw_pytorch, dbr_pytorch, grad_h0, None, None, None
 
 
 # ============================================================
@@ -1223,9 +1223,9 @@ class QuantGRU(nn.Module):
         纯 PyTorch 实现的单向 GRU 前向传播(可被 ONNX 追踪)
 
         GRU 公式(Haste 格式，门顺序为 z, r, g)：
-            z = sigmoid(W_z @ x + R_z @ h + bx_z + br_z)  # update gate
-            r = sigmoid(W_r @ x + R_r @ h + bx_r + br_r)  # reset gate
-            g = tanh(W_g @ x + r * (R_g @ h + br_g) + bx_g)  # candidate gate
+            z = sigmoid(W_z @ x + R_z @ h + bw_z + br_z)  # update gate
+            r = sigmoid(W_r @ x + R_r @ h + bw_r + br_r)  # reset gate
+            g = tanh(W_g @ x + r * (R_g @ h + br_g) + bw_g)  # candidate gate
             h' = z * h + (1 - z) * g
 
         量化模式下根据 ONNX 导出模式选择实现：
@@ -1283,9 +1283,9 @@ class QuantGRU(nn.Module):
         门控顺序：Haste 格式 (z, r, g)
         
         公式(与 gru_forward_gpu.cu 一致)：
-            z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
-            r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
-            g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
+            z = sigmoid(Wx_z + Rh_z + bw_z + br_z)
+            r = sigmoid(Wx_r + Rh_r + bw_r + br_r)
+            g = tanh(Wx_g + r * (Rh_g + br_g) + bw_g)
             h_new = z * h_old + (1 - z) * g
         
         Args:
@@ -1317,9 +1317,9 @@ class QuantGRU(nn.Module):
 
         # 处理偏置并转换格式
         if bias_ih is None:
-            bx = torch.zeros(3 * H, device=device, dtype=dtype)
+            bw = torch.zeros(3 * H, device=device, dtype=dtype)
         else:
-            bx = reorder_weights_pytorch_to_haste(bias_ih)
+            bw = reorder_weights_pytorch_to_haste(bias_ih)
         if bias_hh is None:
             br = torch.zeros(3 * H, device=device, dtype=dtype)
         else:
@@ -1334,7 +1334,7 @@ class QuantGRU(nn.Module):
         Wx_all = Wx_all.reshape(T, B, 3 * H)  # [T, B, 3*H]
 
         # 预分割偏置(循环外完成)
-        bx_z, bx_r, bx_g = bx.chunk(3)
+        bw_z, bw_r, bw_g = bw.chunk(3)
         br_z, br_r, br_g = br.chunk(3)
 
         outputs = []
@@ -1351,14 +1351,14 @@ class QuantGRU(nn.Module):
             Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)
 
             # Update gate (z)
-            z = torch.sigmoid(Wx_z + Rh_z + bx_z + br_z)
+            z = torch.sigmoid(Wx_z + Rh_z + bw_z + br_z)
 
             # Reset gate (r)
-            r = torch.sigmoid(Wx_r + Rh_r + bx_r + br_r)
+            r = torch.sigmoid(Wx_r + Rh_r + bw_r + br_r)
 
             # Candidate gate (g): r 只乘以 (Rh_g + br_g)
             Rh_add_br_g = Rh_g + br_g
-            g = torch.tanh(Wx_g + r * Rh_add_br_g + bx_g)
+            g = torch.tanh(Wx_g + r * Rh_add_br_g + bw_g)
 
             # 新隐藏状态: h_new = z * h_old + (1 - z) * g
             h = z * h + (1 - z) * g
@@ -1449,7 +1449,7 @@ class QuantGRU(nn.Module):
         # per-channel 量化参数
         exp2_W = list(quant_params.exp2_inv_W_)
         exp2_R = list(quant_params.exp2_inv_R_)
-        exp2_bx = list(quant_params.exp2_inv_bx_)
+        exp2_bw = list(quant_params.exp2_inv_bw_)
         exp2_br = list(quant_params.exp2_inv_br_)
 
         # ========== 权重重排序 ==========
@@ -1458,9 +1458,9 @@ class QuantGRU(nn.Module):
         R_reordered = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
 
         if bias_ih is not None:
-            bx_reordered = reorder_weights_pytorch_to_haste(bias_ih)  # [3*H]
+            bw_reordered = reorder_weights_pytorch_to_haste(bias_ih)  # [3*H]
         else:
-            bx_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
+            bw_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
 
         if bias_hh is not None:
             br_reordered = reorder_weights_pytorch_to_haste(bias_hh)  # [3*H]
@@ -1477,15 +1477,15 @@ class QuantGRU(nn.Module):
                                         bitwidth=self._get_bitwidth('R'),
                                         symmetric=self._get_symmetric('R')).t()
         # 偏置使用配置的位宽(注意：偏置始终使用对称量化)
-        bx_q = fake_quantize_per_channel(bx_reordered.unsqueeze(0), exp2_bx, zp=0,
-                                         bitwidth=self._get_bitwidth('bx'),
-                                         symmetric=self._get_symmetric('bx')).squeeze(0)
+        bw_q = fake_quantize_per_channel(bw_reordered.unsqueeze(0), exp2_bw, zp=0,
+                                         bitwidth=self._get_bitwidth('bw'),
+                                         symmetric=self._get_symmetric('bw')).squeeze(0)
         br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), exp2_br, zp=0,
                                          bitwidth=self._get_bitwidth('br'),
                                          symmetric=self._get_symmetric('br')).squeeze(0)
 
         # 分割偏置(Haste 格式：z, r, g)
-        bx_z, bx_r, bx_g = bx_q.chunk(3)  # 各 [H]
+        bw_z, bw_r, bw_g = bw_q.chunk(3)  # 各 [H]
         br_z, br_r, br_g = br_q.chunk(3)  # 各 [H]
 
         # ========== 初始化隐藏状态 ==========
@@ -1534,8 +1534,8 @@ class QuantGRU(nn.Module):
             Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)  # 各 [B, H]
 
             # ========== z 门(Update Gate)==========
-            # [与 CUDA 一致] z = sigmoid(Wx_z + Rh_z + bx_z + br_z)
-            z_pre = Wx_z + Rh_z + bx_z.unsqueeze(0) + br_z.unsqueeze(0)
+            # [与 CUDA 一致] z = sigmoid(Wx_z + Rh_z + bw_z + br_z)
+            z_pre = Wx_z + Rh_z + bw_z.unsqueeze(0) + br_z.unsqueeze(0)
 
             # [与 CUDA 一致] 激活前量化
             z_pre = fake_quantize(z_pre, exp2_z_pre, zp_z_pre,
@@ -1552,8 +1552,8 @@ class QuantGRU(nn.Module):
                               is_unsigned=self._get_unsigned('z_out'))
 
             # ========== r 门(Reset Gate)==========
-            # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bx_r + br_r)
-            r_pre = Wx_r + Rh_r + bx_r.unsqueeze(0) + br_r.unsqueeze(0)
+            # [与 CUDA 一致] r = sigmoid(Wx_r + Rh_r + bw_r + br_r)
+            r_pre = Wx_r + Rh_r + bw_r.unsqueeze(0) + br_r.unsqueeze(0)
 
             r_pre = fake_quantize(r_pre, exp2_r_pre, zp_r_pre,
                                   bitwidth=self._get_bitwidth('r_pre'),
@@ -1569,7 +1569,7 @@ class QuantGRU(nn.Module):
                               is_unsigned=self._get_unsigned('r_out'))
 
             # ========== g 门(New Gate / Candidate)==========
-            # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bx_g)
+            # [与 CUDA 一致] g = tanh(Wx_g + r * (Rh_g + br_g) + bw_g)
             # 注意: Rh_add_br 量化步骤已移除（融合到 weight_hh_linear）
             Rh_add_br = Rh_g + br_g.unsqueeze(0)
             rRh = r * Rh_add_br
@@ -1580,7 +1580,7 @@ class QuantGRU(nn.Module):
                                 bitwidth=self._get_bitwidth('rRh'),
                                 symmetric=self._get_symmetric('rRh'))
 
-            g_pre = Wx_g + rRh + bx_g.unsqueeze(0)
+            g_pre = Wx_g + rRh + bw_g.unsqueeze(0)
 
             g_pre = fake_quantize(g_pre, exp2_g_pre, zp_g_pre,
                                   bitwidth=self._get_bitwidth('g_pre'),
@@ -1761,7 +1761,7 @@ class QuantGRU(nn.Module):
         quant_ranges, hist_collectors = self._get_calibration_collectors(reverse=False)
 
         # 准备权重
-        W, R, bx, br = convert_weights_to_haste_format(
+        W, R, bw, br = convert_weights_to_haste_format(
             self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
             self.bias_hh_l0 if self.bias else None,
@@ -1773,7 +1773,7 @@ class QuantGRU(nn.Module):
             is_training=True,
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
-            W=W, R=R, bx=bx, br=br, x=input,
+            W=W, R=R, bw=bw, br=br, x=input,
             h0=h0_forward if h0_forward is not None else torch.empty(0, device=device),
             calib_method=self.calibration_method,
             quant_ranges=quant_ranges,
@@ -1789,7 +1789,7 @@ class QuantGRU(nn.Module):
             self._ensure_calibration_collector(hidden_size, reverse=True)
             quant_ranges_rev, hist_collectors_rev = self._get_calibration_collectors(reverse=True)
 
-            W_rev, R_rev, bx_rev, br_rev = convert_weights_to_haste_format(
+            W_rev, R_rev, bw_rev, br_rev = convert_weights_to_haste_format(
                 self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
                 self.bias_hh_l0_reverse if self.bias else None,
@@ -1801,7 +1801,7 @@ class QuantGRU(nn.Module):
                 is_training=True,
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
-                W=W_rev, R=R_rev, bx=bx_rev, br=br_rev, x=input_reversed,
+                W=W_rev, R=R_rev, bw=bw_rev, br=br_rev, x=input_reversed,
                 h0=h0_reverse if h0_reverse is not None else torch.empty(0, device=device),
                 calib_method=self.calibration_method,
                 quant_ranges=quant_ranges_rev,
@@ -2060,8 +2060,8 @@ def print_quant_params(gru: 'QuantGRU'):
         print(f"  [W] exp2_inv (first 5): {list(params.exp2_inv_W_[:5])} ...")
     if params.exp2_inv_R_:
         print(f"  [R] exp2_inv (first 5): {list(params.exp2_inv_R_[:5])} ...")
-    if params.exp2_inv_bx_:
-        print(f"  [bx] exp2_inv (first 5): {list(params.exp2_inv_bx_[:5])} ...")
+    if params.exp2_inv_bw_:
+        print(f"  [bw] exp2_inv (first 5): {list(params.exp2_inv_bw_[:5])} ...")
     if params.exp2_inv_br_:
         print(f"  [br] exp2_inv (first 5): {list(params.exp2_inv_br_[:5])} ...")
     print("=" * 60)
@@ -2378,7 +2378,7 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     params = gru.quant_params
     
     # 转换为 Haste 格式
-    W, R, bx, br = convert_weights_to_haste_format(
+    W, R, bw, br = convert_weights_to_haste_format(
         gru.weight_ih_l0, gru.weight_hh_l0,
         gru.bias_ih_l0 if gru.bias else None,
         gru.bias_hh_l0 if gru.bias else None,
@@ -2406,7 +2406,7 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     # 获取位宽配置
     W_bitwidth = gru._bitwidth_config.W_
     R_bitwidth = gru._bitwidth_config.R_
-    bx_bitwidth = gru._bitwidth_config.bx_
+    bw_bitwidth = gru._bitwidth_config.bw_
     br_bitwidth = gru._bitwidth_config.br_
     
     weights = {
@@ -2416,9 +2416,9 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     
     if gru.bias:
         # 偏置是 1D，需要 unsqueeze
-        bx_2d = bx.unsqueeze(0)  # [1, 3*H]
+        bw_2d = bw.unsqueeze(0)  # [1, 3*H]
         br_2d = br.unsqueeze(0)
-        weights["bx"] = quantize_per_channel(bx_2d, list(params.exp2_inv_bx_), bx_bitwidth, True)[0]
+        weights["bw"] = quantize_per_channel(bw_2d, list(params.exp2_inv_bw_), bw_bitwidth, True)[0]
         weights["br"] = quantize_per_channel(br_2d, list(params.exp2_inv_br_), br_bitwidth, True)[0]
     
     return weights
@@ -2551,7 +2551,7 @@ def _adjust_quant_config_impl(
         if exp2_inv is None and gru.quant_params is not None:
             exp2_attr = f"exp2_inv_{operator}_"
             zp_attr = f"zp_{operator}_"
-            is_per_channel = operator in ['W', 'R', 'bx', 'br']
+            is_per_channel = operator in ['W', 'R', 'bw', 'br']
             is_symmetric = old_symmetric  # 使用当前的对称性设置
             
             bitwidth_delta = bitwidth - old_bitwidth
@@ -2603,7 +2603,7 @@ def _adjust_quant_config_impl(
         zp_attr = f"zp_{operator}_"
         
         # 检查是否是 per-channel 参数
-        is_per_channel = operator in ['W', 'R', 'bx', 'br']
+        is_per_channel = operator in ['W', 'R', 'bw', 'br']
         
         if is_per_channel:
             # per-channel 参数只有 exp2_inv，没有 zp
@@ -2656,7 +2656,7 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
             exp2_attr = f"exp2_inv_{op_name}_"
             zp_attr = f"zp_{op_name}_"
             
-            is_per_channel = op_name in ['W', 'R', 'bx', 'br']
+            is_per_channel = op_name in ['W', 'R', 'bw', 'br']
             
             if is_per_channel:
                 if hasattr(gru.quant_params, exp2_attr):
@@ -2708,7 +2708,7 @@ def print_quant_config(gru: 'QuantGRU', operators: list = None):
     groups = {
         '输入': ['x'],
         '输出': ['h'],
-        '权重': ['W', 'R', 'bx', 'br'],
+        '权重': ['W', 'R', 'bw', 'br'],
         'GEMM': ['Wx', 'Rh'],
         '门控(pre)': ['z_pre', 'r_pre', 'g_pre'],
         '门控(out)': ['z_out', 'r_out', 'g_out'],
@@ -2787,7 +2787,7 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     print(f"  [输出]  h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
     print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
     print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
-    print(f"          bx: {_format_bitwidth(config.bx_):6s} ({_format_symmetric(config.bx_symmetric_)})")
+    print(f"          bw: {_format_bitwidth(config.bw_):6s} ({_format_symmetric(config.bw_symmetric_)})")
     print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
     print(f"  [矩阵]  Wx: {_format_bitwidth(config.Wx_):6s} ({_format_symmetric(config.Wx_symmetric_)})")
     print(f"          Rh: {_format_bitwidth(config.Rh_):6s} ({_format_symmetric(config.Rh_symmetric_)})")

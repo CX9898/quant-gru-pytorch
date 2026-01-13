@@ -248,11 +248,11 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
 /// 
 /// 输入:
 ///   time_steps, batch_size, input_size, hidden_size: 维度参数
-///   W, R, bx, br: 权重和偏置（GPU 端）
+///   W, R, bw, br: 权重和偏置（GPU 端）
 ///   x: [T, B, I] 输入序列（GPU 端）
 ///   h: [(T+1), B, H] 隐藏状态（GPU 端）
 ///   v: [T, B, H*4] 中间值（GPU 端）
-///   Wx_add_bx: [T, B, H*3] Wx+bx 计算结果（GPU 端）
+///   Wx_add_bw: [T, B, H*3] Wx+bw 计算结果（GPU 端）
 ///   Rh_add_br: [T, B, H*3] Rh+br 计算结果（GPU 端）
 ///   z_pres, r_pres, g_pres: [T*B*H] 预激活值（GPU 端）
 ///   pres_size: 预激活值数组大小
@@ -260,9 +260,9 @@ void updateRangesFromV(const std::vector<T> &h_host, const T *v_dev, size_t step
 ///   quant_ranges: 更新后的量化范围（原地更新）
 inline void updateGRUQuantizationRanges(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br,
+    const float *W, const float *R, const float *bw, const float *br,
     const float *x, const float *h, const float *v,
-    const float *Wx_add_bx, const float *Rh_add_br,
+    const float *Wx_add_bw, const float *Rh_add_br,
     const float *z_pres, const float *r_pres, const float *g_pres,
     size_t pres_size,
     GRUQuantizationRanges &quant_ranges) {
@@ -293,8 +293,8 @@ inline void updateGRUQuantizationRanges(
     // 权重 R 的范围（per-channel）
     computeMinMaxPerChannel(R, hidden_size, hidden_size * 3, quant_ranges.min_R_, quant_ranges.max_R_);
 
-    // 偏置 bx 的范围（per-channel）
-    computeMinMaxPerChannel(bx, 1, hidden_size * 3, quant_ranges.min_bx_, quant_ranges.max_bx_);
+    // 偏置 bw 的范围（per-channel）
+    computeMinMaxPerChannel(bw, 1, hidden_size * 3, quant_ranges.min_bw_, quant_ranges.max_bw_);
 
     // 偏置 br 的范围（per-channel）
     computeMinMaxPerChannel(br, 1, hidden_size * 3, quant_ranges.min_br_, quant_ranges.max_br_);
@@ -303,8 +303,8 @@ inline void updateGRUQuantizationRanges(
     // 3. 中间值：使用全局极值累积（与 AIMET 一致）
     // =====================================================================
     
-    // Wx+bx 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
-    auto [min_Wx, max_Wx] = computeMinMaxDev(Wx_add_bx, time_steps * NH * 3);
+    // Wx+bw 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果
+    auto [min_Wx, max_Wx] = computeMinMaxDev(Wx_add_bw, time_steps * NH * 3);
     updateRange(quant_ranges.min_Wx_, quant_ranges.max_Wx_, min_Wx, max_Wx);
 
     // Rh+br 结果的范围（全局极值）- 使用 GEMM 后加 bias 的结果

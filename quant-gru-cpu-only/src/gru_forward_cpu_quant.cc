@@ -29,33 +29,33 @@ namespace cpu {
 
 namespace {
 
-int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
+int32_t computeZ(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bw_val, int32_t br_val,
                  const QuantGRUReScaleCPU &rescale) {
     const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.shift_Wx_div_z_pre_);
     const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.shift_Rh_div_z_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_z_[channel_idx]);
+    const int32_t bw_shifted = rshift_round(bw_val, rescale.n_bx_div_z_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_z_[channel_idx]);
 
-    const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_z_pre_;
+    const int32_t z_pre_i32 = Wx_shifted + Rh_shifted + bw_shifted + br_shifted + rescale.zp_z_pre_;
 
     const auto &bw_cfg = rescale.bitwidth_config_;
     return piecewise_linear(z_pre_i32, rescale.sigmoid_z_lut_, bw_cfg.z_pre_, bw_cfg.z_out_);
 }
 
-int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
+int32_t computeR(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bw_val, int32_t br_val,
                  const QuantGRUReScaleCPU &rescale) {
     const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.shift_Wx_div_r_pre_);
     const int32_t Rh_shifted = rshift_round(Rh_val - rescale.zp_Rh_, rescale.shift_Rh_div_r_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.n_bx_div_r_[channel_idx]);
+    const int32_t bw_shifted = rshift_round(bw_val, rescale.n_bx_div_r_[channel_idx]);
     const int32_t br_shifted = rshift_round(br_val, rescale.n_br_div_r_[channel_idx]);
 
-    const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bx_shifted + br_shifted + rescale.zp_r_pre_;
+    const int32_t r_pre_i32 = Wx_shifted + Rh_shifted + bw_shifted + br_shifted + rescale.zp_r_pre_;
 
     const auto &bw_cfg = rescale.bitwidth_config_;
     return piecewise_linear(r_pre_i32, rescale.sigmoid_r_lut_, bw_cfg.r_pre_, bw_cfg.r_out_);
 }
 
-int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val, int32_t br_val,
+int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bw_val, int32_t br_val,
                  int32_t r, const QuantGRUReScaleCPU &rescale, int32_t &Rh_add_br_g) {
     Rh_add_br_g = rshift_round(Rh_val - rescale.zp_Rh_, rescale.n_Rh_div_Rh_add_br_) +
                   rshift_round(br_val, rescale.n_br_div_Rh_add_br_[channel_idx]) +
@@ -72,9 +72,9 @@ int32_t computeG(int channel_idx, int32_t Wx_val, int32_t Rh_val, int32_t bx_val
 
     const int32_t Wx_shifted = rshift_round(Wx_val - rescale.zp_Wx_, rescale.n_Wx_div_g_pre_);
     const int32_t rRh_shifted = rshift_round(rRh - rescale.zp_rRh_, rescale.n_rRh_div_g_pre_);
-    const int32_t bx_shifted = rshift_round(bx_val, rescale.shift_bx_div_g_pre_[channel_idx]);
+    const int32_t bw_shifted = rshift_round(bw_val, rescale.shift_bx_div_g_pre_[channel_idx]);
 
-    const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bx_shifted + rescale.zp_g_pre_;
+    const int32_t g_pre_i32 = Wx_shifted + rRh_shifted + bw_shifted + rescale.zp_g_pre_;
 
     const auto &bw_cfg = rescale.bitwidth_config_;
     return piecewise_linear(g_pre_i32, rescale.tanh_g_lut_, bw_cfg.g_pre_, bw_cfg.g_out_);
@@ -237,7 +237,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::ComputeRh(const RT *R, const HT *h) {
 }
 
 template <typename XT, typename HT, typename WT, typename RT>
-void ForwardPassQuantCPU<XT, HT, WT, RT>::IterateInternal(const RT *R, const int32_t *bx,
+void ForwardPassQuantCPU<XT, HT, WT, RT>::IterateInternal(const RT *R, const int32_t *bw,
                                                            const int32_t *br, const HT *h,
                                                            HT *h_out, int32_t *v,
                                                            const int32_t *cur_Wx,
@@ -261,13 +261,13 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::IterateInternal(const RT *R, const int
             const int b_g_idx = row + 2 * hidden_size;
 
             const int32_t z = computeZ(b_z_idx, cur_Wx[z_idx], tmp_Rh_[z_idx],
-                                       bx[b_z_idx], br[b_z_idx], rescale_param_);
+                                       bw[b_z_idx], br[b_z_idx], rescale_param_);
             const int32_t r = computeR(b_r_idx, cur_Wx[r_idx], tmp_Rh_[r_idx],
-                                       bx[b_r_idx], br[b_r_idx], rescale_param_);
+                                       bw[b_r_idx], br[b_r_idx], rescale_param_);
 
             int32_t Rh_add_br_g;
             const int32_t g = computeG(b_g_idx, cur_Wx[g_idx], tmp_Rh_[g_idx],
-                                       bx[b_g_idx], br[b_g_idx], r, rescale_param_, Rh_add_br_g);
+                                       bw[b_g_idx], br[b_g_idx], r, rescale_param_, Rh_add_br_g);
 
             if (training && v != nullptr) {
                 const int base_v_idx = col * (hidden_size * 4) + row;
@@ -372,7 +372,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::setRescaleParam(const GRUQuantitativeP
 
 template <typename XT, typename HT, typename WT, typename RT>
 void ForwardPassQuantCPU<XT, HT, WT, RT>::Run(int steps, const WT *W, const RT *R,
-                                               const int32_t *bx, const int32_t *br, const XT *x,
+                                               const int32_t *bw, const int32_t *br, const XT *x,
                                                HT *h, int32_t *v, float zoneout_prob,
                                                const HT *zoneout_mask) {
     const int batch_size = data_->batch_size;
@@ -386,7 +386,7 @@ void ForwardPassQuantCPU<XT, HT, WT, RT>::Run(int steps, const WT *W, const RT *
     const int NH3 = batch_size * hidden_size * 3;
 
     for (int i = 0; i < steps; ++i) {
-        IterateInternal(R, bx, br, h + i * NH, h + (i + 1) * NH,
+        IterateInternal(R, bw, br, h + i * NH, h + (i + 1) * NH,
                         v ? v + i * NH * 4 : nullptr,
                         tmp_Wx_.data() + i * NH3,
                         zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);

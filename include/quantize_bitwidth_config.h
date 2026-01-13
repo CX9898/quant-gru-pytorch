@@ -35,7 +35,7 @@ struct QuantBitWidth {
 
 struct OperatorQuantConfig {
     QuantBitWidth x_{8, false}, h_{8, false};
-    QuantBitWidth W_{8, false}, R_{8, false}, bx_{8, false}, br_{8, false};
+    QuantBitWidth W_{8, false}, R_{8, false}, bw_{8, false}, br_{8, false};
     QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};  // GEMM+bias 融合输出
     QuantBitWidth update_gate_input_{8, false}, update_gate_output_{8, true};   // update_gate_output: UINT
     QuantBitWidth reset_gate_input_{8, false}, reset_gate_output_{8, true};     // reset_gate_output: UINT
@@ -44,7 +44,7 @@ struct OperatorQuantConfig {
     QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
 
     bool x_symmetric_ = false, h_symmetric_ = false;
-    bool W_symmetric_ = true, R_symmetric_ = true, bx_symmetric_ = true, br_symmetric_ = true;
+    bool W_symmetric_ = true, R_symmetric_ = true, bw_symmetric_ = true, br_symmetric_ = true;
     bool weight_ih_linear_symmetric_ = false, weight_hh_linear_symmetric_ = false;
     bool update_gate_input_symmetric_ = false, update_gate_output_symmetric_ = false;
     bool reset_gate_input_symmetric_ = false, reset_gate_output_symmetric_ = false;
@@ -54,7 +54,7 @@ struct OperatorQuantConfig {
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
         QuantBitWidth* signed_members[] = {
-            &x_, &h_, &W_, &R_, &bx_, &br_, &weight_ih_linear_, &weight_hh_linear_,
+            &x_, &h_, &W_, &R_, &bw_, &br_, &weight_ih_linear_, &weight_hh_linear_,
             &update_gate_input_, &reset_gate_input_, &new_gate_input_, &new_gate_output_,
             &mul_reset_hidden_, &mul_old_contribution_, &mul_new_contribution_
         };

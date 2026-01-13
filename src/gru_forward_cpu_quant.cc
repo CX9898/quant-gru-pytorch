@@ -120,7 +120,7 @@ void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *
     weight_sums_computed_ = true;
 }
 
-void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bx, int steps) {
+void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -141,8 +141,8 @@ OMP_PARALLEL_FOR_2D
                 rshift_round(gemm_val, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
                 gate_params_.zp_weight_ih_linear_;
             
-            // 添加 bias: bx 移位到 weight_ih_linear 空间
-            int32_t bias_rescaled = rshift_round(bx[m], linear_params_.shift_bx_to_weight_ih_linear_[m]);
+            // 添加 bias: bw 移位到 weight_ih_linear 空间
+            int32_t bias_rescaled = rshift_round(bw[m], linear_params_.shift_bw_to_weight_ih_linear_[m]);
             int32_t result = gemm_result + bias_rescaled;
             tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_ih_linear_);
         }
@@ -197,7 +197,7 @@ OMP_PARALLEL_FOR_2D
             const int reset_idx = weight_idx + 1 * hidden_size;
             const int new_idx = weight_idx + 2 * hidden_size;
 
-            // GEMM+bias 融合版本：直接使用 Wx_bx 和 Rh_br
+            // GEMM+bias 融合版本：直接使用 Wx_bw 和 Rh_br
             const int32_t update_gate = computeUpdateGate(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gate_params_);
             const int32_t reset_gate = computeResetGate(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gate_params_);
 
@@ -233,19 +233,19 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms
 
     // 计算 per-channel 移位参数
     linear_params_.shift_gemm_x_to_weight_ih_linear_.resize(channel);
-    linear_params_.shift_bx_to_weight_ih_linear_.resize(channel);
+    linear_params_.shift_bw_to_weight_ih_linear_.resize(channel);
     linear_params_.shift_gemm_h_to_weight_hh_linear_.resize(channel);
     linear_params_.shift_br_to_weight_hh_linear_.resize(channel);
 
     for (int idx = 0; idx < channel; ++idx) {
         linear_params_.shift_gemm_x_to_weight_ih_linear_[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
         linear_params_.shift_gemm_h_to_weight_hh_linear_[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        linear_params_.shift_bx_to_weight_ih_linear_[idx] = parms.shift_bx_[idx] - parms.shift_weight_ih_linear_;
+        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - parms.shift_weight_ih_linear_;
         linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - parms.shift_weight_hh_linear_;
     }
 
 #ifdef DEBUG
-    linear_params_.shift_bx_ = parms.shift_bx_;
+    linear_params_.shift_bw_ = parms.shift_bw_;
     linear_params_.shift_br_ = parms.shift_br_;
 #endif
 
@@ -304,7 +304,7 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantitativeParameters &parms
 }
 
 void ForwardPassQuantCPU::Run(int steps, const int32_t *W, const int32_t *R,
-                               const int32_t *bx, const int32_t *br, const int32_t *x,
+                               const int32_t *bw, const int32_t *br, const int32_t *x,
                                int32_t *h, int32_t *v, float zoneout_prob,
                                const int32_t *zoneout_mask) {
     const int batch_size = data_->batch_size;
@@ -313,8 +313,8 @@ void ForwardPassQuantCPU::Run(int steps, const int32_t *W, const int32_t *R,
     EnsureBuffersAllocated(steps);
     PrecomputeWeightSums(W, R);
     
-    // 计算 W*x + bx GEMM+bias 融合
-    ComputeLinearX(W, x, bx, steps);
+    // 计算 W*x + bw GEMM+bias 融合
+    ComputeLinearX(W, x, bw, steps);
 
     const int NH = batch_size * hidden_size;
     const int NH3 = batch_size * hidden_size * 3;

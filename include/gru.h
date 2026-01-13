@@ -28,7 +28,7 @@ class ForwardPass {
     //
     // W: [C,H*3] the input weight matrix.
     // R: [H,H*3] the recurrent weight matrix.
-    // bx: [H*3] the bias for the input weight matrix.
+    // bw: [H*3] the bias for the input weight matrix.
     // br: [H*3] the bias for the recurrent weight matrix.
     // x: [N,C] the GRU input for this iteration (N vectors, each with dimension C).
     // h: [N,H] the t-1 iteration's `h_out` or the initial hidden state if this is the
@@ -51,10 +51,10 @@ class ForwardPass {
     // zoneout_mask: [N,H] may be null to disable zoneout. This is a random binary mask
     //     following a Bernoulli(1-zoneout_prob) distribution. A different mask is typically
     //     used for each iteration.
-    void Iterate(const T *W, const T *R, const T *bx, const T *br, const T *x, const T *h, T *h_out,
+    void Iterate(const T *W, const T *R, const T *bw, const T *br, const T *x, const T *h, T *h_out,
                  T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob, const T *zoneout_mask);
 
-    void Run(const int steps, const T *W, const T *R, const T *bx, const T *br, const T *x, T *h,
+    void Run(const int steps, const T *W, const T *R, const T *bw, const T *br, const T *x, T *h,
              T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob, const T *zoneout_mask);
 
     // 设置校准模式：启用后会收集预激活值 (z_pres_, r_pres_, g_pres_)
@@ -70,12 +70,12 @@ class ForwardPass {
 
     // 获取中间加法结果（用于直方图收集）
     // 返回连续存储的 [steps * batch * hidden * 3] 数据
-    const T* getWxAddBx() const { return Wx_add_bx_.data(); }
+    const T* getWxAddBw() const { return Wx_add_bw_.data(); }
     const T* getRhAddBr() const { return Rh_add_br_.data(); }
-    size_t getWxAddBxSize() const { return Wx_add_bx_.size(); }
+    size_t getWxAddBwSize() const { return Wx_add_bw_.size(); }
 
    private:
-    void IterateInternal(int steps, const T *R, const T *bx, const T *br, const T *h, T *h_out,
+    void IterateInternal(int steps, const T *R, const T *bw, const T *br, const T *h, T *h_out,
                          T *v, T *tmp_Wx, T *tmp_Rh, const float zoneout_prob,
                          const T *zoneout_mask);
 
@@ -86,7 +86,7 @@ class ForwardPass {
     dev::vector<T> z_pres_;
     dev::vector<T> r_pres_;
     dev::vector<T> g_pres_;
-    dev::vector<T> Wx_add_bx_;  // [steps * batch * hidden * 3]，z/r/g 门连续存储
+    dev::vector<T> Wx_add_bw_;  // [steps * batch * hidden * 3]，z/r/g 门连续存储
     dev::vector<T> Rh_add_br_;  // [steps * batch * hidden * 3]，z/r/g 门连续存储
 };
 
@@ -114,7 +114,7 @@ class BackwardPass {
     //
     // W_t: [H*3,C] the transpose of the input weight matrix.
     // R_t: [H*3,H] the transpose of the recurrent weight matrix.
-    // bx: [H*3] the bias vector for the input weight matrix.
+    // bw: [H*3] the bias vector for the input weight matrix.
     // br: [H*3] the bias vector for the recurrent weight matrix.
     // x_t: [C,N] the transpose of the GRU input for this iteration.
     // h: [N,H] the t-1 iteration's `h_out` or the initial hidden state if this is the t=0
@@ -125,7 +125,7 @@ class BackwardPass {
     // dx: [N,C] the gradient of the input at this time step with respect to the loss.
     // dW: [C,H*3] the gradient of the input weight matrix with respect to the loss.
     // dR: [H,H*3] the gradient of the recurrent weight matrix with respect to the loss.
-    // dbx: [H*3] the gradient of the bias vector for the input weight matrix with respect to
+    // dbw: [H*3] the gradient of the bias vector for the input weight matrix with respect to
     //     the loss.
     // dbr: [H*3] the gradient of the bias vector for the recurrent weight matrix with respect
     //     to the loss.
@@ -141,16 +141,16 @@ class BackwardPass {
     //     for each iteration.
     // zoneout_mask: [N,H] may be null if zoneout was disabled in the forward pass. This vector
     //     must be the same as the one provided during the corresponding forward iteration.
-    void Iterate(const T *W_t, const T *R_t, const T *bx, const T *br, const T *x_t, const T *h,
-                 const T *v, const T *dh_new, T *dx, T *dW, T *dR, T *dbx, T *dbr, T *dh, T *dp,
+    void Iterate(const T *W_t, const T *R_t, const T *bw, const T *br, const T *x_t, const T *h,
+                 const T *v, const T *dh_new, T *dx, T *dW, T *dR, T *dbw, T *dbr, T *dh, T *dp,
                  T *dq, const T *zoneout_mask);
 
-    void Run(const int steps, const T *W_t, const T *R_t, const T *bx, const T *br, const T *x_t,
-             const T *h, const T *v, const T *dh_new, T *dx, T *dW, T *dR, T *dbx, T *dbr, T *dh,
+    void Run(const int steps, const T *W_t, const T *R_t, const T *bw, const T *br, const T *x_t,
+             const T *h, const T *v, const T *dh_new, T *dx, T *dW, T *dR, T *dbw, T *dbr, T *dh,
              T *dp, T *dq, const T *zoneout_mask);
 
    private:
-    void IterateInternal(const T *R_t, const T *h, const T *v, const T *dh_new, T *dbx, T *dbr,
+    void IterateInternal(const T *R_t, const T *h, const T *v, const T *dh_new, T *dbw, T *dbr,
                          T *dh, T *dp, T *dq, const T *zoneout_mask);
 
     struct private_data;

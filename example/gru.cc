@@ -199,38 +199,38 @@ void compareHistogramStats(const char* name, const Histogram& cpu, const Histogr
 // ==================== 推理函数 ====================
 
 void runFloatInference(int time_steps, int batch_size, int input_size, int hidden_size,
-                       const float *W, const float *R, const float *bx, const float *br,
+                       const float *W, const float *R, const float *bw, const float *br,
                        const float *x, float *h) {
     ScopeTimer t("FloatInference:");
     hasteGRUForward(false, time_steps, batch_size, input_size, hidden_size, 
-                    W, R, bx, br, x, nullptr, g_blas_handle, h, nullptr);
+                    W, R, bw, br, x, nullptr, g_blas_handle, h, nullptr);
 }
 
 void runQuantInference(int time_steps, int batch_size, int input_size, int hidden_size,
-                       const float *W, const float *R, const float *bx, const float *br,
+                       const float *W, const float *R, const float *bw, const float *br,
                        const float *x, const GRUQuantitativeParameters &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU):");
     forwardInterface(false, true, time_steps, batch_size, input_size, hidden_size,
-                     W, R, bx, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
+                     W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
 }
 
 // ==================== CPU 量化推理 ====================
 
 void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hidden_size,
-                          const float *W, const float *R, const float *bx, const float *br,
+                          const float *W, const float *R, const float *bw, const float *br,
                           const float *x, const GRUQuantitativeParameters &quant_params,
                           float *h) {
     ScopeTimer t("QuantInference (CPU):");
     // 使用浮点权重版本的接口，内部会自动量化
     quantGRUForwardCPU(false, time_steps, batch_size, input_size, hidden_size,
-                       W, R, bx, br, x, nullptr, quant_params, h, nullptr);
+                       W, R, bw, br, x, nullptr, quant_params, h, nullptr);
 }
 
 // ==================== 直方图收集性能比较 ====================
 
 void compareHistogramCollectionPerformance(int time_steps, int batch_size, int input_size,
                                             int hidden_size, const float *W_dev, const float *R_dev,
-                                            const float *bx_dev, const float *br_dev,
+                                            const float *bw_dev, const float *br_dev,
                                             const float *x_dev, int num_runs = 5) {
     printf("\n========== Histogram Collection Performance (CPU vs GPU) ==========\n");
     printf("Config: T=%d, B=%d, I=%d, H=%d, runs=%d\n",
@@ -249,7 +249,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
         
         timer.start();
         forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
-                                W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                                W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                                 &cpu_hist, h_dev.data(), v_dev.data());
         float elapsed = timer.stop();
         cpu_total_ms += elapsed;
@@ -267,7 +267,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
         
         timer.start();
         forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                                  W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                                  W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                                   CalibrationMethod::SQNR, nullptr, &gpu_hist,
                                   h_dev.data(), v_dev.data());
         float elapsed = timer.stop();
@@ -289,12 +289,12 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
     
     h_dev.zero();
     forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
-                            W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                            W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                             &cpu_hist, h_dev.data(), v_dev.data());
     
     h_dev.zero();
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                              W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                              W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                               CalibrationMethod::SQNR, nullptr, &gpu_hist, h_dev.data(), v_dev.data());
     
     GRUHistogramCollectors gpu_hist_cpu = convertGPUHistogramsToCPU(gpu_hist);
@@ -315,7 +315,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
  */
 GRUQuantitativeParameters calibrateWithHistogram(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W_dev, const float *R_dev, const float *bx_dev, const float *br_dev,
+    const float *W_dev, const float *R_dev, const float *bw_dev, const float *br_dev,
     const float *x_dev, const OperatorQuantConfig &bitwidth_config, bool use_percentile) {
     
     CudaTimer timer;
@@ -332,7 +332,7 @@ GRUQuantitativeParameters calibrateWithHistogram(
     // Step 2: GPU 前向传播 + 直方图收集
     timer.start();
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                              W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                              W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                               CalibrationMethod::SQNR, nullptr, &gpu_hist,
                               h_dev.data(), v_dev.data());
     printf("  [Step 2] Forward + GPU histogram: %.3f ms\n", timer.stop());
@@ -379,10 +379,10 @@ GRUQuantitativeParameters calibrateWithHistogram(
     // Per-channel 验证
     auto [w_m, w_t] = countPerChannelMatches(params_cpu.shift_W_, params_gpu.shift_W_);
     auto [r_m, r_t] = countPerChannelMatches(params_cpu.shift_R_, params_gpu.shift_R_);
-    auto [bx_m, bx_t] = countPerChannelMatches(params_cpu.shift_bx_, params_gpu.shift_bx_);
+    auto [bw_m, bw_t] = countPerChannelMatches(params_cpu.shift_bw_, params_gpu.shift_bw_);
     auto [br_m, br_t] = countPerChannelMatches(params_cpu.shift_br_, params_gpu.shift_br_);
-    printf("    Per-channel: W=%d/%d, R=%d/%d, bx=%d/%d, br=%d/%d\n",
-           w_m, w_t, r_m, r_t, bx_m, bx_t, br_m, br_t);
+    printf("    Per-channel: W=%d/%d, R=%d/%d, bw=%d/%d, br=%d/%d\n",
+           w_m, w_t, r_m, r_t, bw_m, bw_t, br_m, br_t);
 
     // Step 5: Percentile 计算 (如果需要)
     GRUQuantitativeParameters params_percentile;
@@ -409,7 +409,7 @@ GRUQuantitativeParameters calibrateWithHistogram(
  */
 GRUQuantitativeParameters calibrateWithMinMax(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W_dev, const float *R_dev, const float *bx_dev, const float *br_dev,
+    const float *W_dev, const float *R_dev, const float *bw_dev, const float *br_dev,
     const float *x_dev, const OperatorQuantConfig &bitwidth_config) {
     
     GRUQuantizationRanges ranges(hidden_size);
@@ -418,7 +418,7 @@ GRUQuantitativeParameters calibrateWithMinMax(
     h_dev.zero();
     
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                              W_dev, R_dev, bx_dev, br_dev, x_dev, nullptr, g_blas_handle,
+                              W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                               CalibrationMethod::MINMAX, &ranges, nullptr,
                               h_dev.data(), v_dev.data());
     
@@ -456,21 +456,21 @@ int main(int argc, char *argv[]) {
     cublasSetMathMode(g_blas_handle, CUBLAS_DEFAULT_MATH);
 
     // 初始化数据
-    std::vector<float> W(I * H * 3), R(H * H * 3), bx(H * 3), br(H * 3);
+    std::vector<float> W(I * H * 3), R(H * H * 3), bw(H * 3), br(H * 3);
     std::vector<float> x(T * B * I);
     
     fillVectorWithNormalDistribution(W, -0.001f, 0.001f);
     fillVectorWithNormalDistribution(R, -0.005f, 0.005f);
-    fillVectorWithNormalDistribution(bx, -0.15f, 0.15f);
+    fillVectorWithNormalDistribution(bw, -0.15f, 0.15f);
     fillVectorWithNormalDistribution(br, -0.15f, 0.15f);
     fillVectorWithNormalDistribution(x, -3.0f, 3.5f);
 
     // 拷贝到 GPU
-    dev::vector<float> W_dev(W), R_dev(R), bx_dev(bx), br_dev(br), x_dev(x);
+    dev::vector<float> W_dev(W), R_dev(R), bw_dev(bw), br_dev(br), x_dev(x);
 
     // 直方图收集性能对比
     compareHistogramCollectionPerformance(T, B, I, H, W_dev.data(), R_dev.data(),
-                                          bx_dev.data(), br_dev.data(), x_dev.data(), 5);
+                                          bw_dev.data(), br_dev.data(), x_dev.data(), 5);
 
     // 校准
     printf("\n========== Calibration ==========\n");
@@ -484,11 +484,11 @@ int main(int argc, char *argv[]) {
                       CALIBRATION_METHOD == CalibrationMethod::PERCENTILE) {
             bool use_percentile = (CALIBRATION_METHOD == CalibrationMethod::PERCENTILE);
             quant_params = calibrateWithHistogram(T, B, I, H, W_dev.data(), R_dev.data(),
-                                                   bx_dev.data(), br_dev.data(), x_dev.data(),
+                                                   bw_dev.data(), br_dev.data(), x_dev.data(),
                                                    bitwidth_config, use_percentile);
         } else {
             quant_params = calibrateWithMinMax(T, B, I, H, W_dev.data(), R_dev.data(),
-                                                bx_dev.data(), br_dev.data(), x_dev.data(),
+                                                bw_dev.data(), br_dev.data(), x_dev.data(),
                                                 bitwidth_config);
         }
         // LUT 已在校准函数中自动生成
@@ -502,14 +502,14 @@ int main(int argc, char *argv[]) {
     dev::vector<float> h_float((T + 1) * B * H);
     dev::vector<float> h_quant_gpu((T + 1) * B * H);
 
-    runFloatInference(T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
+    runFloatInference(T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
                       x_dev.data(), h_float.data());
     
-    runQuantInference(T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(), br_dev.data(),
+    runQuantInference(T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
                       x_dev.data(), quant_params, h_quant_gpu.data());
     
     std::vector<float> h_quant_cpu_vec((T + 1) * B * H);
-    runQuantInferenceCPU(T, B, I, H, W.data(), R.data(), bx.data(), br.data(),
+    runQuantInferenceCPU(T, B, I, H, W.data(), R.data(), bw.data(), br.data(),
                          x.data(), quant_params, h_quant_cpu_vec.data());
 
     // 比较结果
@@ -561,7 +561,7 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("FloatTraining Forward:");
-            hasteGRUForward(true, T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(),
+            hasteGRUForward(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                             br_dev.data(), x_dev.data(), nullptr, g_blas_handle,
                             h_train.data(), v_train.data());
         }
@@ -577,7 +577,7 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("FloatTraining Backward:");
-            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bx_dev.data(),
+            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
                              br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
                              dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data());
@@ -586,7 +586,7 @@ int main(int argc, char *argv[]) {
         d2h(gradients_float.dx, dx_dev);
         d2h(gradients_float.dW, dW_dev);
         d2h(gradients_float.dR, dR_dev);
-        d2h(gradients_float.dbx, dbx_dev);
+        d2h(gradients_float.dbw, dbx_dev);
         d2h(gradients_float.dbr, dbr_dev);
         d2h(gradients_float.dh, dh_out_dev);
         gradients_float.h.resize(T * B * H);
@@ -604,7 +604,7 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining Forward:");
-            forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bx_dev.data(),
+            forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
                              h_train.data(), v_train.data());
         }
@@ -620,7 +620,7 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining Backward:");
-            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bx_dev.data(),
+            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
                              br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
                              dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data());
@@ -629,7 +629,7 @@ int main(int argc, char *argv[]) {
         d2h(gradients_quant.dx, dx_dev);
         d2h(gradients_quant.dW, dW_dev);
         d2h(gradients_quant.dR, dR_dev);
-        d2h(gradients_quant.dbx, dbx_dev);
+        d2h(gradients_quant.dbw, dbx_dev);
         d2h(gradients_quant.dbr, dbr_dev);
         d2h(gradients_quant.dh, dh_out_dev);
         gradients_quant.h.resize(T * B * H);

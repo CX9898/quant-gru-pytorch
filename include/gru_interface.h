@@ -83,17 +83,17 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
 // 输入（浮点）:
 //   W:  [C, H*3]   输入权重矩阵
 //   R:  [H, H*3]   循环权重矩阵
-//   bx: [H*3]      输入偏置
+//   bw: [H*3]      输入偏置 (bias for W)
 //   br: [H*3]      循环偏置
 // 输出（量化，int32_t 存储）:
 //   W_quant:  [C, H*3]   量化后的输入权重
 //   R_quant:  [H, H*3]   量化后的循环权重
-//   bx_quant: [H*3]      量化后的输入偏置
+//   bw_quant: [H*3]      量化后的输入偏置
 //   br_quant: [H*3]      量化后的循环偏置
 void quantitativeWeight(const int input_size, const int hidden_size,
-                        const float *W, const float *R, const float *bx, const float *br,
+                        const float *W, const float *R, const float *bw, const float *br,
                         const GRUQuantitativeParameters &quant_parms,
-                        int32_t *W_quant, int32_t *R_quant, int32_t *bx_quant, int32_t *br_quant);
+                        int32_t *W_quant, int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant);
 
 // =====================================================================
 // GPU 量化 GRU 前向传播接口
@@ -104,7 +104,7 @@ void quantitativeWeight(const int input_size, const int hidden_size,
 // 输入:
 //   W:  [C, H*3]   量化后的输入权重（int32_t 存储）
 //   R:  [H, H*3]   量化后的循环权重（int32_t 存储）
-//   bx: [H*3]      量化后的输入偏置（int32_t）
+//   bw: [H*3]      量化后的输入偏置（int32_t）
 //   br: [H*3]      量化后的循环偏置（int32_t）
 //   x:  [T, B, I]  浮点输入序列（内部会量化）
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
@@ -114,7 +114,7 @@ void quantitativeWeight(const int input_size, const int hidden_size,
 void quantGRUForward(
     bool is_training,
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const int32_t *W, const int32_t *R, const int32_t *bx, const int32_t *br, const float *x,
+    const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
     const float *h0,
     const GRUQuantitativeParameters &quant_parms, const cublasHandle_t &g_blas_handle,
     float *h, float *v);
@@ -128,7 +128,7 @@ void quantGRUForward(
 // 输入:
 //   W:  [C, H*3]   量化后的输入权重（int32_t 存储）
 //   R:  [H, H*3]   量化后的循环权重（int32_t 存储）
-//   bx: [H*3]      量化后的输入偏置（int32_t）
+//   bw: [H*3]      量化后的输入偏置（int32_t）
 //   br: [H*3]      量化后的循环偏置（int32_t）
 //   x:  [T, B, I]  浮点输入序列（内部会量化）
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
@@ -138,7 +138,7 @@ void quantGRUForward(
 void quantGRUForwardCPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const int32_t *W, const int32_t *R, const int32_t *bx, const int32_t *br,
+    const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br,
     const float *x, const float *h0,
     const GRUQuantitativeParameters &quant_parms,
     float *h, float *v);
@@ -147,7 +147,7 @@ void quantGRUForwardCPU(
 // 输入:
 //   W:  [C, H*3]   浮点输入权重
 //   R:  [H, H*3]   浮点循环权重
-//   bx: [H*3]      浮点输入偏置
+//   bw: [H*3]      浮点输入偏置
 //   br: [H*3]      浮点循环偏置
 //   x:  [T, B, I]  浮点输入序列
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
@@ -157,7 +157,7 @@ void quantGRUForwardCPU(
 void quantGRUForwardCPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br,
+    const float *W, const float *R, const float *bw, const float *br,
     const float *x, const float *h0,
     const GRUQuantitativeParameters &quant_parms,
     float *h, float *v);
@@ -166,7 +166,7 @@ void quantGRUForwardCPU(
 // 输入:
 //   W:  [C, H*3]   输入权重矩阵
 //   R:  [H, H*3]   循环权重矩阵
-//   bx: [H*3]      输入偏置
+//   bw: [H*3]      输入偏置 (bias for W)
 //   br: [H*3]      循环偏置
 //   x:  [T, B, I]  输入序列
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
@@ -176,7 +176,7 @@ void quantGRUForwardCPU(
 void hasteGRUForward(
     bool is_training,
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     float *h, float *v);
@@ -186,7 +186,7 @@ void hasteGRUForward(
 void forwardInterface(
     bool is_training, bool is_quant,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
     float *h, float *v);
@@ -201,7 +201,7 @@ void forwardInterface(
 void forwardWithCalibrationGPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     CalibrationMethod calib_method,
@@ -214,7 +214,7 @@ void forwardWithCalibrationGPU(
 void forwardWithHistogramCPU(
     bool is_training,
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bx, const float *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const cublasHandle_t &g_blas_handle,
     GRUHistogramCollectors *hist_collectors,
@@ -249,7 +249,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
 // 输入（转置后的数据）:
 //   W_t: [H*3, C]      转置后的输入权重（原 W 是 [C, H*3]）
 //   R_t: [H*3, H]      转置后的循环权重（原 R 是 [H, H*3]）
-//   bx:  [H*3]         输入偏置（不需要转置）
+//   bw:  [H*3]         输入偏置（不需要转置）
 //   br:  [H*3]         循环偏置（不需要转置）
 //   x_t: [I, T, B]     转置后的输入序列（原 x 是 [T, B, I]）
 //   dh_new: [(T+1), B, H]  上游梯度
@@ -260,15 +260,15 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
 //   dx:  [T, B, I]     输入序列梯度
 //   dW:  [C, H*3]      输入权重梯度（注意：输出格式与输入 W_t 不同！）
 //   dR:  [H, H*3]      循环权重梯度（注意：输出格式与输入 R_t 不同！）
-//   dbx: [H*3]         输入偏置梯度
+//   dbw: [H*3]         输入偏置梯度
 //   dbr: [H*3]         循环偏置梯度
 //   dh:  [B, H]        初始隐藏状态梯度
 void hasteGRUBackward(
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
     const float *W_t, const float *R_t,
-    const float *bx, const float *br,
+    const float *bw, const float *br,
     const float *x_t,
     const float *dh_new,
     const float *h, const float *v,
     const cublasHandle_t &g_blas_handle,
-    float *dx, float *dW, float *dR, float *dbx, float *dbr, float *dh);
+    float *dx, float *dW, float *dR, float *dbw, float *dbr, float *dh);
