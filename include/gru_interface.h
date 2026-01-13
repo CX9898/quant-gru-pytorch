@@ -162,6 +162,31 @@ void quantGRUForwardCPU(
     const GRUQuantParams &quant_parms,
     float *h, float *v);
 
+// =====================================================================
+// 纯定点 GRU 前向传播接口（核心实现）
+// =====================================================================
+
+// GPU 纯定点 GRU 前向传播（int32 输入/输出）
+// 这是量化 GRU 的核心计算，所有高层接口都调用此函数
+// 输入（全部 int32，GPU 内存）:
+//   W_q:  [C, H*3]   量化后的输入权重
+//   R_q:  [H, H*3]   量化后的循环权重
+//   bw_q: [H*3]      量化后的输入偏置
+//   br_q: [H*3]      量化后的循环偏置
+//   x_q:  [T, B, I]  量化后的输入序列
+//   h0_q: [B, H]     量化后的初始隐藏状态（可为 nullptr，则使用 zp_h）
+// 输出（int32，GPU 内存）:
+//   h_q:  [(T+1), B, H]  所有时间步的量化隐藏状态
+//   v_q:  [T, B, H*4]    量化中间值（可为 nullptr）
+void quantGRUForwardInt32(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const int32_t *W_q, const int32_t *R_q, const int32_t *bw_q, const int32_t *br_q,
+    const int32_t *x_q, const int32_t *h0_q,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    int32_t *h_q, int32_t *v_q);
+
 // 浮点 GRU 前向传播
 // 输入:
 //   W:  [C, H*3]   输入权重矩阵

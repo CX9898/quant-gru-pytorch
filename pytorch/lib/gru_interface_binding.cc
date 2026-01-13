@@ -380,6 +380,56 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     return std::make_tuple(h, v);
 }
 
+// =====================================================================
+// quant_gru_forward_int32: 纯定点 GRU 前向传播（用于验证）
+// =====================================================================
+// 输入输出都是 int32 张量，不涉及浮点转换
+// 用于验证 CPU 定点实现与 GPU 定点实现的一致性
+torch::Tensor quant_gru_forward_int32_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W_q, const torch::Tensor &R_q,
+    const torch::Tensor &bw_q, const torch::Tensor &br_q,
+    const torch::Tensor &x_q, const torch::Tensor &h0_q,
+    const GRUQuantParamsPy &quant_params) {
+    
+    // 检查输入类型和设备
+    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kInt32, "W_q must be CUDA int32 tensor");
+    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kInt32, "R_q must be CUDA int32 tensor");
+    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kInt32, "bw_q must be CUDA int32 tensor");
+    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kInt32, "br_q must be CUDA int32 tensor");
+    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kInt32, "x_q must be CUDA int32 tensor");
+    
+    // h0_q 可以为空
+    const int32_t *h0_ptr = nullptr;
+    if (h0_q.defined() && h0_q.numel() > 0) {
+        TORCH_CHECK(h0_q.is_cuda() && h0_q.dtype() == torch::kInt32, "h0_q must be CUDA int32 tensor");
+        h0_ptr = h0_q.data_ptr<int32_t>();
+    }
+    
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+    
+    // 创建输出张量
+    auto h_q = torch::empty({time_steps + 1, batch_size, hidden_size},
+                            torch::dtype(torch::kInt32).device(torch::kCUDA));
+    
+    // 转换量化参数
+    GRUQuantParams cpp_params = quant_params.to_cpp();
+    
+    // 调用 C++ 函数（推理模式，不输出 v）
+    quantGRUForwardInt32(
+        false, time_steps, batch_size, input_size, hidden_size,
+        W_q.data_ptr<int32_t>(), R_q.data_ptr<int32_t>(),
+        bw_q.data_ptr<int32_t>(), br_q.data_ptr<int32_t>(),
+        x_q.data_ptr<int32_t>(), h0_ptr,
+        cpp_params, g_blas_handle,
+        h_q.data_ptr<int32_t>(), nullptr);
+    
+    return h_q;
+}
+
 // GRU 反向传播包装函数
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int hidden_size,
@@ -938,6 +988,26 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("calib_method"),
           py::arg("quant_ranges") = nullptr,
           py::arg("hist_collectors") = nullptr);
+
+    // =====================================================================
+    // quant_gru_forward_int32: 纯定点 GRU 前向传播（用于验证）
+    // =====================================================================
+    m.def("quant_gru_forward_int32", &quant_gru_forward_int32_wrapper,
+          "Quantized GRU forward pass with int32 input/output for verification.\n"
+          "\n"
+          "Args:\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W_q, R_q, bw_q, br_q: Quantized weights (int32 CUDA tensors)\n"
+          "  x_q: Quantized input [T, B, I] (int32 CUDA tensor)\n"
+          "  h0_q: Quantized initial hidden state [B, H] (int32 CUDA tensor, optional)\n"
+          "  quant_params: Quantization parameters\n"
+          "\n"
+          "Returns:\n"
+          "  h_q: Quantized hidden states [T+1, B, H] (int32 CUDA tensor)",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W_q"), py::arg("R_q"), py::arg("bw_q"), py::arg("br_q"),
+          py::arg("x_q"), py::arg("h0_q"),
+          py::arg("quant_params"));
 
     // GRU 反向传播
     m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",
