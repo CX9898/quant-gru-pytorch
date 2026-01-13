@@ -8,28 +8,56 @@
 #include "quantize_lut_types.h"
 #include "quantize_ops_helper.h"
 
+// ============================================================================
+// gru_quant_cpu.h - 纯 C++ 定点 GRU 前向传播接口
+// ============================================================================
+//
+// 设计说明:
+//   - 完全不依赖 CUDA，可在任意 CPU 平台运行
+//   - 与 GPU 版本保持数值一致性（用于验证和部署）
+//   - 所有量化值使用 int32_t 统一存储，通过 bitwidth_config_ 控制实际位宽
+//   - 复用 quantize_lut_types.h 中的 LUT 结构和生成函数
+//   - 复用 quantize_ops_helper.h 中的通用函数
+//
+// ============================================================================
+
 namespace cpu {
 
+// ==================== CPU 专用辅助函数 ====================
+// 以下函数已统一定义在 quantize_ops_helper.h 中：
+//   - rshift_round (int32_t / int64_t)
+//   - clamp_by_bitwidth
+//   - find_segment
+//   - piecewise_linear_raw
+//   - piecewise_linear
+
+// ==================== 前向传播类声明 ====================
+
+/// @brief CPU 版本量化 GRU 前向传播类（非模板，统一 int32_t 存储）
 class ForwardPassQuantCPU {
-public:
+   public:
     ForwardPassQuantCPU(bool training, int batch_size, int input_size, int hidden_size);
     ~ForwardPassQuantCPU();
 
+    /// @brief 设置量化 rescale 参数（使用 quantize_ops_helper.h 中定义的通用结构）
     void setRescaleParam(const GRUQuantParams &params);
 
+    /// @brief 执行前向传播（所有量化值使用 int32_t 存储）
     void Run(int steps, const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br,
-             const int32_t *x, int32_t *h, int32_t *v, float zoneout_prob, const int32_t *zoneout_mask);
+             const int32_t *x, int32_t *h, int32_t *v, float zoneout_prob,
+             const int32_t *zoneout_mask);
 
-private:
+   private:
     struct PrivateData;
     std::unique_ptr<PrivateData> data_;
 
-    GateQuantParams gate_params_;
-    LinearQuantParamsCPU linear_params_;
+    // -------------------- 量化参数（拆分设计）--------------------
+    GateQuantParams gate_params_;        ///< 门计算参数（纯标量，传给 computeZ/R/G/H）
+    LinearQuantParamsCPU linear_params_; ///< Linear 层参数（per-channel，用于 GEMM）
 
     int max_steps_ = 0;
-    std::vector<int32_t> tmp_weight_ih_linear_;
-    std::vector<int32_t> tmp_weight_hh_linear_;
+    std::vector<int32_t> tmp_weight_ih_linear_;  // Linear 变换: W*x + bw
+    std::vector<int32_t> tmp_weight_hh_linear_;  // Linear 变换: R*h + br
     std::vector<int64_t> W_sum_mul_x_zp_;
     std::vector<int64_t> R_sum_mul_h_zp_;
     bool weight_sums_computed_ = false;
@@ -41,8 +69,8 @@ private:
     void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps);
     void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br);
     void IterateInternal(const int32_t *R, const int32_t *br, const int32_t *h,
-                         int32_t *h_out, int32_t *v, const int32_t *cur_linear_x,
-                         float zoneout_prob, const int32_t *zoneout_mask);
+                         int32_t *h_out, int32_t *v, const int32_t *cur_linear_x, float zoneout_prob,
+                         const int32_t *zoneout_mask);
 };
 
 }  // namespace cpu
