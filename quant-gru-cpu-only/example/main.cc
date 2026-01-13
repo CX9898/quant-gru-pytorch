@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
     for (auto& v : br_float) v = dist(gen) * 0.1f;
 
     // 量化参数设置（示例值）
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     quant_params.hidden_ = hidden_size;
     quant_params.bitwidth_config_ = OperatorQuantConfig::create(bitwidth);
 

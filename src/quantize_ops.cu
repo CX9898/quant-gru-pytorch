@@ -15,7 +15,7 @@
 
 // 生成分段线性量化表并存储到参数中
 // 在 finalize_calibration 时调用一次，然后在每次 forward 时从参数复制到 QuantGRUReScale
-void generate_piecewise_linear_lut_to_params(GRUQuantitativeParameters &params) {
+void generate_piecewise_linear_lut_to_params(GRUQuantParams &params) {
     const auto &config = params.bitwidth_config_;
 
     // update gate Sigmoid

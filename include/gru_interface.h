@@ -56,7 +56,7 @@ inline void init_gru_cublas(cublasHandle_t &g_blas_handle) {
 // =====================================================================
 
 // 根据量化范围和位宽配置计算量化参数（scale 和 zero point）
-GRUQuantitativeParameters calculateGRUQuantitativeParameters(
+GRUQuantParams calculateGRUQuantitativeParameters(
     const GRUQuantizationRanges &quant_ranges,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
@@ -67,7 +67,7 @@ struct GRUGPUHistogramCollectors;  // GPU 版本
 // 从直方图计算量化参数（支持 SQNR 和 Percentile 两种校准方案）
 // use_percentile: false = SQNR (AIMET tf_enhanced), true = Percentile
 // percentile_value: 仅 Percentile 方案使用，默认 99.99%
-GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
+GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
     bool verbose = false,
@@ -92,7 +92,7 @@ GRUQuantitativeParameters calculateGRUQuantitativeParametersFromHistograms(
 //   br_quant: [H*3]      量化后的循环偏置
 void quantitativeWeight(const int input_size, const int hidden_size,
                         const float *W, const float *R, const float *bw, const float *br,
-                        const GRUQuantitativeParameters &quant_parms,
+                        const GRUQuantParams &quant_parms,
                         int32_t *W_quant, int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant);
 
 // =====================================================================
@@ -116,7 +116,7 @@ void quantGRUForward(
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
     const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
     const float *h0,
-    const GRUQuantitativeParameters &quant_parms, const cublasHandle_t &g_blas_handle,
+    const GRUQuantParams &quant_parms, const cublasHandle_t &g_blas_handle,
     float *h, float *v);
 
 // =====================================================================
@@ -140,7 +140,7 @@ void quantGRUForwardCPU(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br,
     const float *x, const float *h0,
-    const GRUQuantitativeParameters &quant_parms,
+    const GRUQuantParams &quant_parms,
     float *h, float *v);
 
 // CPU 量化 GRU 前向传播（从浮点权重开始，内部量化）
@@ -159,7 +159,7 @@ void quantGRUForwardCPU(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bw, const float *br,
     const float *x, const float *h0,
-    const GRUQuantitativeParameters &quant_parms,
+    const GRUQuantParams &quant_parms,
     float *h, float *v);
 
 // 浮点 GRU 前向传播
@@ -188,7 +188,7 @@ void forwardInterface(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
-    const GRUQuantitativeParameters &quant_gru_scales, const cublasHandle_t &g_blas_handle,
+    const GRUQuantParams &quant_gru_scales, const cublasHandle_t &g_blas_handle,
     float *h, float *v);
 
 // =====================================================================
@@ -226,7 +226,7 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
 
 // 从 GPU 直方图收集器直接计算量化参数（GPU 加速 SQNR）
 // 避免 GPU→CPU 传输，直接在 GPU 上计算 SQNR
-GRUQuantitativeParameters calculateGRUQuantitativeParametersFromGPUHistograms(
+GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
     bool verbose = false);

@@ -208,7 +208,7 @@ void runFloatInference(int time_steps, int batch_size, int input_size, int hidde
 
 void runQuantInference(int time_steps, int batch_size, int input_size, int hidden_size,
                        const float *W, const float *R, const float *bw, const float *br,
-                       const float *x, const GRUQuantitativeParameters &quant_params, float *h) {
+                       const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU):");
     forwardInterface(false, true, time_steps, batch_size, input_size, hidden_size,
                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
@@ -218,7 +218,7 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
 
 void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hidden_size,
                           const float *W, const float *R, const float *bw, const float *br,
-                          const float *x, const GRUQuantitativeParameters &quant_params,
+                          const float *x, const GRUQuantParams &quant_params,
                           float *h) {
     ScopeTimer t("QuantInference (CPU):");
     // 使用浮点权重版本的接口，内部会自动量化
@@ -313,7 +313,7 @@ void compareHistogramCollectionPerformance(int time_steps, int batch_size, int i
 /**
  * @brief 执行 SQNR/Percentile 校准并返回量化参数
  */
-GRUQuantitativeParameters calibrateWithHistogram(
+GRUQuantParams calibrateWithHistogram(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W_dev, const float *R_dev, const float *bw_dev, const float *br_dev,
     const float *x_dev, const OperatorQuantConfig &bitwidth_config, bool use_percentile) {
@@ -344,13 +344,13 @@ GRUQuantitativeParameters calibrateWithHistogram(
 
     // Step 4: SQNR 计算对比
     cpu_timer.start();
-    GRUQuantitativeParameters params_cpu = calculateGRUQuantitativeParametersFromHistograms(
+    GRUQuantParams params_cpu = calculateGRUQuantitativeParametersFromHistograms(
         hist_cpu, bitwidth_config, false, false);
     double sqnr_cpu_ms = cpu_timer.stop_ms();
     printf("  [Step 4a] SQNR param (CPU): %.3f ms\n", sqnr_cpu_ms);
 
     timer.start();
-    GRUQuantitativeParameters params_gpu = calculateGRUQuantitativeParametersFromGPUHistograms(
+    GRUQuantParams params_gpu = calculateGRUQuantitativeParametersFromGPUHistograms(
         gpu_hist, bitwidth_config, false);
     float sqnr_gpu_ms = timer.stop();
     printf("  [Step 4b] SQNR param (GPU): %.3f ms (%.1fx speedup)\n", 
@@ -385,7 +385,7 @@ GRUQuantitativeParameters calibrateWithHistogram(
            w_m, w_t, r_m, r_t, bw_m, bw_t, br_m, br_t);
 
     // Step 5: Percentile 计算 (如果需要)
-    GRUQuantitativeParameters params_percentile;
+    GRUQuantParams params_percentile;
     if (use_percentile) {
         const int PERC_RUNS = 10;
         double percentile_total = 0.0;
@@ -407,7 +407,7 @@ GRUQuantitativeParameters calibrateWithHistogram(
 /**
  * @brief 执行 MinMax 校准并返回量化参数
  */
-GRUQuantitativeParameters calibrateWithMinMax(
+GRUQuantParams calibrateWithMinMax(
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *W_dev, const float *R_dev, const float *bw_dev, const float *br_dev,
     const float *x_dev, const OperatorQuantConfig &bitwidth_config) {
@@ -475,7 +475,7 @@ int main(int argc, char *argv[]) {
     // 校准
     printf("\n========== Calibration ==========\n");
     OperatorQuantConfig bitwidth_config;
-    GRUQuantitativeParameters quant_params;
+    GRUQuantParams quant_params;
     
     {
         ScopeTimer t("Total calibration time:");

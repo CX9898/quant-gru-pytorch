@@ -24,7 +24,7 @@ class ForwardPassQuant {
     // Blocks until all iterations have completed executing on the GPU.
     ~ForwardPassQuant();
 
-    void setRescaleParam(const GRUQuantitativeParameters &parms);
+    void setRescaleParam(const GRUQuantParams &parms);
 
     // 简化的 GRU 前向接口（内部管理临时缓冲区）
     // 所有输入输出数据使用 int32_t 存储，实际值限制在配置的位宽范围内

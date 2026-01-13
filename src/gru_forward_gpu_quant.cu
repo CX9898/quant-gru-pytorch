@@ -597,7 +597,7 @@ void ForwardPassQuant::IterateInternal(
     }
 }
 
-void ForwardPassQuant::setRescaleParam(const GRUQuantitativeParameters &parms) {
+void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
 
     // ==================== Linear 层参数（per-channel）====================
