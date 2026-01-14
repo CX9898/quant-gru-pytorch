@@ -1385,12 +1385,23 @@ class QuantGRU(nn.Module):
         [与 CUDA 一致]
           - 量化参数(scale/zp)完全一致
           - 计算图结构一致(门顺序、计算顺序)
-          - 权重/偏置的 per-channel 量化参数一致
+          - Linear 层融合：weight_ih_linear = W*x + bw, weight_hh_linear = R*h + br
+          - shift_weight_ih_linear 是 GEMM+bias 融合后的输出 scale
+          - 门计算不再单独加 bias（已融合到 Linear 层）
           
         [ONNX 兼容 - 与 CUDA 实现不同]
           - GEMM: 使用标准 torch.mm(推理引擎会用 MatMulInteger)
           - sigmoid/tanh: 使用标准 torch.sigmoid/tanh(推理引擎会优化)
           - rescale: 通过 QDQ 实现(不用显式 rshift_round)
+        
+        量化计算流程（与 CUDA quantizedGemmBiasFused 一致）：
+        ==========
+        1. weight_ih_linear = W*x + bw（融合 Linear，再统一量化到 shift_weight_ih_linear）
+        2. weight_hh_linear = R*h + br（融合 Linear，再统一量化到 shift_weight_hh_linear）
+        3. update_gate_input = ih_z + hh_z（不加 bias，已融合）
+        4. reset_gate_input = ih_r + hh_r（不加 bias，已融合）
+        5. mul_reset_hidden = reset_gate * hh_n（hh_n 已含 br）
+        6. new_gate_input = ih_n + mul_reset_hidden（不加 bias，已融合）
         
         Args:
             input: [T, B, I] 输入序列
@@ -1476,10 +1487,6 @@ class QuantGRU(nn.Module):
                                          bitwidth=self._get_bitwidth('br'),
                                          symmetric=self._get_symmetric('br')).squeeze(0)
 
-        # 分割偏置(Haste 格式：z, r, g)
-        bw_z, bw_r, bw_g = bw_q.chunk(3)  # 各 [H]
-        br_z, br_r, br_g = br_q.chunk(3)  # 各 [H]
-
         # ========== 初始化隐藏状态 ==========
         if h0 is None:
             h = torch.zeros(B, H, device=device, dtype=dtype)
@@ -1495,13 +1502,19 @@ class QuantGRU(nn.Module):
         x_q = fake_quantize(input, shift_x, zp_x, bitwidth=self._get_bitwidth('x'),
                             symmetric=self._get_symmetric('x'))
 
-        # ========== weight_ih_linear GEMM(循环外一次性计算)==========
-        # [与 CUDA 一致] 计算顺序一致
-        # [ONNX 兼容] 使用标准 matmul，推理引擎会替换为 MatMulInteger
-        # x_q: [T, B, I], W_q: [3*H, I] -> weight_ih_linear: [T, B, 3*H]
-        weight_ih_linear_all = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
+        # ========== weight_ih_linear = W*x + bw（融合 Linear，循环外一次性计算）==========
+        # [与 CUDA quantizedGemmBiasFused 一致]
+        # CUDA: result = rshift(W*x, shift_gemm[i]) + rshift(bw, shift_bw[i]) + zp_out
+        # 在 fake_quantize 模式下：先浮点相加，再统一量化到 shift_weight_ih_linear
+        # x_q: [T, B, I], W_q: [3*H, I] -> gemm: [T, B, 3*H]
+        gemm_Wx = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
+        
+        # [与 CUDA 一致] 融合 bias：weight_ih_linear = W*x + bw
+        # bw_q: [3*H] -> broadcast to [T, B, 3*H]
+        weight_ih_linear_all = gemm_Wx + bw_q.unsqueeze(0).unsqueeze(0)  # [T, B, 3*H]
 
-        # [与 CUDA 一致] GEMM 输出量化
+        # [与 CUDA 一致] 融合后统一量化到 shift_weight_ih_linear
+        # 这是 GEMM+bias 之后的输出 scale
         weight_ih_linear_all = fake_quantize(weight_ih_linear_all, shift_weight_ih_linear, zp_weight_ih_linear,
                                              bitwidth=self._get_bitwidth('weight_ih_linear'),
                                              symmetric=self._get_symmetric('weight_ih_linear'))
@@ -1512,24 +1525,30 @@ class QuantGRU(nn.Module):
         for t in range(T):
             weight_ih_linear = weight_ih_linear_all[t]  # [B, 3*H]
 
-            # ========== weight_hh_linear GEMM ==========
-            # [与 CUDA 一致] 每个时间步计算 R*h + br (weight_hh_linear)
-            # [ONNX 兼容] 使用标准 matmul
-            weight_hh_linear = torch.mm(h, R_q.t())  # [B, 3*H]
+            # ========== weight_hh_linear = R*h + br（融合 Linear）==========
+            # [与 CUDA quantizedGemmBiasFused 一致]
+            # CUDA: result = rshift(R*h, shift_gemm[i]) + rshift(br, shift_br[i]) + zp_out
+            gemm_Rh = torch.mm(h, R_q.t())  # [B, 3*H]
+            
+            # [与 CUDA 一致] 融合 bias：weight_hh_linear = R*h + br
+            weight_hh_linear = gemm_Rh + br_q.unsqueeze(0)  # [B, 3*H]
 
-            # [与 CUDA 一致] GEMM 输出量化
+            # [与 CUDA 一致] 融合后统一量化到 shift_weight_hh_linear
             weight_hh_linear = fake_quantize(weight_hh_linear, shift_weight_hh_linear, zp_weight_hh_linear,
                                              bitwidth=self._get_bitwidth('weight_hh_linear'),
                                              symmetric=self._get_symmetric('weight_hh_linear'))
 
             # ========== 分割门控 ==========
             # [与 CUDA 一致] Haste 格式 (z, r, n) → (update, reset, new)
-            ih_z, ih_r, ih_n = weight_ih_linear.chunk(3, dim=1)  # 各 [B, H]
-            hh_z, hh_r, hh_n = weight_hh_linear.chunk(3, dim=1)  # 各 [B, H]
+            # 注意：分割后的 ih_z/ih_r/ih_n 和 hh_z/hh_r/hh_n 都已包含各自的 bias
+            ih_z, ih_r, ih_n = weight_ih_linear.chunk(3, dim=1)  # 各 [B, H]，已含 bw
+            hh_z, hh_r, hh_n = weight_hh_linear.chunk(3, dim=1)  # 各 [B, H]，已含 br
 
             # ========== Update Gate (z 门) ==========
-            # [与 CUDA 一致] update_gate = sigmoid(ih_z + hh_z + bw_z + br_z)
-            update_gate_input = ih_z + hh_z + bw_z.unsqueeze(0) + br_z.unsqueeze(0)
+            # [与 CUDA computeUpdateGate 一致]
+            # CUDA: update_gate_input = rescale(ih_z) + rescale(hh_z) + zp_update_gate_input
+            # 不需要再加 bias（已融合到 weight_ih_linear 和 weight_hh_linear）
+            update_gate_input = ih_z + hh_z
 
             # [与 CUDA 一致] 激活前量化
             update_gate_input = fake_quantize(update_gate_input, shift_update_gate_input, zp_update_gate_input,
@@ -1546,8 +1565,9 @@ class QuantGRU(nn.Module):
                                                is_unsigned=self._get_unsigned('update_gate_output'))
 
             # ========== Reset Gate (r 门) ==========
-            # [与 CUDA 一致] reset_gate = sigmoid(ih_r + hh_r + bw_r + br_r)
-            reset_gate_input = ih_r + hh_r + bw_r.unsqueeze(0) + br_r.unsqueeze(0)
+            # [与 CUDA computeResetGate 一致]
+            # 不需要再加 bias（已融合）
+            reset_gate_input = ih_r + hh_r
 
             reset_gate_input = fake_quantize(reset_gate_input, shift_reset_gate_input, zp_reset_gate_input,
                                              bitwidth=self._get_bitwidth('reset_gate_input'),
@@ -1563,10 +1583,13 @@ class QuantGRU(nn.Module):
                                               is_unsigned=self._get_unsigned('reset_gate_output'))
 
             # ========== New Gate (g 门 / Candidate) ==========
-            # [与 CUDA 一致] new_gate = tanh(ih_n + reset_gate * (hh_n + br_n) + bw_n)
-            # 注意: hh_add_br 量化步骤已移除（融合到 weight_hh_linear）
-            hh_add_br = hh_n + br_g.unsqueeze(0)
-            mul_reset_hidden = reset_gate_output * hh_add_br
+            # [与 CUDA computeNewGate 一致]
+            # CUDA: mul_reset_hidden = reset_gate * weight_hh_linear_g（hh_n 已含 br）
+            # CUDA: new_gate_input = rescale(ih_n) + rescale(mul_reset_hidden) + zp_new_gate_input
+            # 
+            # 注意：hh_n 已经包含了 br_n（融合到 weight_hh_linear）
+            # 所以 mul_reset_hidden = reset_gate * hh_n，不需要额外加 br
+            mul_reset_hidden = reset_gate_output * hh_n
 
             # [与 CUDA 一致] 乘积量化(从配置读取位宽)
             mul_reset_hidden = fake_quantize(mul_reset_hidden, quant_params.shift_mul_reset_hidden_,
@@ -1574,7 +1597,8 @@ class QuantGRU(nn.Module):
                                              bitwidth=self._get_bitwidth('mul_reset_hidden'),
                                              symmetric=self._get_symmetric('mul_reset_hidden'))
 
-            new_gate_input = ih_n + mul_reset_hidden + bw_g.unsqueeze(0)
+            # ih_n 已经包含了 bw_n（融合到 weight_ih_linear），不需要额外加 bw
+            new_gate_input = ih_n + mul_reset_hidden
 
             new_gate_input = fake_quantize(new_gate_input, shift_new_gate_input, zp_new_gate_input,
                                            bitwidth=self._get_bitwidth('new_gate_input'),
@@ -1589,8 +1613,9 @@ class QuantGRU(nn.Module):
                                             symmetric=self._get_symmetric('new_gate_output'))
 
             # ========== 新隐藏状态 ==========
-            # [与 CUDA 一致] h_new = update_gate * h + (1 - update_gate) * new_gate
-            # CUDA computeHiddenState 分别计算并量化 mul_old_contribution 和 mul_new_contribution
+            # [与 CUDA computeHiddenState 一致]
+            # h_new = update_gate * h + (1 - update_gate) * new_gate
+            # CUDA 分别计算并量化 mul_old_contribution 和 mul_new_contribution
 
             # mul_old_contribution = update_gate * h(从配置读取位宽)
             mul_old_contribution = update_gate_output * h
