@@ -28,6 +28,6 @@
 *.whl
 *.egg-info
 */*build*/
-*/tmp/
+/tmp/
 
 /release/
