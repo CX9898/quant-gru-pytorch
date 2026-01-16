@@ -8,9 +8,10 @@
 //   1. CPU/GPU 共用的内联函数（__host__ __device__ __forceinline__）
 //   2. 量化/反量化基础操作函数
 //   3. 分段线性近似函数（Sigmoid/Tanh LUT）
-//   4. GRU 门计算模板函数
-//   5. 量化参数校准函数
-//   6. 调试与工具函数
+//   4. 真实 Sigmoid/Tanh 函数（用于 QAT 训练）
+//   5. GRU 门计算模板函数
+//   6. 量化参数校准函数
+//   7. 调试与工具函数
 //
 // 量化参数结构体定义已移至 quantize_param_types.h
 //
@@ -21,6 +22,25 @@
 //
 // ============================================================================
 
+// ============================================================================
+// 激活函数模式开关
+// ============================================================================
+// 
+// USE_REAL_ACTIVATION: 使用真实 sigmoid/tanh（反量化 → 浮点计算 → 量化）
+//   - 优点：前向/反向一致，QAT 梯度更准确
+//   - 缺点：比 LUT 慢（涉及 exp/tanh 浮点运算）
+//
+// 不定义 USE_REAL_ACTIVATION: 使用分段线性 LUT（默认）
+//   - 优点：快速，纯整数运算
+//   - 缺点：QAT 时前向（LUT）与反向（真实导数）不一致
+//
+// 使用方法：
+//   - QAT 训练时：在 CMakeLists.txt 或编译命令中添加 -DUSE_REAL_ACTIVATION
+//   - 推理部署时：不定义此宏，使用 LUT
+//
+// ============================================================================
+// #define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
+
 #include "cuda_compat.h"
 #include <cublas_v2.h>
 
@@ -28,6 +48,13 @@
 #include <cassert>
 #include <iostream>
 #include <vector>
+
+// CUDA 编译时使用内置 min/max（有 __device__ 修饰）
+// 纯 C++ 编译时使用 std::min/max
+#ifndef __CUDACC__
+using std::min;
+using std::max;
+#endif
 
 #include "gru_quantization_ranges.h"
 #include "histogram_collector.h"  // for get_minimum_scale
@@ -67,12 +94,13 @@ __host__ __device__ __forceinline__ float exp2_scale(int8_t exp2_inv) {
  * @brief 带四舍五入的右移操作（int32_t 版本）
  *
  * 实现 round(x / 2^n) 的定点运算，支持正负移位。
+ * 采用 round half away from zero（四舍五入远离零）策略。
  *
  * @param x 被移位的值
  * @param n 移位量（正数右移，负数或零左移）
  * @return 移位后的结果
  *
- * @note 对负数采用向零舍入（round toward zero）
+ * @note 舍入策略：1.5 → 2, -1.5 → -2（绝对值四舍五入后保留符号）
  */
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (n <= 0) return x << (-n);
@@ -81,7 +109,7 @@ __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (x >= 0) {
         return (x + offset) >> n;
     } else {
-        return -((-x + offset) >> n);  // 向零舍入
+        return -((-x + offset) >> n);  // round half away from zero
     }
 }
 
@@ -89,6 +117,7 @@ __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
  * @brief 带四舍五入的右移操作（int64_t 版本）
  *
  * 用于处理 16 位量化时可能超出 int32 范围的乘积。
+ * 采用 round half away from zero（四舍五入远离零）策略。
  */
 __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     if (n <= 0) return x << (-n);
@@ -97,7 +126,7 @@ __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     if (x >= 0) {
         return (x + offset) >> n;
     } else {
-        return -((-x + offset) >> n);  // 向零舍入
+        return -((-x + offset) >> n);  // round half away from zero
     }
 }
 
@@ -154,7 +183,53 @@ __host__ __device__ __forceinline__ uint16_t clamp_to_type<uint16_t>(int32_t x) 
 __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw) {
     int32_t lo = bw.qmin();
     int32_t hi = bw.qmax();
-    return (val < lo) ? lo : ((val > hi) ? hi : val);
+    return max(lo, min(val, hi));
+}
+
+// ============================================================================
+// CPU/GPU 共用量化/反量化函数
+// ============================================================================
+
+/**
+ * @brief 单值量化（任意位宽版本，CPU/GPU 共用）
+ *
+ * q = clamp(round(src / scale + zp), qmin, qmax)
+ * 使用 roundf 实现四舍五入（round half away from zero），确保 CPU/GPU 行为一致。
+ *
+ * @param src 浮点输入
+ * @param exp2_inv 缩放因子指数
+ * @param zp 零点
+ * @param bw 位宽配置
+ * @return 量化值（int32_t 存储）
+ */
+__host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
+                                                      QuantBitWidth bw) {
+    float scale = exp2_scale(exp2_inv);
+    float shifted = src / scale + static_cast<float>(zp);
+    int32_t q = static_cast<int32_t>(roundf(shifted));
+    return clamp_by_bitwidth(q, bw);
+}
+
+/**
+ * @brief 单值量化（模板版本，CPU/GPU 共用，兼容旧代码）
+ */
+template <typename QuantT>
+__host__ __device__ __forceinline__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
+    float scale = exp2_scale(exp2_inv);
+    float shifted = src / scale + static_cast<float>(zp);
+    int32_t q = static_cast<int32_t>(roundf(shifted));
+    return clamp_to_type<QuantT>(q);
+}
+
+/**
+ * @brief 单值反量化（CPU/GPU 共用）
+ *
+ * x = (q - zp) * scale
+ */
+template <typename QuantT>
+__host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
+    int32_t v = static_cast<int32_t>(q) - zp;
+    return static_cast<float>(v) * exp2_scale(exp2_inv);
 }
 
 // ============================================================================
@@ -230,6 +305,51 @@ __host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const 
 }
 
 // ============================================================================
+// 真实 Sigmoid/Tanh 函数（反量化 → 浮点计算 → 量化）
+// ============================================================================
+// 用于替换 piecewise_linear，使前向/反向传播的激活函数一致
+// 优点：QAT 时梯度更准确
+// 缺点：比 LUT 慢（涉及浮点 exp 运算）
+
+/**
+ * @brief 真实 Sigmoid 函数（反量化 → sigmoid → 量化）
+ *
+ * 计算流程：
+ *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
+ *   2. Sigmoid：y_float = 1 / (1 + exp(-x_float))
+ *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
+ */
+__host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
+                                                          int8_t shift_x, int32_t zp_x,
+                                                          int8_t shift_y, int32_t zp_y,
+                                                          QuantBitWidth pre_bw,
+                                                          QuantBitWidth out_bw) {
+    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
+    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float y_float = 1.0f / (1.0f + expf(-x_float));
+    return quantize(y_float, shift_y, zp_y, out_bw);
+}
+
+/**
+ * @brief 真实 Tanh 函数（反量化 → tanh → 量化）
+ *
+ * 计算流程：
+ *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
+ *   2. Tanh：  y_float = tanh(x_float)
+ *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
+ */
+__host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
+                                                       int8_t shift_x, int32_t zp_x,
+                                                       int8_t shift_y, int32_t zp_y,
+                                                       QuantBitWidth pre_bw,
+                                                       QuantBitWidth out_bw) {
+    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
+    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float y_float = tanhf(x_float);
+    return quantize(y_float, shift_y, zp_y, out_bw);
+}
+
+// ============================================================================
 // GRU 门计算模板函数 (CPU/GPU 共用)
 // ============================================================================
 
@@ -270,7 +390,15 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
     const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t update_gate = piecewise_linear(update_gate_input, params.sigmoid_update_gate_lut_, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+    const auto &lut = params.sigmoid_update_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t update_gate = real_sigmoid(update_gate_input, 
+                                              lut.shift_bits_x, lut.zp_x,
+                                              lut.shift_bits_y, lut.zp_y,
+                                              bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+#else
+    const int32_t update_gate = piecewise_linear(update_gate_input, lut, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+#endif
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -311,7 +439,15 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
     const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t reset_gate = piecewise_linear(reset_gate_input, params.sigmoid_reset_gate_lut_, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+    const auto &lut = params.sigmoid_reset_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t reset_gate = real_sigmoid(reset_gate_input,
+                                             lut.shift_bits_x, lut.zp_x,
+                                             lut.shift_bits_y, lut.zp_y,
+                                             bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+#else
+    const int32_t reset_gate = piecewise_linear(reset_gate_input, lut, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+#endif
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -371,7 +507,15 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    const int32_t new_gate = piecewise_linear(new_gate_input, params.tanh_new_gate_lut_, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+    const auto &lut = params.tanh_new_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t new_gate = real_tanh(new_gate_input,
+                                        lut.shift_bits_x, lut.zp_x,
+                                        lut.shift_bits_y, lut.zp_y,
+                                        bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+#else
+    const int32_t new_gate = piecewise_linear(new_gate_input, lut, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+#endif
 
 #ifdef DEBUG_QUANT
     if (debug_idx == 0) {
@@ -662,48 +806,6 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
                min_with_zero, max_with_zero, aligned_min, aligned_max, scale, exp2_inv, zp);
     }
 #endif
-}
-
-/**
- * @brief 单值量化（任意位宽版本，CPU/GPU 共用）
- *
- * q = clamp(round(src / scale + zp), qmin, qmax)
- * 使用 roundf 实现四舍五入（round half away from zero），确保 CPU/GPU 行为一致。
- *
- * @param src 浮点输入
- * @param exp2_inv 缩放因子指数
- * @param zp 零点
- * @param bw 位宽配置
- * @return 量化值（int32_t 存储）
- */
-__host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
-                                                      QuantBitWidth bw) {
-    float scale = exp2_scale(exp2_inv);
-    float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(roundf(shifted));
-    return clamp_by_bitwidth(q, bw);
-}
-
-/**
- * @brief 单值量化（模板版本，CPU/GPU 共用，兼容旧代码）
- */
-template <typename QuantT>
-__host__ __device__ __forceinline__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
-    float scale = exp2_scale(exp2_inv);
-    float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(roundf(shifted));
-    return clamp_to_type<QuantT>(q);
-}
-
-/**
- * @brief 单值反量化（CPU/GPU 共用）
- *
- * x = (q - zp) * scale
- */
-template <typename QuantT>
-__host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
-    int32_t v = static_cast<int32_t>(q) - zp;
-    return static_cast<float>(v) * exp2_scale(exp2_inv);
 }
 
 /// @brief 批量量化（任意位宽版本，输出 int32_t）
