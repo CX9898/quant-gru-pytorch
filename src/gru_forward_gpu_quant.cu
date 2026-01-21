@@ -163,11 +163,11 @@ __global__ void quantizedGemmBiasFused(
         const int32_t bias_val = bias[row];
 
         // 使用 rshift_round 进行 rescale
-        const int64_t gemm_result = rshift_round(acc, n_gemm);
         const int64_t bias_result = rshift_round(static_cast<int64_t>(bias_val), n_bias);
+        const int64_t gemm_result = rshift_round(acc + static_cast<int64_t>(bias_result), n_gemm);
 
         // 合并结果
-        const int64_t result = gemm_result + bias_result + zp_out;
+        const int64_t result = gemm_result + zp_out;
 
         // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
         C[col * M + row] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
@@ -613,8 +613,11 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     for (int idx = 0; idx < channel; ++idx) {
         shift_gemm_x[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
         shift_gemm_h[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        shift_bw[idx] = parms.shift_bw_[idx] - parms.shift_weight_ih_linear_;
-        shift_br[idx] = parms.shift_br_[idx] - parms.shift_weight_hh_linear_;
+        // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
+        // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
+        // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
+        shift_bw[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
+        shift_br[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
     }
 
     linear_params_.shift_gemm_x_to_weight_ih_linear_ = dev::vector<int8_t>(shift_gemm_x);
