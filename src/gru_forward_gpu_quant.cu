@@ -644,25 +644,19 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
     gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
 
-    // new gate
+    // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
     gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
     gate_params_.zp_new_gate_output_ = parms.zp_new_gate_output_;
-    gate_params_.shift_reset_gate_mul_hh_to_mul_reset_hidden_ =
-        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_mul_reset_hidden_;
-    gate_params_.zp_mul_reset_hidden_ = parms.zp_mul_reset_hidden_;
     gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
-    gate_params_.shift_mul_reset_hidden_to_new_gate_input_ = parms.shift_mul_reset_hidden_ - parms.shift_new_gate_input_;
+    gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
+        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
 
-    // h_new
+    // h_new（乘法scale融合：(1-u)*n 和 u*h 直接对齐到 h）
     gate_params_.quant_one_in_update_gate_scale_ = rshift_round(1, -parms.shift_update_gate_output_) + parms.zp_update_gate_output_;
-    gate_params_.zp_mul_new_contribution_ = parms.zp_mul_new_contribution_;
-    gate_params_.shift_update_new_to_mul_new_contribution_ =
-        (parms.shift_update_gate_output_ + parms.shift_new_gate_output_) - parms.shift_mul_new_contribution_;
-    gate_params_.zp_mul_old_contribution_ = parms.zp_mul_old_contribution_;
-    gate_params_.shift_update_h_to_mul_old_contribution_ =
-        (parms.shift_update_gate_output_ + parms.shift_h_) - parms.shift_mul_old_contribution_;
-    gate_params_.shift_mul_new_contribution_to_h_ = parms.shift_mul_new_contribution_ - parms.shift_h_;
-    gate_params_.shift_mul_old_contribution_to_h_ = parms.shift_mul_old_contribution_ - parms.shift_h_;
+    gate_params_.shift_update_new_to_h_ =
+        (parms.shift_update_gate_output_ + parms.shift_new_gate_output_) - parms.shift_h_;
+    gate_params_.shift_update_old_to_h_ =
+        (parms.shift_update_gate_output_ + parms.shift_h_) - parms.shift_h_;  // = shift_update_gate_output_
 
     // 位宽配置和 LUT
     gate_params_.bitwidth_config_ = parms.bitwidth_config_;

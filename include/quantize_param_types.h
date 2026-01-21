@@ -142,19 +142,13 @@ struct GateQuantParams {
     // -------------------- New Gate（候选隐状态）参数 --------------------
     int32_t zp_new_gate_input_;                  ///< new gate 激活前零点
     int32_t zp_new_gate_output_;                 ///< new gate 激活后零点
-    int8_t shift_reset_gate_mul_hh_to_mul_reset_hidden_;   ///< r*weight_hh_linear 的移位
-    int32_t zp_mul_reset_hidden_;                ///< r*weight_hh_linear 的零点
     int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
-    int8_t shift_mul_reset_hidden_to_new_gate_input_;      ///< mul_reset_hidden 到 new_gate_input 的移位
+    int8_t shift_reset_mul_hh_to_new_gate_input_;          ///< r*weight_hh_linear 直接对齐到 new_gate_input 的移位（融合）
 
-    // -------------------- 隐状态更新参数 --------------------
+    // -------------------- 隐状态更新参数（乘法scale融合）--------------------
     int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 在 update_gate_output 量化空间的表示
-    int32_t zp_mul_new_contribution_;            ///< (1-u)*n 的零点
-    int8_t shift_update_new_to_mul_new_contribution_;    ///< (1-u)*n 的移位
-    int32_t zp_mul_old_contribution_;            ///< u*h 的零点
-    int8_t shift_update_h_to_mul_old_contribution_;      ///< u*h 的移位
-    int8_t shift_mul_new_contribution_to_h_;     ///< mul_new_contribution 到 h 的移位
-    int8_t shift_mul_old_contribution_to_h_;     ///< mul_old_contribution 到 h 的移位
+    int8_t shift_update_new_to_h_;               ///< (1-u)*n 直接对齐到 h 的移位（融合）
+    int8_t shift_update_old_to_h_;               ///< u*h 直接对齐到 h 的移位（融合）
 
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
