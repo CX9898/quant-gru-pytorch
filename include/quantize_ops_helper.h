@@ -39,7 +39,7 @@
 //   - 推理部署时：不定义此宏，使用 LUT
 //
 // ============================================================================
-// #define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
+#define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
 
 #include "cuda_compat.h"
 #include <cublas_v2.h>
@@ -479,6 +479,8 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
 /**
  * @brief 计算候选门 new_gate = tanh(weight_ih_linear + reset_gate * weight_hh_linear)
  * 
+ * 乘法scale融合：r * weight_hh_linear 的结果直接对齐到 new_gate_input，省略中间层
+ * 
  * @param weight_ih_linear    输入 Linear 变换结果
  * @param weight_hh_linear    隐状态 Linear 变换结果
  * @param reset_gate          重置门输出
@@ -491,18 +493,16 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     // Linear 融合后，weight_hh_linear 就是 R*h + br
     weight_hh_linear_g = weight_hh_linear;
 
-    // 计算 reset_gate * weight_hh_linear (即 mul_reset_hidden)
+    // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input（融合中间层）
     const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
     const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
     const int64_t reset_hidden_mul = r_diff * hh_diff;
 
-    int32_t mul_reset_hidden = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_gate_mul_hh_to_mul_reset_hidden_)) +
-                 params.zp_mul_reset_hidden_;
-    mul_reset_hidden = clamp_by_bitwidth(mul_reset_hidden, params.bitwidth_config_.mul_reset_hidden_);
+    // 乘法结果直接 shift 到 new_gate_input 空间（融合后省略中间 zp）
+    const int32_t rh_shifted = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_mul_hh_to_new_gate_input_));
 
-    // 计算 new_gate_input = weight_ih_linear + mul_reset_hidden
+    // weight_ih_linear shift 到 new_gate_input 空间
     const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
-    const int32_t rh_shifted = rshift_round(mul_reset_hidden - params.zp_mul_reset_hidden_, params.shift_mul_reset_hidden_to_new_gate_input_);
 
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
@@ -521,14 +521,12 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     if (debug_idx == 0) {
         float hh_fp = (float)(weight_hh_linear_g - params.zp_weight_hh_linear_) /
                       (float)(1 << params.test.shift_weight_hh_linear_);
-        float rh_fp = (float)(mul_reset_hidden - params.zp_mul_reset_hidden_) / 
-                      (float)(1 << params.test.shift_mul_reset_hidden_);
         float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
                          (float)(1 << params.test.shift_new_gate_input_);
         float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) /
                      (float)(1 << params.test.shift_new_gate_output_);
-        printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, rh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
-               hh_fp, rh_fp, new_gate_input_fp, new_gate_fp);
+        printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
+               hh_fp, new_gate_input_fp, new_gate_fp);
     }
 #endif
 
@@ -550,35 +548,30 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
 
 /**
  * @brief 计算隐藏状态 h_new = update_gate * h_old + (1 - update_gate) * new_gate
+ * 
+ * 乘法scale融合：u*h 和 (1-u)*n 的结果直接对齐到 h，省略中间层
  */
 __host__ __device__ __forceinline__ 
 int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
                  [[maybe_unused]] int debug_idx = -1) {
-    // 计算 mul_old_contribution = update_gate * h_old
+    // 计算 update_gate * h_old，直接对齐到 h（融合中间层）
     const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
     const int64_t old_contribution_mul = u_diff * h_diff;
 
-    int32_t mul_old_contribution = static_cast<int32_t>(
-        rshift_round(old_contribution_mul, params.shift_update_h_to_mul_old_contribution_)) +
-        params.zp_mul_old_contribution_;
-    mul_old_contribution = clamp_by_bitwidth(mul_old_contribution, params.bitwidth_config_.mul_old_contribution_);
+    // 乘法结果直接 shift 到 h 空间（融合后省略中间 zp）
+    const int32_t old_shifted = static_cast<int32_t>(rshift_round(old_contribution_mul, params.shift_update_old_to_h_));
 
-    // 计算 mul_new_contribution = (1 - update_gate) * new_gate
+    // 计算 (1 - update_gate) * new_gate，直接对齐到 h（融合中间层）
     const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
     const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
     const int64_t new_contribution_mul = one_minus_u * n_diff;
 
-    int32_t mul_new_contribution = static_cast<int32_t>(
-        rshift_round(new_contribution_mul, params.shift_update_new_to_mul_new_contribution_)) +
-        params.zp_mul_new_contribution_;
-    mul_new_contribution = clamp_by_bitwidth(mul_new_contribution, params.bitwidth_config_.mul_new_contribution_);
+    // 乘法结果直接 shift 到 h 空间（融合后省略中间 zp）
+    const int32_t new_shifted = static_cast<int32_t>(rshift_round(new_contribution_mul, params.shift_update_new_to_h_));
 
-    // 计算 h_new = mul_old_contribution + mul_new_contribution
-    const int32_t h_new =
-        rshift_round(mul_old_contribution - params.zp_mul_old_contribution_, params.shift_mul_old_contribution_to_h_) +
-        rshift_round(mul_new_contribution - params.zp_mul_new_contribution_, params.shift_mul_new_contribution_to_h_) +
-        params.zp_h_;
+    // 计算 h_new = old_shifted + new_shifted + zp_h
+    const int32_t h_new = old_shifted + new_shifted + params.zp_h_;
 
     const int32_t h = clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
 
