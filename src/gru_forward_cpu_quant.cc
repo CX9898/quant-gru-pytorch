@@ -137,13 +137,13 @@ OMP_PARALLEL_FOR_2D
                        static_cast<int64_t>(x[n * input_size + k]);
             }
             int64_t gemm_val = acc - W_sum_mul_x_zp_[m];
-            int32_t gemm_result = static_cast<int32_t>(
-                rshift_round(gemm_val, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
-                gate_params_.zp_weight_ih_linear_;
             
-            // 添加 bias: bw 移位到 weight_ih_linear 空间
-            int32_t bias_rescaled = rshift_round(bw[m], linear_params_.shift_bw_to_weight_ih_linear_[m]);
-            int32_t result = gemm_result + bias_rescaled;
+            // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
+            int64_t bias_shifted = rshift_round(static_cast<int64_t>(bw[m]), linear_params_.shift_bw_to_weight_ih_linear_[m]);
+            int64_t gemm_plus_bias = gemm_val + bias_shifted;
+            int32_t result = static_cast<int32_t>(
+                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
+                gate_params_.zp_weight_ih_linear_;
             tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_ih_linear_);
         }
     }
@@ -164,13 +164,13 @@ OMP_PARALLEL_FOR_2D
                        static_cast<int64_t>(h[n * hidden_size + k]);
             }
             int64_t gemm_val = acc - R_sum_mul_h_zp_[m];
-            int32_t gemm_result = static_cast<int32_t>(
-                rshift_round(gemm_val, linear_params_.shift_gemm_h_to_weight_hh_linear_[m])) +
-                gate_params_.zp_weight_hh_linear_;
             
-            // 添加 bias: br 移位到 weight_hh_linear 空间
-            int32_t bias_rescaled = rshift_round(br[m], linear_params_.shift_br_to_weight_hh_linear_[m]);
-            int32_t result = gemm_result + bias_rescaled;
+            // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
+            int64_t bias_shifted = rshift_round(static_cast<int64_t>(br[m]), linear_params_.shift_br_to_weight_hh_linear_[m]);
+            int64_t gemm_plus_bias = gemm_val + bias_shifted;
+            int32_t result = static_cast<int32_t>(
+                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_h_to_weight_hh_linear_[m])) +
+                gate_params_.zp_weight_hh_linear_;
             tmp_weight_hh_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_hh_linear_);
         }
     }
@@ -240,8 +240,11 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     for (int idx = 0; idx < channel; ++idx) {
         linear_params_.shift_gemm_x_to_weight_ih_linear_[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
         linear_params_.shift_gemm_h_to_weight_hh_linear_[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - parms.shift_weight_ih_linear_;
-        linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - parms.shift_weight_hh_linear_;
+        // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
+        // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
+        // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
+        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
+        linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
     }
 
 #ifdef DEBUG
