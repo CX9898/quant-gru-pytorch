@@ -463,7 +463,6 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
 }
 
 // 统一前向传播接口（推理/训练）
-// 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
 // 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
 void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
                       int input_size, int hidden_size, const float *W, const float *R,
@@ -472,7 +471,8 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                       const cublasHandle_t &g_blas_handle,
                       float *h, float *v) {
     if (is_quant) {
-        // 所有权重和激活统一使用 int32_t 存储
+#if 0   // 方案1：整数存储版量化（GPU-INT）
+        // 所有量化值使用 int32_t 存储，使用自定义 GEMM kernel
         dev::vector<int32_t> W_quant(hidden_size * 3 * input_size);
         dev::vector<int32_t> R_quant(hidden_size * 3 * hidden_size);
         dev::vector<int32_t> bw_quant(hidden_size * 3);
@@ -487,9 +487,159 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                         hidden_size, W_quant.data(), R_quant.data(),
                         bw_quant.data(), br_quant.data(), x, h0,
                         quant_gru_scales, g_blas_handle, h, v);
+#endif
+
+#if 1   // 方案2：浮点存储版量化（GPU-FP）
+        // 所有量化值使用 float 存储，使用 cuBLAS SGEMM
+        quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
+                          W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v);
+#endif
     } else {
         hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bw, br,
                         x, h0, g_blas_handle, h, v);
+    }
+}
+
+// =====================================================================
+// 浮点存储版量化 GRU 前向传播（GPU-FP）
+// =====================================================================
+
+// GPU 量化权重为浮点存储格式
+void quantitativeWeightFP(
+    int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const GRUQuantParams &quant_params,
+    float *W_q, float *R_q, float *bw_q, float *br_q) {
+    
+    const int hidden3 = hidden_size * 3;
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    
+    // 拷贝 shift 到 device
+    dev::vector<int8_t> shift_W_dev(quant_params.shift_W_);
+    dev::vector<int8_t> shift_R_dev(quant_params.shift_R_);
+    dev::vector<int8_t> shift_bw_dev(quant_params.shift_bw_);
+    dev::vector<int8_t> shift_br_dev(quant_params.shift_br_);
+    
+    // 量化 W [input_size, hidden3] - per-channel (device 端)
+    dev::quantificationPerChannelFP(W, W_q, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+    
+    // 量化 R [hidden_size, hidden3] - per-channel (device 端)
+    dev::quantificationPerChannelFP(R, R_q, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+    
+    // 量化 bw [1, hidden3] - per-channel (device 端)
+    dev::quantificationPerChannelFP(bw, bw_q, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+    
+    // 量化 br [1, hidden3] - per-channel (device 端)
+    dev::quantificationPerChannelFP(br, br_q, 1, hidden3, shift_br_dev, bw_cfg.br_);
+}
+
+void quantGRUForwardFP(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const float *x, const float *h0,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    float *h, float *v) {
+    
+    const int hidden3 = hidden_size * 3;
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    const std::size_t x_size = time_steps * batch_size * input_size;
+    const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
+    const int NH = batch_size * hidden_size;
+    
+    // 1. 量化权重（GPU 端）
+    dev::vector<float> W_q(input_size * hidden3);
+    dev::vector<float> R_q(hidden_size * hidden3);
+    dev::vector<float> bw_q(hidden3);
+    dev::vector<float> br_q(hidden3);
+    quantitativeWeightFP(input_size, hidden_size, W, R, bw, br, quant_params,
+                         W_q.data(), R_q.data(), bw_q.data(), br_q.data());
+    
+    // 2. 量化输入 x（GPU 端）
+    dev::vector<float> x_q(x_size);
+    dev::quantificationFP(x, x_q.data(), x_size, quant_params.shift_x_, 
+                          quant_params.zp_x_, bw_cfg.x_);
+    
+    // 3. 分配输出缓冲区（GPU 端）
+    dev::vector<float> h_q(h_size);
+    
+    // 4. 分配中间值缓冲区（与 INT32 版本保持一致：总是分配）
+    dev::vector<float> v_internal;
+    float* v_ptr = nullptr;
+    if (v != nullptr) {
+        v_internal.resize(time_steps * batch_size * hidden_size * 4);
+        v_ptr = v_internal.data();
+    } else {
+        // 即使 v==nullptr，也分配临时缓冲区（避免 Training 模板写 nullptr）
+        v_internal.resize(time_steps * batch_size * hidden_size * 4);
+        v_ptr = v_internal.data();
+    }
+    
+    // 5. 初始化 h_q[0]
+    if (h0 != nullptr) {
+        // 量化 h0 到 h_q[0]
+        dev::quantificationFP(h0, h_q.data(), NH, quant_params.shift_h_,
+                              quant_params.zp_h_, bw_cfg.h_);
+    } else {
+        // 填充零点值（表示初始隐状态为 0）
+        // 注意：当 h[0] 是 uniform 向量时，cuBLAS SGEMM 的计算可能与自定义 INT32 GEMM 有微小差异
+        // 这是由于 cuBLAS 对 uniform 输入的优化导致的浮点精度差异
+        dev::fill_n(h_q.data(), NH, static_cast<float>(quant_params.zp_h_));
+    }
+    
+    // 6. 创建浮点版前向传播对象
+    gru::ForwardPassQuantFP forward_fp(is_training, batch_size, input_size, hidden_size,
+                                       g_blas_handle, nullptr);
+    forward_fp.setRescaleParam(quant_params);
+    
+    // 7. 运行前向传播（总是传有效 V 指针）
+    forward_fp.Run(time_steps, W_q.data(), R_q.data(),
+                   bw_q.data(), br_q.data(),
+                   x_q.data(), h_q.data(),
+                   v_ptr,
+                   0.0f, nullptr);
+    
+    // 8. 反量化输出 h（GPU 端）
+    dev::dequantificationFP(h_q.data(), h, h_size, quant_params.shift_h_, quant_params.zp_h_);
+    
+    // 9. 反量化中间值 v（如需要，GPU 端）
+    if (v != nullptr) {
+        dev::dequantificationVFP(v_internal.data(), v, time_steps, batch_size, hidden_size,
+                                 quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
+                                 quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                                 quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
+                                 quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
+    }
+    
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+    
+    // 检查 CUDA 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantGRUForwardFP: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForwardFP: ") + err_str);
+    }
+}
+
+// 统一前向传播接口（浮点存储版）
+void forwardInterfaceFP(
+    bool is_training, bool is_quant,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const float *x, const float *h0,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    float *h, float *v) {
+    
+    if (is_quant) {
+        quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
+                          W, R, bw, br, x, h0, quant_params, g_blas_handle, h, v);
+    } else {
+        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
+                        W, R, bw, br, x, h0, g_blas_handle, h, v);
     }
 }
 

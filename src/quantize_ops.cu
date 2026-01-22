@@ -140,6 +140,89 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
     data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
 }
 
+// ============================================================================
+// 浮点存储版量化 kernel（用于 GPU-FP 实现）
+// ============================================================================
+
+// 量化到 float 存储（值仍是定点整数）
+__global__ void quantificationFP(const float *data, float *quant_data, size_t size, 
+                                  int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    float scale = ldexpf(1.0f, -exp2_inv);  // 2^(-exp2_inv)
+    float q = roundf(data[idx] / scale + zp);
+    quant_data[idx] = fmaxf(static_cast<float>(bw.qmin()), 
+                            fminf(q, static_cast<float>(bw.qmax())));
+}
+
+// Per-channel 量化到 float 存储
+__global__ void quantificationPerChannelFP(const float *src, float *quant_data, 
+                                            size_t input_size, size_t channel_size,
+                                            const int8_t *__restrict__ exp2_invs,
+                                            QuantBitWidth bw) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (channel_idx >= channel_size || input_idx >= input_size) return;
+    
+    const size_t idx = input_idx * channel_size + channel_idx;
+    float scale = ldexpf(1.0f, -exp2_invs[channel_idx]);
+    float q = roundf(src[idx] / scale);  // per-channel 无零点
+    quant_data[idx] = fmaxf(static_cast<float>(bw.qmin()), 
+                            fminf(q, static_cast<float>(bw.qmax())));
+}
+
+// 从 float 存储的量化值反量化
+__global__ void dequantificationFP(const float *quant_data, float *data, size_t size,
+                                    int8_t exp2_inv, int32_t zp) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    float scale = ldexpf(1.0f, -exp2_inv);  // 2^(-exp2_inv)
+    data[idx] = (quant_data[idx] - zp) * scale;
+}
+
+// 从 float 存储的量化值反量化 V 向量
+// V 布局: [time_steps, batch_size, hidden_size * 4]
+// 4个部分: [z_out, r_out, g_out, weight_hh_linear_g]
+__global__ void dequantificationVFP(const float *quant_data, float *data, int time_steps,
+                                     int batch_size, int hidden_size,
+                                     int8_t shift_z, int32_t zp_z,
+                                     int8_t shift_r, int32_t zp_r,
+                                     int8_t shift_g, int32_t zp_g,
+                                     int8_t shift_hh, int32_t zp_hh) {
+    const int t = blockIdx.x;
+    const int b = blockIdx.y;
+    const int h = threadIdx.x;
+
+    if (t >= time_steps || b >= batch_size || h >= hidden_size) return;
+
+    const int base_idx = t * (batch_size * hidden_size * 4) + b * (hidden_size * 4);
+    
+    // 预计算 scale
+    float scale_z = ldexpf(1.0f, -shift_z);
+    float scale_r = ldexpf(1.0f, -shift_r);
+    float scale_g = ldexpf(1.0f, -shift_g);
+    float scale_hh = ldexpf(1.0f, -shift_hh);
+
+    // 反量化 z_out (第0部分)
+    const int z_idx = base_idx + 0 * hidden_size + h;
+    data[z_idx] = (quant_data[z_idx] - zp_z) * scale_z;
+
+    // 反量化 r_out (第1部分)
+    const int r_idx = base_idx + 1 * hidden_size + h;
+    data[r_idx] = (quant_data[r_idx] - zp_r) * scale_r;
+
+    // 反量化 g_out (第2部分)
+    const int g_idx = base_idx + 2 * hidden_size + h;
+    data[g_idx] = (quant_data[g_idx] - zp_g) * scale_g;
+
+    // 反量化 weight_hh_linear_g (第3部分)
+    const int hh_idx = base_idx + 3 * hidden_size + h;
+    data[hh_idx] = (quant_data[hh_idx] - zp_hh) * scale_hh;
+}
+
 }  // namespace kernel
 
 namespace kernel {
@@ -329,6 +412,63 @@ void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size,
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+// ============================================================================
+// 浮点存储版量化函数（用于 GPU-FP 实现）
+// ============================================================================
+
+void quantificationFP(const float *data, float *quant_data, size_t size,
+                      int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::quantificationFP<<<grid, block>>>(data, quant_data, size, exp2_inv, zp, bw);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("quantificationFP kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+void quantificationPerChannelFP(const float *src, float *quant_data, size_t input_size,
+                                size_t channel_size, const dev::vector<int8_t> &exp2_invs,
+                                QuantBitWidth bw) {
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+    kernel::quantificationPerChannelFP<<<gridDim, blockDim>>>(src, quant_data, input_size,
+                                                               channel_size, exp2_invs.data(), bw);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("quantificationPerChannelFP kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+void dequantificationFP(const float *quant_data, float *data, size_t size,
+                        int8_t exp2_inv, int32_t zp) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::dequantificationFP<<<grid, block>>>(quant_data, data, size, exp2_inv, zp);
+    cudaDeviceSynchronize();
+}
+
+void dequantificationVFP(const float *quant_data, float *data, int time_steps, int batch_size,
+                         int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
+                         int32_t zp_r, int8_t shift_g, int32_t zp_g,
+                         int8_t shift_hh, int32_t zp_hh) {
+    const dim3 blockDim(hidden_size);
+    const dim3 gridDim(time_steps, batch_size);
+
+    kernel::dequantificationVFP<<<gridDim, blockDim>>>(
+        quant_data, data, time_steps, batch_size, hidden_size,
+        shift_z, zp_z, shift_r, zp_r, shift_g, zp_g, shift_hh, zp_hh);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("dequantificationVFP kernel launch failed: %s\n", cudaGetErrorString(err));
     }
     cudaDeviceSynchronize();
 }
