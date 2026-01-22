@@ -620,12 +620,21 @@ int main(int argc, char *argv[]) {
     {
         dev::vector<float> h_train((T + 1) * B * H);
         dev::vector<float> v_train(T * B * H * 4);
+        
+        // training=true 时需要分配 mask 缓冲区
+        dev::vector<uint8_t> weight_ih_mask(T * B * H * 3);
+        dev::vector<uint8_t> weight_hh_mask(T * B * H * 3);
+        dev::vector<uint8_t> gate_mask(T * B * H * 3);
+        dev::vector<uint8_t> h_mask(T * B * H);
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Forward:");
             forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                             h_train.data(), v_train.data());
+                             h_train.data(), v_train.data(),
+                             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                             weight_ih_mask.data(), weight_hh_mask.data(),
+                             gate_mask.data(), h_mask.data());
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -663,12 +672,21 @@ int main(int argc, char *argv[]) {
     {
         dev::vector<float> h_train((T + 1) * B * H);
         dev::vector<float> v_train(T * B * H * 4);
+        
+        // training=true 时需要分配 mask 缓冲区
+        dev::vector<uint8_t> weight_ih_mask_fp(T * B * H * 3);
+        dev::vector<uint8_t> weight_hh_mask_fp(T * B * H * 3);
+        dev::vector<uint8_t> gate_mask_fp(T * B * H * 3);
+        dev::vector<uint8_t> h_mask_fp(T * B * H);
 
         {
             ScopeTimer t("QuantTraining (GPU-FP) Forward:");
             forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                                br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                               h_train.data(), v_train.data());
+                               h_train.data(), v_train.data(),
+                               nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                               weight_ih_mask_fp.data(), weight_hh_mask_fp.data(),
+                               gate_mask_fp.data(), h_mask_fp.data());
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -731,19 +749,27 @@ int main(int argc, char *argv[]) {
         fillVectorWithNormalDistribution(h0_cpu, -1.0f, 1.0f);
         dev::vector<float> h0_dev(h0_cpu);
         
-        // INT32 版本 (训练模式)
+        // INT32 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
+        dev::vector<uint8_t> mask_ih_int(T * B * H * 3), mask_hh_int(T * B * H * 3);
+        dev::vector<uint8_t> mask_gate_int(T * B * H * 3), mask_h_int(T * B * H);
         forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data());
+                         h_int.data(), v_int.data(),
+                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                         mask_ih_int.data(), mask_hh_int.data(), mask_gate_int.data(), mask_h_int.data());
         
-        // FP 版本 (训练模式)
+        // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
+        dev::vector<uint8_t> mask_ih_fp(T * B * H * 3), mask_hh_fp(T * B * H * 3);
+        dev::vector<uint8_t> mask_gate_fp(T * B * H * 3), mask_h_fp(T * B * H);
         forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                            br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data());
+                           h_fp.data(), v_fp.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                           mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_fp.data(), mask_h_fp.data());
         
         // 比较
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
@@ -789,18 +815,24 @@ int main(int argc, char *argv[]) {
         printf("h0=0.0 quantized: shift=%d, zp=%d, scale=%.6f, q_val=%.1f\n", 
                shift_h, zp_h, scale, q_h0);
         
-        // 训练模式
+        // 训练模式 - 需要分配 mask
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
+        dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
         
         forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                          br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data());
+                         h_int.data(), v_int.data(),
+                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                         m1.data(), m2.data(), m3.data(), m4.data());
         forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                            br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data());
+                           h_fp.data(), v_fp.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                           m5.data(), m6.data(), m7.data(), m8.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);
@@ -825,13 +857,19 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_int(T * B * H * 4);
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
+        dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
         
         forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                          br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data());
+                         h_int.data(), v_int.data(),
+                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                         m1.data(), m2.data(), m3.data(), m4.data());
         forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                            br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data());
+                           h_fp.data(), v_fp.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                           m5.data(), m6.data(), m7.data(), m8.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);

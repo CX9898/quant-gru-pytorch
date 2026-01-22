@@ -460,6 +460,10 @@ class GRUFunction(torch.autograd.Function):
     职责：
         - forward: 权重格式转换 → 调用 gru_ops.forward → 返回输出
         - backward: 梯度格式转换 → 调用 gru_ops.haste_gru_backward → 返回梯度
+        
+    QAT 支持：
+        - 量化训练时，forward 会返回 clamp mask
+        - backward 使用 mask 将被 clamp 的梯度置零（Straight-Through Estimator）
     """
 
     @staticmethod
@@ -491,6 +495,8 @@ class GRUFunction(torch.autograd.Function):
         ctx.bias_ih_is_none = (bias_ih is None)
         ctx.bias_hh_is_none = (bias_hh is None)
         ctx.h0_is_none = (h0 is None)
+        ctx.use_quantization = use_quantization
+        ctx.is_training = is_training
 
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
@@ -511,8 +517,10 @@ class GRUFunction(torch.autograd.Function):
         else:
             quant_params = gru_ops.GRUQuantParams()
 
-        # 调用 C++ 前向接口
-        output_full, v = gru_ops.forward(
+        # 调用 C++ 前向接口（返回 12 个值）
+        (output_full, v,
+         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+         weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask) = gru_ops.forward(
             is_training=is_training,
             is_quant=use_quantization,
             time_steps=time_steps,
@@ -532,8 +540,10 @@ class GRUFunction(torch.autograd.Function):
         output = output_full[1:]
         h_n = output_full[-1:]
 
-        # 保存反向传播所需的中间结果
-        ctx.save_for_backward(W, R, bw, br, input, output_full, v)
+        # 保存反向传播所需的中间结果（包括所有 10 个 mask）
+        ctx.save_for_backward(W, R, bw, br, input, output_full, v,
+                              x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                              weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask)
 
         return output, h_n
 
@@ -548,8 +558,16 @@ class GRUFunction(torch.autograd.Function):
             
         Returns:
             对应 forward 各参数的梯度
+            
+        QAT 说明：
+            使用 Straight-Through Estimator (STE)：
+            - 被 clamp 的值（mask=1）梯度置零
+            - 未被 clamp 的值（mask=0）梯度正常传播
+            - 所有 mask 在 C++ 端应用，提高效率
         """
-        W, R, bw, br, input, h, v = ctx.saved_tensors
+        (W, R, bw, br, input, h, v,
+         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+         weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask) = ctx.saved_tensors
         time_steps, batch_size = ctx.time_steps, ctx.batch_size
         input_size, hidden_size = ctx.input_size, ctx.hidden_size
 
@@ -577,12 +595,26 @@ class GRUFunction(torch.autograd.Function):
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
-        # 调用 C++ 反向接口(绑定层会处理格式转换)
-        dx, dW, dR, dbw, dbr, dh = gru_ops.haste_gru_backward(
+        # 调用 C++ 统一反向接口
+        # 量化模式时传入所有 mask，C++ 端应用 STE
+        # 非量化模式时 mask 为空 tensor，C++ 端会忽略
+        dx, dW, dR, dbw, dbr, dh = gru_ops.backward(
+            is_quant=ctx.use_quantization,
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
             W=W, R=R, bw=bw, br=br, x=input,
-            dh_new=dh_new, h=h, v=v
+            dh_new=dh_new, h=h, v=v,
+            # QAT masks（C++ 端应用 STE）
+            x_mask=x_mask,
+            h0_mask=h0_mask,
+            W_mask=W_mask,
+            R_mask=R_mask,
+            bw_mask=bw_mask,
+            br_mask=br_mask,
+            weight_ih_linear_mask=weight_ih_linear_mask,
+            weight_hh_linear_mask=weight_hh_linear_mask,
+            gate_mask=gate_mask,
+            h_mask=h_mask
         )
 
         # 梯度格式转换: Haste (z,r,n) -> PyTorch (r,z,n)
