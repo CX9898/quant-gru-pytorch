@@ -629,6 +629,7 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
     const cudaStream_t stream = data_->stream[1];
+    const bool training = data_->training;
 
     const int M = hidden_size * 3;
     const int N = steps * batch_size;
@@ -639,8 +640,8 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    if (weight_ih_linear_mask != nullptr) {
-        // 带 mask 版本
+    // training 模式保存 mask（调用方需保证 mask 指针有效）
+    if (training) {
         kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), weight_ih_linear_mask, bw, M, N, K,
             linear_params_.zp_x_,
@@ -649,7 +650,6 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
             gate_params_.zp_weight_ih_linear_,
             gate_params_.bitwidth_config_.weight_ih_linear_);
     } else {
-        // 无 mask 版本
         kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), bw, M, N, K,
             linear_params_.zp_x_,
@@ -665,6 +665,7 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
     const cudaStream_t stream = data_->stream[0];
+    const bool training = data_->training;
 
     const int M = hidden_size * 3;
     const int N = batch_size;
@@ -675,8 +676,8 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    if (weight_hh_linear_mask != nullptr) {
-        // 带 mask 版本
+    // training 模式保存 mask（调用方需保证 mask 指针有效）
+    if (training) {
         kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
             R, h, tmp_weight_hh_linear_.data(), weight_hh_linear_mask, br, M, N, K,
             linear_params_.zp_h_,
@@ -685,7 +686,6 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
             gate_params_.zp_weight_hh_linear_,
             gate_params_.bitwidth_config_.weight_hh_linear_);
     } else {
-        // 无 mask 版本
         kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
             R, h, tmp_weight_hh_linear_.data(), br, M, N, K,
             linear_params_.zp_h_,
