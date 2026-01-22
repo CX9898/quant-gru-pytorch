@@ -24,6 +24,7 @@
 
 #include "histogram_collector.h"
 #include "quantize_bitwidth_config.h"  // for QuantBitWidth
+#include "quantize_ops_helper.h"       // for round_f, round_to_int
 
 // ============================================================================
 // 公共数据结构
@@ -194,7 +195,7 @@ inline float estimateNoise(const Histogram& hist, float delta, float offset,
         float x = hist.min_val + (i + 0.5f) * bin_width;
         
         // AIMET 公式：q = round(x / delta - offset)
-        float q = std::round(x / delta - offset);
+        float q = round_f(x / delta - offset);
         
         bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
         q = std::max(0.0f, std::min(static_cast<float>(num_steps), q));
@@ -276,7 +277,7 @@ inline ContinuousScaleResult searchAsymmetric(
     float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
     
     // 计算 observed_min/observed_max（量化对齐的范围）
-    float observed_offset = std::round(min_val / max_delta);
+    float observed_offset = round_f(min_val / max_delta);
     float observed_min = max_delta * observed_offset;
     float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
     
@@ -287,7 +288,7 @@ inline ContinuousScaleResult searchAsymmetric(
     std::vector<float> offsets(num_offsets);
     float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
     for (int o = 0; o < num_offsets - 1; ++o) {
-        offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+        offsets[o] = round_f(-static_cast<float>(num_steps) + o * offset_step);
     }
     offsets[num_offsets - 1] = observed_offset;
     
@@ -307,7 +308,7 @@ inline ContinuousScaleResult searchAsymmetric(
             test_max = std::min(observed_max, test_max);
             float clamped_delta = (test_max - test_min) / static_cast<float>(num_steps);
             clamped_delta = std::max(clamped_delta, minimum_scale);
-            float clamped_offset = std::round(test_min / clamped_delta);
+            float clamped_offset = round_f(test_min / clamped_delta);
             
             float noise = estimateNoise(hist, clamped_delta, clamped_offset, num_steps,
                                        config.gamma, config.p);
@@ -383,7 +384,7 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
         throw std::runtime_error("Invalid scale <= 0 in roundScaleToPowerOfTwo");
     }
     float n = -std::log2(scale);
-    int8_t n_rounded = static_cast<int8_t>(std::round(n));
+    int8_t n_rounded = static_cast<int8_t>(round_f(n));
     return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
 }
 
@@ -402,7 +403,7 @@ inline int32_t computeZeroPoint(float continuous_min, float po2_scale,
         return 0;
     } else {
         float zp_fp = static_cast<float>(quant_min) - continuous_min / po2_scale;
-        return static_cast<int32_t>(std::round(zp_fp));
+        return round_to_int(zp_fp);
     }
 }
 

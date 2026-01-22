@@ -29,7 +29,6 @@ namespace cpu {
 // 以下函数已统一定义在 quantize_ops_helper.h 中，使用 __host__ __device__ 标记：
 //   - rshift_round (int32_t / int64_t)
 //   - clamp_by_bitwidth
-//   - clamp_to_type<T>
 //   - find_segment
 //   - piecewise_linear_raw
 //   - piecewise_linear

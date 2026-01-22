@@ -17,6 +17,7 @@
 #include "histogram_collector.h"  // for Histogram struct and get_minimum_scale
 #include "parallel_algorithm.h"   // for dev::fill_n
 #include "gru_quantization_ranges.h"  // for GRUQuantizationRanges
+#include "quantize_ops_helper.h"  // for round_f
 
 // ============================================================================
 // CUDA Kernels
@@ -135,7 +136,7 @@ __global__ void redistribute_histogram_kernel(const float* __restrict__ src_coun
     float dst_bin_end = dst_min + dst_bin_width * (dst_idx + 1);
 
     // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
-    float split_hist_value = roundf(
+    float split_hist_value = round_f(
         ((dst_bin_end - src_bin_start) / src_bin_width) * count
     );
     float first_bin_count = fminf(split_hist_value, count);
@@ -1035,7 +1036,7 @@ __global__ void sqnr_noise_symmetric_kernel(
         float x = min_val + (i + 0.5f) * bin_width;
         
         // AIMET: q = round(x / delta - offset)
-        float q = roundf(x / delta - offset);
+        float q = round_f(x / delta - offset);
         
         bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
         q = fmaxf(0.0f, fminf(static_cast<float>(num_steps), q));
@@ -1104,7 +1105,7 @@ __global__ void sqnr_noise_asymmetric_kernel(
     test_min = fmaxf(observed_min, test_min);
     test_max = fminf(observed_max, test_max);
     float clamped_delta = fmaxf((test_max - test_min) / num_steps, minimum_scale);
-    float clamped_offset = roundf(test_min / clamped_delta);
+    float clamped_offset = round_f(test_min / clamped_delta);
     
     // Shared memory for reduction
     extern __shared__ float shared_noise[];
@@ -1118,7 +1119,7 @@ __global__ void sqnr_noise_asymmetric_kernel(
         // bin 中点使用原始直方图范围（与 AIMET stat.bin_edges 一致）
         float x = hist_min + (i + 0.5f) * bin_width;
         
-        float q = roundf(x / clamped_delta - clamped_offset);
+        float q = round_f(x / clamped_delta - clamped_offset);
         bool clipped = (q < 0) || (q > static_cast<float>(num_steps));
         q = fmaxf(0.0f, fminf(static_cast<float>(num_steps), q));
         float x_recon = (q + clamped_offset) * clamped_delta;
@@ -1269,7 +1270,7 @@ ContinuousScaleResult searchSqnrGpu(
         float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
         
         // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
-        float observed_offset = std::round(min_val / max_delta);
+        float observed_offset = round_f(min_val / max_delta);
         float observed_min = max_delta * observed_offset;
         float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
         
@@ -1281,7 +1282,7 @@ ContinuousScaleResult searchSqnrGpu(
         std::vector<float> h_offsets(num_offsets);
         float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
         for (int o = 0; o < num_offsets - 1; ++o) {
-            h_offsets[o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+            h_offsets[o] = round_f(-static_cast<float>(num_steps) + o * offset_step);
         }
         h_offsets[num_offsets - 1] = observed_offset;  // 与 AIMET 一致：直接用 observed_offset
         
@@ -1330,7 +1331,7 @@ ContinuousScaleResult searchSqnrGpu(
         float test_max = std::min(observed_max, test_max_calc);
         float scale_calc = (test_max - test_min) / static_cast<float>(num_steps);
         optimal_scale = std::max(scale_calc, minimum_scale);  // 与 AIMET 一致
-        optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
+        optimal_min = round_f(test_min / optimal_scale) * optimal_scale;
     }
     
     // 返回连续 scale 结果，POT 转换由调用者完成
@@ -1426,7 +1427,7 @@ void searchSqnrPerChannelGpu(
             float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             
             // 与 AIMET 完全一致：计算 observed_min/observed_max（量化对齐的范围）
-            observed_offsets[c] = std::round(min_val / max_delta);
+            observed_offsets[c] = round_f(min_val / max_delta);
             observed_mins[c] = max_delta * observed_offsets[c];
             observed_maxs[c] = observed_mins[c] + max_delta * static_cast<float>(num_steps);
             
@@ -1435,7 +1436,7 @@ void searchSqnrPerChannelGpu(
             h_offsets_all[c].resize(num_offsets);
             float offset_step = static_cast<float>(num_steps) / (num_offsets - 2);
             for (int o = 0; o < num_offsets - 1; ++o) {
-                h_offsets_all[c][o] = std::round(-static_cast<float>(num_steps) + o * offset_step);
+                h_offsets_all[c][o] = round_f(-static_cast<float>(num_steps) + o * offset_step);
             }
             h_offsets_all[c][num_offsets - 1] = observed_offsets[c];  // 与 AIMET 一致
             
@@ -1562,7 +1563,7 @@ void searchSqnrPerChannelGpu(
             float test_max = std::min(observed_maxs[c], test_max_calc);
             optimal_scale = (test_max - test_min) / static_cast<float>(num_steps);
             optimal_scale = std::max(optimal_scale, minimum_scale);
-            optimal_min = std::round(test_min / optimal_scale) * optimal_scale;
+            optimal_min = round_f(test_min / optimal_scale) * optimal_scale;
         }
         
         // 返回连续 scale 结果

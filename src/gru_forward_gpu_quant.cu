@@ -246,22 +246,17 @@ __global__ void PointwiseOperationsQuant(
     const int debug_idx = (col == 0 && row < 3) ? row : -1;
 
     if (debug_idx >= 0) {
-        // 反量化 Linear 变换结果
-        const float scale_ih = 1.0f / (float)(1 << gate_params.test.shift_weight_ih_linear_);
-        const float scale_hh = 1.0f / (float)(1 << gate_params.test.shift_weight_hh_linear_);
-        const float scale_h = 1.0f / (float)(1 << gate_params.test.shift_h_);
+        // 反量化 Linear 变换结果（使用通用函数）
+        float ih_u_fp = dequantize<int32_t>(weight_ih_linear[update_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
+        float ih_r_fp = dequantize<int32_t>(weight_ih_linear[reset_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
+        float ih_n_fp = dequantize<int32_t>(weight_ih_linear[new_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
 
-        // 反量化 Linear 变换结果
-        float ih_u_fp = (float)(weight_ih_linear[update_idx] - gate_params.zp_weight_ih_linear_) * scale_ih;
-        float ih_r_fp = (float)(weight_ih_linear[reset_idx] - gate_params.zp_weight_ih_linear_) * scale_ih;
-        float ih_n_fp = (float)(weight_ih_linear[new_idx] - gate_params.zp_weight_ih_linear_) * scale_ih;
-
-        float hh_u_fp = (float)(weight_hh_linear[update_idx] - gate_params.zp_weight_hh_linear_) * scale_hh;
-        float hh_r_fp = (float)(weight_hh_linear[reset_idx] - gate_params.zp_weight_hh_linear_) * scale_hh;
-        float hh_n_fp = (float)(weight_hh_linear[new_idx] - gate_params.zp_weight_hh_linear_) * scale_hh;
+        float hh_u_fp = dequantize<int32_t>(weight_hh_linear[update_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
+        float hh_r_fp = dequantize<int32_t>(weight_hh_linear[reset_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
+        float hh_n_fp = dequantize<int32_t>(weight_hh_linear[new_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
 
         // 反量化 h_old
-        float h_old_fp = (float)(h[output_idx] - gate_params.zp_h_) * scale_h;
+        float h_old_fp = dequantize<int32_t>(h[output_idx], gate_params.test.shift_h_, gate_params.zp_h_);
 
         // ========== 浮点 GRU 计算 ==========
         float u_pre_fp = ih_u_fp + hh_u_fp;
@@ -310,14 +305,10 @@ __global__ void PointwiseOperationsQuant(
 
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0) {
-        // 反量化最终结果与浮点对比
-        const float scale_u = 1.0f / (float)(1 << gate_params.test.shift_update_gate_output_);
-        const float scale_n = 1.0f / (float)(1 << gate_params.test.shift_new_gate_output_);
-        const float scale_h = 1.0f / (float)(1 << gate_params.test.shift_h_);
-
-        float u_quant_fp = (float)(update_gate - gate_params.zp_update_gate_output_) * scale_u;
-        float n_quant_fp = (float)(new_gate - gate_params.zp_new_gate_output_) * scale_n;
-        float h_quant_fp = (float)(cur_h - gate_params.zp_h_) * scale_h;
+        // 反量化最终结果与浮点对比（使用通用函数）
+        float u_quant_fp = dequantize<int32_t>(update_gate, gate_params.test.shift_update_gate_output_, gate_params.zp_update_gate_output_);
+        float n_quant_fp = dequantize<int32_t>(new_gate, gate_params.test.shift_new_gate_output_, gate_params.zp_new_gate_output_);
+        float h_quant_fp = dequantize<int32_t>(cur_h, gate_params.test.shift_h_, gate_params.zp_h_);
 
         printf("[QUANT] u_q=%d u_fp=%.4f | n_q=%d n_fp=%.4f | h_q=%d h_fp=%.4f\n", update_gate, u_quant_fp, new_gate,
                n_quant_fp, cur_h, h_quant_fp);

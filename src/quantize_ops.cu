@@ -106,17 +106,6 @@ __global__ void computeWeightSumMulZP_i32(
     weight_sum[row] = sum;
 }
 
-template <typename T, typename QuantT>
-__global__ void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv,
-                               int32_t zp) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) {
-        return;
-    }
-
-    quant_data[idx] = ::quantize<QuantT>(data[idx], exp2_inv, zp);
-}
-
 // 统一 int32_t 输出，使用位宽配置进行 clamp
 template <typename T>
 __global__ void quantificationBitwidth(const T *data, int32_t *quant_data, size_t size, 
@@ -137,7 +126,7 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
         return;
     }
 
-    data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, zp);
+    data[idx] = dequantize(static_cast<int32_t>(quant_data[idx]), exp2_inv, zp);
 }
 
 // ============================================================================
@@ -150,10 +139,7 @@ __global__ void quantificationFP(const float *data, float *quant_data, size_t si
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    float scale = ldexpf(1.0f, -exp2_inv);  // 2^(-exp2_inv)
-    float q = roundf(data[idx] / scale + zp);
-    quant_data[idx] = fmaxf(static_cast<float>(bw.qmin()), 
-                            fminf(q, static_cast<float>(bw.qmax())));
+    quant_data[idx] = quantize_f(data[idx], exp2_inv, zp, bw);
 }
 
 // Per-channel 量化到 float 存储
@@ -167,10 +153,7 @@ __global__ void quantificationPerChannelFP(const float *src, float *quant_data,
     if (channel_idx >= channel_size || input_idx >= input_size) return;
     
     const size_t idx = input_idx * channel_size + channel_idx;
-    float scale = ldexpf(1.0f, -exp2_invs[channel_idx]);
-    float q = roundf(src[idx] / scale);  // per-channel 无零点
-    quant_data[idx] = fmaxf(static_cast<float>(bw.qmin()), 
-                            fminf(q, static_cast<float>(bw.qmax())));
+    quant_data[idx] = quantize_f(src[idx], exp2_invs[channel_idx], bw);  // per-channel 无零点
 }
 
 // 从 float 存储的量化值反量化
@@ -179,8 +162,7 @@ __global__ void dequantificationFP(const float *quant_data, float *data, size_t 
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    float scale = ldexpf(1.0f, -exp2_inv);  // 2^(-exp2_inv)
-    data[idx] = (quant_data[idx] - zp) * scale;
+    data[idx] = dequantize_f(quant_data[idx], exp2_inv, zp);
 }
 
 // 从 float 存储的量化值反量化 V 向量
@@ -199,28 +181,22 @@ __global__ void dequantificationVFP(const float *quant_data, float *data, int ti
     if (t >= time_steps || b >= batch_size || h >= hidden_size) return;
 
     const int base_idx = t * (batch_size * hidden_size * 4) + b * (hidden_size * 4);
-    
-    // 预计算 scale
-    float scale_z = ldexpf(1.0f, -shift_z);
-    float scale_r = ldexpf(1.0f, -shift_r);
-    float scale_g = ldexpf(1.0f, -shift_g);
-    float scale_hh = ldexpf(1.0f, -shift_hh);
 
     // 反量化 z_out (第0部分)
     const int z_idx = base_idx + 0 * hidden_size + h;
-    data[z_idx] = (quant_data[z_idx] - zp_z) * scale_z;
+    data[z_idx] = dequantize_f(quant_data[z_idx], shift_z, zp_z);
 
     // 反量化 r_out (第1部分)
     const int r_idx = base_idx + 1 * hidden_size + h;
-    data[r_idx] = (quant_data[r_idx] - zp_r) * scale_r;
+    data[r_idx] = dequantize_f(quant_data[r_idx], shift_r, zp_r);
 
     // 反量化 g_out (第2部分)
     const int g_idx = base_idx + 2 * hidden_size + h;
-    data[g_idx] = (quant_data[g_idx] - zp_g) * scale_g;
+    data[g_idx] = dequantize_f(quant_data[g_idx], shift_g, zp_g);
 
     // 反量化 weight_hh_linear_g (第3部分)
     const int hh_idx = base_idx + 3 * hidden_size + h;
-    data[hh_idx] = (quant_data[hh_idx] - zp_hh) * scale_hh;
+    data[hh_idx] = dequantize_f(quant_data[hh_idx], shift_hh, zp_hh);
 }
 
 }  // namespace kernel
@@ -271,21 +247,6 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
     // 反量化 weight_hh_linear_g (第3部分) - 从 int32_t 反量化
     const int hh_idx = base_idx + 3 * hidden_size + h;
     data[hh_idx] = dequantize<int32_t>(quant_data[hh_idx], shift_hh, zp_hh);
-}
-
-template <typename T, typename QuantT>
-__global__ void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
-                                         size_t channel_size, const int8_t *exp2_invs) {
-    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    if (channel_idx >= channel_size || input_idx >= input_size) {
-        return;
-    }
-
-    const int8_t exp2_inv = exp2_invs[channel_idx];
-
-    const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = ::quantize<QuantT>(src[idx], exp2_inv, 0);
 }
 
 // 统一 int32_t 输出，使用位宽配置进行 clamp
@@ -383,25 +344,6 @@ template void computeWeightSumMulzp<int32_t>(const int32_t *W_q, int32_t *weight
                                              cudaStream_t stream);
 
 namespace dev {
-
-template <typename T, typename QuantT>
-void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv, int32_t zp) {
-    size_t block = 256;
-    size_t grid = (size + block - 1) / block;
-    kernel::quantification<<<grid, block>>>(data, quant_data, size, exp2_inv, zp);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
-}
-
-template void quantification<float, int8_t>(const float *data, int8_t *quant_data, size_t size,
-                                            int8_t exp2_inv, int32_t zp);
-template void quantification<float, int16_t>(const float *data, int16_t *quant_data, size_t size,
-                                             int8_t exp2_inv, int32_t zp);
-template void quantification<float, int32_t>(const float *data, int32_t *quant_data, size_t size,
-                                             int8_t exp2_inv, int32_t zp);
 
 // 统一 int32_t 输出，使用位宽配置进行 clamp
 void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size, 
@@ -518,29 +460,6 @@ template void dequantificationV<float>(const int32_t *quant_data, float *data, i
                                        int32_t zp_z, int8_t shift_r, int32_t zp_r,
                                        int8_t shift_g, int32_t zp_g, 
                                        int8_t shift_hh, int32_t zp_hh);
-
-template <typename T, typename QuantT>
-void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
-                              size_t channel_size, const dev::vector<int8_t> &exp2_invs) {
-    const dim3 blockDim(32, 16);
-    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
-                       (input_size + blockDim.y - 1) / blockDim.y);
-
-    kernel::quantificationPerChannel<<<gridDim, blockDim>>>(src, quant_data, input_size,
-                                                            channel_size, exp2_invs.data());
-    cudaDeviceSynchronize();
-}
-
-template void quantificationPerChannel<float, int8_t>(const float *src, int8_t *quant_data,
-                                                      size_t input_size, size_t channel_size,
-                                                      const dev::vector<int8_t> &exp2_invs);
-
-template void quantificationPerChannel<float, int16_t>(const float *src, int16_t *quant_data,
-                                                       size_t input_size, size_t channel_size,
-                                                       const dev::vector<int8_t> &exp2_invs);
-template void quantificationPerChannel<float, int32_t>(const float *src, int32_t *quant_data,
-                                                       size_t input_size, size_t channel_size,
-                                                       const dev::vector<int8_t> &exp2_invs);
 
 // 统一 int32_t 输出，使用位宽配置进行 clamp
 void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
@@ -728,7 +647,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float scale_x = exp2_scale(shift_bits_x);
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -774,7 +693,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     }
 
     // 第二遍扫描：统一量化参数
-    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float scale_y = exp2_scale(shift_bits_y);
     float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
     float b_abs_max = 0.0f, c_abs_max = 0.0f;
@@ -817,8 +736,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
         int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
 
         // threshold 量化（任意位宽支持，存储为 int32_t）
-        float scale = std::pow(2.0f, -static_cast<float>(shift_bits_x));
-        int32_t threshold = static_cast<int32_t>(std::round(coeff.x_end / scale + zp_x));
+        int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
         threshold = clamp_by_bitwidth(threshold, input_bw);
 
         lut.segments[i].q_b = q_b;
@@ -845,7 +763,7 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = std::pow(2.0f, -static_cast<float>(shift_bits_x));
+    float scale_x = exp2_scale(shift_bits_x);
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -888,7 +806,7 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
         all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    float scale_y = std::pow(2.0f, -static_cast<float>(shift_bits_y));
+    float scale_y = exp2_scale(shift_bits_y);
     float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
     float b_abs_max = 0.0f, c_abs_max = 0.0f;
@@ -930,8 +848,7 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
         int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
         
         // threshold 量化（任意位宽支持，存储为 int32_t）
-        float scale = std::pow(2.0f, -static_cast<float>(shift_bits_x));
-        int32_t threshold = static_cast<int32_t>(std::round(coeff.x_end / scale + zp_x));
+        int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
         threshold = clamp_by_bitwidth(threshold, input_bw);
 
         lut.segments[i].q_b = q_b;

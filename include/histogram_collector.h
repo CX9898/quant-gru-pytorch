@@ -402,7 +402,8 @@ class HistogramCollector {
                 float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
                 
                 // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
-                float split_hist_value = std::round(
+                // 使用 rintf（银行家舍入）与 PyTorch round 一致
+                float split_hist_value = rintf(
                     ((dest_bin_end - src_bin_start) / src_bin_width) * count
                 );
                 float first_bin_count = std::min(split_hist_value, count);
@@ -508,7 +509,8 @@ class HistogramCollector {
             float dest_bin_end = new_min + dest_bin_width * (dest_bin_index + 1);
             
             // 计算分割比例（与 AIMET split_hist_value 完全一致：不对 ratio clamp）
-            float split_hist_value = std::round(
+            // 使用 rintf（银行家舍入）与 PyTorch round 一致
+            float split_hist_value = rintf(
                 ((dest_bin_end - src_bin_start) / src_bin_width) * count
             );
             float first_bin_count = std::min(split_hist_value, count);
