@@ -3,12 +3,15 @@
 // ============================================================================
 //
 // 文件结构:
-//   1. 辅助函数          - div_round, clamp_f 等
-//   2. 激活函数          - real_sigmoid_f, real_tanh_f
-//   3. 门计算函数        - computeUpdateGateFP, computeResetGateFP 等
-//   4. Bias+Rescale Kernel - GEMM 后处理
-//   5. Pointwise Kernel  - GRU 逐点运算
-//   6. ForwardPassQuantFP - 前向传播封装类
+//   1. 辅助函数          - div_round 等（本地使用）
+//   2. 门计算函数        - computeUpdateGateFP, computeResetGateFP 等
+//   3. Bias+Rescale Kernel - GEMM 后处理
+//   4. Pointwise Kernel  - GRU 逐点运算
+//   5. ForwardPassQuantFP - 前向传播封装类
+//
+// 通用函数在 quantize_ops_helper.h:
+//   - clamp_f, quantize_f, dequantize_f
+//   - real_sigmoid_f, real_tanh_f
 //
 // 与 gru_forward_gpu_quant.cu 的区别:
 //   - 所有量化值使用 float 存储（值仍是定点整数）
@@ -31,7 +34,7 @@
 namespace kernel {
 
 // ============================================================================
-// 1. 辅助函数
+// 1. 辅助函数（本地使用，不通用）
 // ============================================================================
 
 /**
@@ -42,67 +45,21 @@ namespace kernel {
  */
 __device__ __forceinline__ 
 float div_round(float x, float divisor) {
-    return roundf(x / divisor);
+    return round_f(x / divisor);
 }
 
 /**
- * @brief 带四舍五入的除法（double 精度版本，用于乘法累加）
+ * @brief 带银行家舍入的除法（double 精度版本，用于乘法累加）
  */
 __device__ __forceinline__ 
 double div_round_d(double x, double divisor) {
-    return round(x / divisor);
+    return round_d(x / divisor);
 }
 
-/**
- * @brief 浮点版 clamp（值是定点整数，用 float 存储）
- */
-__device__ __forceinline__ 
-float clamp_f(float val, QuantBitWidth bw) {
-    float lo = static_cast<float>(bw.qmin());
-    float hi = static_cast<float>(bw.qmax());
-    return fmaxf(lo, fminf(val, hi));
-}
+// 注：clamp_f, real_sigmoid_f, real_tanh_f 已移至 quantize_ops_helper.h
 
 // ============================================================================
-// 2. 激活函数
-// ============================================================================
-
-/**
- * @brief 真实 Sigmoid 函数（反量化 → sigmoid → 量化）
- * 
- * @param q_x 量化输入
- * @param scale_x 输入反量化 scale = 2^(-shift_x)
- * @param zp_x 输入零点
- * @param scale_y 输出量化 scale = 2^(-shift_y)
- * @param zp_y 输出零点
- * @param out_bw 输出位宽配置
- */
-__device__ __forceinline__ 
-float real_sigmoid_f(float q_x, float scale_x, float zp_x,
-                     float scale_y, float zp_y, QuantBitWidth out_bw) {
-    // 反量化: x_fp = (q_x - zp_x) * scale_x
-    float x_fp = (q_x - zp_x) * scale_x;
-    // sigmoid: y_fp = 1 / (1 + exp(-x_fp))
-    float y_fp = 1.0f / (1.0f + expf(-x_fp));
-    // 量化: q_y = round(y_fp / scale_y + zp_y)
-    float q_y = roundf(y_fp / scale_y + zp_y);
-    return clamp_f(q_y, out_bw);
-}
-
-/**
- * @brief 真实 Tanh 函数（反量化 → tanh → 量化）
- */
-__device__ __forceinline__ 
-float real_tanh_f(float q_x, float scale_x, float zp_x,
-                  float scale_y, float zp_y, QuantBitWidth out_bw) {
-    float x_fp = (q_x - zp_x) * scale_x;
-    float y_fp = tanhf(x_fp);
-    float q_y = roundf(y_fp / scale_y + zp_y);
-    return clamp_f(q_y, out_bw);
-}
-
-// ============================================================================
-// 3. 门计算函数
+// 2. 门计算函数
 // ============================================================================
 
 /**
@@ -287,10 +244,10 @@ __global__ void customFloatGemmBiasFused(
         const double bias_val = static_cast<double>(bias[row]);
 
         // bias 先 rescale（与 INT32 的 rshift_round 对应）
-        double bias_result = round(bias_val / div_b);
+        double bias_result = round_d(bias_val / div_b);
         
         // GEMM + bias 一起 rescale
-        double gemm_result = round((acc + bias_result) / div_g);
+        double gemm_result = round_d((acc + bias_result) / div_g);
 
         // 合并结果
         double result = gemm_result + static_cast<double>(zp_out);
@@ -341,10 +298,10 @@ __global__ void biasRescaleKernel(
     double val = static_cast<double>(gemm_result[idx]) - W_sum_mul_zp[row];
     
     // bias 先 rescale
-    double bias_term = round(static_cast<double>(bias[row]) / static_cast<double>(div_bias[row]));
+    double bias_term = round_d(static_cast<double>(bias[row]) / static_cast<double>(div_bias[row]));
     
     // GEMM + bias 一起 rescale
-    double result = round((val + bias_term) / static_cast<double>(div_gemm[row])) + 
+    double result = round_d((val + bias_term) / static_cast<double>(div_gemm[row])) + 
                     static_cast<double>(zp_out);
     
     output[idx] = clamp_f(static_cast<float>(result), output_bw);
@@ -541,12 +498,12 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     g.div_update_old_to_h_ = ldexpf(1.0f, shift_uh);
 
     // 激活函数 scale = 2^(-shift)
-    g.scale_update_gate_input_ = ldexpf(1.0f, -src.shift_update_gate_input_);
-    g.scale_update_gate_output_ = ldexpf(1.0f, -src.shift_update_gate_output_);
-    g.scale_reset_gate_input_ = ldexpf(1.0f, -src.shift_reset_gate_input_);
-    g.scale_reset_gate_output_ = ldexpf(1.0f, -src.shift_reset_gate_output_);
-    g.scale_new_gate_input_ = ldexpf(1.0f, -src.shift_new_gate_input_);
-    g.scale_new_gate_output_ = ldexpf(1.0f, -src.shift_new_gate_output_);
+    g.scale_update_gate_input_ = exp2_scale(src.shift_update_gate_input_);
+    g.scale_update_gate_output_ = exp2_scale(src.shift_update_gate_output_);
+    g.scale_reset_gate_input_ = exp2_scale(src.shift_reset_gate_input_);
+    g.scale_reset_gate_output_ = exp2_scale(src.shift_reset_gate_output_);
+    g.scale_new_gate_input_ = exp2_scale(src.shift_new_gate_input_);
+    g.scale_new_gate_output_ = exp2_scale(src.shift_new_gate_output_);
 
     g.bitwidth_config_ = src.bitwidth_config_;
 

@@ -784,8 +784,8 @@ int main(int argc, char *argv[]) {
         // 先测试量化后的 h0 值
         int8_t shift_h = quant_params.shift_h_;
         int32_t zp_h = quant_params.zp_h_;
-        float scale = ldexpf(1.0f, -shift_h);
-        float q_h0 = roundf(0.0f / scale) + zp_h;
+        float scale = exp2_scale(shift_h);
+        float q_h0 = round_f(0.0f / scale) + zp_h;
         printf("h0=0.0 quantized: shift=%d, zp=%d, scale=%.6f, q_val=%.1f\n", 
                shift_h, zp_h, scale, q_h0);
         

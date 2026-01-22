@@ -90,86 +90,115 @@ __host__ __device__ __forceinline__ float exp2_scale(int8_t exp2_inv) {
     return ldexpf(1.0f, -static_cast<int>(exp2_inv));
 }
 
+// ============================================================================
+// 通用舍入函数（银行家舍入，与 rint / PyTorch round 一致）
+// ============================================================================
+
 /**
- * @brief 带四舍五入的右移操作（int32_t 版本）
+ * @brief 单精度浮点数银行家舍入（round half to even）
+ *
+ * 采用 round half to even 策略：1.5 → 2, 2.5 → 2, -1.5 → -2
+ * 与 PyTorch 的 torch.round 行为一致。
+ */
+__host__ __device__ __forceinline__ float round_f(float x) {
+    return rintf(x);
+}
+
+/**
+ * @brief 双精度浮点数银行家舍入（round half to even）
+ *
+ * 采用 round half to even 策略：1.5 → 2, 2.5 → 2, -1.5 → -2
+ * 与 PyTorch 的 torch.round 行为一致。
+ */
+__host__ __device__ __forceinline__ double round_d(double x) {
+    return rint(x);
+}
+
+/**
+ * @brief 浮点数舍入到 int32_t（银行家舍入）
+ */
+__host__ __device__ __forceinline__ int32_t round_to_int(float x) {
+    return static_cast<int32_t>(round_f(x));
+}
+
+/**
+ * @brief 双精度浮点数舍入到 int64_t（银行家舍入）
+ */
+__host__ __device__ __forceinline__ int64_t round_to_int64(double x) {
+    return static_cast<int64_t>(round_d(x));
+}
+
+/**
+ * @brief 带银行家舍入的右移操作（int32_t 版本，纯定点实现）
  *
  * 实现 round(x / 2^n) 的定点运算，支持正负移位。
- * 采用 round half away from zero（四舍五入远离零）策略。
+ * 采用 round half to even（银行家舍入）策略。
  *
  * @param x 被移位的值
  * @param n 移位量（正数右移，负数或零左移）
  * @return 移位后的结果
  *
- * @note 舍入策略：1.5 → 2, -1.5 → -2（绝对值四舍五入后保留符号）
+ * @note 纯定点实现，避免浮点转换的精度损失
  */
 __host__ __device__ __forceinline__ int32_t rshift_round(int32_t x, int8_t n) {
     if (n <= 0) return x << (-n);
-
-    const int32_t offset = 1 << (n - 1);
-    if (x >= 0) {
-        return (x + offset) >> n;
+    
+    // 处理负数：对绝对值舍入后取反
+    const bool neg = (x < 0);
+    const int32_t abs_x = neg ? -x : x;
+    
+    // 正数的银行家舍入
+    const int32_t half = 1 << (n - 1);
+    const int32_t mask = (1 << n) - 1;
+    const int32_t q = abs_x >> n;      // 商（向下取整）
+    const int32_t r = abs_x & mask;    // 余数
+    
+    int32_t result;
+    if (r > half) {
+        result = q + 1;                // 大于一半，进位
+    } else if (r < half) {
+        result = q;                    // 小于一半，舍去
     } else {
-        return -((-x + offset) >> n);  // round half away from zero
+        // 正好一半：舍入到偶数
+        result = (q & 1) ? (q + 1) : q;
     }
+    
+    return neg ? -result : result;
 }
 
 /**
- * @brief 带四舍五入的右移操作（int64_t 版本）
+ * @brief 带银行家舍入的右移操作（int64_t 版本，纯定点实现）
  *
  * 用于处理 16 位量化时可能超出 int32 范围的乘积。
- * 采用 round half away from zero（四舍五入远离零）策略。
  */
 __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     if (n <= 0) return x << (-n);
-
-    const int64_t offset = static_cast<int64_t>(1) << (n - 1);
-    if (x >= 0) {
-        return (x + offset) >> n;
+    
+    // 处理负数
+    const bool neg = (x < 0);
+    const int64_t abs_x = neg ? -x : x;
+    
+    // 正数的银行家舍入
+    const int64_t half = static_cast<int64_t>(1) << (n - 1);
+    const int64_t mask = (static_cast<int64_t>(1) << n) - 1;
+    const int64_t q = abs_x >> n;
+    const int64_t r = abs_x & mask;
+    
+    int64_t result;
+    if (r > half) {
+        result = q + 1;
+    } else if (r < half) {
+        result = q;
     } else {
-        return -((-x + offset) >> n);  // round half away from zero
+        result = (q & 1) ? (q + 1) : q;
     }
+    
+    return neg ? -result : result;
 }
 
 // ============================================================================
 // CPU/GPU 共用饱和截断函数
 // ============================================================================
-
-/**
- * @brief 将 int32_t 饱和截断到指定类型范围（模板版本）
- *
- * 编译时确定目标类型，零运行时开销。
- *
- * @tparam T 目标类型（int8_t, int16_t, int32_t, uint8_t, uint16_t）
- * @param x 输入值
- * @return 截断后的值
- */
-template <typename T>
-__host__ __device__ __forceinline__ T clamp_to_type(int32_t x);
-
-template <>
-__host__ __device__ __forceinline__ int8_t clamp_to_type<int8_t>(int32_t x) {
-    return static_cast<int8_t>((x < -128) ? -128 : ((x > 127) ? 127 : x));
-}
-
-template <>
-__host__ __device__ __forceinline__ int16_t clamp_to_type<int16_t>(int32_t x) {
-    return static_cast<int16_t>((x < -32768) ? -32768 : ((x > 32767) ? 32767 : x));
-}
-
-template <>
-__host__ __device__ __forceinline__ int32_t clamp_to_type<int32_t>(int32_t x) {
-    return x;  // int32_t 无需截断
-}
-
-template <>
-__host__ __device__ __forceinline__ uint8_t clamp_to_type<uint8_t>(int32_t x) {
-    return static_cast<uint8_t>((x < 0) ? 0 : ((x > 255) ? 255 : x));
-}
-
-template <>
-__host__ __device__ __forceinline__ uint16_t clamp_to_type<uint16_t>(int32_t x) {
-    return static_cast<uint16_t>((x < 0) ? 0 : ((x > 65535) ? 65535 : x));
-}
 
 /**
  * @brief 按任意位宽饱和截断
@@ -191,10 +220,77 @@ __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, Quant
 // ============================================================================
 
 /**
+ * @brief 单值反量化（CPU/GPU 共用）
+ *
+ * x = (q - zp) * scale
+ *
+ * 注：反量化不涉及截断，所以不需要 QuantBitWidth
+ *
+ * @tparam QuantT 量化类型（int8_t, int16_t, int32_t 等）
+ * @param q 量化值
+ * @param exp2_inv 缩放因子指数
+ * @param zp 零点
+ * @return 反量化浮点值
+ */
+template <typename QuantT>
+__host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
+    int32_t v = static_cast<int32_t>(q) - zp;
+    return static_cast<float>(v) * exp2_scale(exp2_inv);
+}
+
+// ============================================================================
+// 浮点存储版量化/反量化函数（值是定点整数，用 float 存储）
+// ============================================================================
+// 用于 GPU-FP 实现，避免整数到浮点的频繁转换
+
+/**
+ * @brief 浮点版 clamp（值是定点整数，用 float 存储）
+ */
+__host__ __device__ __forceinline__ float clamp_f(float val, QuantBitWidth bw) {
+    float lo = static_cast<float>(bw.qmin());
+    float hi = static_cast<float>(bw.qmax());
+#ifdef __CUDA_ARCH__
+    return fmaxf(lo, fminf(val, hi));
+#else
+    return std::max(lo, std::min(val, hi));
+#endif
+}
+
+/**
+ * @brief 浮点版量化（输出 float 存储的定点值）
+ * 
+ * q = clamp(round(src / scale + zp), qmin, qmax)
+ */
+__host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, int32_t zp,
+                                                      QuantBitWidth bw) {
+    float scale = exp2_scale(exp2_inv);
+    float q = round_f(src / scale + static_cast<float>(zp));
+    return clamp_f(q, bw);
+}
+
+/**
+ * @brief 浮点版量化（无零点，用于 per-channel 权重）
+ */
+__host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, QuantBitWidth bw) {
+    float scale = exp2_scale(exp2_inv);
+    float q = round_f(src / scale);
+    return clamp_f(q, bw);
+}
+
+/**
+ * @brief 浮点版反量化
+ * 
+ * x = (q - zp) * scale
+ */
+__host__ __device__ __forceinline__ float dequantize_f(float q, int8_t exp2_inv, int32_t zp) {
+    float scale = exp2_scale(exp2_inv);
+    return (q - static_cast<float>(zp)) * scale;
+}
+
+/**
  * @brief 单值量化（任意位宽版本，CPU/GPU 共用）
  *
  * q = clamp(round(src / scale + zp), qmin, qmax)
- * 使用 roundf 实现四舍五入（round half away from zero），确保 CPU/GPU 行为一致。
  *
  * @param src 浮点输入
  * @param exp2_inv 缩放因子指数
@@ -204,32 +300,7 @@ __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, Quant
  */
 __host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
                                                       QuantBitWidth bw) {
-    float scale = exp2_scale(exp2_inv);
-    float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(roundf(shifted));
-    return clamp_by_bitwidth(q, bw);
-}
-
-/**
- * @brief 单值量化（模板版本，CPU/GPU 共用，兼容旧代码）
- */
-template <typename QuantT>
-__host__ __device__ __forceinline__ QuantT quantize(float src, int8_t exp2_inv, int32_t zp) {
-    float scale = exp2_scale(exp2_inv);
-    float shifted = src / scale + static_cast<float>(zp);
-    int32_t q = static_cast<int32_t>(roundf(shifted));
-    return clamp_to_type<QuantT>(q);
-}
-
-/**
- * @brief 单值反量化（CPU/GPU 共用）
- *
- * x = (q - zp) * scale
- */
-template <typename QuantT>
-__host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, int32_t zp) {
-    int32_t v = static_cast<int32_t>(q) - zp;
-    return static_cast<float>(v) * exp2_scale(exp2_inv);
+    return static_cast<int32_t>(quantize_f(src, exp2_inv, zp, bw));
 }
 
 // ============================================================================
@@ -347,6 +418,42 @@ __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
     float x_float = dequantize(q_x_clamped, shift_x, zp_x);
     float y_float = tanhf(x_float);
     return quantize(y_float, shift_y, zp_y, out_bw);
+}
+
+// ============================================================================
+// 浮点存储版激活函数（用于 GPU-FP 实现）
+// ============================================================================
+// 输入/输出均为 float 存储的定点值，scale 已预计算为 2^(-shift)
+
+/**
+ * @brief 浮点版真实 Sigmoid（反量化 → sigmoid → 量化）
+ * 
+ * @param q_x 量化输入（float 存储）
+ * @param scale_x 输入反量化 scale = 2^(-shift_x)（已预计算）
+ * @param zp_x 输入零点
+ * @param scale_y 输出量化 scale = 2^(-shift_y)（已预计算）
+ * @param zp_y 输出零点
+ * @param out_bw 输出位宽配置
+ */
+__host__ __device__ __forceinline__ 
+float real_sigmoid_f(float q_x, float scale_x, float zp_x,
+                     float scale_y, float zp_y, QuantBitWidth out_bw) {
+    float x_fp = (q_x - zp_x) * scale_x;
+    float y_fp = 1.0f / (1.0f + expf(-x_fp));
+    float q_y = round_f(y_fp / scale_y + zp_y);
+    return clamp_f(q_y, out_bw);
+}
+
+/**
+ * @brief 浮点版真实 Tanh（反量化 → tanh → 量化）
+ */
+__host__ __device__ __forceinline__ 
+float real_tanh_f(float q_x, float scale_x, float zp_x,
+                  float scale_y, float zp_y, QuantBitWidth out_bw) {
+    float x_fp = (q_x - zp_x) * scale_x;
+    float y_fp = tanhf(x_fp);
+    float q_y = round_f(y_fp / scale_y + zp_y);
+    return clamp_f(q_y, out_bw);
 }
 
 // ============================================================================
@@ -730,7 +837,7 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
             
             // POT 转换
             exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
-            scale = std::pow(2.0f, -exp2_inv);
+            scale = exp2_scale(exp2_inv);
             aligned_min = 0.0f;
             aligned_max = scale * static_cast<float>(quant_max);
         } else {
@@ -766,7 +873,7 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
             // POT 转换
             float raw_scale = delta;
             exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
-            scale = std::pow(2.0f, -exp2_inv);
+            scale = exp2_scale(exp2_inv);
             aligned_max = scale * num_pos_steps;
             aligned_min = -scale * num_neg_steps;
         }
@@ -777,12 +884,12 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
         float raw_scale = range / static_cast<float>(num_steps);
 
         exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
-        scale = std::pow(2.0f, -exp2_inv);
+        scale = exp2_scale(exp2_inv);
 
         aligned_min = std::floor(updated_min / scale) * scale;
         aligned_max = std::ceil(updated_max / scale) * scale;
 
-        zp = static_cast<int32_t>(std::round(quant_min - aligned_min / scale));
+        zp = round_to_int(quant_min - aligned_min / scale);
     }
     
     // 与 AIMET 一致: Inf 保护
@@ -810,16 +917,6 @@ inline void quantification(const float *data, int32_t *quant_data, size_t size,
     }
 }
 
-/// @brief 批量量化（模板版本，兼容旧代码）
-template <typename T, typename QuantT>
-inline void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv,
-                           int32_t zp) {
-#pragma omp parallel for
-    for (size_t i = 0; i < size; ++i) {
-        quant_data[i] = quantize<QuantT>(data[i], exp2_inv, zp);
-    }
-}
-
 /// @brief Per-channel 批量量化（Host 端，统一 int32_t 输出，使用位宽配置）
 inline void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
                                               size_t channel_size, const std::vector<int8_t> &exp2_invs,
@@ -834,30 +931,11 @@ inline void quantificationPerChannelBitwidth(const float *src, int32_t *quant_da
     }
 }
 
-/// @brief Per-channel 批量量化（Host 端，用于权重矩阵）
-/// @deprecated 建议使用 quantificationPerChannelBitwidth
-template <typename T, typename QuantT>
-inline void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
-                                     size_t channel_size, const std::vector<int8_t> &exp2_invs) {
-#pragma omp parallel for
-    for (int i = 0; i < channel_size; ++i) {
-        const int8_t exp2_inv = exp2_invs[i];
-        for (int j = 0; j < input_size; ++j) {
-            const int idx = j * channel_size + i;
-            quant_data[idx] = quantize<QuantT>(src[idx], exp2_inv, 0);  // 对称量化
-        }
-    }
-}
-
 // ============================================================================
 // GPU 量化/反量化 Kernel 声明
 // ============================================================================
 
 namespace dev {
-
-/// @brief GPU 批量量化
-template <typename T, typename QuantT>
-void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv, int32_t zp);
 
 /// @brief GPU 批量反量化
 template <typename T, typename QuantT>
@@ -910,17 +988,6 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
                          int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
                          int32_t zp_r, int8_t shift_g, int32_t zp_g,
                          int8_t shift_hh, int32_t zp_hh);
-
-/// @brief GPU 量化
-/// @deprecated 建议使用 quantificationBitwidth
-template <typename T, typename QuantT>
-void quantification(const T *data, QuantT *quant_data, size_t size, int8_t exp2_inv, int32_t zp);
-
-/// @brief GPU Per-channel 量化
-/// @deprecated 建议使用 quantificationPerChannelBitwidth
-template <typename T, typename QuantT>
-void quantificationPerChannel(const T *src, QuantT *quant_data, size_t input_size,
-                              size_t channel_size, const dev::vector<int8_t> &exp2_invs);
 
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
@@ -980,22 +1047,22 @@ inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min
 
 /// @brief 量化系数为 INT8
 inline int8_t quantize_coefficient_int8(float val_fp, int8_t shift_bits) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale);
     return static_cast<int8_t>(std::max(-128, std::min(127, q)));
 }
 
 /// @brief 量化系数为 INT16
 inline int16_t quantize_coefficient_int16(float val_fp, int8_t shift_bits) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale);
     return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
 }
 
 /// @brief 量化系数为 INT32（用于 LUT 斜率 q_b，避免截断误差）
 inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int64_t q = static_cast<int64_t>(std::round(val_fp / scale));
+    float scale = exp2_scale(shift_bits);
+    int64_t q = round_to_int64(static_cast<double>(val_fp / scale));
     q = std::max(static_cast<int64_t>(INT32_MIN), std::min(static_cast<int64_t>(INT32_MAX), q));
     return static_cast<int32_t>(q);
 }
@@ -1004,29 +1071,29 @@ inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
 
 /// @brief 量化输入为 UINT8
 inline uint8_t quantize_input_uint8(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
     return static_cast<uint8_t>(std::max(0, std::min(255, q)));
 }
 
 /// @brief 量化输入为 INT8
 inline int8_t quantize_input_int8(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
     return static_cast<int8_t>(std::max(-128, std::min(127, q)));
 }
 
 /// @brief 量化输入为 UINT16
 inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
     return static_cast<uint16_t>(std::max(0, std::min(65535, q)));
 }
 
 /// @brief 量化输入为 INT16
 inline int16_t quantize_input_int16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = std::pow(2.0f, -static_cast<float>(shift_bits));
-    int32_t q = static_cast<int32_t>(std::round(val_fp / scale + static_cast<float>(zp)));
+    float scale = exp2_scale(shift_bits);
+    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
     return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
 }
 
