@@ -174,6 +174,78 @@ __global__ void quantizedGemmBiasFused(
     }
 }
 
+// 融合 GEMM + bias + mask: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
+// 带 mask 版本，用于 QAT 训练
+__global__ void quantizedGemmBiasFusedWithMask(
+    const int32_t *__restrict__ A,               // [M, K] 权重，列主序
+    const int32_t *__restrict__ B,               // [K, N] 输入，列主序
+    int32_t *__restrict__ C,                     // [M, N] 输出，列主序
+    uint8_t *__restrict__ C_mask,                // [M, N] clamp mask，列主序
+    const int32_t *__restrict__ bias,            // [M] 偏置
+    int M, int N, int K,
+    int32_t zp_B,                                // 输入的 zero-point
+    const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
+    const int8_t *__restrict__ shift_bias_per_row,   // [M] bias per-row shift
+    int32_t zp_out,                              // 输出的 zero-point
+    QuantBitWidth output_bw                      // 输出位宽配置
+) {
+    __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
+
+    const int row = blockIdx.y * TILE_SIZE + threadIdx.y;  // m in [0, M)
+    const int col = blockIdx.x * TILE_SIZE + threadIdx.x;  // n in [0, N)
+
+    int64_t acc = 0;
+
+    const int numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int t = 0; t < numTiles; t++) {
+        // 加载 A tile（列主序：A[k*M + m]）
+        const int aK = t * TILE_SIZE + threadIdx.x;
+        if (row < M && aK < K) {
+            As[threadIdx.y][threadIdx.x] = A[aK * M + row];
+        } else {
+            As[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        // 加载 B tile 并减去 zp_B（列主序：B[n*K + k]）
+        const int bK = t * TILE_SIZE + threadIdx.y;
+        if (col < N && bK < K) {
+            Bs[threadIdx.y][threadIdx.x] = B[col * K + bK] - zp_B;
+        } else {
+            Bs[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        __syncthreads();
+
+#pragma unroll
+        for (int k = 0; k < TILE_SIZE; k++) {
+            acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    // 写回结果：rshift(GEMM, shift_gemm) + rshift(bias, shift_bias) + zp_out
+    if (row < M && col < N) {
+        const int8_t n_gemm = shift_gemm_per_row[row];
+        const int8_t n_bias = shift_bias_per_row[row];
+        const int32_t bias_val = bias[row];
+
+        // 使用 rshift_round 进行 rescale
+        const int64_t bias_result = rshift_round(static_cast<int64_t>(bias_val), n_bias);
+        const int64_t gemm_result = rshift_round(acc + static_cast<int64_t>(bias_result), n_gemm);
+
+        // 合并结果
+        const int64_t result = gemm_result + zp_out;
+
+        // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
+        uint8_t was_clamped;
+        C[col * M + row] = clamp_by_bitwidth_with_mask(static_cast<int32_t>(result), output_bw, was_clamped);
+        C_mask[col * M + row] = was_clamped;
+    }
+}
+
 // 将 int32 GEMM 结果原地 rescale（根据位宽配置自动 clamp）
 __global__ void rescaleGemmI32(
     int32_t *__restrict__ data,                // [hidden*3, batch*steps] GEMM 输出（原地修改）
@@ -339,6 +411,73 @@ __global__ void convertI32ToI16(const int32_t *__restrict__ src, int16_t *__rest
     dst[idx] = static_cast<int16_t>(src[idx]);
 }
 
+// ============================================================================
+// 带 Mask 版本的 Pointwise Kernel（用于 QAT）
+// ============================================================================
+
+template <bool Training, bool ApplyZoneout>
+__global__ void PointwiseOperationsQuantWithMask(
+    const int batch_dim, const int hidden_dim, 
+    const int32_t *weight_ih_linear,  // 输入 Linear 变换: W*x + bw [batch, hidden*3]
+    const int32_t *weight_hh_linear,  // 隐状态 Linear 变换: R*h + br [batch, hidden*3]
+    const int32_t *h, int32_t *h_out, int32_t *v,
+    const float zoneout_prob, const int32_t *zoneout_mask, const GateQuantParams gate_params,
+    uint8_t *gate_mask,               // [batch, hidden*3] 门输出 mask（update, reset, new）
+    uint8_t *h_mask                   // [batch, hidden] 隐状态输出 mask
+) {
+    const int row = blockDim.x * blockIdx.x + threadIdx.x;
+    const int col = blockDim.y * blockIdx.y + threadIdx.y;
+
+    if (row >= hidden_dim || col >= batch_dim) return;
+
+    const int weight_idx = col * (hidden_dim * 3) + row;
+    const int output_idx = col * hidden_dim + row;
+    const int update_idx = weight_idx + 0 * hidden_dim;
+    const int reset_idx = weight_idx + 1 * hidden_dim;
+    const int new_idx = weight_idx + 2 * hidden_dim;
+
+    const int debug_idx = -1;
+
+    // GRU 门计算（带 mask）
+    uint8_t update_mask, reset_mask, new_mask, h_out_mask;
+    
+    const int32_t update_gate = computeUpdateGate_with_mask(
+        weight_ih_linear[update_idx], weight_hh_linear[update_idx], gate_params, update_mask, debug_idx);
+
+    const int32_t reset_gate = computeResetGate_with_mask(
+        weight_ih_linear[reset_idx], weight_hh_linear[reset_idx], gate_params, reset_mask, debug_idx);
+
+    int32_t weight_hh_linear_g;
+    const int32_t new_gate = computeNewGate_with_mask(
+        weight_ih_linear[new_idx], weight_hh_linear[new_idx], reset_gate, gate_params, weight_hh_linear_g, new_mask, debug_idx);
+
+    // 保存门 mask
+    if (gate_mask != nullptr) {
+        gate_mask[update_idx] = update_mask;
+        gate_mask[reset_idx] = reset_mask;
+        gate_mask[new_idx] = new_mask;
+    }
+
+    // Training: 保存中间值
+    if (Training) {
+        const int base_v_idx = col * (hidden_dim * 4) + row;
+        v[base_v_idx + 0 * hidden_dim] = update_gate;
+        v[base_v_idx + 1 * hidden_dim] = reset_gate;
+        v[base_v_idx + 2 * hidden_dim] = new_gate;
+        v[base_v_idx + 3 * hidden_dim] = weight_hh_linear_g;
+    }
+
+    // 计算新的隐藏状态（带 mask）
+    auto cur_h = computeHiddenState_with_mask(update_gate, new_gate, h[output_idx], gate_params, h_out_mask, debug_idx);
+
+    // 保存隐状态 mask
+    if (h_mask != nullptr) {
+        h_mask[output_idx] = h_out_mask;
+    }
+
+    h_out[output_idx] = cur_h;
+}
+
 }  // namespace kernel
 
 // ============================================================================
@@ -484,7 +623,8 @@ void ForwardPassQuant::PrecomputeWeightSums(const int32_t *W, const int32_t *R) 
     weight_sums_computed_ = true;
 }
 
-void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps) {
+void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps,
+                                       uint8_t *weight_ih_linear_mask) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -499,16 +639,29 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
-        W, x, tmp_weight_ih_linear_.data(), bw, M, N, K,
-        linear_params_.zp_x_,
-        linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
-        linear_params_.shift_bw_to_weight_ih_linear_.data(),
-        gate_params_.zp_weight_ih_linear_,
-        gate_params_.bitwidth_config_.weight_ih_linear_);
+    if (weight_ih_linear_mask != nullptr) {
+        // 带 mask 版本
+        kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
+            W, x, tmp_weight_ih_linear_.data(), weight_ih_linear_mask, bw, M, N, K,
+            linear_params_.zp_x_,
+            linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
+            linear_params_.shift_bw_to_weight_ih_linear_.data(),
+            gate_params_.zp_weight_ih_linear_,
+            gate_params_.bitwidth_config_.weight_ih_linear_);
+    } else {
+        // 无 mask 版本
+        kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
+            W, x, tmp_weight_ih_linear_.data(), bw, M, N, K,
+            linear_params_.zp_x_,
+            linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
+            linear_params_.shift_bw_to_weight_ih_linear_.data(),
+            gate_params_.zp_weight_ih_linear_,
+            gate_params_.bitwidth_config_.weight_ih_linear_);
+    }
 }
 
-void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br) {
+void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br,
+                                       uint8_t *weight_hh_linear_mask) {
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
     const cudaStream_t stream = data_->stream[0];
@@ -522,13 +675,25 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
-        R, h, tmp_weight_hh_linear_.data(), br, M, N, K,
-        linear_params_.zp_h_,
-        linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
-        linear_params_.shift_br_to_weight_hh_linear_.data(),
-        gate_params_.zp_weight_hh_linear_,
-        gate_params_.bitwidth_config_.weight_hh_linear_);
+    if (weight_hh_linear_mask != nullptr) {
+        // 带 mask 版本
+        kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
+            R, h, tmp_weight_hh_linear_.data(), weight_hh_linear_mask, br, M, N, K,
+            linear_params_.zp_h_,
+            linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
+            linear_params_.shift_br_to_weight_hh_linear_.data(),
+            gate_params_.zp_weight_hh_linear_,
+            gate_params_.bitwidth_config_.weight_hh_linear_);
+    } else {
+        // 无 mask 版本
+        kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
+            R, h, tmp_weight_hh_linear_.data(), br, M, N, K,
+            linear_params_.zp_h_,
+            linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
+            linear_params_.shift_br_to_weight_hh_linear_.data(),
+            gate_params_.zp_weight_hh_linear_,
+            gate_params_.bitwidth_config_.weight_hh_linear_);
+    }
 }
 
 void ForwardPassQuant::IterateInternal(
@@ -539,7 +704,10 @@ void ForwardPassQuant::IterateInternal(
     int32_t *v,                 // [N,H*4]
     const int32_t *cur_weight_ih_linear, // [N,H*3] 当前时间步的 W*x + bw 结果
     const float zoneout_prob,
-    const int32_t *zoneout_mask  // Zoneout mask [N,H]
+    const int32_t *zoneout_mask,  // Zoneout mask [N,H]
+    uint8_t *weight_hh_linear_mask,
+    uint8_t *gate_mask,
+    uint8_t *h_mask
 ) {
     const bool training = data_->training;
     const int batch_size = data_->batch_size;
@@ -550,8 +718,8 @@ void ForwardPassQuant::IterateInternal(
 
     cublasSetStream(blas_handle, stream1);
 
-    // 计算隐状态 Linear 变换: R*h + br（结果存入 tmp_weight_hh_linear_）
-    ComputeLinearH(R, h, br);
+    // 计算隐状态 Linear 变换: R*h + br（结果存入 tmp_weight_hh_linear_，可选 mask）
+    ComputeLinearH(R, h, br, weight_hh_linear_mask);
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -560,21 +728,27 @@ void ForwardPassQuant::IterateInternal(
 
     cudaStreamWaitEvent(stream1, event, 0);
 
-    // 启动量化 GRU kernel（传递 gate_params_）
+    const bool apply_zoneout = (zoneout_prob > 0.0f && zoneout_mask != nullptr);
+
+    // 启动量化 GRU kernel
+    // training=true 时保存 mask（调用方需保证 mask 指针有效）
+    // training=false 时不保存 mask
     if (training) {
-        if (zoneout_prob && zoneout_mask) {
-            kernel::PointwiseOperationsQuant<true, true>
+        if (apply_zoneout) {
+            kernel::PointwiseOperationsQuantWithMask<true, true>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v,
-                                                    zoneout_prob, zoneout_mask, gate_params_);
+                                                    zoneout_prob, zoneout_mask, gate_params_,
+                                                    gate_mask, h_mask);
         } else {
-            kernel::PointwiseOperationsQuant<true, false>
+            kernel::PointwiseOperationsQuantWithMask<true, false>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v, 0.0f,
-                                                    nullptr, gate_params_);
+                                                    nullptr, gate_params_,
+                                                    gate_mask, h_mask);
         }
     } else {
-        if (zoneout_prob && zoneout_mask) {
+        if (apply_zoneout) {
             kernel::PointwiseOperationsQuant<false, true>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, nullptr,
@@ -673,7 +847,11 @@ void ForwardPassQuant::Run(
     int32_t *h,                   // [(T+1)*N,H], 输出隐藏状态（int32_t 存储）
     int32_t *v,                   // [T*N,H*4], 中间激活值（训练模式需要）
     const float zoneout_prob,     // Zoneout 概率
-    const int32_t *zoneout_mask   // Zoneout mask [T*N,H]（int32_t 存储）
+    const int32_t *zoneout_mask,  // Zoneout mask [T*N,H]（int32_t 存储）
+    uint8_t *weight_ih_linear_mask,
+    uint8_t *weight_hh_linear_mask,
+    uint8_t *gate_mask,
+    uint8_t *h_mask
 ) {
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
@@ -694,8 +872,8 @@ void ForwardPassQuant::Run(
 
     cublasSetStream(data_->blas_handle, stream2);
 
-    // 计算输入 Linear 变换（所有时间步一次性计算，结果存入 tmp_weight_ih_linear_）
-    ComputeLinearX(W, x, bw, steps);
+    // 计算输入 Linear 变换（所有时间步一次性计算，结果存入 tmp_weight_ih_linear_，可选 mask）
+    ComputeLinearX(W, x, bw, steps, weight_ih_linear_mask);
 
     // 同步 Linear 计算
     cudaEventRecord(event, stream2);
@@ -709,7 +887,10 @@ void ForwardPassQuant::Run(
                         h + (i + 1) * NH,                // 输出 h
                         v + i * NH * 4,                  // 中间激活
                         tmp_weight_ih_linear_.data() + i * NH3,  // 当前时间步的 W*x + bw
-                        zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
+                        zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr,
+                        weight_hh_linear_mask ? weight_hh_linear_mask + i * NH3 : nullptr,
+                        gate_mask ? gate_mask + i * NH3 : nullptr,
+                        h_mask ? h_mask + i * NH : nullptr);
     }
 
     cublasSetStream(data_->blas_handle, save_stream);

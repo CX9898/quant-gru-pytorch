@@ -216,6 +216,24 @@ __host__ __device__ __forceinline__ int32_t clamp_by_bitwidth(int32_t val, Quant
     return max(lo, min(val, hi));
 }
 
+/**
+ * @brief 按位宽配置进行 clamp 并输出 mask（CPU/GPU 共用）
+ * 
+ * 用于 QAT 训练时记录被截断的值
+ * 
+ * @param val 输入值
+ * @param bw 位宽配置
+ * @param was_clamped 输出：是否被截断（1=被截断，0=未截断）
+ * @return 截断后的值
+ */
+__host__ __device__ __forceinline__ 
+int32_t clamp_by_bitwidth_with_mask(int32_t val, QuantBitWidth bw, uint8_t &was_clamped) {
+    int32_t lo = bw.qmin();
+    int32_t hi = bw.qmax();
+    was_clamped = (val < lo || val > hi) ? 1 : 0;
+    return max(lo, min(val, hi));
+}
+
 // ============================================================================
 // CPU/GPU 共用量化/反量化函数
 // ============================================================================
@@ -258,6 +276,29 @@ __host__ __device__ __forceinline__ float clamp_f(float val, QuantBitWidth bw) {
 }
 
 /**
+ * @brief 浮点版 clamp（带 mask 输出，用于 QAT 反向传播）
+ * 
+ * 当值被截断时，was_clamped = 1，否则 = 0。
+ * 反向传播时，被截断的值梯度置零。
+ * 
+ * @param val 输入值
+ * @param bw 位宽配置
+ * @param was_clamped [out] 是否被截断（1=截断，0=未截断）
+ * @return 截断后的值
+ */
+__host__ __device__ __forceinline__ 
+float clamp_f_with_mask(float val, QuantBitWidth bw, uint8_t& was_clamped) {
+    float lo = static_cast<float>(bw.qmin());
+    float hi = static_cast<float>(bw.qmax());
+    was_clamped = (val < lo || val > hi) ? 1 : 0;
+#ifdef __CUDA_ARCH__
+    return fmaxf(lo, fminf(val, hi));
+#else
+    return std::max(lo, std::min(val, hi));
+#endif
+}
+
+/**
  * @brief 浮点版量化（输出 float 存储的定点值）
  * 
  * q = clamp(round(src / scale + zp), qmin, qmax)
@@ -276,6 +317,16 @@ __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv,
     float scale = exp2_scale(exp2_inv);
     float q = round_f(src / scale);
     return clamp_f(q, bw);
+}
+
+/**
+ * @brief 浮点版量化（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ float quantize_f_with_mask(float src, int8_t exp2_inv, int32_t zp,
+                                                                QuantBitWidth bw, uint8_t &was_clamped) {
+    float scale = exp2_scale(exp2_inv);
+    float q = round_f(src / scale + static_cast<float>(zp));
+    return clamp_f_with_mask(q, bw, was_clamped);
 }
 
 /**
@@ -302,6 +353,22 @@ __host__ __device__ __forceinline__ float dequantize_f(float q, int8_t exp2_inv,
 __host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
                                                       QuantBitWidth bw) {
     return static_cast<int32_t>(quantize_f(src, exp2_inv, zp, bw));
+}
+
+/**
+ * @brief 量化浮点数到 int32_t（带 mask 输出，用于 QAT）
+ * 
+ * @param src 浮点源值
+ * @param exp2_inv 缩放因子指数
+ * @param zp 零点
+ * @param bw 位宽配置
+ * @param was_clamped 输出：是否被截断
+ * @return 量化值（int32_t 存储）
+ */
+__host__ __device__ __forceinline__ int32_t quantize_with_mask(float src, int8_t exp2_inv, int32_t zp,
+                                                                QuantBitWidth bw, uint8_t &was_clamped) {
+    float q = round_f(src / exp2_scale(exp2_inv)) + static_cast<float>(zp);
+    return clamp_by_bitwidth_with_mask(static_cast<int32_t>(q), bw, was_clamped);
 }
 
 // ============================================================================
@@ -423,6 +490,36 @@ __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
     return quantize(y_float, shift_y, zp_y, out_bw);
 }
 
+/**
+ * @brief 真实 Sigmoid 函数（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ int32_t real_sigmoid_with_mask(int32_t q_x,
+                                                          int8_t shift_x, int32_t zp_x,
+                                                          int8_t shift_y, int32_t zp_y,
+                                                          QuantBitWidth pre_bw,
+                                                          QuantBitWidth out_bw,
+                                                          uint8_t &was_clamped) {
+    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
+    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float y_float = sigmoid<float>(x_float);
+    return quantize_with_mask(y_float, shift_y, zp_y, out_bw, was_clamped);
+}
+
+/**
+ * @brief 真实 Tanh 函数（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ int32_t real_tanh_with_mask(int32_t q_x,
+                                                       int8_t shift_x, int32_t zp_x,
+                                                       int8_t shift_y, int32_t zp_y,
+                                                       QuantBitWidth pre_bw,
+                                                       QuantBitWidth out_bw,
+                                                       uint8_t &was_clamped) {
+    int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
+    float x_float = dequantize(q_x_clamped, shift_x, zp_x);
+    float y_float = tanh<float>(x_float);
+    return quantize_with_mask(y_float, shift_y, zp_y, out_bw, was_clamped);
+}
+
 // ============================================================================
 // 浮点存储版激活函数（用于 GPU-FP 实现）
 // ============================================================================
@@ -448,6 +545,19 @@ float real_sigmoid_f(float q_x, float scale_x, float zp_x,
 }
 
 /**
+ * @brief 浮点版真实 Sigmoid（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+float real_sigmoid_f_with_mask(float q_x, float scale_x, float zp_x,
+                               float scale_y, float zp_y, QuantBitWidth out_bw,
+                               uint8_t& was_clamped) {
+    float x_fp = (q_x - zp_x) * scale_x;
+    float y_fp = sigmoid<float>(x_fp);
+    float q_y = round_f(y_fp / scale_y + zp_y);
+    return clamp_f_with_mask(q_y, out_bw, was_clamped);
+}
+
+/**
  * @brief 浮点版真实 Tanh（反量化 → tanh → 量化）
  */
 __host__ __device__ __forceinline__ 
@@ -457,6 +567,19 @@ float real_tanh_f(float q_x, float scale_x, float zp_x,
     float y_fp = tanh<float>(x_fp);
     float q_y = round_f(y_fp / scale_y + zp_y);
     return clamp_f(q_y, out_bw);
+}
+
+/**
+ * @brief 浮点版真实 Tanh（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+float real_tanh_f_with_mask(float q_x, float scale_x, float zp_x,
+                            float scale_y, float zp_y, QuantBitWidth out_bw,
+                            uint8_t& was_clamped) {
+    float x_fp = (q_x - zp_x) * scale_x;
+    float y_fp = tanh<float>(x_fp);
+    float q_y = round_f(y_fp / scale_y + zp_y);
+    return clamp_f_with_mask(q_y, out_bw, was_clamped);
 }
 
 // ============================================================================
@@ -703,6 +826,119 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 #endif
 
     return h;
+}
+
+// ============================================================================
+// 带 mask 版本的 GRU 门计算函数（用于 QAT）
+// ============================================================================
+
+/**
+ * @brief 计算更新门（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+int32_t computeUpdateGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, 
+                                    const GateQuantParams &params, uint8_t &was_clamped,
+                                    [[maybe_unused]] int debug_idx = -1) {
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
+    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_update_gate_input_);
+    const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
+
+    const auto &bw_cfg = params.bitwidth_config_;
+    const auto &lut = params.sigmoid_update_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t update_gate = real_sigmoid_with_mask(update_gate_input, 
+                                              lut.shift_bits_x, lut.zp_x,
+                                              lut.shift_bits_y, lut.zp_y,
+                                              bw_cfg.update_gate_input_, bw_cfg.update_gate_output_,
+                                              was_clamped);
+#else
+    // 非 real activation 时，使用分段线性，mask 单独计算
+    int32_t q_x_clamped = clamp_by_bitwidth(update_gate_input, bw_cfg.update_gate_input_);
+    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
+    const int32_t update_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.update_gate_output_, was_clamped);
+#endif
+    return update_gate;
+}
+
+/**
+ * @brief 计算复位门（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+int32_t computeResetGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, 
+                                   const GateQuantParams &params, uint8_t &was_clamped,
+                                   [[maybe_unused]] int debug_idx = -1) {
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
+    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
+    const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
+
+    const auto &bw_cfg = params.bitwidth_config_;
+    const auto &lut = params.sigmoid_reset_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t reset_gate = real_sigmoid_with_mask(reset_gate_input,
+                                             lut.shift_bits_x, lut.zp_x,
+                                             lut.shift_bits_y, lut.zp_y,
+                                             bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_,
+                                             was_clamped);
+#else
+    int32_t q_x_clamped = clamp_by_bitwidth(reset_gate_input, bw_cfg.reset_gate_input_);
+    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
+    const int32_t reset_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.reset_gate_output_, was_clamped);
+#endif
+    return reset_gate;
+}
+
+/**
+ * @brief 计算新门（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+int32_t computeNewGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
+                                 const GateQuantParams &params, int32_t &weight_hh_linear_g, 
+                                 uint8_t &was_clamped,
+                                 [[maybe_unused]] int debug_idx = -1) {
+    weight_hh_linear_g = weight_hh_linear;
+    
+    const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
+    const int64_t reset_hidden_mul = r_diff * hh_diff;
+    const int32_t rh_shifted = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_mul_hh_to_new_gate_input_));
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
+    const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
+
+    const auto &bw_cfg = params.bitwidth_config_;
+    const auto &lut = params.tanh_new_gate_lut_;
+#ifdef USE_REAL_ACTIVATION
+    const int32_t new_gate = real_tanh_with_mask(new_gate_input,
+                                            lut.shift_bits_x, lut.zp_x,
+                                            lut.shift_bits_y, lut.zp_y,
+                                            bw_cfg.new_gate_input_, bw_cfg.new_gate_output_,
+                                            was_clamped);
+#else
+    int32_t q_x_clamped = clamp_by_bitwidth(new_gate_input, bw_cfg.new_gate_input_);
+    int32_t result = piecewise_linear_raw(q_x_clamped, lut);
+    const int32_t new_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.new_gate_output_, was_clamped);
+#endif
+    return new_gate;
+}
+
+/**
+ * @brief 计算隐藏状态（带 mask 输出，用于 QAT）
+ */
+__host__ __device__ __forceinline__ 
+int32_t computeHiddenState_with_mask(int32_t update_gate, int32_t new_gate, int32_t h_old, 
+                                     const GateQuantParams &params, uint8_t &was_clamped,
+                                     [[maybe_unused]] int debug_idx = -1) {
+    const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
+    const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
+    const int64_t old_contribution_mul = u_diff * h_diff;
+    const int32_t old_shifted = static_cast<int32_t>(rshift_round(old_contribution_mul, params.shift_update_old_to_h_));
+
+    const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
+    const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
+    const int64_t new_contribution_mul = one_minus_u * n_diff;
+    const int32_t new_shifted = static_cast<int32_t>(rshift_round(new_contribution_mul, params.shift_update_new_to_h_));
+
+    const int32_t h_new = old_shifted + new_shifted + params.zp_h_;
+    return clamp_by_bitwidth_with_mask(h_new, params.bitwidth_config_.h_, was_clamped);
 }
 
 // ============================================================================
@@ -978,6 +1214,23 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
                          int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
                          int32_t zp_r, int8_t shift_g, int32_t zp_g,
                          int8_t shift_hh, int32_t zp_hh);
+
+// ============================================================================
+// 带 mask 版本的量化函数（用于 QAT）
+// ============================================================================
+
+/// @brief GPU 量化（float 输出，带 mask）
+void quantificationFPWithMask(const float *data, float *quant_data, uint8_t *mask,
+                              size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+
+/// @brief GPU 量化（int32 输出，带 mask）
+void quantificationBitwidthWithMask(const float *data, int32_t *quant_data, uint8_t *mask,
+                                    size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+
+/// @brief GPU Per-channel 量化（float 输出，带 mask）
+void quantificationPerChannelFPWithMask(const float *src, float *quant_data, uint8_t *mask,
+                                        size_t input_size, size_t channel_size,
+                                        const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
