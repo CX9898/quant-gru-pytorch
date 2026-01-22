@@ -267,6 +267,65 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
 // 反向传播接口
 // =====================================================================
 
+// =====================================================================
+// 浮点存储版量化 GRU 前向传播接口（GPU-FP）
+// =====================================================================
+// 
+// 与整数版的区别：
+//   - 所有量化值使用 float 存储（值仍是定点整数）
+//   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
+//   - 只使用 real_sigmoid/real_tanh，不用 LUT
+//   - shift 预处理为除数，避免运行时位移
+
+// 量化权重为浮点存储格式（GPU 端）
+// 输入（全部 device 内存）:
+//   W:  [C, H*3]   浮点输入权重
+//   R:  [H, H*3]   浮点循环权重
+//   bw: [H*3]      浮点输入偏置
+//   br: [H*3]      浮点循环偏置
+// 输出（全部 device 内存）:
+//   W_q, R_q, bw_q, br_q: 量化后的权重（float 存储的定点值）
+void quantitativeWeightFP(
+    int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const GRUQuantParams &quant_params,
+    float *W_q, float *R_q, float *bw_q, float *br_q);
+
+// GPU 浮点存储版量化前向传播（浮点输入/输出，全部 device 内存）
+// 输入（全部 device 内存）:
+//   W:  [C, H*3]   浮点输入权重
+//   R:  [H, H*3]   浮点循环权重
+//   bw: [H*3]      浮点输入偏置
+//   br: [H*3]      浮点循环偏置
+//   x:  [T, B, I]  浮点输入序列
+//   h0: [B, H]     初始隐藏状态（可为 nullptr）
+// 输出（全部 device 内存）:
+//   h:  [(T+1), B, H]  所有时间步的隐藏状态（反量化后的浮点值）
+//   v:  [T, B, H*4]    中间值（训练时需要，推理时可为 nullptr）
+void quantGRUForwardFP(
+    bool is_training,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const float *x, const float *h0,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    float *h, float *v);
+
+// 统一前向传播接口（浮点存储版）
+// 与 forwardInterface 类似，但使用浮点存储版量化实现
+void forwardInterfaceFP(
+    bool is_training, bool is_quant,
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const float *x, const float *h0,
+    const GRUQuantParams &quant_params,
+    const cublasHandle_t &g_blas_handle,
+    float *h, float *v);
+
+// =====================================================================
+// 反向传播接口
+// =====================================================================
+
 // 浮点 GRU 反向传播
 //
 // ★★★ 重要：W、R、x 需要传入【转置后】的数据！★★★

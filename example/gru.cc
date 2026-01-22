@@ -226,6 +226,17 @@ void runQuantInferenceCPU(int time_steps, int batch_size, int input_size, int hi
                        W, R, bw, br, x, nullptr, quant_params, h, nullptr);
 }
 
+// ==================== 浮点存储版量化推理（FP版）====================
+
+void runQuantInferenceFP(int time_steps, int batch_size, int input_size, int hidden_size,
+                         const float *W, const float *R, const float *bw, const float *br,
+                         const float *x, const GRUQuantParams &quant_params, float *h) {
+    ScopeTimer t("QuantInference (GPU-FP):");
+    // 使用统一接口，内部会自动处理量化/反量化
+    forwardInterfaceFP(false, true, time_steps, batch_size, input_size, hidden_size,
+                       W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
+}
+
 // ==================== 直方图收集性能比较 ====================
 
 void compareHistogramCollectionPerformance(int time_steps, int batch_size, int input_size,
@@ -512,19 +523,27 @@ int main(int argc, char *argv[]) {
     runQuantInferenceCPU(T, B, I, H, W.data(), R.data(), bw.data(), br.data(),
                          x.data(), quant_params, h_quant_cpu_vec.data());
 
+    // 浮点存储版量化推理（FP版）
+    dev::vector<float> h_quant_fp((T + 1) * B * H);
+    runQuantInferenceFP(T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                        x_dev.data(), quant_params, h_quant_fp.data());
+
     // 比较结果
-    std::vector<float> h_float_cpu, h_quant_gpu_cpu;
+    std::vector<float> h_float_cpu, h_quant_gpu_cpu, h_quant_fp_cpu;
     d2h(h_float_cpu, h_float);
     d2h(h_quant_gpu_cpu, h_quant_gpu);
+    d2h(h_quant_fp_cpu, h_quant_fp);
 
     printf("\n----- Comparison Results -----\n");
-    compareHValues(h_float_cpu, h_quant_gpu_cpu, T, B, H, "Float vs Quant(GPU)");
+    compareHValues(h_float_cpu, h_quant_gpu_cpu, T, B, H, "Float vs Quant(GPU-INT)");
     compareHValues(h_float_cpu, h_quant_cpu_vec, T, B, H, "Float vs Quant(CPU)");
-    compareHValues(h_quant_gpu_cpu, h_quant_cpu_vec, T, B, H, "Quant(GPU) vs Quant(CPU)");
+    compareHValues(h_float_cpu, h_quant_fp_cpu, T, B, H, "Float vs Quant(GPU-FP)");
+    compareHValues(h_quant_gpu_cpu, h_quant_cpu_vec, T, B, H, "Quant(GPU-INT) vs Quant(CPU)");
+    compareHValues(h_quant_gpu_cpu, h_quant_fp_cpu, T, B, H, "Quant(GPU-INT) vs Quant(GPU-FP)");
 
     printf("CUDA Error: %s\n", cudaGetErrorString(cudaGetLastError()));
 
-#if 0  // 训练测试（暂时禁用，需要时改为 #if 1）
+#if 1  // 训练测试
     // ========== 训练测试 ==========
     printf("\n========== Running Training Tests ==========\n");
 
@@ -595,15 +614,15 @@ int main(int argc, char *argv[]) {
     }
     printf("CUDA Error (FloatTraining): %s\n", cudaGetErrorString(cudaGetLastError()));
 
-    // 量化训练
-    printf("\n----- Quant Training -----\n");
+    // 量化训练 (GPU-INT)
+    printf("\n----- Quant Training (GPU-INT) -----\n");
     GRUTrainGradients gradients_quant;
     {
         dev::vector<float> h_train((T + 1) * B * H);
         dev::vector<float> v_train(T * B * H * 4);
 
         {
-            ScopeTimer t("QuantTraining Forward:");
+            ScopeTimer t("QuantTraining (GPU-INT) Forward:");
             forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
                              h_train.data(), v_train.data());
@@ -619,7 +638,7 @@ int main(int argc, char *argv[]) {
         dbx_dev.zero(); dbr_dev.zero(); dh_out_dev.zero();
 
         {
-            ScopeTimer t("QuantTraining Backward:");
+            ScopeTimer t("QuantTraining (GPU-INT) Backward:");
             hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
                              br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
@@ -636,14 +655,196 @@ int main(int argc, char *argv[]) {
         d2h(gradients_quant.h.data(), h_train.data() + B * H, T * B * H);
         d2h(gradients_quant.v, v_train);
     }
-    printf("CUDA Error (QuantTraining): %s\n", cudaGetErrorString(cudaGetLastError()));
+    printf("CUDA Error (QuantTraining GPU-INT): %s\n", cudaGetErrorString(cudaGetLastError()));
+
+    // 量化训练 (GPU-FP)
+    printf("\n----- Quant Training (GPU-FP) -----\n");
+    GRUTrainGradients gradients_quant_fp;
+    {
+        dev::vector<float> h_train((T + 1) * B * H);
+        dev::vector<float> v_train(T * B * H * 4);
+
+        {
+            ScopeTimer t("QuantTraining (GPU-FP) Forward:");
+            forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                               br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
+                               h_train.data(), v_train.data());
+        }
+
+        dev::vector<float> dx_dev(T * B * I);
+        dev::vector<float> dW_dev(I * H * 3);
+        dev::vector<float> dR_dev(H * H * 3);
+        dev::vector<float> dbx_dev(H * 3);
+        dev::vector<float> dbr_dev(H * 3);
+        dev::vector<float> dh_out_dev(B * H);
+        dx_dev.zero(); dW_dev.zero(); dR_dev.zero();
+        dbx_dev.zero(); dbr_dev.zero(); dh_out_dev.zero();
+
+        {
+            ScopeTimer t("QuantTraining (GPU-FP) Backward:");
+            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
+                             br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
+                             v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
+                             dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data());
+        }
+
+        d2h(gradients_quant_fp.dx, dx_dev);
+        d2h(gradients_quant_fp.dW, dW_dev);
+        d2h(gradients_quant_fp.dR, dR_dev);
+        d2h(gradients_quant_fp.dbw, dbx_dev);
+        d2h(gradients_quant_fp.dbr, dbr_dev);
+        d2h(gradients_quant_fp.dh, dh_out_dev);
+        gradients_quant_fp.h.resize(T * B * H);
+        d2h(gradients_quant_fp.h.data(), h_train.data() + B * H, T * B * H);
+        d2h(gradients_quant_fp.v, v_train);
+    }
+    printf("CUDA Error (QuantTraining GPU-FP): %s\n", cudaGetErrorString(cudaGetLastError()));
 
     // 比较训练结果
     printf("\n========== Comparing Training Results ==========\n");
-    compareVIntermediateValues(gradients_float.v, gradients_quant.v, T, B, H, "Float vs Quant");
-    compareHValues(gradients_float.h, gradients_quant.h, T, B, H, "Training H: Float vs Quant");
-    compareGRUTrainGradients(gradients_float, gradients_quant, "Float vs Quant");
+    
+    // Float vs Quant(GPU-INT)
+    printf("\n----- Float vs Quant(GPU-INT) -----\n");
+    compareVIntermediateValues(gradients_float.v, gradients_quant.v, T, B, H, "V: Float vs Quant(GPU-INT)");
+    compareHValues(gradients_float.h, gradients_quant.h, T, B, H, "H: Float vs Quant(GPU-INT)");
+    compareGRUTrainGradients(gradients_float, gradients_quant, "Gradients: Float vs Quant(GPU-INT)");
+    
+    // Float vs Quant(GPU-FP)
+    printf("\n----- Float vs Quant(GPU-FP) -----\n");
+    compareVIntermediateValues(gradients_float.v, gradients_quant_fp.v, T, B, H, "V: Float vs Quant(GPU-FP)");
+    compareHValues(gradients_float.h, gradients_quant_fp.h, T, B, H, "H: Float vs Quant(GPU-FP)");
+    compareGRUTrainGradients(gradients_float, gradients_quant_fp, "Gradients: Float vs Quant(GPU-FP)");
+    
+    // Quant(GPU-INT) vs Quant(GPU-FP)
+    printf("\n----- Quant(GPU-INT) vs Quant(GPU-FP) -----\n");
+    compareVIntermediateValues(gradients_quant.v, gradients_quant_fp.v, T, B, H, "V: Quant(GPU-INT) vs Quant(GPU-FP)");
+    compareHValues(gradients_quant.h, gradients_quant_fp.h, T, B, H, "H: Quant(GPU-INT) vs Quant(GPU-FP)");
+    compareGRUTrainGradients(gradients_quant, gradients_quant_fp, "Gradients: Quant(GPU-INT) vs Quant(GPU-FP)");
 #endif  // 训练测试
+
+    // ========== h0 不为空的测试 ==========
+    printf("\n========== h0 Non-Null Test (INT vs FP) ==========\n");
+    {
+        // 测试1：h0 = 随机数据
+        printf("\n--- Test 1: h0 = random data ---\n");
+        std::vector<float> h0_cpu(B * H);
+        fillVectorWithNormalDistribution(h0_cpu, -1.0f, 1.0f);
+        dev::vector<float> h0_dev(h0_cpu);
+        
+        // INT32 版本 (训练模式)
+        dev::vector<float> h_int((T + 1) * B * H);
+        dev::vector<float> v_int(T * B * H * 4);
+        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                         br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                         h_int.data(), v_int.data());
+        
+        // FP 版本 (训练模式)
+        dev::vector<float> h_fp((T + 1) * B * H);
+        dev::vector<float> v_fp(T * B * H * 4);
+        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                           h_fp.data(), v_fp.data());
+        
+        // 比较
+        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
+        d2h(h_int_cpu, h_int);
+        d2h(h_fp_cpu, h_fp);
+        d2h(v_int_cpu, v_int);
+        d2h(v_fp_cpu, v_fp);
+        
+        // 跳过 h[0]（是输入），从 h[1] 开始比较
+        std::vector<float> h_int_out(h_int_cpu.begin() + B * H, h_int_cpu.end());
+        std::vector<float> h_fp_out(h_fp_cpu.begin() + B * H, h_fp_cpu.end());
+        
+        compareVIntermediateValues(v_int_cpu, v_fp_cpu, T, B, H, "V: INT vs FP (h0 non-null, training)");
+        compareHValues(h_int_out, h_fp_out, T, B, H, "H: INT vs FP (h0 non-null, training)");
+        
+        // 推理模式也测试一下
+        dev::vector<float> h_int_inf((T + 1) * B * H);
+        dev::vector<float> h_fp_inf((T + 1) * B * H);
+        forwardInterface(false, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                         br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                         h_int_inf.data(), nullptr);
+        forwardInterfaceFP(false, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                           h_fp_inf.data(), nullptr);
+        
+        std::vector<float> h_int_inf_cpu, h_fp_inf_cpu;
+        d2h(h_int_inf_cpu, h_int_inf);
+        d2h(h_fp_inf_cpu, h_fp_inf);
+        compareHValues(h_int_inf_cpu, h_fp_inf_cpu, T, B, H, "H: INT vs FP (h0 non-null, inference)");
+    }
+    
+    // 测试2：h0 = 全 0（量化后应该等于零点值）
+    printf("\n--- Test 2: h0 = all zeros ---\n");
+    {
+        std::vector<float> h0_zero_cpu(B * H, 0.0f);
+        dev::vector<float> h0_zero_dev(h0_zero_cpu);
+        
+        // 先测试量化后的 h0 值
+        int8_t shift_h = quant_params.shift_h_;
+        int32_t zp_h = quant_params.zp_h_;
+        float scale = ldexpf(1.0f, -shift_h);
+        float q_h0 = roundf(0.0f / scale) + zp_h;
+        printf("h0=0.0 quantized: shift=%d, zp=%d, scale=%.6f, q_val=%.1f\n", 
+               shift_h, zp_h, scale, q_h0);
+        
+        // 训练模式
+        dev::vector<float> h_int((T + 1) * B * H);
+        dev::vector<float> v_int(T * B * H * 4);
+        dev::vector<float> h_fp((T + 1) * B * H);
+        dev::vector<float> v_fp(T * B * H * 4);
+        
+        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                         br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+                         h_int.data(), v_int.data());
+        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+                           h_fp.data(), v_fp.data());
+        
+        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
+        d2h(h_int_cpu, h_int);
+        d2h(h_fp_cpu, h_fp);
+        d2h(v_int_cpu, v_int);
+        d2h(v_fp_cpu, v_fp);
+        
+        std::vector<float> h_int_out(h_int_cpu.begin() + B * H, h_int_cpu.end());
+        std::vector<float> h_fp_out(h_fp_cpu.begin() + B * H, h_fp_cpu.end());
+        
+        compareVIntermediateValues(v_int_cpu, v_fp_cpu, T, B, H, "V: INT vs FP (h0=zeros, training)");
+        compareHValues(h_int_out, h_fp_out, T, B, H, "H: INT vs FP (h0=zeros, training)");
+    }
+    
+    // 测试3：h0 = 全 1.0（uniform 非零值）
+    printf("\n--- Test 3: h0 = all 1.0 (uniform non-zero) ---\n");
+    {
+        std::vector<float> h0_ones_cpu(B * H, 1.0f);
+        dev::vector<float> h0_ones_dev(h0_ones_cpu);
+        
+        dev::vector<float> h_int((T + 1) * B * H);
+        dev::vector<float> v_int(T * B * H * 4);
+        dev::vector<float> h_fp((T + 1) * B * H);
+        dev::vector<float> v_fp(T * B * H * 4);
+        
+        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                         br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+                         h_int.data(), v_int.data());
+        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+                           h_fp.data(), v_fp.data());
+        
+        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
+        d2h(h_int_cpu, h_int);
+        d2h(h_fp_cpu, h_fp);
+        d2h(v_int_cpu, v_int);
+        d2h(v_fp_cpu, v_fp);
+        
+        std::vector<float> h_int_out(h_int_cpu.begin() + B * H, h_int_cpu.end());
+        std::vector<float> h_fp_out(h_fp_cpu.begin() + B * H, h_fp_cpu.end());
+        
+        compareVIntermediateValues(v_int_cpu, v_fp_cpu, T, B, H, "V: INT vs FP (h0=ones, training)");
+        compareHValues(h_int_out, h_fp_out, T, B, H, "H: INT vs FP (h0=ones, training)");
+    }
 
     // 清理
     cublasDestroy(g_blas_handle);

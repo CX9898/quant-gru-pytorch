@@ -207,3 +207,82 @@ struct LinearQuantParamsCPU {
     std::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
 #endif
 };
+
+// ============================================================================
+// 浮点存储版量化参数（用于 gru_forward_gpu_quant_fp.cu）
+// ============================================================================
+//
+// 与整数版本的区别：
+//   - 所有量化值使用 float 存储（值仍是定点整数）
+//   - shift 预处理为除数：divisor = 2^shift
+//   - 不包含 LUT（使用 real_sigmoid/real_tanh）
+//
+// ============================================================================
+
+/**
+ * @brief 门计算量化参数（浮点存储版本）
+ *
+ * shift 预处理为除数：divisor = 2^shift
+ * 零点使用 float 存储
+ * 不包含 LUT（使用 real_sigmoid/real_tanh）
+ */
+struct GateQuantParamsFP {
+    // -------------------- Linear 输出零点 --------------------
+    float zp_weight_ih_linear_;   ///< W*x+bw 的零点
+    float zp_weight_hh_linear_;   ///< R*h+br 的零点
+    float zp_h_;                  ///< 隐状态 h 的零点
+
+    // -------------------- Update Gate 参数 --------------------
+    float zp_update_gate_input_;                      ///< update gate 激活前零点
+    float zp_update_gate_output_;                     ///< update gate 激活后零点
+    float div_weight_ih_linear_to_update_gate_input_; ///< = 2^shift，除数
+    float div_weight_hh_linear_to_update_gate_input_; ///< = 2^shift，除数
+
+    // -------------------- Reset Gate 参数 --------------------
+    float zp_reset_gate_input_;                       ///< reset gate 激活前零点
+    float zp_reset_gate_output_;                      ///< reset gate 激活后零点
+    float div_weight_ih_linear_to_reset_gate_input_;  ///< = 2^shift，除数
+    float div_weight_hh_linear_to_reset_gate_input_;  ///< = 2^shift，除数
+
+    // -------------------- New Gate 参数 --------------------
+    float zp_new_gate_input_;                         ///< new gate 激活前零点
+    float zp_new_gate_output_;                        ///< new gate 激活后零点
+    float div_weight_ih_linear_to_new_gate_input_;    ///< = 2^shift，除数
+    float div_reset_mul_hh_to_new_gate_input_;        ///< = 2^shift，r*hh 到 new_gate_input 的除数
+
+    // -------------------- 隐状态更新参数 --------------------
+    float quant_one_in_update_gate_scale_;  ///< 常数 1 在 update_gate_output 量化空间的表示
+    float div_update_new_to_h_;             ///< = 2^shift，(1-u)*n 到 h 的除数
+    float div_update_old_to_h_;             ///< = 2^shift，u*h 到 h 的除数
+
+    // -------------------- 激活函数 scale（用于 real_sigmoid/real_tanh）--------------------
+    float scale_update_gate_input_;   ///< = 2^(-shift)，反量化 scale
+    float scale_update_gate_output_;  ///< = 2^(-shift)，量化 scale
+    float scale_reset_gate_input_;    ///< = 2^(-shift)
+    float scale_reset_gate_output_;   ///< = 2^(-shift)
+    float scale_new_gate_input_;      ///< = 2^(-shift)
+    float scale_new_gate_output_;     ///< = 2^(-shift)
+
+    // -------------------- 位宽配置 --------------------
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
+};
+
+/**
+ * @brief Linear 层量化参数（GPU 浮点版本）
+ *
+ * shift 预处理为除数，存储在 GPU 端
+ */
+struct LinearQuantParamsGPUFP {
+    float zp_x_;                 ///< 输入 x 的零点
+    float zp_h_;                 ///< 隐状态 h 的零点
+    float zp_weight_ih_linear_;  ///< W*x+bw 输出零点
+    float zp_weight_hh_linear_;  ///< R*h+br 输出零点
+
+    dev::vector<float> div_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 除数
+    dev::vector<float> div_bw_to_weight_ih_linear_;      ///< bw per-channel 除数
+    dev::vector<float> div_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 除数
+    dev::vector<float> div_br_to_weight_hh_linear_;      ///< br per-channel 除数
+
+    QuantBitWidth output_bw_ih_;  ///< weight_ih_linear 输出位宽
+    QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
+};

@@ -96,4 +96,88 @@ class ForwardPassQuant {
     dev::vector<int8_t> h_padded_i8_;  // [hidden * N_padded_Rh]
 };
 
+// ============================================================================
+// 浮点存储版量化 GRU 前向传播类
+// ============================================================================
+
+/**
+ * @brief 量化 GRU 前向传播类（浮点存储版本）
+ *
+ * 与 ForwardPassQuant 的区别：
+ *   - 所有量化值使用 float 存储（值仍是定点整数）
+ *   - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
+ *   - 只使用 real_sigmoid/real_tanh，不用 LUT
+ *
+ * 适用场景：
+ *   - 需要浮点存储格式进行后续处理
+ *   - 调试和验证量化精度
+ */
+class ForwardPassQuantFP {
+public:
+    /// @brief 构造函数
+    /// @param training 是否训练模式（需要保存中间值）
+    /// @param batch_size 批大小
+    /// @param input_size 输入维度
+    /// @param hidden_size 隐藏层维度
+    /// @param blas_handle cuBLAS 句柄
+    /// @param stream CUDA 流（可选）
+    ForwardPassQuantFP(bool training, int batch_size, int input_size,
+                       int hidden_size, const cublasHandle_t &blas_handle,
+                       const cudaStream_t &stream = 0);
+
+    ~ForwardPassQuantFP();
+
+    /// @brief 设置量化参数（从整数版参数转换）
+    void setRescaleParam(const GRUQuantParams &params);
+
+    /// @brief 前向传播
+    /// @param steps 时间步数
+    /// @param W [C, H*3] 输入权重（float 存储的定点值）
+    /// @param R [H, H*3] 循环权重
+    /// @param bw [H*3] 输入偏置
+    /// @param br [H*3] 循环偏置
+    /// @param x [N*T, C] 输入序列
+    /// @param h [(T+1)*N, H] 隐状态（输入输出）
+    /// @param v [T*N, H*4] 中间值（训练模式）
+    /// @param zoneout_prob Zoneout 概率
+    /// @param zoneout_mask Zoneout mask
+    void Run(int steps,
+             const float *W, const float *R,
+             const float *bw, const float *br,
+             const float *x, float *h, float *v,
+             float zoneout_prob, const float *zoneout_mask);
+
+private:
+    void ComputeLinearX(const float *W, const float *x, const float *bw, int steps);
+    void ComputeLinearH(const float *R, const float *h, const float *br);
+    void IterateInternal(const float *R, const float *br,
+                         const float *h, float *h_out, float *v,
+                         const float *cur_weight_ih_linear,
+                         float zoneout_prob, const float *zoneout_mask);
+    void EnsureBuffersAllocated(int steps);
+    void PrecomputeWeightSums(const float *W, const float *R);
+
+    struct private_data;
+    private_data *data_;
+
+    GateQuantParamsFP gate_params_;
+    LinearQuantParamsGPUFP linear_params_;
+
+    int max_steps_ = 0;
+
+    // GEMM 原始结果（未 rescale）
+    dev::vector<float> tmp_gemm_result_;
+    // Linear 变换结果（rescale 后）
+    dev::vector<float> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch]
+    dev::vector<float> tmp_weight_hh_linear_;  // [hidden*3 * batch]
+
+    // 权重和常量（预计算，用于零点补偿）
+    dev::vector<double> W_sum_mul_x_zp_;  // [hidden*3]
+    dev::vector<double> R_sum_mul_h_zp_;  // [hidden*3]
+    bool weight_sums_computed_ = false;
+
+    const float *cached_W_ = nullptr;
+    const float *cached_R_ = nullptr;
+};
+
 }  // namespace gru

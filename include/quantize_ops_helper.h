@@ -880,6 +880,37 @@ void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, siz
                                        size_t channel_size, const dev::vector<int8_t> &exp2_invs,
                                        QuantBitWidth bw);
 
+// ============================================================================
+// 浮点存储版量化函数（用于 GPU-FP 实现）
+// ============================================================================
+
+/// @brief GPU 量化（float 输出，使用位宽配置）
+/// @param data 输入浮点数据（device）
+/// @param quant_data 输出量化数据（device，float 存储的定点值）
+/// @param size 数据大小
+/// @param exp2_inv scale 指数（scale = 2^(-exp2_inv)）
+/// @param zp 零点
+/// @param bw 位宽配置
+void quantificationFP(const float *data, float *quant_data, size_t size,
+                      int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+
+/// @brief GPU Per-channel 量化（float 输出，使用位宽配置）
+void quantificationPerChannelFP(const float *src, float *quant_data, size_t input_size,
+                                size_t channel_size, const dev::vector<int8_t> &exp2_invs,
+                                QuantBitWidth bw);
+
+/// @brief GPU 反量化（float 输入的量化值）
+void dequantificationFP(const float *quant_data, float *data, size_t size,
+                        int8_t exp2_inv, int32_t zp);
+
+/// @brief GPU 反量化 V 向量（float 输入的量化值）
+/// V 布局: [time_steps, batch_size, hidden_size * 4]
+/// 4个部分使用不同量化参数: [z_out, r_out, g_out, weight_hh_linear_g]
+void dequantificationVFP(const float *quant_data, float *data, int time_steps, int batch_size,
+                         int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
+                         int32_t zp_r, int8_t shift_g, int32_t zp_g,
+                         int8_t shift_hh, int32_t zp_hh);
+
 /// @brief GPU 量化
 /// @deprecated 建议使用 quantificationBitwidth
 template <typename T, typename QuantT>
