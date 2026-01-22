@@ -471,7 +471,7 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                       const cublasHandle_t &g_blas_handle,
                       float *h, float *v) {
     if (is_quant) {
-#if 0   // 方案1：整数存储版量化（GPU-INT）
+#if 1   // 方案1：整数存储版量化（GPU-INT）
         // 所有量化值使用 int32_t 存储，使用自定义 GEMM kernel
         dev::vector<int32_t> W_quant(hidden_size * 3 * input_size);
         dev::vector<int32_t> R_quant(hidden_size * 3 * hidden_size);
@@ -489,7 +489,7 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                         quant_gru_scales, g_blas_handle, h, v);
 #endif
 
-#if 1   // 方案2：浮点存储版量化（GPU-FP）
+#if 0   // 方案2：浮点存储版量化（GPU-FP）
         // 所有量化值使用 float 存储，使用 cuBLAS SGEMM
         quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
                           W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v);
