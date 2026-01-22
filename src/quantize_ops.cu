@@ -706,20 +706,13 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
-    // 根据输出位宽选择正确的 shift_bits 精度
-    int8_t shift_bits_b, shift_bits_c;
-    bool is_8bit_output = (output_bw.bits_ <= 8);
-    if (is_8bit_output) {
-        shift_bits_b = determine_shift_bits_int8(b_abs_max);
-        shift_bits_c = determine_shift_bits_int8(c_abs_max);
-    } else {
-        shift_bits_b = determine_shift_bits_int16(b_abs_max);
-        shift_bits_c = determine_shift_bits_int16(c_abs_max);
-    }
+    // 根据输出位宽自动确定 shift_bits
+    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
+    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: output_bw.bits_=%d, is_8bit=%d, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, is_8bit_output, shift_bits_b, shift_bits_c);
+    printf("[DEBUG] generate_sigmoid_lut: output_bw.bits_=%d, shift_bits_b=%d, shift_bits_c=%d\n",
+           output_bw.bits_, shift_bits_b, shift_bits_c);
 #endif
 
     // 第三遍扫描：量化每段
@@ -819,20 +812,13 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
     if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
 
-    // 根据输出位宽选择正确的 shift_bits 精度
-    int8_t shift_bits_b, shift_bits_c;
-    bool is_8bit_output = (output_bw.bits_ <= 8);
-    if (is_8bit_output) {
-        shift_bits_b = determine_shift_bits_int8(b_abs_max);
-        shift_bits_c = determine_shift_bits_int8(c_abs_max);
-    } else {
-        shift_bits_b = determine_shift_bits_int16(b_abs_max);
-        shift_bits_c = determine_shift_bits_int16(c_abs_max);
-    }
+    // 根据输出位宽自动确定 shift_bits
+    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
+    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: output_bw.bits_=%d, is_8bit=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, is_8bit_output, b_abs_max, shift_bits_b, shift_bits_c);
+    printf("[DEBUG] generate_tanh_lut: output_bw.bits_=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
+           output_bw.bits_, b_abs_max, shift_bits_b, shift_bits_c);
 #endif
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {

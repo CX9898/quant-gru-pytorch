@@ -42,6 +42,7 @@
 #define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
 
 #include "cuda_compat.h"
+#include "inline_ops.h"
 #include <cublas_v2.h>
 
 #include <algorithm>
@@ -381,13 +382,15 @@ __host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const 
 // 用于替换 piecewise_linear，使前向/反向传播的激活函数一致
 // 优点：QAT 时梯度更准确
 // 缺点：比 LUT 慢（涉及浮点 exp 运算）
+// 
+// 激活函数 sigmoid<T>/tanh<T> 定义在 inline_ops.h 中
 
 /**
  * @brief 真实 Sigmoid 函数（反量化 → sigmoid → 量化）
  *
  * 计算流程：
  *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
- *   2. Sigmoid：y_float = 1 / (1 + exp(-x_float))
+ *   2. Sigmoid：y_float = sigmoid<float>(x_float)
  *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
  */
 __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
@@ -397,7 +400,7 @@ __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
                                                           QuantBitWidth out_bw) {
     int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
     float x_float = dequantize(q_x_clamped, shift_x, zp_x);
-    float y_float = 1.0f / (1.0f + expf(-x_float));
+    float y_float = sigmoid<float>(x_float);
     return quantize(y_float, shift_y, zp_y, out_bw);
 }
 
@@ -406,7 +409,7 @@ __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
  *
  * 计算流程：
  *   1. 反量化：x_float = dequantize(q_x, shift_x, zp_x)
- *   2. Tanh：  y_float = tanh(x_float)
+ *   2. Tanh：  y_float = tanh<float>(x_float)
  *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
  */
 __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
@@ -416,7 +419,7 @@ __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
                                                        QuantBitWidth out_bw) {
     int32_t q_x_clamped = clamp_by_bitwidth(q_x, pre_bw);
     float x_float = dequantize(q_x_clamped, shift_x, zp_x);
-    float y_float = tanhf(x_float);
+    float y_float = tanh<float>(x_float);
     return quantize(y_float, shift_y, zp_y, out_bw);
 }
 
@@ -439,7 +442,7 @@ __host__ __device__ __forceinline__
 float real_sigmoid_f(float q_x, float scale_x, float zp_x,
                      float scale_y, float zp_y, QuantBitWidth out_bw) {
     float x_fp = (q_x - zp_x) * scale_x;
-    float y_fp = 1.0f / (1.0f + expf(-x_fp));
+    float y_fp = sigmoid<float>(x_fp);
     float q_y = round_f(y_fp / scale_y + zp_y);
     return clamp_f(q_y, out_bw);
 }
@@ -451,7 +454,7 @@ __host__ __device__ __forceinline__
 float real_tanh_f(float q_x, float scale_x, float zp_x,
                   float scale_y, float zp_y, QuantBitWidth out_bw) {
     float x_fp = (q_x - zp_x) * scale_x;
-    float y_fp = tanhf(x_fp);
+    float y_fp = tanh<float>(x_fp);
     float q_y = round_f(y_fp / scale_y + zp_y);
     return clamp_f(q_y, out_bw);
 }
@@ -460,23 +463,10 @@ float real_tanh_f(float q_x, float scale_x, float zp_x,
 // GRU 门计算模板函数 (CPU/GPU 共用)
 // ============================================================================
 
-// 调试辅助函数
+// 调试辅助函数（直接调用通用激活函数）
 #if defined(DEBUG_QUANT) || defined(DEBUG_QUANT_DETAIL)
-__host__ __device__ __forceinline__ float sigmoid_fp(float x) {
-#ifdef __CUDA_ARCH__
-    return 1.0f / (1.0f + expf(-x));
-#else
-    return 1.0f / (1.0f + std::exp(-x));
-#endif
-}
-
-__host__ __device__ __forceinline__ float tanh_fp(float x) {
-#ifdef __CUDA_ARCH__
-    return tanhf(x);
-#else
-    return std::tanh(x);
-#endif
-}
+__host__ __device__ __forceinline__ float sigmoid_fp(float x) { return sigmoid<float>(x); }
+__host__ __device__ __forceinline__ float tanh_fp(float x) { return tanh<float>(x); }
 #endif  // DEBUG_QUANT || DEBUG_QUANT_DETAIL
 
 /**
@@ -1045,20 +1035,6 @@ inline void fillVectorWithNormalDistribution(std::vector<float> &data, float min
 
 // -------------------- 系数量化（对称量化，zp=0）--------------------
 
-/// @brief 量化系数为 INT8
-inline int8_t quantize_coefficient_int8(float val_fp, int8_t shift_bits) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale);
-    return static_cast<int8_t>(std::max(-128, std::min(127, q)));
-}
-
-/// @brief 量化系数为 INT16
-inline int16_t quantize_coefficient_int16(float val_fp, int8_t shift_bits) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale);
-    return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
-}
-
 /// @brief 量化系数为 INT32（用于 LUT 斜率 q_b，避免截断误差）
 inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
     float scale = exp2_scale(shift_bits);
@@ -1067,58 +1043,17 @@ inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
     return static_cast<int32_t>(q);
 }
 
-// -------------------- 输入量化（非对称量化）--------------------
-
-/// @brief 量化输入为 UINT8
-inline uint8_t quantize_input_uint8(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
-    return static_cast<uint8_t>(std::max(0, std::min(255, q)));
-}
-
-/// @brief 量化输入为 INT8
-inline int8_t quantize_input_int8(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
-    return static_cast<int8_t>(std::max(-128, std::min(127, q)));
-}
-
-/// @brief 量化输入为 UINT16
-inline uint16_t quantize_input_uint16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
-    return static_cast<uint16_t>(std::max(0, std::min(65535, q)));
-}
-
-/// @brief 量化输入为 INT16
-inline int16_t quantize_input_int16(float val_fp, int8_t shift_bits, int32_t zp) {
-    float scale = exp2_scale(shift_bits);
-    int32_t q = round_to_int(val_fp / scale + static_cast<float>(zp));
-    return static_cast<int16_t>(std::max(-32768, std::min(32767, q)));
-}
-
 // -------------------- Shift bits 自动确定 --------------------
 
-/// @brief 根据最大值确定 INT8 的 shift_bits
-inline int8_t determine_shift_bits_int8(float max_val) {
+/// @brief 根据最大值和位宽配置自动确定 shift_bits
+/// @param max_val 浮点数的最大绝对值
+/// @param bw 目标量化位宽
+/// @return 使量化值能充分利用目标范围的 shift_bits
+inline int8_t determine_shift_bits(float max_val, QuantBitWidth bw) {
     if (max_val < 1e-9f) return 0;
-    float scale = max_val / 127.0f;
-    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
-    return std::max(static_cast<int8_t>(0), shift_bits);
-}
-
-/// @brief 根据最大值确定 INT16 的 shift_bits
-inline int8_t determine_shift_bits_int16(float max_val) {
-    if (max_val < 1e-9f) return 0;
-    float scale = max_val / 32767.0f;
-    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
-    return std::max(static_cast<int8_t>(0), shift_bits);
-}
-
-/// @brief 根据最大值确定 INT32 的 shift_bits（留出 rounding 余量）
-inline int8_t determine_shift_bits_int32(float max_val) {
-    if (max_val < 1e-9f) return 0;
-    float scale = max_val / 2147483520.0f;  // 略小于 INT32_MAX
+    // 使用 qmax 作为量化范围上限（对称量化）
+    float qmax = static_cast<float>(bw.qmax());
+    float scale = max_val / qmax;
     int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
     return std::max(static_cast<int8_t>(0), shift_bits);
 }
