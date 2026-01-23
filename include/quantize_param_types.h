@@ -146,7 +146,7 @@ struct GateQuantParams {
     int8_t shift_reset_mul_hh_to_new_gate_input_;          ///< r*weight_hh_linear 直接对齐到 new_gate_input 的移位（融合）
 
     // -------------------- 隐状态更新参数（乘法scale融合）--------------------
-    int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 在 update_gate_output 量化空间的表示
+    int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
     int8_t shift_update_new_to_h_;               ///< (1-u)*n 直接对齐到 h 的移位（融合）
     int8_t shift_update_old_to_h_;               ///< u*h 直接对齐到 h 的移位（融合）
 
@@ -251,7 +251,7 @@ struct GateQuantParamsFP {
     float div_reset_mul_hh_to_new_gate_input_;        ///< = 2^shift，r*hh 到 new_gate_input 的除数
 
     // -------------------- 隐状态更新参数 --------------------
-    float quant_one_in_update_gate_scale_;  ///< 常数 1 在 update_gate_output 量化空间的表示
+    float quant_one_in_update_gate_scale_;  ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
     float div_update_new_to_h_;             ///< = 2^shift，(1-u)*n 到 h 的除数
     float div_update_old_to_h_;             ///< = 2^shift，u*h 到 h 的除数
 

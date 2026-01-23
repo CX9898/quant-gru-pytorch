@@ -83,21 +83,30 @@ float computeUpdateGateFP(float weight_ih_linear, float weight_hh_linear,
 }
 
 /**
- * @brief 计算更新门（带 mask 输出，用于 QAT）
+ * @brief 计算更新门（带输入和输出 mask 分离输出，用于 QAT）
+ * 
+ * @param input_was_clamped [out] 门输入是否被截断
+ * @param output_was_clamped [out] 门输出是否被截断
  */
 __device__ __forceinline__ 
 float computeUpdateGateFP_with_mask(float weight_ih_linear, float weight_hh_linear, 
-                                    const GateQuantParamsFP &p, uint8_t& was_clamped) {
+                                    const GateQuantParamsFP &p, 
+                                    uint8_t& input_was_clamped,
+                                    uint8_t& output_was_clamped) {
     float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_, 
                          p.div_weight_ih_linear_to_update_gate_input_);
     float hh = div_round(weight_hh_linear - p.zp_weight_hh_linear_, 
                          p.div_weight_hh_linear_to_update_gate_input_);
     float input = ih + hh + p.zp_update_gate_input_;
     
-    return real_sigmoid_f_with_mask(input, 
+    // 对门输入进行位宽截断并记录 mask
+    float clamped_input = clamp_f_with_mask(input, p.bitwidth_config_.update_gate_input_, input_was_clamped);
+    
+    // 使用截断后的输入计算激活函数
+    return real_sigmoid_f_with_mask(clamped_input, 
                           p.scale_update_gate_input_, p.zp_update_gate_input_,
                           p.scale_update_gate_output_, p.zp_update_gate_output_,
-                          p.bitwidth_config_.update_gate_output_, was_clamped);
+                          p.bitwidth_config_.update_gate_output_, output_was_clamped);
 }
 
 /**
@@ -119,21 +128,26 @@ float computeResetGateFP(float weight_ih_linear, float weight_hh_linear,
 }
 
 /**
- * @brief 计算重置门（带 mask 输出，用于 QAT）
+ * @brief 计算重置门（带输入和输出 mask 分离输出，用于 QAT）
  */
 __device__ __forceinline__ 
 float computeResetGateFP_with_mask(float weight_ih_linear, float weight_hh_linear,
-                                   const GateQuantParamsFP &p, uint8_t& was_clamped) {
+                                   const GateQuantParamsFP &p, 
+                                   uint8_t& input_was_clamped,
+                                   uint8_t& output_was_clamped) {
     float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_,
                          p.div_weight_ih_linear_to_reset_gate_input_);
     float hh = div_round(weight_hh_linear - p.zp_weight_hh_linear_,
                          p.div_weight_hh_linear_to_reset_gate_input_);
     float input = ih + hh + p.zp_reset_gate_input_;
     
-    return real_sigmoid_f_with_mask(input,
+    // 对门输入进行位宽截断并记录 mask
+    float clamped_input = clamp_f_with_mask(input, p.bitwidth_config_.reset_gate_input_, input_was_clamped);
+    
+    return real_sigmoid_f_with_mask(clamped_input,
                           p.scale_reset_gate_input_, p.zp_reset_gate_input_,
                           p.scale_reset_gate_output_, p.zp_reset_gate_output_,
-                          p.bitwidth_config_.reset_gate_output_, was_clamped);
+                          p.bitwidth_config_.reset_gate_output_, output_was_clamped);
 }
 
 /**
@@ -165,12 +179,13 @@ float computeNewGateFP(float weight_ih_linear, float weight_hh_linear, float res
 }
 
 /**
- * @brief 计算候选门（带 mask 输出，用于 QAT）
+ * @brief 计算候选门（带输入和输出 mask 分离输出，用于 QAT）
  */
 __device__ __forceinline__ 
 float computeNewGateFP_with_mask(float weight_ih_linear, float weight_hh_linear, float reset_gate,
                                  const GateQuantParamsFP &p, float &weight_hh_linear_g,
-                                 uint8_t& was_clamped) {
+                                 uint8_t& input_was_clamped,
+                                 uint8_t& output_was_clamped) {
     weight_hh_linear_g = weight_hh_linear;
     
     double r_diff = static_cast<double>(reset_gate) - static_cast<double>(p.zp_reset_gate_output_);
@@ -183,10 +198,13 @@ float computeNewGateFP_with_mask(float weight_ih_linear, float weight_hh_linear,
                          p.div_weight_ih_linear_to_new_gate_input_);
     float input = ih + rh + p.zp_new_gate_input_;
     
-    return real_tanh_f_with_mask(input,
+    // 对门输入进行位宽截断并记录 mask
+    float clamped_input = clamp_f_with_mask(input, p.bitwidth_config_.new_gate_input_, input_was_clamped);
+    
+    return real_tanh_f_with_mask(clamped_input,
                        p.scale_new_gate_input_, p.zp_new_gate_input_,
                        p.scale_new_gate_output_, p.zp_new_gate_output_,
-                       p.bitwidth_config_.new_gate_output_, was_clamped);
+                       p.bitwidth_config_.new_gate_output_, output_was_clamped);
 }
 
 /**
@@ -203,6 +221,8 @@ float computeHiddenStateFP(float update_gate, float new_gate, float h_old,
                                                     static_cast<double>(p.div_update_old_to_h_)));
     
     // 计算 (1 - update_gate) * new_gate，直接对齐到 h
+    // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
+    // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     double one_minus_u = static_cast<double>(p.quant_one_in_update_gate_scale_) - 
                          static_cast<double>(update_gate);
     double n_diff = static_cast<double>(new_gate) - static_cast<double>(p.zp_new_gate_output_);
@@ -220,12 +240,16 @@ float computeHiddenStateFP(float update_gate, float new_gate, float h_old,
 __device__ __forceinline__ 
 float computeHiddenStateFP_with_mask(float update_gate, float new_gate, float h_old,
                                      const GateQuantParamsFP &p, uint8_t& was_clamped) {
+    // 计算 update_gate * h_old，直接对齐到 h
     double u_diff = static_cast<double>(update_gate) - static_cast<double>(p.zp_update_gate_output_);
     double h_diff = static_cast<double>(h_old) - static_cast<double>(p.zp_h_);
     double old_contribution_mul = u_diff * h_diff;
     float old_term = static_cast<float>(div_round_d(old_contribution_mul, 
                                                     static_cast<double>(p.div_update_old_to_h_)));
     
+    // 计算 (1 - update_gate) * new_gate，直接对齐到 h
+    // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
+    // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     double one_minus_u = static_cast<double>(p.quant_one_in_update_gate_scale_) - 
                          static_cast<double>(update_gate);
     double n_diff = static_cast<double>(new_gate) - static_cast<double>(p.zp_new_gate_output_);
@@ -546,8 +570,9 @@ __global__ void PointwiseOperationsFP(
     const float *__restrict__ zoneout_mask,
     GateQuantParamsFP gate_params,
     // Mask 输出（Training=true 时使用）
-    uint8_t *__restrict__ gate_mask,  // [batch, hidden*3] update/reset/new gate mask
-    uint8_t *__restrict__ h_mask      // [batch, hidden] hidden state mask
+    uint8_t *__restrict__ gate_input_mask,   // [batch, hidden*3] 门输入 clamp mask（新增）
+    uint8_t *__restrict__ gate_output_mask,  // [batch, hidden*3] 门输出 clamp mask（原 gate_mask）
+    uint8_t *__restrict__ h_mask             // [batch, hidden] 隐状态输出 mask
 ) {
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
     const int col = blockDim.y * blockIdx.y + threadIdx.y;
@@ -564,31 +589,41 @@ __global__ void PointwiseOperationsFP(
     float weight_hh_linear_g;
 
     if constexpr (Training) {
-        // 训练模式：带 mask 的版本
-        uint8_t update_clamped, reset_clamped, new_clamped, h_clamped;
+        // 训练模式：带输入和输出 mask 分离的版本
+        uint8_t update_input_clamped, update_output_clamped;
+        uint8_t reset_input_clamped, reset_output_clamped;
+        uint8_t new_input_clamped, new_output_clamped;
+        uint8_t h_clamped;
         
         update_gate = computeUpdateGateFP_with_mask(
             weight_ih_linear[update_idx], 
             weight_hh_linear[update_idx], 
-            gate_params, update_clamped);
+            gate_params, update_input_clamped, update_output_clamped);
 
         reset_gate = computeResetGateFP_with_mask(
             weight_ih_linear[reset_idx], 
             weight_hh_linear[reset_idx], 
-            gate_params, reset_clamped);
+            gate_params, reset_input_clamped, reset_output_clamped);
 
         new_gate = computeNewGateFP_with_mask(
             weight_ih_linear[new_idx], 
             weight_hh_linear[new_idx], 
-            reset_gate, gate_params, weight_hh_linear_g, new_clamped);
+            reset_gate, gate_params, weight_hh_linear_g, 
+            new_input_clamped, new_output_clamped);
 
         cur_h = computeHiddenStateFP_with_mask(
             update_gate, new_gate, h[output_idx], gate_params, h_clamped);
         
-        // 保存 mask
-        gate_mask[update_idx] = update_clamped;
-        gate_mask[reset_idx] = reset_clamped;
-        gate_mask[new_idx] = new_clamped;
+        // 保存门输入 mask（新增）
+        gate_input_mask[update_idx] = update_input_clamped;
+        gate_input_mask[reset_idx] = reset_input_clamped;
+        gate_input_mask[new_idx] = new_input_clamped;
+        
+        // 保存门输出 mask（原 gate_mask）
+        gate_output_mask[update_idx] = update_output_clamped;
+        gate_output_mask[reset_idx] = reset_output_clamped;
+        gate_output_mask[new_idx] = new_output_clamped;
+        
         h_mask[output_idx] = h_clamped;
     } else {
         // 不保存 mask 的版本
@@ -1001,7 +1036,8 @@ void ForwardPassQuantFP::IterateInternal(
     float zoneout_prob,
     const float *zoneout_mask,
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
     const bool training = data_->training;
@@ -1033,14 +1069,14 @@ void ForwardPassQuantFP::IterateInternal(
                     batch_size, hidden_size,
                     cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
                     h, h_out, v, zoneout_prob, zoneout_mask, gate_params_,
-                    gate_mask, h_mask);
+                    gate_input_mask, gate_output_mask, h_mask);
         } else {
             kernel::PointwiseOperationsFP<true, false>
                 <<<gridDim, blockDim, 0, stream1>>>(
                     batch_size, hidden_size,
                     cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
                     h, h_out, v, zoneout_prob, zoneout_mask, gate_params_,
-                    gate_mask, h_mask);
+                    gate_input_mask, gate_output_mask, h_mask);
         }
     } else {
         if (apply_zoneout) {
@@ -1049,14 +1085,14 @@ void ForwardPassQuantFP::IterateInternal(
                     batch_size, hidden_size,
                     cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
                     h, h_out, v, zoneout_prob, zoneout_mask, gate_params_,
-                    nullptr, nullptr);
+                    nullptr, nullptr, nullptr);
         } else {
             kernel::PointwiseOperationsFP<false, false>
                 <<<gridDim, blockDim, 0, stream1>>>(
                     batch_size, hidden_size,
                     cur_weight_ih_linear, tmp_weight_hh_linear_.data(),
                     h, h_out, v, zoneout_prob, zoneout_mask, gate_params_,
-                    nullptr, nullptr);
+                    nullptr, nullptr, nullptr);
         }
     }
 }
@@ -1074,7 +1110,8 @@ void ForwardPassQuantFP::Run(
     const float *zoneout_mask,
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
@@ -1116,7 +1153,8 @@ void ForwardPassQuantFP::Run(
                         zoneout_prob, 
                         zoneout_mask ? zoneout_mask + i * NH : nullptr,
                         weight_hh_linear_mask ? weight_hh_linear_mask + i * NH3 : nullptr,
-                        gate_mask ? gate_mask + i * NH3 : nullptr,
+                        gate_input_mask ? gate_input_mask + i * NH3 : nullptr,
+                        gate_output_mask ? gate_output_mask + i * NH3 : nullptr,
                         h_mask ? h_mask + i * NH : nullptr);
     }
 

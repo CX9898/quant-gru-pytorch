@@ -40,14 +40,16 @@ class ForwardPassQuant {
     // zoneout_mask: [T*N,H] Zoneout mask（int32_t 存储）
     // weight_ih_linear_mask: [T*N, H*3] weight_ih_linear clamp mask（外部分配，nullptr=不保存）
     // weight_hh_linear_mask: [T*N, H*3] weight_hh_linear clamp mask（外部分配，nullptr=不保存）
-    // gate_mask: [T*N, H*3] gate clamp mask（外部分配，nullptr=不保存）
+    // gate_input_mask: [T*N, H*3] gate input clamp mask（外部分配，nullptr=不保存）
+    // gate_output_mask: [T*N, H*3] gate output clamp mask（外部分配，nullptr=不保存）
     // h_mask: [T*N, H] hidden state clamp mask（外部分配，nullptr=不保存）
     void Run(const int steps, const int32_t *W, const int32_t *R, const int32_t *bw,
              const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
              const float zoneout_prob, const int32_t *zoneout_mask,
              uint8_t *weight_ih_linear_mask = nullptr,
              uint8_t *weight_hh_linear_mask = nullptr,
-             uint8_t *gate_mask = nullptr,
+             uint8_t *gate_input_mask = nullptr,
+             uint8_t *gate_output_mask = nullptr,
              uint8_t *h_mask = nullptr);
 
    private:
@@ -58,7 +60,8 @@ class ForwardPassQuant {
                          const int32_t *cur_linear_x, const float zoneout_prob,
                          const int32_t *zoneout_mask,
                          uint8_t *weight_hh_linear_mask = nullptr,
-                         uint8_t *gate_mask = nullptr,
+                         uint8_t *gate_input_mask = nullptr,
+                         uint8_t *gate_output_mask = nullptr,
                          uint8_t *h_mask = nullptr);
 
     // 计算输入 Linear 变换: W*x + bw（输出到 tmp_linear_x_）
@@ -156,7 +159,8 @@ public:
     /// @param zoneout_mask Zoneout mask
     /// @param weight_ih_linear_mask [T*N, H*3] weight_ih_linear clamp mask（外部分配，nullptr=不保存）
     /// @param weight_hh_linear_mask [T*N, H*3] weight_hh_linear clamp mask（外部分配，nullptr=不保存）
-    /// @param gate_mask [T*N, H*3] gate clamp mask（外部分配，nullptr=不保存）
+    /// @param gate_input_mask [T*N, H*3] gate input clamp mask（外部分配，nullptr=不保存）
+    /// @param gate_output_mask [T*N, H*3] gate output clamp mask（外部分配，nullptr=不保存）
     /// @param h_mask [T*N, H] hidden state clamp mask（外部分配，nullptr=不保存）
     void Run(int steps,
              const float *W, const float *R,
@@ -165,7 +169,8 @@ public:
              float zoneout_prob, const float *zoneout_mask,
              uint8_t *weight_ih_linear_mask = nullptr,
              uint8_t *weight_hh_linear_mask = nullptr,
-             uint8_t *gate_mask = nullptr,
+             uint8_t *gate_input_mask = nullptr,
+             uint8_t *gate_output_mask = nullptr,
              uint8_t *h_mask = nullptr);
 
 private:
@@ -178,7 +183,8 @@ private:
                          const float *cur_weight_ih_linear,
                          float zoneout_prob, const float *zoneout_mask,
                          uint8_t *weight_hh_linear_mask = nullptr,
-                         uint8_t *gate_mask = nullptr,
+                         uint8_t *gate_input_mask = nullptr,
+                         uint8_t *gate_output_mask = nullptr,
                          uint8_t *h_mask = nullptr);
     void EnsureBuffersAllocated(int steps);
     void PrecomputeWeightSums(const float *W, const float *R);
@@ -283,7 +289,8 @@ public:
     /// @param br_mask [H*3] 偏置 br 量化 clamp mask
     /// @param weight_ih_linear_mask [N*T, H*3] W*x+bw 输出 clamp mask
     /// @param weight_hh_linear_mask [N*T, H*3] R*h+br 输出 clamp mask
-    /// @param gate_mask [N*T, H*3] 门输出 clamp mask
+    /// @param gate_input_mask [N*T, H*3] 门输入 clamp mask
+    /// @param gate_output_mask [N*T, H*3] 门输出 clamp mask
     /// @param h_mask [N*T, H] 隐状态输出 clamp mask
     void Run(int steps, const T *W_t, const T *R_t, const T *bw, const T *br,
              const T *x_t, const T *h, const T *v, const T *dh_new,
@@ -298,7 +305,8 @@ public:
              const uint8_t *br_mask = nullptr,
              const uint8_t *weight_ih_linear_mask = nullptr,
              const uint8_t *weight_hh_linear_mask = nullptr,
-             const uint8_t *gate_mask = nullptr,
+             const uint8_t *gate_input_mask = nullptr,
+             const uint8_t *gate_output_mask = nullptr,
              const uint8_t *h_mask = nullptr);
 
 private:
@@ -306,7 +314,8 @@ private:
                          T *dbw, T *dbr, T *dh, T *dp, T *dq,
                          const T *zoneout_mask,
                          const uint8_t *weight_hh_linear_mask,
-                         const uint8_t *gate_mask,
+                         const uint8_t *gate_input_mask,
+                         const uint8_t *gate_output_mask,
                          const uint8_t *h_mask,
                          const uint8_t *bw_mask,
                          const uint8_t *br_mask);
