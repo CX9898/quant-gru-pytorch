@@ -286,3 +286,42 @@ struct LinearQuantParamsGPUFP {
     QuantBitWidth output_bw_ih_;  ///< weight_ih_linear 输出位宽
     QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
 };
+
+// ============================================================================
+// 反向传播 Rescale 参数（用于 QAT 梯度 scale 补偿）
+// ============================================================================
+
+/**
+ * @brief 反向传播 rescale 参数
+ *
+ * 在前向传播中，有多处 div_round 操作（rescale）：
+ *   y = div_round(x, divisor) ≈ x / divisor
+ *
+ * 在反向传播中，梯度需要乘以 divisor 来补偿 scale 变化：
+ *   ∂L/∂x = ∂L/∂y * divisor
+ *
+ * 这确保了实际值（浮点）的梯度在 rescale 前后保持一致。
+ *
+ * 参数命名规则：mul_xxx_to_yyy 表示从 xxx 传回 yyy 时梯度需要乘以的因子
+ */
+struct BackwardRescaleParams {
+    // -------------------- Update Gate 反向 rescale --------------------
+    // dp_z 从 update_gate_input 传回 weight_ih_linear
+    float mul_update_gate_input_to_weight_ih_linear_;  // = div_weight_ih_linear_to_update_gate_input
+    // dq_z 从 update_gate_input 传回 weight_hh_linear
+    float mul_update_gate_input_to_weight_hh_linear_;  // = div_weight_hh_linear_to_update_gate_input
+
+    // -------------------- Reset Gate 反向 rescale --------------------
+    float mul_reset_gate_input_to_weight_ih_linear_;   // = div_weight_ih_linear_to_reset_gate_input
+    float mul_reset_gate_input_to_weight_hh_linear_;   // = div_weight_hh_linear_to_reset_gate_input
+
+    // -------------------- New Gate 反向 rescale --------------------
+    float mul_new_gate_input_to_weight_ih_linear_;     // = div_weight_ih_linear_to_new_gate_input
+    // r*hh 到 new_gate_input 的 rescale（涉及乘法链）
+    float mul_new_gate_input_to_reset_mul_hh_;         // = div_reset_mul_hh_to_new_gate_input
+
+    // -------------------- Hidden State 反向 rescale --------------------
+    // h_new 从 h 空间传回各部分
+    float mul_h_to_update_new_;                        // = div_update_new_to_h
+    float mul_h_to_update_old_;                        // = div_update_old_to_h
+};

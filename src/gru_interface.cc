@@ -124,7 +124,87 @@ GRUQuantParams calculateGRUQuantitativeParameters(
 }
 
 // =====================================================================
-// 前向传播实现
+// 统一前向/反向传播接口（主入口）
+// =====================================================================
+
+// 量化模式选择宏：默认使用浮点存储版（方案2）
+// 如需使用 INT32 版本（方案1），注释掉此行
+// #define USE_FP_STORAGE 1
+
+// 统一前向传播接口（推理/训练）
+// 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
+void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
+                      int input_size, int hidden_size, const float *W, const float *R,
+                      const float *bw, const float *br, const float *x, const float *h0,
+                      const GRUQuantParams &quant_gru_scales,
+                      const cublasHandle_t &g_blas_handle,
+                      float *h, float *v,
+                      // 输入量化 mask（外部分配，nullptr=不保存）
+                      uint8_t *x_mask,
+                      uint8_t *h0_mask,
+                      uint8_t *W_mask,
+                      uint8_t *R_mask,
+                      uint8_t *bw_mask,
+                      uint8_t *br_mask,
+                      // 计算过程 mask（外部分配，nullptr=不保存）
+                      uint8_t *weight_ih_linear_mask,
+                      uint8_t *weight_hh_linear_mask,
+                      uint8_t *gate_mask,
+                      uint8_t *h_mask) {
+    if (is_quant) {
+#if USE_FP_STORAGE
+        // 方案1：浮点存储版（支持 QAT mask）
+        quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
+                          W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v,
+                          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                          weight_ih_linear_mask, weight_hh_linear_mask,
+                          gate_mask, h_mask);
+#else
+        // 方案2：INT32存储版（支持 QAT mask）
+        quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
+                        W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v,
+                        x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                        weight_ih_linear_mask, weight_hh_linear_mask,
+                        gate_mask, h_mask);
+#endif
+    } else {
+        // 非量化模式：使用原始 haste 实现
+        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bw, br,
+                        x, h0, g_blas_handle, h, v);
+    }
+}
+
+void backwardInterface(bool is_quant,
+                       const int time_steps, const int batch_size, const int input_size,
+                       const int hidden_size, const float *W_t, const float *R_t, const float *bw,
+                       const float *br, const float *x_t, const float *dh_new, const float *h,
+                       const float *v, const cublasHandle_t &g_blas_handle, float *dx, float *dW,
+                       float *dR, float *dbw, float *dbr, float *dh,
+                       const GRUQuantParams *quant_params,
+                       const uint8_t *x_mask, const uint8_t *h0_mask,
+                       const uint8_t *W_mask, const uint8_t *R_mask,
+                       const uint8_t *bw_mask, const uint8_t *br_mask,
+                       const uint8_t *weight_ih_linear_mask, const uint8_t *weight_hh_linear_mask,
+                       const uint8_t *gate_mask, const uint8_t *h_mask) {
+    if (is_quant) {
+        // 量化版反向传播（支持 QAT mask 和 rescale 补偿）
+        quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
+                         W_t, R_t, bw, br, x_t, dh_new, h, v, g_blas_handle,
+                         dx, dW, dR, dbw, dbr, dh,
+                         quant_params,
+                         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                         weight_ih_linear_mask, weight_hh_linear_mask,
+                         gate_mask, h_mask);
+    } else {
+        // 非量化版反向传播
+        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
+                         W_t, R_t, bw, br, x_t, dh_new, h, v, g_blas_handle,
+                         dx, dW, dR, dbw, dbr, dh);
+    }
+}
+
+// =====================================================================
+// Haste GRU 前向传播实现
 // =====================================================================
 
 void hasteGRUForward(bool is_training, const int time_steps, const int batch_size,
@@ -205,6 +285,7 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
                       const float *br, const float *x_t, const float *dh_new, const float *h,
                       const float *v, const cublasHandle_t &g_blas_handle, float *dx, float *dW,
                       float *dR, float *dbw, float *dbr, float *dh,
+                      const GRUQuantParams *quant_params,
                       const uint8_t *x_mask, const uint8_t *h0_mask,
                       const uint8_t *W_mask, const uint8_t *R_mask,
                       const uint8_t *bw_mask, const uint8_t *br_mask,
@@ -214,8 +295,13 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size * 3);
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size * 3);
 
-    // 使用量化版反向传播类（支持 QAT mask）
+    // 使用量化版反向传播类（支持 QAT mask 和 rescale 补偿）
     gru::BackwardPassQuant<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
+    
+    // 设置 rescale 参数（如果提供了量化参数）
+    if (quant_params != nullptr) {
+        backward.setRescaleParam(*quant_params);
+    }
 
     backward.Run(time_steps, W_t, R_t, bw, br, x_t, h, v, dh_new,
                  dx, dW, dR, dbw, dbr, dh,
@@ -235,37 +321,6 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
         const char *err_str = cudaGetErrorString(err);
         fprintf(stderr, "CUDA error in quantGRUBackward: %s\n", err_str);
         throw std::runtime_error(std::string("CUDA error in quantGRUBackward: ") + err_str);
-    }
-}
-
-// =====================================================================
-// 统一反向传播接口
-// =====================================================================
-
-void backwardInterface(bool is_quant,
-                       const int time_steps, const int batch_size, const int input_size,
-                       const int hidden_size, const float *W_t, const float *R_t, const float *bw,
-                       const float *br, const float *x_t, const float *dh_new, const float *h,
-                       const float *v, const cublasHandle_t &g_blas_handle, float *dx, float *dW,
-                       float *dR, float *dbw, float *dbr, float *dh,
-                       const uint8_t *x_mask, const uint8_t *h0_mask,
-                       const uint8_t *W_mask, const uint8_t *R_mask,
-                       const uint8_t *bw_mask, const uint8_t *br_mask,
-                       const uint8_t *weight_ih_linear_mask, const uint8_t *weight_hh_linear_mask,
-                       const uint8_t *gate_mask, const uint8_t *h_mask) {
-    if (is_quant) {
-        // 量化版反向传播（支持 QAT mask）
-        quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
-                         W_t, R_t, bw, br, x_t, dh_new, h, v, g_blas_handle,
-                         dx, dW, dR, dbw, dbr, dh,
-                         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-                         weight_ih_linear_mask, weight_hh_linear_mask,
-                         gate_mask, h_mask);
-    } else {
-        // 非量化版反向传播
-        hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
-                         W_t, R_t, bw, br, x_t, dh_new, h, v, g_blas_handle,
-                         dx, dW, dR, dbw, dbr, dh);
     }
 }
 
@@ -366,48 +421,95 @@ void quantGRUForwardInt32(
 // 量化 GRU 前向传播（浮点接口）
 // =====================================================================
 
-// 量化 GRU 前向传播（浮点输入/输出，内部调用 quantGRUForwardInt32）
+// 量化 GRU 前向传播（浮点输入/输出，内部自动量化权重和激活）
 void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
-                     const int input_size, const int hidden_size, const int32_t *W,
-                     const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
+                     const int input_size, const int hidden_size, const float *W,
+                     const float *R, const float *bw, const float *br, const float *x,
                      const float *h0, const GRUQuantParams &quant_parms,
                      const cublasHandle_t &g_blas_handle, float *h, float *v,
+                     // 输入量化 mask
+                     uint8_t *x_mask,
+                     uint8_t *h0_mask,
+                     uint8_t *W_mask,
+                     uint8_t *R_mask,
+                     uint8_t *bw_mask,
+                     uint8_t *br_mask,
+                     // 计算过程 mask
                      uint8_t *weight_ih_linear_mask,
                      uint8_t *weight_hh_linear_mask,
                      uint8_t *gate_mask,
                      uint8_t *h_mask) {
+    const int hidden3 = hidden_size * 3;
     const std::size_t x_size = time_steps * batch_size * input_size;
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
+    const std::size_t h0_size = batch_size * hidden_size;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
 
-    // 1. 量化输入 x
-    dev::vector<int32_t> x_quant(x_size);
-    dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.shift_x_, 
-                                 quant_parms.zp_x_, bw_cfg.x_);
+    // 拷贝 shift 到 device（用于 per-channel 量化）
+    dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
+    dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
+    dev::vector<int8_t> shift_bw_dev(quant_parms.shift_bw_);
+    dev::vector<int8_t> shift_br_dev(quant_parms.shift_br_);
 
-    // 2. 量化初始隐藏状态 h0（空 vector 的 .data() 返回 nullptr）
-    dev::vector<int32_t> h0_quant;
-    if (h0 != nullptr) {
-        h0_quant.resize(batch_size * hidden_size);
-        dev::quantificationBitwidth(h0, h0_quant.data(), batch_size * hidden_size, 
-                                     quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+    // 1. 量化权重
+    dev::vector<int32_t> W_q(input_size * hidden3);
+    dev::vector<int32_t> R_q(hidden_size * hidden3);
+    dev::vector<int32_t> bw_q(hidden3);
+    dev::vector<int32_t> br_q(hidden3);
+
+    if (is_training) {
+        // QAT 训练：使用带 mask 的量化函数
+        dev::quantificationPerChannelBitwidthWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelBitwidthWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelBitwidthWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelBitwidthWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
+    } else {
+        // 推理：使用不带 mask 的量化函数
+        dev::quantificationPerChannelBitwidth(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelBitwidth(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelBitwidth(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelBitwidth(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
     }
 
-    // 3. 分配输出缓冲区
+    // 2. 量化输入 x
+    dev::vector<int32_t> x_quant(x_size);
+    if (is_training) {
+        dev::quantificationBitwidthWithMask(x, x_quant.data(), x_mask, x_size, 
+                                             quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
+    } else {
+        dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.shift_x_, 
+                                     quant_parms.zp_x_, bw_cfg.x_);
+    }
+
+    // 3. 量化初始隐藏状态 h0（空 vector 的 .data() 返回 nullptr）
+    dev::vector<int32_t> h0_quant;
+    if (h0 != nullptr) {
+        h0_quant.resize(h0_size);
+        if (is_training) {
+            dev::quantificationBitwidthWithMask(h0, h0_quant.data(), h0_mask, h0_size, 
+                                                 quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+        } else {
+            dev::quantificationBitwidth(h0, h0_quant.data(), h0_size, 
+                                         quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+        }
+    }
+
+    // 4. 分配输出缓冲区
     dev::vector<int32_t> h_quant(h_size);
     dev::vector<int32_t> v_quant(v != nullptr ? time_steps * batch_size * hidden_size * 4 : 0);
 
-    // 4. 调用核心定点计算（传递 mask 指针）
+    // 5. 调用核心定点计算（传递 mask 指针）
     quantGRUForwardInt32(is_training, time_steps, batch_size, input_size, hidden_size,
-                         W, R, bw, br, x_quant.data(), h0_quant.data(),
+                         W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                         x_quant.data(), h0_quant.data(),
                          quant_parms, g_blas_handle,
                          h_quant.data(), v != nullptr ? v_quant.data() : nullptr,
                          weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask);
 
-    // 5. 反量化输出 h
+    // 6. 反量化输出 h
     dev::dequantification(h_quant.data(), h, h_size, quant_parms.shift_h_, quant_parms.zp_h_);
 
-    // 6. 反量化中间值 v（如需要）
+    // 7. 反量化中间值 v（如需要）
     if (v != nullptr) {
         dev::dequantificationV(v_quant.data(), v, time_steps, batch_size, hidden_size,
                                quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_,
@@ -545,104 +647,9 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
                        quant_parms, h, v);
 }
 
-// 量化模式选择宏：默认使用浮点存储版（方案2）
-// 如需使用 INT32 版本（方案1），注释掉此行
-#define USE_FP_STORAGE 1
-
-// 统一前向传播接口（推理/训练）
-// 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
-void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch_size,
-                      int input_size, int hidden_size, const float *W, const float *R,
-                      const float *bw, const float *br, const float *x, const float *h0,
-                      const GRUQuantParams &quant_gru_scales,
-                      const cublasHandle_t &g_blas_handle,
-                      float *h, float *v,
-                      // 输入量化 mask（外部分配，nullptr=不保存）
-                      uint8_t *x_mask,
-                      uint8_t *h0_mask,
-                      uint8_t *W_mask,
-                      uint8_t *R_mask,
-                      uint8_t *bw_mask,
-                      uint8_t *br_mask,
-                      // 计算过程 mask（外部分配，nullptr=不保存）
-                      uint8_t *weight_ih_linear_mask,
-                      uint8_t *weight_hh_linear_mask,
-                      uint8_t *gate_mask,
-                      uint8_t *h_mask) {
-    if (is_quant) {
-#if USE_FP_STORAGE
-        // 方案2：浮点存储版（支持 QAT mask）
-        quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
-                          W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v,
-                          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-                          weight_ih_linear_mask, weight_hh_linear_mask,
-                          gate_mask, h_mask);
-#else
-        // 方案1：INT32存储版（需要先量化权重）
-        // 注意：INT32 版本的输入量化 mask 暂不支持，仅支持计算过程 mask
-        const int hidden3 = hidden_size * 3;
-        
-        // 量化权重
-        std::vector<int32_t> W_quant(input_size * hidden3);
-        std::vector<int32_t> R_quant(hidden_size * hidden3);
-        std::vector<int32_t> bw_quant(hidden3);
-        std::vector<int32_t> br_quant(hidden3);
-        
-        quantitativeWeight(input_size, hidden_size, W, R, bw, br, quant_gru_scales,
-                          W_quant.data(), R_quant.data(), bw_quant.data(), br_quant.data());
-        
-        // 拷贝量化权重到 GPU
-        dev::vector<int32_t> W_q_dev(W_quant);
-        dev::vector<int32_t> R_q_dev(R_quant);
-        dev::vector<int32_t> bw_q_dev(bw_quant);
-        dev::vector<int32_t> br_q_dev(br_quant);
-        
-        // 调用 INT32 版本
-        quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
-                       W_q_dev.data(), R_q_dev.data(), bw_q_dev.data(), br_q_dev.data(),
-                       x, h0, quant_gru_scales, g_blas_handle, h, v,
-                       weight_ih_linear_mask, weight_hh_linear_mask,
-                       gate_mask, h_mask);
-#endif
-    } else {
-        // 非量化模式：使用原始 haste 实现
-        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size, W, R, bw, br,
-                        x, h0, g_blas_handle, h, v);
-    }
-}
-
 // =====================================================================
 // 浮点存储版量化 GRU 前向传播（GPU-FP）
 // =====================================================================
-
-// GPU 量化权重为浮点存储格式
-void quantitativeWeightFP(
-    int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br,
-    const GRUQuantParams &quant_params,
-    float *W_q, float *R_q, float *bw_q, float *br_q) {
-    
-    const int hidden3 = hidden_size * 3;
-    const auto &bw_cfg = quant_params.bitwidth_config_;
-    
-    // 拷贝 shift 到 device
-    dev::vector<int8_t> shift_W_dev(quant_params.shift_W_);
-    dev::vector<int8_t> shift_R_dev(quant_params.shift_R_);
-    dev::vector<int8_t> shift_bw_dev(quant_params.shift_bw_);
-    dev::vector<int8_t> shift_br_dev(quant_params.shift_br_);
-    
-    // 量化 W [input_size, hidden3] - per-channel (device 端)
-    dev::quantificationPerChannelFP(W, W_q, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-    
-    // 量化 R [hidden_size, hidden3] - per-channel (device 端)
-    dev::quantificationPerChannelFP(R, R_q, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-    
-    // 量化 bw [1, hidden3] - per-channel (device 端)
-    dev::quantificationPerChannelFP(bw, bw_q, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-    
-    // 量化 br [1, hidden3] - per-channel (device 端)
-    dev::quantificationPerChannelFP(br, br_q, 1, hidden3, shift_br_dev, bw_cfg.br_);
-}
 
 void quantGRUForwardFP(
     bool is_training,
@@ -652,14 +659,14 @@ void quantGRUForwardFP(
     const GRUQuantParams &quant_params,
     const cublasHandle_t &g_blas_handle,
     float *h, float *v,
-    // 输入量化 mask（外部分配，nullptr=不保存）
+    // 输入量化 mask（训练时外部分配，推理时可为 nullptr）
     uint8_t *x_mask,
     uint8_t *h0_mask,
     uint8_t *W_mask,
     uint8_t *R_mask,
     uint8_t *bw_mask,
     uint8_t *br_mask,
-    // 计算过程 mask（外部分配，nullptr=不保存）
+    // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
     uint8_t *gate_mask,
@@ -677,64 +684,35 @@ void quantGRUForwardFP(
     dev::vector<int8_t> shift_bw_dev(quant_params.shift_bw_);
     dev::vector<int8_t> shift_br_dev(quant_params.shift_br_);
     
-    // 1. 量化权重（GPU 端，带可选 mask）
+    // 分配量化缓冲区
     dev::vector<float> W_q(input_size * hidden3);
     dev::vector<float> R_q(hidden_size * hidden3);
     dev::vector<float> bw_q(hidden3);
     dev::vector<float> br_q(hidden3);
-    
-    if (W_mask != nullptr) {
-        dev::quantificationPerChannelFPWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-    } else {
-        dev::quantificationPerChannelFP(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
-    }
-    
-    if (R_mask != nullptr) {
-        dev::quantificationPerChannelFPWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-    } else {
-        dev::quantificationPerChannelFP(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-    }
-    
-    if (bw_mask != nullptr) {
-        dev::quantificationPerChannelFPWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-    } else {
-        dev::quantificationPerChannelFP(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-    }
-    
-    if (br_mask != nullptr) {
-        dev::quantificationPerChannelFPWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
-    } else {
-        dev::quantificationPerChannelFP(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
-    }
-    
-    // 2. 量化输入 x（GPU 端，带可选 mask）
     dev::vector<float> x_q(x_size);
-    if (x_mask != nullptr) {
+    dev::vector<float> h_q(h_size);
+    dev::vector<float> v_internal(v != nullptr ? time_steps * batch_size * hidden_size * 4 : 0);
+    
+    // 量化权重和输入
+    if (is_training) {
+        dev::quantificationPerChannelFPWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelFPWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelFPWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFPWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
         dev::quantificationFPWithMask(x, x_q.data(), x_mask, x_size, quant_params.shift_x_, 
                                       quant_params.zp_x_, bw_cfg.x_);
     } else {
+        dev::quantificationPerChannelFP(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelFP(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelFP(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFP(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
         dev::quantificationFP(x, x_q.data(), x_size, quant_params.shift_x_, 
                               quant_params.zp_x_, bw_cfg.x_);
     }
     
-    // 3. 分配输出缓冲区（GPU 端）
-    dev::vector<float> h_q(h_size);
-    
-    // 4. 分配中间值缓冲区（与 INT32 版本保持一致：总是分配）
-    dev::vector<float> v_internal;
-    float* v_ptr = nullptr;
-    if (v != nullptr) {
-        v_internal.resize(time_steps * batch_size * hidden_size * 4);
-        v_ptr = v_internal.data();
-    } else {
-        // 即使 v==nullptr，也分配临时缓冲区（避免 Training 模板写 nullptr）
-        v_internal.resize(time_steps * batch_size * hidden_size * 4);
-        v_ptr = v_internal.data();
-    }
-    
-    // 5. 初始化 h_q[0]（带可选 mask）
+    // 量化 h0
     if (h0 != nullptr) {
-        if (h0_mask != nullptr) {
+        if (is_training) {
             dev::quantificationFPWithMask(h0, h_q.data(), h0_mask, NH, quant_params.shift_h_,
                                           quant_params.zp_h_, bw_cfg.h_);
         } else {
@@ -746,27 +724,22 @@ void quantGRUForwardFP(
         dev::fill_n(h_q.data(), NH, static_cast<float>(quant_params.zp_h_));
     }
     
-    // 6. 创建浮点版前向传播对象
+    // 前向传播
     gru::ForwardPassQuantFP forward_fp(is_training, batch_size, input_size, hidden_size,
                                        g_blas_handle, nullptr);
     forward_fp.setRescaleParam(quant_params);
-    
-    // 7. 运行前向传播
-    // 注意：is_training=true 时，mask 指针必须有效（调用方负责分配）
     forward_fp.Run(time_steps, W_q.data(), R_q.data(),
                    bw_q.data(), br_q.data(),
                    x_q.data(), h_q.data(),
-                   v_ptr,
+                   v != nullptr ? v_internal.data() : nullptr,
                    0.0f, nullptr,
                    weight_ih_linear_mask,
                    weight_hh_linear_mask,
                    gate_mask,
                    h_mask);
     
-    // 8. 反量化输出 h（GPU 端）
+    // 反量化输出
     dev::dequantificationFP(h_q.data(), h, h_size, quant_params.shift_h_, quant_params.zp_h_);
-    
-    // 9. 反量化中间值 v（如需要，GPU 端）
     if (v != nullptr) {
         dev::dequantificationVFP(v_internal.data(), v, time_steps, batch_size, hidden_size,
                                  quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
@@ -775,10 +748,7 @@ void quantGRUForwardFP(
                                  quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
     }
     
-    // 同步 CUDA 操作
     cudaDeviceSynchronize();
-    
-    // 检查 CUDA 错误
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         const char *err_str = cudaGetErrorString(err);
@@ -786,45 +756,6 @@ void quantGRUForwardFP(
         throw std::runtime_error(std::string("CUDA error in quantGRUForwardFP: ") + err_str);
     }
 }
-
-// 统一前向传播接口（浮点存储版）
-void forwardInterfaceFP(
-    bool is_training, bool is_quant,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br,
-    const float *x, const float *h0,
-    const GRUQuantParams &quant_params,
-    const cublasHandle_t &g_blas_handle,
-    float *h, float *v,
-    // 输入量化 mask（外部分配，nullptr=不保存）
-    uint8_t *x_mask,
-    uint8_t *h0_mask,
-    uint8_t *W_mask,
-    uint8_t *R_mask,
-    uint8_t *bw_mask,
-    uint8_t *br_mask,
-    // 计算过程 mask（外部分配，nullptr=不保存）
-    uint8_t *weight_ih_linear_mask,
-    uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
-    uint8_t *h_mask) {
-    
-    if (is_quant) {
-        quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
-                          W, R, bw, br, x, h0, quant_params, g_blas_handle, h, v,
-                          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-                          weight_ih_linear_mask, weight_hh_linear_mask,
-                          gate_mask, h_mask);
-    } else {
-        hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
-                        W, R, bw, br, x, h0, g_blas_handle, h, v);
-    }
-}
-
-// =====================================================================
-// 注：模板已移除，所有量化函数现在使用统一的 int32_t 存储
-// quantitativeWeight 和 quantGRUForward 现在是普通函数（非模板）
-// =====================================================================
 
 // =====================================================================
 // GPU 直方图收集器转换函数

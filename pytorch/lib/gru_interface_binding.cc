@@ -604,7 +604,7 @@ haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int h
 }
 
 // ============================================================================
-// 统一反向传播包装函数（支持 QAT mask）
+// 统一反向传播包装函数（支持 QAT mask 和 rescale 补偿）
 // ============================================================================
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 backward_wrapper(bool is_quant,
@@ -614,6 +614,8 @@ backward_wrapper(bool is_quant,
                  const torch::Tensor &dh_new,
                  const torch::Tensor &h,
                  const torch::Tensor &v,
+                 // 以下为量化相关参数
+                 const GRUQuantParamsPy &quant_params,
                  // QAT masks
                  const torch::Tensor &x_mask,
                  const torch::Tensor &h0_mask,
@@ -682,6 +684,14 @@ backward_wrapper(bool is_quant,
         return t.numel() > 0 ? t.data_ptr<uint8_t>() : nullptr;
     };
 
+    // 转换量化参数（如果是量化模式且有有效参数）
+    const GRUQuantParams *quant_params_ptr = nullptr;
+    GRUQuantParams cpp_params;
+    if (is_quant && quant_params.hidden_ > 0) {
+        cpp_params = quant_params.to_cpp();
+        quant_params_ptr = &cpp_params;
+    }
+
     // 调用 C++ 统一反向接口
     backwardInterface(
         is_quant,
@@ -695,6 +705,8 @@ backward_wrapper(bool is_quant,
         dx.data_ptr<float>(), dW.data_ptr<float>(),
         dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
         dh.data_ptr<float>(),
+        // 量化相关参数
+        quant_params_ptr,
         // QAT masks
         get_mask_ptr(x_mask),
         get_mask_ptr(h0_mask),
@@ -1226,18 +1238,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("x"), py::arg("dh_new"), py::arg("h"),
           py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbw, dbr, dh) 元组
 
-    // GRU 统一反向传播接口（支持 QAT mask）
+    // GRU 统一反向传播接口（支持 QAT mask 和 rescale 补偿）
     m.def("backward", &backward_wrapper,
-          "Unified GRU backward pass with optional QAT mask support.\n"
+          "Unified GRU backward pass with optional QAT mask support and rescale compensation.\n"
           "\n"
           "Args:\n"
-          "  is_quant: Whether to use quantized backward (applies masks via STE)\n"
+          "  is_quant: Whether to use quantized backward (applies masks via STE and rescale)\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
           "  W, R, bw, br: Weight tensors in Haste format\n"
           "  x: Input tensor [T, B, I]\n"
           "  dh_new: Upstream gradient [T+1, B, H]\n"
           "  h: Hidden states from forward [T+1, B, H]\n"
           "  v: Intermediate values from forward [T, B, H*4]\n"
+          "  quant_params: Quantization parameters (for rescale compensation)\n"
           "  x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask: Input/weight clamp masks\n"
           "  weight_ih_linear_mask, weight_hh_linear_mask: Linear output clamp masks\n"
           "  gate_mask, h_mask: Gate and hidden state clamp masks\n"
@@ -1246,13 +1259,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n"
           "\n"
           "Note:\n"
-          "  - When is_quant=True, all masks are applied in C++ (STE)\n"
-          "  - When is_quant=False, masks are ignored (uses hasteGRUBackward)\n"
-          "  - Empty tensors for masks are treated as nullptr (no masking)",
+          "  - When is_quant=True, masks and rescale compensation are applied in C++\n"
+          "  - When is_quant=False, masks and quant_params are ignored\n"
+          "  - Rescale compensation: gradients are multiplied by divisor to compensate div_round",
           py::arg("is_quant"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
           py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"),
           py::arg("x"), py::arg("dh_new"), py::arg("h"), py::arg("v"),
+          py::arg("quant_params"),
           py::arg("x_mask") = torch::Tensor(),
           py::arg("h0_mask") = torch::Tensor(),
           py::arg("W_mask") = torch::Tensor(),

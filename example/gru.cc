@@ -232,9 +232,9 @@ void runQuantInferenceFP(int time_steps, int batch_size, int input_size, int hid
                          const float *W, const float *R, const float *bw, const float *br,
                          const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU-FP):");
-    // 使用统一接口，内部会自动处理量化/反量化
-    forwardInterfaceFP(false, true, time_steps, batch_size, input_size, hidden_size,
-                       W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
+    // 直接调用浮点存储版量化前向
+    quantGRUForwardFP(false, time_steps, batch_size, input_size, hidden_size,
+                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
 }
 
 // ==================== 直方图收集性能比较 ====================
@@ -681,12 +681,12 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining (GPU-FP) Forward:");
-            forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                               br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                               h_train.data(), v_train.data(),
-                               nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                               weight_ih_mask_fp.data(), weight_hh_mask_fp.data(),
-                               gate_mask_fp.data(), h_mask_fp.data());
+            quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
+                              h_train.data(), v_train.data(),
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                              weight_ih_mask_fp.data(), weight_hh_mask_fp.data(),
+                              gate_mask_fp.data(), h_mask_fp.data());
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -765,11 +765,11 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_fp(T * B * H * 4);
         dev::vector<uint8_t> mask_ih_fp(T * B * H * 3), mask_hh_fp(T * B * H * 3);
         dev::vector<uint8_t> mask_gate_fp(T * B * H * 3), mask_h_fp(T * B * H);
-        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_fp.data(), mask_h_fp.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                          h_fp.data(), v_fp.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_fp.data(), mask_h_fp.data());
         
         // 比较
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
@@ -791,9 +791,9 @@ int main(int argc, char *argv[]) {
         forwardInterface(false, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                          h_int_inf.data(), nullptr);
-        forwardInterfaceFP(false, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                           h_fp_inf.data(), nullptr);
+        quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                          h_fp_inf.data(), nullptr);
         
         std::vector<float> h_int_inf_cpu, h_fp_inf_cpu;
         d2h(h_int_inf_cpu, h_int_inf);
@@ -828,11 +828,11 @@ int main(int argc, char *argv[]) {
                          h_int.data(), v_int.data(),
                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                          m1.data(), m2.data(), m3.data(), m4.data());
-        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           m5.data(), m6.data(), m7.data(), m8.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+                          h_fp.data(), v_fp.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          m5.data(), m6.data(), m7.data(), m8.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);
@@ -865,11 +865,11 @@ int main(int argc, char *argv[]) {
                          h_int.data(), v_int.data(),
                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                          m1.data(), m2.data(), m3.data(), m4.data());
-        forwardInterfaceFP(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
-                           h_fp.data(), v_fp.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           m5.data(), m6.data(), m7.data(), m8.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+                          h_fp.data(), v_fp.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          m5.data(), m6.data(), m7.data(), m8.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);

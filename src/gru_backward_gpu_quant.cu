@@ -58,10 +58,11 @@ __global__ void ApplyMaskKernel(T *data, const uint8_t *mask, size_t size) {
 }
 
 /**
- * @brief 量化 GRU 反向传播 pointwise 操作（带 mask 支持）
+ * @brief 量化 GRU 反向传播 pointwise 操作（带 mask 支持和 rescale 补偿）
  *
  * @tparam T 数据类型
  * @tparam ApplyZoneout 是否应用 Zoneout
+ * @tparam ApplyRescale 是否应用 rescale 补偿
  *
  * 输入：
  *   - h: [N, H] 上一时间步隐状态
@@ -73,15 +74,21 @@ __global__ void ApplyMaskKernel(T *data, const uint8_t *mask, size_t size) {
  *   - h_mask: [N, H] 隐状态输出 clamp mask
  *   - bw_mask: [H*3] 偏置 bw 量化 clamp mask
  *   - br_mask: [H*3] 偏置 br 量化 clamp mask
+ *   - rescale_params: 反向传播 rescale 参数（ApplyRescale=true 时使用）
  *
  * 输出：
  *   - dbw_out: [H*3] 输入偏置梯度（atomicAdd 累加）
  *   - dbr_out: [H*3] 循环偏置梯度（atomicAdd 累加）
  *   - dh_inout: [N, H] 传递到上一时间步的隐状态梯度
- *   - dp_out: [N, H*3] dp 中间梯度
- *   - dq_out: [N, H*3] dq 中间梯度
+ *   - dp_out: [N, H*3] dp 中间梯度（传回 weight_ih_linear）
+ *   - dq_out: [N, H*3] dq 中间梯度（传回 weight_hh_linear）
+ *
+ * Rescale 补偿说明：
+ *   前向传播中：gate_input = div_round(linear_output, divisor)
+ *   反向传播中：d_linear_output = d_gate_input * divisor
+ *   dp 和 dq 是相对于 gate_input 的梯度，需要乘以 divisor 才能传回 linear_output
  */
-template <typename T, bool ApplyZoneout>
+template <typename T, bool ApplyZoneout, bool ApplyRescale>
 __global__ void PointwiseOperationsQuant(
     const int batch_dim, const int hidden_dim,
     const T *h, const T *v, const T *dh_new,
@@ -91,7 +98,12 @@ __global__ void PointwiseOperationsQuant(
     const uint8_t *gate_mask,
     const uint8_t *h_mask,
     const uint8_t *bw_mask,
-    const uint8_t *br_mask) {
+    const uint8_t *br_mask,
+    // Rescale 参数（ApplyRescale=true 时使用）
+    const T mul_update_ih, const T mul_update_hh,
+    const T mul_reset_ih, const T mul_reset_hh,
+    const T mul_new_ih, const T mul_new_rh,
+    const T mul_h_new, const T mul_h_old) {
     
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
     const int col = blockDim.y * blockIdx.y + threadIdx.y;
@@ -127,6 +139,7 @@ __global__ void PointwiseOperationsQuant(
         dh_inout[base_idx] = z * dh_total;
     }
 
+    // 标准 GRU 反向传播计算
     const T dg = (static_cast<T>(1.0) - z) * dh_total;
     const T dz = (h[base_idx] - g) * dh_total;
     const T dp_g = d_tanh(g) * dg;
@@ -139,7 +152,7 @@ __global__ void PointwiseOperationsQuant(
 
     const int idx = col * (hidden_dim * 3) + row;
 
-    // 初始化输出梯度
+    // 初始化输出梯度（这些是相对于 gate_input 的梯度）
     T final_dp_z = dp_z;
     T final_dp_r = dp_r;
     T final_dp_g = dp_g;
@@ -167,6 +180,25 @@ __global__ void PointwiseOperationsQuant(
         }
     }
 
+    // ========== Rescale 补偿 ==========
+    // 前向：gate_input = div_round(linear_output, divisor)
+    // 反向：d_linear_output = d_gate_input * divisor
+    // dp 传回 weight_ih_linear，dq 传回 weight_hh_linear
+    if constexpr (ApplyRescale) {
+        // Update gate: dp_z 和 dq_z 分别乘以对应的 rescale 因子
+        final_dp_z *= mul_update_ih;
+        final_dq_z *= mul_update_hh;
+        
+        // Reset gate: dp_r 和 dq_r
+        final_dp_r *= mul_reset_ih;
+        final_dq_r *= mul_reset_hh;
+        
+        // New gate: dp_g 和 dq_g
+        // 注意：new gate 的 hh 路径经过 reset_gate * hh_linear，rescale 更复杂
+        final_dp_g *= mul_new_ih;
+        final_dq_g *= mul_new_rh;  // r * weight_hh_linear_g 的 rescale
+    }
+
     // 应用 weight_hh_linear_mask（STE：R*h+br 输出被 clamp 时 dq 梯度置零）
     if (weight_hh_linear_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
@@ -178,7 +210,7 @@ __global__ void PointwiseOperationsQuant(
         if (weight_hh_linear_mask[g_mask_idx] != 0) final_dq_g = static_cast<T>(0.0);
     }
 
-    // 写出 dp 和 dq
+    // 写出 dp 和 dq（现在是相对于 linear_output 的梯度）
     dp_out[idx + 0 * hidden_dim] = final_dp_z;
     dp_out[idx + 1 * hidden_dim] = final_dp_r;
     dp_out[idx + 2 * hidden_dim] = final_dp_g;
@@ -263,6 +295,59 @@ BackwardPassQuant<T>::~BackwardPassQuant() {
 }
 
 template <typename T>
+void BackwardPassQuant<T>::setRescaleParam(const GRUQuantParams &params) {
+    // 从前向传播参数计算反向传播 rescale 因子
+    //
+    // 前向：gate_input = div_round(linear_output, divisor) ≈ linear_output / divisor
+    //       其中 divisor = 2^(shift_linear - shift_gate_input)
+    //
+    // 反向（链式法则）：
+    //   ∂gate_input/∂linear_output = 1/divisor
+    //   d_linear_output = d_gate_input × (1/divisor) = d_gate_input / divisor
+    //
+    // 所以 mul = 1/divisor = 2^(-(shift_linear - shift_gate_input)) = 2^(shift_gate_input - shift_linear)
+    //
+    // 注意：取负号！前向除以 divisor，反向也除以 divisor（不是乘以）
+    
+    // Update gate rescale 因子
+    // shift_diff = shift_update_gate_input - shift_weight_ih_linear (取负)
+    int shift_diff_update_ih = params.shift_update_gate_input_ - params.shift_weight_ih_linear_;
+    int shift_diff_update_hh = params.shift_update_gate_input_ - params.shift_weight_hh_linear_;
+    rescale_params_.mul_update_gate_input_to_weight_ih_linear_ = exp2f(static_cast<float>(shift_diff_update_ih));
+    rescale_params_.mul_update_gate_input_to_weight_hh_linear_ = exp2f(static_cast<float>(shift_diff_update_hh));
+    
+    // Reset gate rescale 因子
+    int shift_diff_reset_ih = params.shift_reset_gate_input_ - params.shift_weight_ih_linear_;
+    int shift_diff_reset_hh = params.shift_reset_gate_input_ - params.shift_weight_hh_linear_;
+    rescale_params_.mul_reset_gate_input_to_weight_ih_linear_ = exp2f(static_cast<float>(shift_diff_reset_ih));
+    rescale_params_.mul_reset_gate_input_to_weight_hh_linear_ = exp2f(static_cast<float>(shift_diff_reset_hh));
+    
+    // New gate rescale 因子
+    int shift_diff_new_ih = params.shift_new_gate_input_ - params.shift_weight_ih_linear_;
+    rescale_params_.mul_new_gate_input_to_weight_ih_linear_ = exp2f(static_cast<float>(shift_diff_new_ih));
+    
+    // r * weight_hh_linear_g 的 rescale：
+    // 前向：reset_mul_hh = r * hh_linear，然后 rescale 到 new_gate_input
+    // shift_reset_mul_hh = shift_reset_gate_output + shift_weight_hh_linear
+    // shift_diff = shift_new_gate_input - shift_reset_mul_hh (取负)
+    int shift_reset_mul_hh = params.shift_reset_gate_output_ + params.shift_weight_hh_linear_;
+    int shift_diff_new_rh = params.shift_new_gate_input_ - shift_reset_mul_hh;
+    rescale_params_.mul_new_gate_input_to_reset_mul_hh_ = exp2f(static_cast<float>(shift_diff_new_rh));
+    
+    // Hidden state 更新 rescale 因子
+    // (1-u) * n 和 u * h 到 h 的 rescale
+    // 前向：h_new = div_round((1-u)*n, divisor_new) + div_round(u*h_old, divisor_old)
+    int shift_update_new = params.shift_update_gate_output_ + params.shift_new_gate_output_;
+    int shift_update_old = params.shift_update_gate_output_ + params.shift_h_;
+    int shift_diff_h_new = params.shift_h_ - shift_update_new;
+    int shift_diff_h_old = params.shift_h_ - shift_update_old;
+    rescale_params_.mul_h_to_update_new_ = exp2f(static_cast<float>(shift_diff_h_new));
+    rescale_params_.mul_h_to_update_old_ = exp2f(static_cast<float>(shift_diff_h_old));
+    
+    rescale_params_set_ = true;
+}
+
+template <typename T>
 void BackwardPassQuant<T>::IterateInternal(
     const T *R_t, const T *h, const T *v, const T *dh_new,
     T *dbw, T *dbr, T *dh, T *dp, T *dq,
@@ -288,21 +373,60 @@ void BackwardPassQuant<T>::IterateInternal(
                        (batch_size + blockDim.y - 1) / blockDim.y);
 
     const bool apply_zoneout = (zoneout_mask != nullptr);
+    const bool apply_rescale = rescale_params_set_;
+    
+    // Rescale 参数
+    const T mul_update_ih = static_cast<T>(rescale_params_.mul_update_gate_input_to_weight_ih_linear_);
+    const T mul_update_hh = static_cast<T>(rescale_params_.mul_update_gate_input_to_weight_hh_linear_);
+    const T mul_reset_ih = static_cast<T>(rescale_params_.mul_reset_gate_input_to_weight_ih_linear_);
+    const T mul_reset_hh = static_cast<T>(rescale_params_.mul_reset_gate_input_to_weight_hh_linear_);
+    const T mul_new_ih = static_cast<T>(rescale_params_.mul_new_gate_input_to_weight_ih_linear_);
+    const T mul_new_rh = static_cast<T>(rescale_params_.mul_new_gate_input_to_reset_mul_hh_);
+    const T mul_h_new = static_cast<T>(rescale_params_.mul_h_to_update_new_);
+    const T mul_h_old = static_cast<T>(rescale_params_.mul_h_to_update_old_);
 
-    if (apply_zoneout) {
-        kernel::PointwiseOperationsQuant<T, true>
-            <<<gridDim, blockDim, 0, stream1>>>(
-                batch_size, hidden_size, h, v, dh_new,
-                dbw, dbr, dh, dp, dq,
-                zoneout_mask, weight_hh_linear_mask, gate_mask, h_mask,
-                bw_mask, br_mask);
+    // 根据 zoneout 和 rescale 选择正确的 kernel 实例
+    if (apply_rescale) {
+        if (apply_zoneout) {
+            kernel::PointwiseOperationsQuant<T, true, true>
+                <<<gridDim, blockDim, 0, stream1>>>(
+                    batch_size, hidden_size, h, v, dh_new,
+                    dbw, dbr, dh, dp, dq,
+                    zoneout_mask, weight_hh_linear_mask, gate_mask, h_mask,
+                    bw_mask, br_mask,
+                    mul_update_ih, mul_update_hh, mul_reset_ih, mul_reset_hh,
+                    mul_new_ih, mul_new_rh, mul_h_new, mul_h_old);
+        } else {
+            kernel::PointwiseOperationsQuant<T, false, true>
+                <<<gridDim, blockDim, 0, stream1>>>(
+                    batch_size, hidden_size, h, v, dh_new,
+                    dbw, dbr, dh, dp, dq,
+                    nullptr, weight_hh_linear_mask, gate_mask, h_mask,
+                    bw_mask, br_mask,
+                    mul_update_ih, mul_update_hh, mul_reset_ih, mul_reset_hh,
+                    mul_new_ih, mul_new_rh, mul_h_new, mul_h_old);
+        }
     } else {
-        kernel::PointwiseOperationsQuant<T, false>
-            <<<gridDim, blockDim, 0, stream1>>>(
-                batch_size, hidden_size, h, v, dh_new,
-                dbw, dbr, dh, dp, dq,
-                nullptr, weight_hh_linear_mask, gate_mask, h_mask,
-                bw_mask, br_mask);
+        // 不应用 rescale（兼容非量化训练）
+        if (apply_zoneout) {
+            kernel::PointwiseOperationsQuant<T, true, false>
+                <<<gridDim, blockDim, 0, stream1>>>(
+                    batch_size, hidden_size, h, v, dh_new,
+                    dbw, dbr, dh, dp, dq,
+                    zoneout_mask, weight_hh_linear_mask, gate_mask, h_mask,
+                    bw_mask, br_mask,
+                    static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0),
+                    static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0));
+        } else {
+            kernel::PointwiseOperationsQuant<T, false, false>
+                <<<gridDim, blockDim, 0, stream1>>>(
+                    batch_size, hidden_size, h, v, dh_new,
+                    dbw, dbr, dh, dp, dq,
+                    nullptr, weight_hh_linear_mask, gate_mask, h_mask,
+                    bw_mask, br_mask,
+                    static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0),
+                    static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0), static_cast<T>(1.0));
+        }
     }
     cudaEventRecord(event, stream1);
 
