@@ -122,7 +122,8 @@ void quantitativeWeight(const int input_size, const int hidden_size,
 //   计算过程 mask:
 //     weight_ih_linear_mask: [T*B*H*3]
 //     weight_hh_linear_mask: [T*B*H*3]
-//     gate_mask: [T*B*H*3]
+//     gate_input_mask: [T*B*H*3] 门输入 clamp mask
+//     gate_output_mask: [T*B*H*3] 门输出 clamp mask
 //     h_mask: [T*B*H]
 void quantGRUForward(
     bool is_training,
@@ -141,7 +142,8 @@ void quantGRUForward(
     // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_mask = nullptr,
+    uint8_t *gate_input_mask = nullptr,
+    uint8_t *gate_output_mask = nullptr,
     uint8_t *h_mask = nullptr);
 
 // =====================================================================
@@ -206,7 +208,8 @@ void quantGRUForwardCPU(
 // QAT mask 输出（外部分配，nullptr=不保存）:
 //   weight_ih_linear_mask: [T*B, H*3]
 //   weight_hh_linear_mask: [T*B, H*3]
-//   gate_mask: [T*B, H*3]
+//   gate_input_mask: [T*B, H*3] 门输入 clamp mask
+//   gate_output_mask: [T*B, H*3] 门输出 clamp mask
 //   h_mask: [T*B, H]
 void quantGRUForwardInt32(
     bool is_training,
@@ -218,7 +221,8 @@ void quantGRUForwardInt32(
     int32_t *h_q, int32_t *v_q,
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_mask = nullptr,
+    uint8_t *gate_input_mask = nullptr,
+    uint8_t *gate_output_mask = nullptr,
     uint8_t *h_mask = nullptr);
 
 // 浮点 GRU 前向传播
@@ -262,7 +266,8 @@ void forwardInterface(
     // 计算过程 mask（外部分配，nullptr=不保存）
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_mask = nullptr,
+    uint8_t *gate_input_mask = nullptr,
+    uint8_t *gate_output_mask = nullptr,
     uint8_t *h_mask = nullptr);
 
 // =====================================================================
@@ -367,7 +372,8 @@ void quantGRUForwardFP(
     // 计算过程 mask（外部分配，nullptr=不保存）
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_mask = nullptr,
+    uint8_t *gate_input_mask = nullptr,
+    uint8_t *gate_output_mask = nullptr,
     uint8_t *h_mask = nullptr);
 
 
@@ -425,7 +431,8 @@ void hasteGRUBackward(
 //   - br_mask [H*3] → dbr
 //   - weight_ih_linear_mask [T*B, H*3] → dp
 //   - weight_hh_linear_mask [T*B, H*3] → dq
-//   - gate_mask [T*B, H*3] → 门梯度
+//   - gate_input_mask [T*B, H*3] → 门输入梯度
+//   - gate_output_mask [T*B, H*3] → 门输出梯度
 //   - h_mask [T*B, H] → 隐状态梯度
 //
 void quantGRUBackward(
@@ -448,7 +455,8 @@ void quantGRUBackward(
     const uint8_t *br_mask = nullptr,
     const uint8_t *weight_ih_linear_mask = nullptr,
     const uint8_t *weight_hh_linear_mask = nullptr,
-    const uint8_t *gate_mask = nullptr,
+    const uint8_t *gate_input_mask = nullptr,
+    const uint8_t *gate_output_mask = nullptr,
     const uint8_t *h_mask = nullptr);
 
 // ============================================================================
@@ -485,5 +493,6 @@ void backwardInterface(
     const uint8_t *br_mask = nullptr,
     const uint8_t *weight_ih_linear_mask = nullptr,
     const uint8_t *weight_hh_linear_mask = nullptr,
-    const uint8_t *gate_mask = nullptr,
+    const uint8_t *gate_input_mask = nullptr,
+    const uint8_t *gate_output_mask = nullptr,
     const uint8_t *h_mask = nullptr);

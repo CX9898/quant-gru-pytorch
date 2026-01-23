@@ -249,7 +249,8 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
 // =====================================================================
 // forward: 正常前向传播（推理/训练）
 // =====================================================================
-// 返回: (h, v, weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask)
+// 返回: (h, v, x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+//        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
 //   h: [T+1, B, H] 隐藏状态序列（包含初始状态）
 //   v: [T, B, H*4] 中间值（训练时需要，推理时可忽略）
 //   输入量化 mask:
@@ -262,11 +263,12 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
 //   计算过程 mask:
 //   weight_ih_linear_mask: [T, B, H*3] QAT mask
 //   weight_hh_linear_mask: [T, B, H*3] QAT mask
-//   gate_mask: [T, B, H*3] QAT mask
+//   gate_input_mask: [T, B, H*3] 门输入 clamp mask
+//   gate_output_mask: [T, B, H*3] 门输出 clamp mask
 //   h_mask: [T, B, H] QAT mask
 std::tuple<torch::Tensor, torch::Tensor, 
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
-           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> 
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> 
 forward_wrapper(
     bool is_training,  // 是否开启训练模式
     bool is_quant,     // 是否使用量化推理
@@ -307,14 +309,14 @@ forward_wrapper(
     // 输入量化 mask
     torch::Tensor x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor;
     // 计算过程 mask
-    torch::Tensor weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask;
+    torch::Tensor weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask;
     
     // mask 指针
     uint8_t *x_mask_ptr = nullptr, *h0_mask_ptr = nullptr;
     uint8_t *W_mask_ptr = nullptr, *R_mask_ptr = nullptr;
     uint8_t *bw_mask_ptr = nullptr, *br_mask_ptr = nullptr;
     uint8_t *weight_ih_mask_ptr = nullptr, *weight_hh_mask_ptr = nullptr;
-    uint8_t *gate_mask_ptr = nullptr, *h_mask_ptr = nullptr;
+    uint8_t *gate_input_mask_ptr = nullptr, *gate_output_mask_ptr = nullptr, *h_mask_ptr = nullptr;
     
     const bool need_mask = is_training && is_quant;
     if (need_mask) {
@@ -340,8 +342,10 @@ forward_wrapper(
                                              torch::dtype(torch::kUInt8).device(torch::kCUDA));
         weight_hh_linear_mask = torch::empty({time_steps, batch_size, hidden3},
                                              torch::dtype(torch::kUInt8).device(torch::kCUDA));
-        gate_mask = torch::empty({time_steps, batch_size, hidden3},
-                                 torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        gate_input_mask = torch::empty({time_steps, batch_size, hidden3},
+                                       torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        gate_output_mask = torch::empty({time_steps, batch_size, hidden3},
+                                        torch::dtype(torch::kUInt8).device(torch::kCUDA));
         h_mask = torch::empty({time_steps, batch_size, hidden_size},
                               torch::dtype(torch::kUInt8).device(torch::kCUDA));
         
@@ -354,7 +358,8 @@ forward_wrapper(
         br_mask_ptr = br_mask_tensor.data_ptr<uint8_t>();
         weight_ih_mask_ptr = weight_ih_linear_mask.data_ptr<uint8_t>();
         weight_hh_mask_ptr = weight_hh_linear_mask.data_ptr<uint8_t>();
-        gate_mask_ptr = gate_mask.data_ptr<uint8_t>();
+        gate_input_mask_ptr = gate_input_mask.data_ptr<uint8_t>();
+        gate_output_mask_ptr = gate_output_mask.data_ptr<uint8_t>();
         h_mask_ptr = h_mask.data_ptr<uint8_t>();
     } else {
         // 返回空张量（numel() == 0）
@@ -367,7 +372,8 @@ forward_wrapper(
         br_mask_tensor = empty_mask.clone();
         weight_ih_linear_mask = empty_mask.clone();
         weight_hh_linear_mask = empty_mask.clone();
-        gate_mask = empty_mask.clone();
+        gate_input_mask = empty_mask.clone();
+        gate_output_mask = empty_mask.clone();
         h_mask = empty_mask.clone();
     }
 
@@ -383,11 +389,11 @@ forward_wrapper(
                      x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
                      h.data_ptr<float>(), v.data_ptr<float>(),
                      x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
-                     weight_ih_mask_ptr, weight_hh_mask_ptr, gate_mask_ptr, h_mask_ptr);
+                     weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr);
 
     return std::make_tuple(h, v, 
                            x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor,
-                           weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask);
+                           weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
 }
 
 // =====================================================================
@@ -625,7 +631,8 @@ backward_wrapper(bool is_quant,
                  const torch::Tensor &br_mask,
                  const torch::Tensor &weight_ih_linear_mask,
                  const torch::Tensor &weight_hh_linear_mask,
-                 const torch::Tensor &gate_mask,
+                 const torch::Tensor &gate_input_mask,
+                 const torch::Tensor &gate_output_mask,
                  const torch::Tensor &h_mask) {
 
     // 检查输入张量的类型和设备
@@ -716,7 +723,8 @@ backward_wrapper(bool is_quant,
         get_mask_ptr(br_mask),
         get_mask_ptr(weight_ih_linear_mask),
         get_mask_ptr(weight_hh_linear_mask),
-        get_mask_ptr(gate_mask),
+        get_mask_ptr(gate_input_mask),
+        get_mask_ptr(gate_output_mask),
         get_mask_ptr(h_mask));
 
     return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
@@ -1145,7 +1153,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "\n"
           "Returns:\n"
           "  tuple(h, v, x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,\n"
-          "        weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask)\n"
+          "        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)\n"
           "  - h: Hidden states [T+1, B, H]\n"
           "  - v: Intermediate values [T, B, H*4]\n"
           "  Input quantization masks (empty if not training+quant):\n"
@@ -1158,7 +1166,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  Computation masks (empty if not training+quant):\n"
           "  - weight_ih_linear_mask: [T, B, H*3] (uint8, 1=clamped)\n"
           "  - weight_hh_linear_mask: [T, B, H*3] (uint8, 1=clamped)\n"
-          "  - gate_mask: [T, B, H*3] update/reset/new gate mask (uint8, 1=clamped)\n"
+          "  - gate_input_mask: [T, B, H*3] gate input clamp mask (uint8, 1=clamped)\n"
+          "  - gate_output_mask: [T, B, H*3] gate output clamp mask (uint8, 1=clamped)\n"
           "  - h_mask: [T, B, H] hidden state mask (uint8, 1=clamped)\n"
           "\n"
           "Note: QAT masks are only populated when is_training=True and is_quant=True.\n"
@@ -1253,7 +1262,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  quant_params: Quantization parameters (for rescale compensation)\n"
           "  x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask: Input/weight clamp masks\n"
           "  weight_ih_linear_mask, weight_hh_linear_mask: Linear output clamp masks\n"
-          "  gate_mask, h_mask: Gate and hidden state clamp masks\n"
+          "  gate_input_mask, gate_output_mask: Gate input/output clamp masks\n"
+          "  h_mask: Hidden state clamp mask\n"
           "\n"
           "Returns:\n"
           "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n"
@@ -1275,6 +1285,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("br_mask") = torch::Tensor(),
           py::arg("weight_ih_linear_mask") = torch::Tensor(),
           py::arg("weight_hh_linear_mask") = torch::Tensor(),
-          py::arg("gate_mask") = torch::Tensor(),
+          py::arg("gate_input_mask") = torch::Tensor(),
+          py::arg("gate_output_mask") = torch::Tensor(),
           py::arg("h_mask") = torch::Tensor());
 }

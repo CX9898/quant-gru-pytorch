@@ -517,10 +517,10 @@ class GRUFunction(torch.autograd.Function):
         else:
             quant_params = gru_ops.GRUQuantParams()
 
-        # 调用 C++ 前向接口（返回 12 个值）
+        # 调用 C++ 前向接口（返回 13 个值）
         (output_full, v,
          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-         weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask) = gru_ops.forward(
+         weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = gru_ops.forward(
             is_training=is_training,
             is_quant=use_quantization,
             time_steps=time_steps,
@@ -540,10 +540,10 @@ class GRUFunction(torch.autograd.Function):
         output = output_full[1:]
         h_n = output_full[-1:]
 
-        # 保存反向传播所需的中间结果（包括所有 10 个 mask）
+        # 保存反向传播所需的中间结果（包括所有 11 个 mask）
         ctx.save_for_backward(W, R, bw, br, input, output_full, v,
                               x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-                              weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask)
+                              weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
         
         # 保存量化参数（用于反向传播的 rescale 补偿）
         # 注意：quant_params 不是 tensor，需要单独保存
@@ -571,7 +571,7 @@ class GRUFunction(torch.autograd.Function):
         """
         (W, R, bw, br, input, h, v,
          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-         weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask) = ctx.saved_tensors
+         weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = ctx.saved_tensors
         time_steps, batch_size = ctx.time_steps, ctx.batch_size
         input_size, hidden_size = ctx.input_size, ctx.hidden_size
 
@@ -619,7 +619,8 @@ class GRUFunction(torch.autograd.Function):
             br_mask=br_mask,
             weight_ih_linear_mask=weight_ih_linear_mask,
             weight_hh_linear_mask=weight_hh_linear_mask,
-            gate_mask=gate_mask,
+            gate_input_mask=gate_input_mask,
+            gate_output_mask=gate_output_mask,
             h_mask=h_mask
         )
 

@@ -149,7 +149,8 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                       // 计算过程 mask（外部分配，nullptr=不保存）
                       uint8_t *weight_ih_linear_mask,
                       uint8_t *weight_hh_linear_mask,
-                      uint8_t *gate_mask,
+                      uint8_t *gate_input_mask,
+                      uint8_t *gate_output_mask,
                       uint8_t *h_mask) {
     if (is_quant) {
 #if USE_FP_STORAGE
@@ -158,14 +159,14 @@ void forwardInterface(bool is_training, bool is_quant, int time_steps, int batch
                           W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v,
                           x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                           weight_ih_linear_mask, weight_hh_linear_mask,
-                          gate_mask, h_mask);
+                          gate_input_mask, gate_output_mask, h_mask);
 #else
         // 方案2：INT32存储版（支持 QAT mask）
         quantGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
                         W, R, bw, br, x, h0, quant_gru_scales, g_blas_handle, h, v,
                         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                         weight_ih_linear_mask, weight_hh_linear_mask,
-                        gate_mask, h_mask);
+                        gate_input_mask, gate_output_mask, h_mask);
 #endif
     } else {
         // 非量化模式：使用原始 haste 实现
@@ -185,7 +186,8 @@ void backwardInterface(bool is_quant,
                        const uint8_t *W_mask, const uint8_t *R_mask,
                        const uint8_t *bw_mask, const uint8_t *br_mask,
                        const uint8_t *weight_ih_linear_mask, const uint8_t *weight_hh_linear_mask,
-                       const uint8_t *gate_mask, const uint8_t *h_mask) {
+                       const uint8_t *gate_input_mask, const uint8_t *gate_output_mask,
+                       const uint8_t *h_mask) {
     if (is_quant) {
         // 量化版反向传播（支持 QAT mask 和 rescale 补偿）
         quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
@@ -194,7 +196,7 @@ void backwardInterface(bool is_quant,
                          quant_params,
                          x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                          weight_ih_linear_mask, weight_hh_linear_mask,
-                         gate_mask, h_mask);
+                         gate_input_mask, gate_output_mask, h_mask);
     } else {
         // 非量化版反向传播
         hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
@@ -290,7 +292,8 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
                       const uint8_t *W_mask, const uint8_t *R_mask,
                       const uint8_t *bw_mask, const uint8_t *br_mask,
                       const uint8_t *weight_ih_linear_mask, const uint8_t *weight_hh_linear_mask,
-                      const uint8_t *gate_mask, const uint8_t *h_mask) {
+                      const uint8_t *gate_input_mask, const uint8_t *gate_output_mask,
+                      const uint8_t *h_mask) {
     // 临时缓存梯度（内部结构用）
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size * 3);
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size * 3);
@@ -310,7 +313,7 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
                  // QAT masks
                  x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                  weight_ih_linear_mask, weight_hh_linear_mask,
-                 gate_mask, h_mask);
+                 gate_input_mask, gate_output_mask, h_mask);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -376,7 +379,8 @@ void quantGRUForwardInt32(
     int32_t *h_q, int32_t *v_q,
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask) {
     
     const int NH = batch_size * hidden_size;
@@ -403,7 +407,7 @@ void quantGRUForwardInt32(
     
     // 运行前向传播（传递 mask 指针）
     forward.Run(time_steps, W_q, R_q, bw_q, br_q, x_q, h_q, v_ptr, 0.0f, nullptr,
-                weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask);
+                weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
     
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -437,7 +441,8 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
                      // 计算过程 mask
                      uint8_t *weight_ih_linear_mask,
                      uint8_t *weight_hh_linear_mask,
-                     uint8_t *gate_mask,
+                     uint8_t *gate_input_mask,
+                     uint8_t *gate_output_mask,
                      uint8_t *h_mask) {
     const int hidden3 = hidden_size * 3;
     const std::size_t x_size = time_steps * batch_size * input_size;
@@ -504,7 +509,8 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
                          x_quant.data(), h0_quant.data(),
                          quant_parms, g_blas_handle,
                          h_quant.data(), v != nullptr ? v_quant.data() : nullptr,
-                         weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask);
+                         weight_ih_linear_mask, weight_hh_linear_mask, 
+                         gate_input_mask, gate_output_mask, h_mask);
 
     // 6. 反量化输出 h
     dev::dequantification(h_quant.data(), h, h_size, quant_parms.shift_h_, quant_parms.zp_h_);
@@ -669,7 +675,8 @@ void quantGRUForwardFP(
     // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask) {
     
     const int hidden3 = hidden_size * 3;
@@ -735,7 +742,8 @@ void quantGRUForwardFP(
                    0.0f, nullptr,
                    weight_ih_linear_mask,
                    weight_hh_linear_mask,
-                   gate_mask,
+                   gate_input_mask,
+                   gate_output_mask,
                    h_mask);
     
     // 反量化输出
