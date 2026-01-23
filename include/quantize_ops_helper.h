@@ -1232,6 +1232,11 @@ void quantificationPerChannelFPWithMask(const float *src, float *quant_data, uin
                                         size_t input_size, size_t channel_size,
                                         const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
+/// @brief GPU Per-channel 量化（int32 输出，带 mask）
+void quantificationPerChannelBitwidthWithMask(const float *src, int32_t *quant_data, uint8_t *mask,
+                                              size_t input_size, size_t channel_size,
+                                              const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,

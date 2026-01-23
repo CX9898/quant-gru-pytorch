@@ -99,30 +99,46 @@ void quantitativeWeight(const int input_size, const int hidden_size,
 // GPU 量化 GRU 前向传播接口
 // =====================================================================
 
-// GPU 量化 GRU 前向传播（统一 int32_t 存储）
+// GPU 量化 GRU 前向传播（浮点输入/输出，内部自动量化权重和激活）
 // 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
 // 输入:
-//   W:  [C, H*3]   量化后的输入权重（int32_t 存储）
-//   R:  [H, H*3]   量化后的循环权重（int32_t 存储）
-//   bw: [H*3]      量化后的输入偏置（int32_t）
-//   br: [H*3]      量化后的循环偏置（int32_t）
+//   W:  [C, H*3]   浮点输入权重（内部会量化）
+//   R:  [H, H*3]   浮点循环权重（内部会量化）
+//   bw: [H*3]      浮点输入偏置（内部会量化）
+//   br: [H*3]      浮点循环偏置（内部会量化）
 //   x:  [T, B, I]  浮点输入序列（内部会量化）
 //   h0: [B, H]     初始隐藏状态（可为 nullptr）
 // 输出:
 //   h:  [(T+1), B, H]  所有时间步的隐藏状态（反量化后的浮点值）
 //   v:  [T, B, H*4]    中间值（训练时需要，推理时可为 nullptr）
-// QAT mask 输出（外部分配，nullptr=不保存）:
-//   weight_ih_linear_mask: [T*B, H*3]
-//   weight_hh_linear_mask: [T*B, H*3]
-//   gate_mask: [T*B, H*3]
-//   h_mask: [T*B, H]
+// QAT mask 输出（训练时需要外部分配，推理时可为 nullptr）:
+//   输入量化 mask:
+//     x_mask:  [T*B*I]    输入序列量化 mask
+//     h0_mask: [B*H]      初始隐藏状态量化 mask（h0=nullptr时忽略）
+//     W_mask:  [C*H*3]    输入权重量化 mask
+//     R_mask:  [H*H*3]    循环权重量化 mask
+//     bw_mask: [H*3]      输入偏置量化 mask
+//     br_mask: [H*3]      循环偏置量化 mask
+//   计算过程 mask:
+//     weight_ih_linear_mask: [T*B*H*3]
+//     weight_hh_linear_mask: [T*B*H*3]
+//     gate_mask: [T*B*H*3]
+//     h_mask: [T*B*H]
 void quantGRUForward(
     bool is_training,
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const int32_t *W, const int32_t *R, const int32_t *bw, const int32_t *br, const float *x,
+    const float *W, const float *R, const float *bw, const float *br, const float *x,
     const float *h0,
     const GRUQuantParams &quant_parms, const cublasHandle_t &g_blas_handle,
     float *h, float *v,
+    // 输入量化 mask（训练时外部分配，推理时可为 nullptr）
+    uint8_t *x_mask = nullptr,
+    uint8_t *h0_mask = nullptr,
+    uint8_t *W_mask = nullptr,
+    uint8_t *R_mask = nullptr,
+    uint8_t *bw_mask = nullptr,
+    uint8_t *br_mask = nullptr,
+    // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
     uint8_t *gate_mask = nullptr,
@@ -311,19 +327,6 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
 //   - shift 预处理为除数，避免运行时位移
 
 // 量化权重为浮点存储格式（GPU 端）
-// 输入（全部 device 内存）:
-//   W:  [C, H*3]   浮点输入权重
-//   R:  [H, H*3]   浮点循环权重
-//   bw: [H*3]      浮点输入偏置
-//   br: [H*3]      浮点循环偏置
-// 输出（全部 device 内存）:
-//   W_q, R_q, bw_q, br_q: 量化后的权重（float 存储的定点值）
-void quantitativeWeightFP(
-    int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br,
-    const GRUQuantParams &quant_params,
-    float *W_q, float *R_q, float *bw_q, float *br_q);
-
 // GPU 浮点存储版量化前向传播（浮点输入/输出，全部 device 内存）
 // 输入（全部 device 内存）:
 //   W:  [C, H*3]   浮点输入权重
@@ -367,28 +370,6 @@ void quantGRUForwardFP(
     uint8_t *gate_mask = nullptr,
     uint8_t *h_mask = nullptr);
 
-// 统一前向传播接口（浮点存储版）
-// 与 forwardInterface 类似，但使用浮点存储版量化实现
-void forwardInterfaceFP(
-    bool is_training, bool is_quant,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br,
-    const float *x, const float *h0,
-    const GRUQuantParams &quant_params,
-    const cublasHandle_t &g_blas_handle,
-    float *h, float *v,
-    // 输入量化 mask（外部分配，nullptr=不保存）
-    uint8_t *x_mask = nullptr,
-    uint8_t *h0_mask = nullptr,
-    uint8_t *W_mask = nullptr,
-    uint8_t *R_mask = nullptr,
-    uint8_t *bw_mask = nullptr,
-    uint8_t *br_mask = nullptr,
-    // 计算过程 mask（外部分配，nullptr=不保存）
-    uint8_t *weight_ih_linear_mask = nullptr,
-    uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_mask = nullptr,
-    uint8_t *h_mask = nullptr);
 
 // =====================================================================
 // 反向传播接口
@@ -426,11 +407,14 @@ void hasteGRUBackward(
     float *dx, float *dW, float *dR, float *dbw, float *dbr, float *dh);
 
 // ============================================================================
-// 量化 GRU 反向传播接口（支持 QAT mask）
+// 量化 GRU 反向传播接口（支持 QAT mask 和 rescale 补偿）
 // ============================================================================
 //
-// 与 hasteGRUBackward 类似，但使用 BackwardPassQuant 并支持 QAT mask。
-// 如果提供了 mask 指针，会在反向传播中应用 STE（被 clamp 的梯度置零）。
+// 与 hasteGRUBackward 类似，但使用 BackwardPassQuant 并支持：
+//   1. QAT mask: STE（被 clamp 的梯度置零）
+//   2. Rescale 补偿: 梯度乘以 divisor 补偿前向传播中的 div_round 操作
+//
+// quant_params: 量化参数（用于计算 rescale 因子），nullptr=不应用 rescale
 //
 // QAT Mask 参数（可选，nullptr=不应用）：
 //   - x_mask [T*B, I] → dx
@@ -453,6 +437,8 @@ void quantGRUBackward(
     const float *h, const float *v,
     const cublasHandle_t &g_blas_handle,
     float *dx, float *dW, float *dR, float *dbw, float *dbr, float *dh,
+    // 以下为量化相关参数（可选）
+    const GRUQuantParams *quant_params = nullptr,  // 量化参数（用于 rescale 补偿），nullptr=不应用
     // QAT masks（可选）
     const uint8_t *x_mask = nullptr,
     const uint8_t *h0_mask = nullptr,
@@ -473,8 +459,10 @@ void quantGRUBackward(
 // 与 forwardInterface 对称的设计。
 //
 // @param is_quant 是否使用量化版本
-//   - true: 调用 quantGRUBackward（支持 QAT mask）
-//   - false: 调用 hasteGRUBackward（忽略所有 mask 参数）
+//   - true: 调用 quantGRUBackward（支持 QAT mask 和 rescale 补偿）
+//   - false: 调用 hasteGRUBackward（忽略所有 mask 参数和 quant_params）
+//
+// @param quant_params 量化参数（用于 rescale 补偿），nullptr=不应用 rescale
 //
 void backwardInterface(
     bool is_quant,
@@ -486,7 +474,9 @@ void backwardInterface(
     const float *h, const float *v,
     const cublasHandle_t &g_blas_handle,
     float *dx, float *dW, float *dR, float *dbw, float *dbr, float *dh,
-    // QAT masks（is_quant=true 时有效）
+    // 以下为量化相关参数（is_quant=true 时有效）
+    const GRUQuantParams *quant_params = nullptr,  // 量化参数（用于 rescale 补偿），nullptr=不应用
+    // QAT masks
     const uint8_t *x_mask = nullptr,
     const uint8_t *h0_mask = nullptr,
     const uint8_t *W_mask = nullptr,

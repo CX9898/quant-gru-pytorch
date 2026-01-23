@@ -544,6 +544,10 @@ class GRUFunction(torch.autograd.Function):
         ctx.save_for_backward(W, R, bw, br, input, output_full, v,
                               x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                               weight_ih_linear_mask, weight_hh_linear_mask, gate_mask, h_mask)
+        
+        # 保存量化参数（用于反向传播的 rescale 补偿）
+        # 注意：quant_params 不是 tensor，需要单独保存
+        ctx.quant_params = quant_params
 
         return output, h_n
 
@@ -596,7 +600,7 @@ class GRUFunction(torch.autograd.Function):
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
         # 调用 C++ 统一反向接口
-        # 量化模式时传入所有 mask，C++ 端应用 STE
+        # 量化模式时传入所有 mask 和 quant_params，C++ 端应用 STE 和 rescale 补偿
         # 非量化模式时 mask 为空 tensor，C++ 端会忽略
         dx, dW, dR, dbw, dbr, dh = gru_ops.backward(
             is_quant=ctx.use_quantization,
@@ -604,6 +608,8 @@ class GRUFunction(torch.autograd.Function):
             input_size=input_size, hidden_size=hidden_size,
             W=W, R=R, bw=bw, br=br, x=input,
             dh_new=dh_new, h=h, v=v,
+            # 量化参数（用于 rescale 补偿）
+            quant_params=ctx.quant_params,
             # QAT masks（C++ 端应用 STE）
             x_mask=x_mask,
             h0_mask=h0_mask,
