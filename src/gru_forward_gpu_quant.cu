@@ -422,7 +422,8 @@ __global__ void PointwiseOperationsQuantWithMask(
     const int32_t *weight_hh_linear,  // 隐状态 Linear 变换: R*h + br [batch, hidden*3]
     const int32_t *h, int32_t *h_out, int32_t *v,
     const float zoneout_prob, const int32_t *zoneout_mask, const GateQuantParams gate_params,
-    uint8_t *gate_mask,               // [batch, hidden*3] 门输出 mask（update, reset, new）
+    uint8_t *gate_input_mask,         // [batch, hidden*3] 门输入 clamp mask（新增）
+    uint8_t *gate_output_mask,        // [batch, hidden*3] 门输出 clamp mask（原 gate_mask）
     uint8_t *h_mask                   // [batch, hidden] 隐状态输出 mask
 ) {
     const int row = blockDim.x * blockIdx.x + threadIdx.x;
@@ -438,24 +439,37 @@ __global__ void PointwiseOperationsQuantWithMask(
 
     const int debug_idx = -1;
 
-    // GRU 门计算（带 mask）
-    uint8_t update_mask, reset_mask, new_mask, h_out_mask;
+    // GRU 门计算（带输入和输出 mask 分离）
+    uint8_t update_input_mask, update_output_mask;
+    uint8_t reset_input_mask, reset_output_mask;
+    uint8_t new_input_mask, new_output_mask;
+    uint8_t h_out_mask;
     
     const int32_t update_gate = computeUpdateGate_with_mask(
-        weight_ih_linear[update_idx], weight_hh_linear[update_idx], gate_params, update_mask, debug_idx);
+        weight_ih_linear[update_idx], weight_hh_linear[update_idx], gate_params, 
+        update_input_mask, update_output_mask, debug_idx);
 
     const int32_t reset_gate = computeResetGate_with_mask(
-        weight_ih_linear[reset_idx], weight_hh_linear[reset_idx], gate_params, reset_mask, debug_idx);
+        weight_ih_linear[reset_idx], weight_hh_linear[reset_idx], gate_params, 
+        reset_input_mask, reset_output_mask, debug_idx);
 
     int32_t weight_hh_linear_g;
     const int32_t new_gate = computeNewGate_with_mask(
-        weight_ih_linear[new_idx], weight_hh_linear[new_idx], reset_gate, gate_params, weight_hh_linear_g, new_mask, debug_idx);
+        weight_ih_linear[new_idx], weight_hh_linear[new_idx], reset_gate, gate_params, weight_hh_linear_g, 
+        new_input_mask, new_output_mask, debug_idx);
 
-    // 保存门 mask
-    if (gate_mask != nullptr) {
-        gate_mask[update_idx] = update_mask;
-        gate_mask[reset_idx] = reset_mask;
-        gate_mask[new_idx] = new_mask;
+    // 保存门输入 mask（新增）
+    if (gate_input_mask != nullptr) {
+        gate_input_mask[update_idx] = update_input_mask;
+        gate_input_mask[reset_idx] = reset_input_mask;
+        gate_input_mask[new_idx] = new_input_mask;
+    }
+    
+    // 保存门输出 mask（原 gate_mask）
+    if (gate_output_mask != nullptr) {
+        gate_output_mask[update_idx] = update_output_mask;
+        gate_output_mask[reset_idx] = reset_output_mask;
+        gate_output_mask[new_idx] = new_output_mask;
     }
 
     // Training: 保存中间值
@@ -706,7 +720,8 @@ void ForwardPassQuant::IterateInternal(
     const float zoneout_prob,
     const int32_t *zoneout_mask,  // Zoneout mask [N,H]
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
     const bool training = data_->training;
@@ -739,13 +754,13 @@ void ForwardPassQuant::IterateInternal(
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v,
                                                     zoneout_prob, zoneout_mask, gate_params_,
-                                                    gate_mask, h_mask);
+                                                    gate_input_mask, gate_output_mask, h_mask);
         } else {
             kernel::PointwiseOperationsQuantWithMask<true, false>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v, 0.0f,
                                                     nullptr, gate_params_,
-                                                    gate_mask, h_mask);
+                                                    gate_input_mask, gate_output_mask, h_mask);
         }
     } else {
         if (apply_zoneout) {
@@ -850,7 +865,8 @@ void ForwardPassQuant::Run(
     const int32_t *zoneout_mask,  // Zoneout mask [T*N,H]（int32_t 存储）
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
-    uint8_t *gate_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
     const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
@@ -889,7 +905,8 @@ void ForwardPassQuant::Run(
                         tmp_weight_ih_linear_.data() + i * NH3,  // 当前时间步的 W*x + bw
                         zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr,
                         weight_hh_linear_mask ? weight_hh_linear_mask + i * NH3 : nullptr,
-                        gate_mask ? gate_mask + i * NH3 : nullptr,
+                        gate_input_mask ? gate_input_mask + i * NH3 : nullptr,
+                        gate_output_mask ? gate_output_mask + i * NH3 : nullptr,
                         h_mask ? h_mask + i * NH : nullptr);
     }
 
