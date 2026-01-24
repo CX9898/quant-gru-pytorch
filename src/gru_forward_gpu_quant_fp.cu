@@ -266,7 +266,7 @@ float computeHiddenStateFP_with_mask(float update_gate, float new_gate, float h_
 // ============================================================================
 
 // 启用自定义 GEMM 的编译开关（设为 1 使用自定义 GEMM，0 使用 cuBLAS）
-#define USE_CUSTOM_FLOAT_GEMM 1
+// #define USE_CUSTOM_FLOAT_GEMM 1
 
 constexpr int TILE_SIZE_FP = 16;
 
@@ -489,13 +489,12 @@ __global__ void biasRescaleKernel(
 }
 
 /**
- * @brief GEMM 结果加 bias 并 rescale（带可选 mask 输出版本）
+ * @brief GEMM 结果加 bias 并 rescale（原地处理，带可选 mask 输出版本）
  * @tparam Training 训练模式时保存 clamp mask
  */
 template <bool Training>
 __global__ void biasRescaleKernelWithMask(
-    const float *__restrict__ gemm_result,
-    float *__restrict__ output,
+    float *__restrict__ data,  // 输入：GEMM 结果，输出：rescale 后的结果（原地处理）
     const float *__restrict__ bias,
     const double *__restrict__ W_sum_mul_zp,
     const float *__restrict__ div_gemm,
@@ -510,17 +509,21 @@ __global__ void biasRescaleKernelWithMask(
     
     int row = idx % M;
     
-    double val = static_cast<double>(gemm_result[idx]) - W_sum_mul_zp[row];
+    // 读取 GEMM 结果，减去零点补偿
+    double val = static_cast<double>(data[idx]) - W_sum_mul_zp[row];
+    // bias 先 rescale
     double bias_term = round_d(static_cast<double>(bias[row]) / static_cast<double>(div_bias[row]));
+    // GEMM + bias 一起 rescale
     double result = round_d((val + bias_term) / static_cast<double>(div_gemm[row])) + 
                     static_cast<double>(zp_out);
     
+    // 原地写回结果
     if constexpr (Training) {
         uint8_t was_clamped;
-        output[idx] = clamp_f_with_mask(static_cast<float>(result), output_bw, was_clamped);
+        data[idx] = clamp_f_with_mask(static_cast<float>(result), output_bw, was_clamped);
         mask[idx] = was_clamped;
     } else {
-        output[idx] = clamp_f(static_cast<float>(result), output_bw);
+        data[idx] = clamp_f(static_cast<float>(result), output_bw);
     }
 }
 
@@ -813,12 +816,7 @@ void ForwardPassQuantFP::EnsureBuffersAllocated(int steps) {
         return;
     }
 
-    // GEMM 原始结果（较大的那个）
-    size_t gemm_size = std::max(hidden3 * steps * batch_size, 
-                                 hidden3 * batch_size);
-    tmp_gemm_result_.resize(gemm_size);
-
-    // Linear 变换结果
+    // Linear 变换结果（cuBLAS GEMM 直接写入，然后原地 rescale）
     tmp_weight_ih_linear_.resize(hidden3 * steps * batch_size);
     tmp_weight_hh_linear_.resize(hidden3 * batch_size);
 
@@ -907,20 +905,20 @@ void ForwardPassQuantFP::ComputeLinearX(const float *W, const float *x,
     // 使用 cuBLAS SGEMM + 后处理
     cublasSetStream(data_->blas_handle, stream);
 
-    // 1. cuBLAS SGEMM: tmp_gemm = W * x
+    // 1. cuBLAS SGEMM: 直接写入 tmp_weight_ih_linear_（后续原地处理）
     // W: [M, K] 列主序，x: [K, N] 列主序，输出 [M, N]
-    const float alpha = 1.0f, beta = 0.0f;
-    cublasSgemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                M, N, K, &alpha, W, M, x, K, &beta, tmp_gemm_result_.data(), M);
+    static const float alpha = 1.0f;
+    static const float beta = 0.0f;
+    blas<float>::gemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                      M, N, K, &alpha, W, M, x, K, &beta, tmp_weight_ih_linear_.data(), M);
 
-    // 2. Bias + Rescale kernel
+    // 2. Bias + Rescale kernel（原地处理）
     int total = M * N;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
     if (training) {
         kernel::biasRescaleKernelWithMask<true><<<blocks, threads, 0, stream>>>(
-            tmp_gemm_result_.data(), 
-            tmp_weight_ih_linear_.data(),
+            tmp_weight_ih_linear_.data(),  // 输入：GEMM 结果，输出：rescale 后的结果
             bw, 
             W_sum_mul_x_zp_.data(),
             linear_params_.div_gemm_x_to_weight_ih_linear_.data(),
@@ -931,8 +929,7 @@ void ForwardPassQuantFP::ComputeLinearX(const float *W, const float *x,
             weight_ih_linear_mask);
     } else {
         kernel::biasRescaleKernelWithMask<false><<<blocks, threads, 0, stream>>>(
-            tmp_gemm_result_.data(), 
-            tmp_weight_ih_linear_.data(),
+            tmp_weight_ih_linear_.data(),  // 输入：GEMM 结果，输出：rescale 后的结果
             bw, 
             W_sum_mul_x_zp_.data(),
             linear_params_.div_gemm_x_to_weight_ih_linear_.data(),
@@ -989,19 +986,19 @@ void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h,
     // 使用 cuBLAS SGEMM + 后处理
     cublasSetStream(data_->blas_handle, stream);
 
-    // 1. cuBLAS SGEMM: tmp_gemm = R * h
-    const float alpha = 1.0f, beta = 0.0f;
-    cublasSgemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                M, N, K, &alpha, R, M, h, K, &beta, tmp_gemm_result_.data(), M);
+    // 1. cuBLAS SGEMM: 直接写入 tmp_weight_hh_linear_（后续原地处理）
+    static const float alpha = 1.0f;
+    static const float beta = 0.0f;
+    blas<float>::gemm(data_->blas_handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                      M, N, K, &alpha, R, M, h, K, &beta, tmp_weight_hh_linear_.data(), M);
 
-    // 2. Bias + Rescale kernel
+    // 2. Bias + Rescale kernel（原地处理）
     int total = M * N;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
     if (training) {
         kernel::biasRescaleKernelWithMask<true><<<blocks, threads, 0, stream>>>(
-            tmp_gemm_result_.data(), 
-            tmp_weight_hh_linear_.data(),
+            tmp_weight_hh_linear_.data(),  // 输入：GEMM 结果，输出：rescale 后的结果
             br, 
             R_sum_mul_h_zp_.data(),
             linear_params_.div_gemm_h_to_weight_hh_linear_.data(),
@@ -1012,8 +1009,7 @@ void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h,
             weight_hh_linear_mask);
     } else {
         kernel::biasRescaleKernelWithMask<false><<<blocks, threads, 0, stream>>>(
-            tmp_gemm_result_.data(), 
-            tmp_weight_hh_linear_.data(),
+            tmp_weight_hh_linear_.data(),  // 输入：GEMM 结果，输出：rescale 后的结果
             br, 
             R_sum_mul_h_zp_.data(),
             linear_params_.div_gemm_h_to_weight_hh_linear_.data(),
@@ -1048,7 +1044,7 @@ void ForwardPassQuantFP::IterateInternal(
 
     cublasSetStream(data_->blas_handle, stream1);
 
-    // 计算隐状态 Linear 变换: R*h + br
+    // 计算隐状态 Linear 变换: R*h + br（与 stream2 上的 ComputeLinearX 并行执行）
     ComputeLinearH(R, h, br, weight_hh_linear_mask);
 
     // Pointwise kernel 配置
@@ -1056,6 +1052,7 @@ void ForwardPassQuantFP::IterateInternal(
     const dim3 gridDim((hidden_size + blockDim.x - 1) / blockDim.x,
                        (batch_size + blockDim.y - 1) / blockDim.y);
 
+    // 等待 ComputeLinearX 完成（pointwise kernel 需要同时使用 weight_ih_linear 和 weight_hh_linear）
     cudaStreamWaitEvent(stream1, event, 0);
 
     const bool apply_zoneout = (zoneout_prob > 0.0f && zoneout_mask != nullptr);
