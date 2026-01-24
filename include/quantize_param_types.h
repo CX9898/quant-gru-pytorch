@@ -235,25 +235,25 @@ struct GateQuantParamsFP {
     // -------------------- Update Gate 参数 --------------------
     float zp_update_gate_input_;                      ///< update gate 激活前零点
     float zp_update_gate_output_;                     ///< update gate 激活后零点
-    float div_weight_ih_linear_to_update_gate_input_; ///< = 2^shift，除数
-    float div_weight_hh_linear_to_update_gate_input_; ///< = 2^shift，除数
+    float inv_div_weight_ih_linear_to_update_gate_input_; ///< 1.0f / (2^shift)，用于乘法替代除法
+    float inv_div_weight_hh_linear_to_update_gate_input_; ///< 1.0f / (2^shift)，用于乘法替代除法
 
     // -------------------- Reset Gate 参数 --------------------
     float zp_reset_gate_input_;                       ///< reset gate 激活前零点
     float zp_reset_gate_output_;                      ///< reset gate 激活后零点
-    float div_weight_ih_linear_to_reset_gate_input_;  ///< = 2^shift，除数
-    float div_weight_hh_linear_to_reset_gate_input_;  ///< = 2^shift，除数
+    float inv_div_weight_ih_linear_to_reset_gate_input_;  ///< 1.0f / (2^shift)，用于乘法替代除法
+    float inv_div_weight_hh_linear_to_reset_gate_input_;  ///< 1.0f / (2^shift)，用于乘法替代除法
 
     // -------------------- New Gate 参数 --------------------
     float zp_new_gate_input_;                         ///< new gate 激活前零点
     float zp_new_gate_output_;                        ///< new gate 激活后零点
-    float div_weight_ih_linear_to_new_gate_input_;    ///< = 2^shift，除数
-    float div_reset_mul_hh_to_new_gate_input_;        ///< = 2^shift，r*hh 到 new_gate_input 的除数
+    float inv_div_weight_ih_linear_to_new_gate_input_;    ///< 1.0f / (2^shift)，用于乘法替代除法
+    float inv_div_reset_mul_hh_to_new_gate_input_;        ///< 1.0f / (2^shift)，r*hh 到 new_gate_input 的倒数
 
     // -------------------- 隐状态更新参数 --------------------
     float quant_one_in_update_gate_scale_;  ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
-    float div_update_new_to_h_;             ///< = 2^shift，(1-u)*n 到 h 的除数
-    float div_update_old_to_h_;             ///< = 2^shift，u*h 到 h 的除数
+    float inv_div_update_new_to_h_;             ///< 1.0f / (2^shift)，(1-u)*n 到 h 的倒数
+    float inv_div_update_old_to_h_;             ///< 1.0f / (2^shift)，u*h 到 h 的倒数
 
     // -------------------- 激活函数 scale（用于 real_sigmoid/real_tanh）--------------------
     float scale_update_gate_input_;   ///< = 2^(-shift)，反量化 scale
@@ -278,10 +278,11 @@ struct LinearQuantParamsGPUFP {
     float zp_weight_ih_linear_;  ///< W*x+bw 输出零点
     float zp_weight_hh_linear_;  ///< R*h+br 输出零点
 
-    dev::vector<float> div_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 除数
-    dev::vector<float> div_bw_to_weight_ih_linear_;      ///< bw per-channel 除数
-    dev::vector<float> div_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 除数
-    dev::vector<float> div_br_to_weight_hh_linear_;      ///< br per-channel 除数
+    // 倒数数组（用于优化：乘法替代除法）
+    dev::vector<float> inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)
+    dev::vector<float> inv_div_bw_to_weight_ih_linear_;      ///< [3*hidden] 1.0f / (2^shift_bw)
+    dev::vector<float> inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)
+    dev::vector<float> inv_div_br_to_weight_hh_linear_;      ///< [3*hidden] 1.0f / (2^shift_br)
 
     QuantBitWidth output_bw_ih_;  ///< weight_ih_linear 输出位宽
     QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
@@ -295,15 +296,15 @@ struct LinearQuantParamsGPUFP {
 struct LinearRescaleParamsFP {
     // weight_ih_linear 相关参数
     const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x
-    const float *div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] W*x per-channel 除数
-    const float *div_bw_to_weight_ih_linear_;      ///< [3*hidden] bw per-channel 除数
+    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)
+    const float *inv_div_bw_to_weight_ih_linear_;      ///< [3*hidden] 1.0f / (2^shift_bw)
     float zp_weight_ih_linear_;                     ///< weight_ih_linear 输出零点
     QuantBitWidth output_bw_ih_;                     ///< weight_ih_linear 输出位宽
     
     // weight_hh_linear 相关参数
     const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h
-    const float *div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] R*h per-channel 除数
-    const float *div_br_to_weight_hh_linear_;      ///< [3*hidden] br per-channel 除数
+    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)
+    const float *inv_div_br_to_weight_hh_linear_;      ///< [3*hidden] 1.0f / (2^shift_br)
     float zp_weight_hh_linear_;                     ///< weight_hh_linear 输出零点
     QuantBitWidth output_bw_hh_;                     ///< weight_hh_linear 输出位宽
 };
