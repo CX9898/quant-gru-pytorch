@@ -41,10 +41,12 @@ namespace dev {
 void fill_n(int8_t *first, size_t size, int8_t val);
 void fill_n(int16_t *first, size_t size, int16_t val);
 void fill_n(int32_t *first, size_t size, int32_t val);
+void fill_n(int64_t *first, size_t size, int64_t val);
 void fill_n(uint8_t *first, size_t size, uint8_t val);
 void fill_n(uint16_t *first, size_t size, uint16_t val);
 void fill_n(uint32_t *first, size_t size, uint32_t val);
 void fill_n(float *first, size_t size, float val);
+void fill_n(double *first, size_t size, double val);
 void sort(uint32_t *first, uint32_t *last);
 void sort(uint64_t *first, uint64_t *last);
 void sort_by_key(uint32_t *key_first, uint32_t *key_last, uint32_t *value_first);

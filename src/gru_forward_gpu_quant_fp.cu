@@ -5,7 +5,7 @@
 // 文件结构:
 //   1. 辅助函数          - div_round 等（本地使用）
 //   2. 门计算函数        - computeUpdateGateFP, computeResetGateFP 等
-//   3. Bias+Rescale Kernel - GEMM 后处理
+//   3. Bias+Rescale Kernel - cuBLAS GEMM 后处理
 //   4. Pointwise Kernel  - GRU 逐点运算
 //   5. ForwardPassQuantFP - 前向传播封装类
 //
@@ -30,6 +30,7 @@
 #include "blas.h"
 #include "dev_vector.h"
 #include "gru_quant.h"
+#include "parallel_algorithm.h"
 
 namespace kernel {
 
@@ -46,14 +47,6 @@ namespace kernel {
 __device__ __forceinline__ 
 float div_round(float x, float divisor) {
     return round_f(x / divisor);
-}
-
-/**
- * @brief 带银行家舍入的除法（double 精度版本，用于乘法累加）
- */
-__device__ __forceinline__ 
-double div_round_d(double x, double divisor) {
-    return round_d(x / divisor);
 }
 
 // 注：clamp_f, real_sigmoid_f, real_tanh_f 已移至 quantize_ops_helper.h
@@ -161,11 +154,11 @@ float computeNewGateFP(float weight_ih_linear, float weight_hh_linear, float res
     weight_hh_linear_g = weight_hh_linear;
     
     // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input
-    double r_diff = static_cast<double>(reset_gate) - static_cast<double>(p.zp_reset_gate_output_);
-    double hh_diff = static_cast<double>(weight_hh_linear_g) - static_cast<double>(p.zp_weight_hh_linear_);
-    double reset_hidden_mul = r_diff * hh_diff;
-    float rh = static_cast<float>(div_round_d(reset_hidden_mul, 
-                                              static_cast<double>(p.div_reset_mul_hh_to_new_gate_input_)));
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float r_diff = reset_gate - p.zp_reset_gate_output_;
+    float hh_diff = weight_hh_linear_g - p.zp_weight_hh_linear_;
+    float reset_hidden_mul = r_diff * hh_diff;
+    float rh = div_round(reset_hidden_mul, p.div_reset_mul_hh_to_new_gate_input_);
     
     // weight_ih_linear 重缩放到 new_gate_input 空间
     float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_,
@@ -188,11 +181,11 @@ float computeNewGateFP_with_mask(float weight_ih_linear, float weight_hh_linear,
                                  uint8_t& output_was_clamped) {
     weight_hh_linear_g = weight_hh_linear;
     
-    double r_diff = static_cast<double>(reset_gate) - static_cast<double>(p.zp_reset_gate_output_);
-    double hh_diff = static_cast<double>(weight_hh_linear_g) - static_cast<double>(p.zp_weight_hh_linear_);
-    double reset_hidden_mul = r_diff * hh_diff;
-    float rh = static_cast<float>(div_round_d(reset_hidden_mul, 
-                                              static_cast<double>(p.div_reset_mul_hh_to_new_gate_input_)));
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float r_diff = reset_gate - p.zp_reset_gate_output_;
+    float hh_diff = weight_hh_linear_g - p.zp_weight_hh_linear_;
+    float reset_hidden_mul = r_diff * hh_diff;
+    float rh = div_round(reset_hidden_mul, p.div_reset_mul_hh_to_new_gate_input_);
     
     float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_,
                          p.div_weight_ih_linear_to_new_gate_input_);
@@ -214,21 +207,19 @@ __device__ __forceinline__
 float computeHiddenStateFP(float update_gate, float new_gate, float h_old,
                            const GateQuantParamsFP &p) {
     // 计算 update_gate * h_old，直接对齐到 h
-    double u_diff = static_cast<double>(update_gate) - static_cast<double>(p.zp_update_gate_output_);
-    double h_diff = static_cast<double>(h_old) - static_cast<double>(p.zp_h_);
-    double old_contribution_mul = u_diff * h_diff;
-    float old_term = static_cast<float>(div_round_d(old_contribution_mul, 
-                                                    static_cast<double>(p.div_update_old_to_h_)));
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float u_diff = update_gate - p.zp_update_gate_output_;
+    float h_diff = h_old - p.zp_h_;
+    float old_contribution_mul = u_diff * h_diff;
+    float old_term = div_round(old_contribution_mul, p.div_update_old_to_h_);
     
     // 计算 (1 - update_gate) * new_gate，直接对齐到 h
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
-    double one_minus_u = static_cast<double>(p.quant_one_in_update_gate_scale_) - 
-                         static_cast<double>(update_gate);
-    double n_diff = static_cast<double>(new_gate) - static_cast<double>(p.zp_new_gate_output_);
-    double new_contribution_mul = one_minus_u * n_diff;
-    float new_term = static_cast<float>(div_round_d(new_contribution_mul, 
-                                                    static_cast<double>(p.div_update_new_to_h_)));
+    float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
+    float n_diff = new_gate - p.zp_new_gate_output_;
+    float new_contribution_mul = one_minus_u * n_diff;
+    float new_term = div_round(new_contribution_mul, p.div_update_new_to_h_);
     
     float h_new = old_term + new_term + p.zp_h_;
     return clamp_f(h_new, p.bitwidth_config_.h_);
@@ -241,205 +232,26 @@ __device__ __forceinline__
 float computeHiddenStateFP_with_mask(float update_gate, float new_gate, float h_old,
                                      const GateQuantParamsFP &p, uint8_t& was_clamped) {
     // 计算 update_gate * h_old，直接对齐到 h
-    double u_diff = static_cast<double>(update_gate) - static_cast<double>(p.zp_update_gate_output_);
-    double h_diff = static_cast<double>(h_old) - static_cast<double>(p.zp_h_);
-    double old_contribution_mul = u_diff * h_diff;
-    float old_term = static_cast<float>(div_round_d(old_contribution_mul, 
-                                                    static_cast<double>(p.div_update_old_to_h_)));
+    // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
+    float u_diff = update_gate - p.zp_update_gate_output_;
+    float h_diff = h_old - p.zp_h_;
+    float old_contribution_mul = u_diff * h_diff;
+    float old_term = div_round(old_contribution_mul, p.div_update_old_to_h_);
     
     // 计算 (1 - update_gate) * new_gate，直接对齐到 h
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
-    double one_minus_u = static_cast<double>(p.quant_one_in_update_gate_scale_) - 
-                         static_cast<double>(update_gate);
-    double n_diff = static_cast<double>(new_gate) - static_cast<double>(p.zp_new_gate_output_);
-    double new_contribution_mul = one_minus_u * n_diff;
-    float new_term = static_cast<float>(div_round_d(new_contribution_mul, 
-                                                    static_cast<double>(p.div_update_new_to_h_)));
+    float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
+    float n_diff = new_gate - p.zp_new_gate_output_;
+    float new_contribution_mul = one_minus_u * n_diff;
+    float new_term = div_round(new_contribution_mul, p.div_update_new_to_h_);
     
     float h_new = old_term + new_term + p.zp_h_;
     return clamp_f_with_mask(h_new, p.bitwidth_config_.h_, was_clamped);
 }
 
 // ============================================================================
-// 4. 自定义 Float GEMM（与 INT32 版本相同逻辑，用于验证）
-// ============================================================================
-
-// 启用自定义 GEMM 的编译开关（设为 1 使用自定义 GEMM，0 使用 cuBLAS）
-// #define USE_CUSTOM_FLOAT_GEMM 1
-
-constexpr int TILE_SIZE_FP = 16;
-
-/**
- * @brief 自定义 Float GEMM + Bias + Rescale（与 INT32 版本完全对齐）
- * 
- * 计算: C = clamp(round((A * (B - zp_B) + bias) / div_gemm) + zp_out)
- * 
- * 关键特点：
- * - 在加载 B tile 时就减去零点（与 INT32 版本一致）
- * - 使用 double 累加确保精度
- * - 与 INT32 版本的 rshift_round 行为一致
- * 
- * @param A [M, K] 权重，列主序
- * @param B [K, N] 输入，列主序
- * @param C [M, N] 输出，列主序
- * @param bias [M] 偏置
- * @param M 输出行数 (hidden*3)
- * @param N 输出列数 (batch)
- * @param K 内部维度 (hidden)
- * @param zp_B 输入零点
- * @param div_gemm [M] per-row GEMM 除数
- * @param div_bias [M] per-row bias 除数
- * @param zp_out 输出零点
- * @param output_bw 输出位宽配置
- */
-__global__ void customFloatGemmBiasFused(
-    const float *__restrict__ A,               // [M, K] 权重，列主序
-    const float *__restrict__ B,               // [K, N] 输入，列主序
-    float *__restrict__ C,                     // [M, N] 输出，列主序
-    const float *__restrict__ bias,            // [M] 偏置
-    int M, int N, int K,
-    float zp_B,                                // 输入的 zero-point
-    const float *__restrict__ div_gemm,        // [M] per-row GEMM 除数
-    const float *__restrict__ div_bias,        // [M] per-row bias 除数
-    float zp_out,                              // 输出的 zero-point
-    QuantBitWidth output_bw                    // 输出位宽配置
-) {
-    __shared__ float As[TILE_SIZE_FP][TILE_SIZE_FP + 1];
-    __shared__ float Bs[TILE_SIZE_FP][TILE_SIZE_FP + 1];
-
-    const int row = blockIdx.y * TILE_SIZE_FP + threadIdx.y;  // m in [0, M)
-    const int col = blockIdx.x * TILE_SIZE_FP + threadIdx.x;  // n in [0, N)
-
-    // 使用 double 累加以匹配 INT32 版本的 int64 精度
-    double acc = 0.0;
-
-    const int numTiles = (K + TILE_SIZE_FP - 1) / TILE_SIZE_FP;
-
-    for (int t = 0; t < numTiles; t++) {
-        // 加载 A tile（列主序：A[k*M + m]）
-        const int aK = t * TILE_SIZE_FP + threadIdx.x;
-        if (row < M && aK < K) {
-            As[threadIdx.y][threadIdx.x] = A[aK * M + row];
-        } else {
-            As[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        // 加载 B tile 并减去 zp_B（列主序：B[n*K + k]）
-        // 关键：与 INT32 版本一样，在加载时就减零点！
-        const int bK = t * TILE_SIZE_FP + threadIdx.y;
-        if (col < N && bK < K) {
-            Bs[threadIdx.y][threadIdx.x] = B[col * K + bK] - zp_B;
-        } else {
-            Bs[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-#pragma unroll
-        for (int k = 0; k < TILE_SIZE_FP; k++) {
-            acc += static_cast<double>(As[threadIdx.y][k]) * 
-                   static_cast<double>(Bs[k][threadIdx.x]);
-        }
-
-        __syncthreads();
-    }
-
-    // 写回结果：与 INT32 版本相同的 rescale 逻辑
-    if (row < M && col < N) {
-        const double div_g = static_cast<double>(div_gemm[row]);
-        const double div_b = static_cast<double>(div_bias[row]);
-        const double bias_val = static_cast<double>(bias[row]);
-
-        // bias 先 rescale（与 INT32 的 rshift_round 对应）
-        double bias_result = round_d(bias_val / div_b);
-        
-        // GEMM + bias 一起 rescale
-        double gemm_result = round_d((acc + bias_result) / div_g);
-
-        // 合并结果
-        double result = gemm_result + static_cast<double>(zp_out);
-
-        // clamp 并输出（列主序：C[n*M + m]）
-        C[col * M + row] = clamp_f(static_cast<float>(result), output_bw);
-    }
-}
-
-/**
- * @brief 自定义 Float GEMM + Bias + Rescale（带可选 mask 输出版本）
- * @tparam Training 训练模式时保存 clamp mask
- */
-template <bool Training>
-__global__ void customFloatGemmBiasFusedWithMask(
-    const float *__restrict__ A,
-    const float *__restrict__ B,
-    float *__restrict__ C,
-    const float *__restrict__ bias,
-    int M, int N, int K,
-    float zp_B,
-    const float *__restrict__ div_gemm,
-    const float *__restrict__ div_bias,
-    float zp_out,
-    QuantBitWidth output_bw,
-    uint8_t *__restrict__ mask
-) {
-    __shared__ float As[TILE_SIZE_FP][TILE_SIZE_FP + 1];
-    __shared__ float Bs[TILE_SIZE_FP][TILE_SIZE_FP + 1];
-
-    const int row = blockIdx.y * TILE_SIZE_FP + threadIdx.y;
-    const int col = blockIdx.x * TILE_SIZE_FP + threadIdx.x;
-
-    double acc = 0.0;
-    const int numTiles = (K + TILE_SIZE_FP - 1) / TILE_SIZE_FP;
-
-    for (int t = 0; t < numTiles; t++) {
-        const int aK = t * TILE_SIZE_FP + threadIdx.x;
-        if (row < M && aK < K) {
-            As[threadIdx.y][threadIdx.x] = A[aK * M + row];
-        } else {
-            As[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        const int bK = t * TILE_SIZE_FP + threadIdx.y;
-        if (col < N && bK < K) {
-            Bs[threadIdx.y][threadIdx.x] = B[col * K + bK] - zp_B;
-        } else {
-            Bs[threadIdx.y][threadIdx.x] = 0.0f;
-        }
-
-        __syncthreads();
-
-#pragma unroll
-        for (int k = 0; k < TILE_SIZE_FP; k++) {
-            acc += static_cast<double>(As[threadIdx.y][k]) * 
-                   static_cast<double>(Bs[k][threadIdx.x]);
-        }
-
-        __syncthreads();
-    }
-
-    if (row < M && col < N) {
-        const double div_g = static_cast<double>(div_gemm[row]);
-        const double div_b = static_cast<double>(div_bias[row]);
-        const double bias_val = static_cast<double>(bias[row]);
-
-        double bias_result = round_d(bias_val / div_b);
-        double gemm_result = round_d((acc + bias_result) / div_g);
-        double result = gemm_result + static_cast<double>(zp_out);
-
-        int idx = col * M + row;
-        if constexpr (Training) {
-            uint8_t was_clamped;
-            C[idx] = clamp_f_with_mask(static_cast<float>(result), output_bw, was_clamped);
-            mask[idx] = was_clamped;
-        } else {
-            C[idx] = clamp_f(static_cast<float>(result), output_bw);
-        }
-    }
-}
-
-// ============================================================================
-// 5. Bias + Rescale Kernel（cuBLAS GEMM 后处理，当不使用自定义 GEMM 时使用）
+// 4. Bias + Rescale Kernel（cuBLAS GEMM 后处理）
 // ============================================================================
 
 /**
@@ -463,7 +275,7 @@ __global__ void biasRescaleKernel(
     const float *__restrict__ gemm_result,
     float *__restrict__ output,
     const float *__restrict__ bias,
-    const double *__restrict__ W_sum_mul_zp,
+    const float *__restrict__ W_sum_mul_zp,
     const float *__restrict__ div_gemm,
     const float *__restrict__ div_bias,
     float zp_out,
@@ -475,17 +287,16 @@ __global__ void biasRescaleKernel(
     
     int row = idx % M;  // 列主序
     
-    // GEMM 结果减去零点补偿
-    double val = static_cast<double>(gemm_result[idx]) - W_sum_mul_zp[row];
+    // GEMM 结果减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
+    float val = gemm_result[idx] - W_sum_mul_zp[row];
     
-    // bias 先 rescale
-    double bias_term = round_d(static_cast<double>(bias[row]) / static_cast<double>(div_bias[row]));
+    // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
+    float bias_term = round_f(bias[row] / div_bias[row]);
     
-    // GEMM + bias 一起 rescale
-    double result = round_d((val + bias_term) / static_cast<double>(div_gemm[row])) + 
-                    static_cast<double>(zp_out);
+    // GEMM + bias 一起 rescale（最终结果在量化范围内）
+    float result = round_f((val + bias_term) / div_gemm[row]) + zp_out;
     
-    output[idx] = clamp_f(static_cast<float>(result), output_bw);
+    output[idx] = clamp_f(result, output_bw);
 }
 
 /**
@@ -496,7 +307,7 @@ template <bool Training>
 __global__ void biasRescaleKernelWithMask(
     float *__restrict__ data,  // 输入：GEMM 结果，输出：rescale 后的结果（原地处理）
     const float *__restrict__ bias,
-    const double *__restrict__ W_sum_mul_zp,
+    const float *__restrict__ W_sum_mul_zp,
     const float *__restrict__ div_gemm,
     const float *__restrict__ div_bias,
     float zp_out,
@@ -509,13 +320,12 @@ __global__ void biasRescaleKernelWithMask(
     
     int row = idx % M;
     
-    // 读取 GEMM 结果，减去零点补偿
-    double val = static_cast<double>(data[idx]) - W_sum_mul_zp[row];
-    // bias 先 rescale
-    double bias_term = round_d(static_cast<double>(bias[row]) / static_cast<double>(div_bias[row]));
-    // GEMM + bias 一起 rescale
-    double result = round_d((val + bias_term) / static_cast<double>(div_gemm[row])) + 
-                    static_cast<double>(zp_out);
+    // 读取 GEMM 结果，减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
+    float val = data[idx] - W_sum_mul_zp[row];
+    // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
+    float bias_term = round_f(bias[row] / div_bias[row]);
+    // GEMM + bias 一起 rescale（最终结果在量化范围内）
+    float result = round_f((val + bias_term) / div_gemm[row]) + zp_out;
     
     // 原地写回结果
     if constexpr (Training) {
@@ -534,19 +344,20 @@ __global__ void biasRescaleKernelWithMask(
  */
 __global__ void computeWeightSumKernel(
     const float *__restrict__ W,
-    double *__restrict__ W_sum_mul_zp,
+    float *__restrict__ W_sum_mul_zp,
     float zp,
     int M, int K
 ) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= M) return;
     
-    double sum = 0.0;
+    // 使用 float 累加（权重总是 8bit，K < 1024 且 zp < 100 时 float 足够精确）
+    float sum = 0.0f;
     // W 是列主序 [M, K]，遍历第 row 行的所有 K 个元素
     for (int k = 0; k < K; ++k) {
-        sum += static_cast<double>(W[k * M + row]);
+        sum += W[k * M + row];
     }
-    W_sum_mul_zp[row] = sum * static_cast<double>(zp);
+    W_sum_mul_zp[row] = sum * zp;
 }
 
 // ============================================================================
@@ -845,15 +656,24 @@ void ForwardPassQuantFP::PrecomputeWeightSums(const float *W, const float *R) {
     const int hidden3 = hidden_size * 3;
     const cudaStream_t stream = data_->stream[1];
 
-    // 计算 W_sum * zp_x
     int threads = 256;
     int blocks = (hidden3 + threads - 1) / threads;
-    kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
-        W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_, hidden3, input_size);
 
-    // 计算 R_sum * zp_h
-    kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
-        R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_, hidden3, hidden_size);
+    // 计算 W_sum * zp_x（如果 zp_x != 0，否则直接清零）
+    if (linear_params_.zp_x_ != 0.0f) {
+        kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
+            W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_, hidden3, input_size);
+    } else {
+        dev::fill_n(W_sum_mul_x_zp_.data(), hidden3, 0.0f);
+    }
+
+    // 计算 R_sum * zp_h（如果 zp_h != 0，否则直接清零）
+    if (linear_params_.zp_h_ != 0.0f) {
+        kernel::computeWeightSumKernel<<<blocks, threads, 0, stream>>>(
+            R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_, hidden3, hidden_size);
+    } else {
+        dev::fill_n(R_sum_mul_h_zp_.data(), hidden3, 0.0f);
+    }
 
     cudaStreamSynchronize(stream);
     weight_sums_computed_ = true;
@@ -873,35 +693,6 @@ void ForwardPassQuantFP::ComputeLinearX(const float *W, const float *x,
     
     const bool training = data_->training;
 
-#if USE_CUSTOM_FLOAT_GEMM
-    // 使用自定义 GEMM（与 INT32 版本相同逻辑）
-    dim3 blockDim(kernel::TILE_SIZE_FP, kernel::TILE_SIZE_FP);
-    dim3 gridDim((N + kernel::TILE_SIZE_FP - 1) / kernel::TILE_SIZE_FP,
-                 (M + kernel::TILE_SIZE_FP - 1) / kernel::TILE_SIZE_FP);
-    
-    // training 模式保存 mask，否则不保存
-    if (training) {
-        kernel::customFloatGemmBiasFusedWithMask<true><<<gridDim, blockDim, 0, stream>>>(
-            W, x, tmp_weight_ih_linear_.data(), bw,
-            M, N, K,
-            linear_params_.zp_x_,
-            linear_params_.div_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.div_bw_to_weight_ih_linear_.data(),
-            linear_params_.zp_weight_ih_linear_,
-            linear_params_.output_bw_ih_,
-            weight_ih_linear_mask);
-    } else {
-        kernel::customFloatGemmBiasFusedWithMask<false><<<gridDim, blockDim, 0, stream>>>(
-            W, x, tmp_weight_ih_linear_.data(), bw,
-            M, N, K,
-            linear_params_.zp_x_,
-            linear_params_.div_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.div_bw_to_weight_ih_linear_.data(),
-            linear_params_.zp_weight_ih_linear_,
-            linear_params_.output_bw_ih_,
-            nullptr);
-    }
-#else
     // 使用 cuBLAS SGEMM + 后处理
     cublasSetStream(data_->blas_handle, stream);
 
@@ -939,7 +730,6 @@ void ForwardPassQuantFP::ComputeLinearX(const float *W, const float *x,
             linear_params_.output_bw_ih_,
             nullptr);
     }
-#endif
 }
 
 void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h, 
@@ -954,35 +744,6 @@ void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h,
     const int N = batch_size;
     const int K = hidden_size;
 
-#if USE_CUSTOM_FLOAT_GEMM
-    // 使用自定义 GEMM（与 INT32 版本相同逻辑）
-    dim3 blockDim(kernel::TILE_SIZE_FP, kernel::TILE_SIZE_FP);
-    dim3 gridDim((N + kernel::TILE_SIZE_FP - 1) / kernel::TILE_SIZE_FP,
-                 (M + kernel::TILE_SIZE_FP - 1) / kernel::TILE_SIZE_FP);
-    
-    // training 模式保存 mask，否则不保存
-    if (training) {
-        kernel::customFloatGemmBiasFusedWithMask<true><<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), br,
-            M, N, K,
-            linear_params_.zp_h_,
-            linear_params_.div_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.div_br_to_weight_hh_linear_.data(),
-            linear_params_.zp_weight_hh_linear_,
-            linear_params_.output_bw_hh_,
-            weight_hh_linear_mask);
-    } else {
-        kernel::customFloatGemmBiasFusedWithMask<false><<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), br,
-            M, N, K,
-            linear_params_.zp_h_,
-            linear_params_.div_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.div_br_to_weight_hh_linear_.data(),
-            linear_params_.zp_weight_hh_linear_,
-            linear_params_.output_bw_hh_,
-            nullptr);
-    }
-#else
     // 使用 cuBLAS SGEMM + 后处理
     cublasSetStream(data_->blas_handle, stream);
 
@@ -1019,7 +780,6 @@ void ForwardPassQuantFP::ComputeLinearH(const float *R, const float *h,
             linear_params_.output_bw_hh_,
             nullptr);
     }
-#endif
 }
 
 void ForwardPassQuantFP::IterateInternal(

@@ -29,6 +29,7 @@
 #include "dev_vector.h"
 #include "gru_quant.h"
 #include "quantize_ops_helper.h"
+#include "parallel_algorithm.h"
 
 namespace kernel {
 
@@ -621,17 +622,26 @@ void ForwardPassQuant::PrecomputeWeightSums(const int32_t *W, const int32_t *R) 
 
     const int hidden_size = data_->hidden_size;
     const int input_size = data_->input_size;
+    const int hidden3 = hidden_size * 3;
     const cudaStream_t stream = data_->stream[1];
 
-    // 计算 W_sum_mul_x_zp
-    computeWeightSumMulzp(W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_,
-                          linear_params_.shift_gemm_x_to_weight_ih_linear_.data(), hidden_size * 3, input_size,
-                          stream);
+    // 计算 W_sum_mul_x_zp（如果 zp_x != 0，否则直接清零）
+    if (linear_params_.zp_x_ != 0) {
+        computeWeightSumMulzp(W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_,
+                              linear_params_.shift_gemm_x_to_weight_ih_linear_.data(), hidden3, input_size,
+                              stream);
+    } else {
+        dev::fill_n(W_sum_mul_x_zp_.data(), hidden3, static_cast<int64_t>(0));
+    }
 
-    // 计算 R_sum_mul_h_zp
-    computeWeightSumMulzp(R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_,
-                          linear_params_.shift_gemm_h_to_weight_hh_linear_.data(), hidden_size * 3, hidden_size,
-                          stream);
+    // 计算 R_sum_mul_h_zp（如果 zp_h != 0，否则直接清零）
+    if (linear_params_.zp_h_ != 0) {
+        computeWeightSumMulzp(R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_,
+                              linear_params_.shift_gemm_h_to_weight_hh_linear_.data(), hidden3, hidden_size,
+                              stream);
+    } else {
+        dev::fill_n(R_sum_mul_h_zp_.data(), hidden3, static_cast<int64_t>(0));
+    }
 
     cudaStreamSynchronize(stream);
     weight_sums_computed_ = true;

@@ -202,8 +202,9 @@ private:
     dev::vector<float> tmp_weight_hh_linear_;  // [hidden*3 * batch] R*h + br
 
     // 权重和常量（预计算，用于零点补偿）
-    dev::vector<double> W_sum_mul_x_zp_;  // [hidden*3]
-    dev::vector<double> R_sum_mul_h_zp_;  // [hidden*3]
+    // 使用 float（权重总是 8bit，K < 1024 且 zp < 100 时 float 足够精确）
+    dev::vector<float> W_sum_mul_x_zp_;  // [hidden*3]
+    dev::vector<float> R_sum_mul_h_zp_;  // [hidden*3]
     bool weight_sums_computed_ = false;
 
     const float *cached_W_ = nullptr;
