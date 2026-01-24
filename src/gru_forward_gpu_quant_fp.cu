@@ -49,6 +49,19 @@ float div_round(float x, float divisor) {
     return round_f(x / divisor);
 }
 
+/**
+ * @brief 内联函数：乘法 + 四舍五入（优化版本，使用倒数）
+ * 
+ * 使用预计算的倒数，乘法比除法快 3-5 倍
+ * 
+ * @param x 被除数
+ * @param inv_divisor 倒数（1.0f / divisor）
+ */
+__device__ __forceinline__ 
+float mul_round(float x, float inv_divisor) {
+    return round_f(x * inv_divisor);
+}
+
 // 注：clamp_f, real_sigmoid_f, real_tanh_f 已移至 quantize_ops_helper.h
 
 // ============================================================================
@@ -70,18 +83,18 @@ float biasRescaleInline(
     float gemm_result,
     float bias,
     float W_sum_mul_zp,
-    float div_gemm,
-    float div_bias,
+    float inv_div_gemm,  // 倒数（1.0f / div_gemm）
+    float inv_div_bias,  // 倒数（1.0f / div_bias）
     float zp_out,
     QuantBitWidth output_bw,
     uint8_t* was_clamped = nullptr
 ) {
     // GEMM 结果减去零点补偿
     float val = gemm_result - W_sum_mul_zp;
-    // bias 先 rescale
-    float bias_term = round_f(bias / div_bias);
-    // GEMM + bias 一起 rescale
-    float result = round_f((val + bias_term) / div_gemm) + zp_out;
+    // bias 先 rescale（使用倒数，乘法替代除法）
+    float bias_term = round_f(bias * inv_div_bias);
+    // GEMM + bias 一起 rescale（使用倒数，乘法替代除法）
+    float result = round_f((val + bias_term) * inv_div_gemm) + zp_out;
     
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
@@ -104,11 +117,11 @@ float computeUpdateGateFP(float weight_ih_linear, float weight_hh_linear,
                           const GateQuantParamsFP &p,
                           uint8_t* input_was_clamped = nullptr,
                           uint8_t* output_was_clamped = nullptr) {
-    // 重缩放到 update_gate_input 空间（除法替代位移）
-    float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_, 
-                         p.div_weight_ih_linear_to_update_gate_input_);
-    float hh = div_round(weight_hh_linear - p.zp_weight_hh_linear_, 
-                         p.div_weight_hh_linear_to_update_gate_input_);
+    // 重缩放到 update_gate_input 空间（使用倒数，乘法替代除法）
+    float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_, 
+                         p.inv_div_weight_ih_linear_to_update_gate_input_);
+    float hh = mul_round(weight_hh_linear - p.zp_weight_hh_linear_, 
+                         p.inv_div_weight_hh_linear_to_update_gate_input_);
     float input = ih + hh + p.zp_update_gate_input_;
     
     // 使用 if constexpr 避免运行时分支
@@ -139,10 +152,10 @@ float computeResetGateFP(float weight_ih_linear, float weight_hh_linear,
                          const GateQuantParamsFP &p,
                          uint8_t* input_was_clamped = nullptr,
                          uint8_t* output_was_clamped = nullptr) {
-    float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_,
-                         p.div_weight_ih_linear_to_reset_gate_input_);
-    float hh = div_round(weight_hh_linear - p.zp_weight_hh_linear_,
-                         p.div_weight_hh_linear_to_reset_gate_input_);
+    float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_,
+                         p.inv_div_weight_ih_linear_to_reset_gate_input_);
+    float hh = mul_round(weight_hh_linear - p.zp_weight_hh_linear_,
+                         p.inv_div_weight_hh_linear_to_reset_gate_input_);
     float input = ih + hh + p.zp_reset_gate_input_;
     
     // 使用 if constexpr 避免运行时分支
@@ -179,11 +192,11 @@ float computeNewGateFP(float weight_ih_linear, float weight_hh_linear, float res
     float r_diff = reset_gate - p.zp_reset_gate_output_;
     float hh_diff = weight_hh_linear - p.zp_weight_hh_linear_;
     float reset_hidden_mul = r_diff * hh_diff;
-    float rh = div_round(reset_hidden_mul, p.div_reset_mul_hh_to_new_gate_input_);
+    float rh = mul_round(reset_hidden_mul, p.inv_div_reset_mul_hh_to_new_gate_input_);
     
-    // weight_ih_linear 重缩放到 new_gate_input 空间
-    float ih = div_round(weight_ih_linear - p.zp_weight_ih_linear_,
-                         p.div_weight_ih_linear_to_new_gate_input_);
+    // weight_ih_linear 重缩放到 new_gate_input 空间（使用倒数，乘法替代除法）
+    float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_,
+                         p.inv_div_weight_ih_linear_to_new_gate_input_);
     float input = ih + rh + p.zp_new_gate_input_;
     
     // 使用 if constexpr 避免运行时分支
@@ -217,7 +230,7 @@ float computeHiddenStateFP(float update_gate, float new_gate, float h_old,
     float u_diff = update_gate - p.zp_update_gate_output_;
     float h_diff = h_old - p.zp_h_;
     float old_contribution_mul = u_diff * h_diff;
-    float old_term = div_round(old_contribution_mul, p.div_update_old_to_h_);
+    float old_term = mul_round(old_contribution_mul, p.inv_div_update_old_to_h_);
     
     // 计算 (1 - update_gate) * new_gate，直接对齐到 h
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
@@ -225,7 +238,7 @@ float computeHiddenStateFP(float update_gate, float new_gate, float h_old,
     float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
     float n_diff = new_gate - p.zp_new_gate_output_;
     float new_contribution_mul = one_minus_u * n_diff;
-    float new_term = div_round(new_contribution_mul, p.div_update_new_to_h_);
+    float new_term = mul_round(new_contribution_mul, p.inv_div_update_new_to_h_);
     
     float h_new = old_term + new_term + p.zp_h_;
     
@@ -403,13 +416,13 @@ __global__ void PointwiseOperationsFP(
     uint8_t ih_update_mask, ih_reset_mask, ih_new_mask;
     uint8_t hh_update_mask, hh_reset_mask, hh_new_mask;
     
-    // Rescale weight_ih_linear (update, reset, new)
+    // Rescale weight_ih_linear (update, reset, new) - 使用倒数，乘法替代除法
     weight_ih_linear_update = biasRescaleInline<Training>(
         gemm_weight_ih_linear[update_idx], 
         bw[row], 
         linear_rescale_params.W_sum_mul_x_zp[row],
-        linear_rescale_params.div_gemm_x_to_weight_ih_linear_[row], 
-        linear_rescale_params.div_bw_to_weight_ih_linear_[row],
+        linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row], 
+        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_update_mask);
@@ -417,8 +430,8 @@ __global__ void PointwiseOperationsFP(
         gemm_weight_ih_linear[reset_idx], 
         bw[row + hidden_dim], 
         linear_rescale_params.W_sum_mul_x_zp[row + hidden_dim],
-        linear_rescale_params.div_gemm_x_to_weight_ih_linear_[row + hidden_dim], 
-        linear_rescale_params.div_bw_to_weight_ih_linear_[row + hidden_dim],
+        linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row + hidden_dim], 
+        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row + hidden_dim],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_reset_mask);
@@ -426,19 +439,19 @@ __global__ void PointwiseOperationsFP(
         gemm_weight_ih_linear[new_idx], 
         bw[row + 2 * hidden_dim], 
         linear_rescale_params.W_sum_mul_x_zp[row + 2 * hidden_dim],
-        linear_rescale_params.div_gemm_x_to_weight_ih_linear_[row + 2 * hidden_dim], 
-        linear_rescale_params.div_bw_to_weight_ih_linear_[row + 2 * hidden_dim],
+        linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row + 2 * hidden_dim], 
+        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row + 2 * hidden_dim],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_new_mask);
     
-    // Rescale weight_hh_linear (update, reset, new)
+    // Rescale weight_hh_linear (update, reset, new) - 使用倒数，乘法替代除法
     weight_hh_linear_update = biasRescaleInline<Training>(
         gemm_weight_hh_linear[update_idx], 
         br[row], 
         linear_rescale_params.R_sum_mul_h_zp[row],
-        linear_rescale_params.div_gemm_h_to_weight_hh_linear_[row], 
-        linear_rescale_params.div_br_to_weight_hh_linear_[row],
+        linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row], 
+        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_update_mask);
@@ -446,8 +459,8 @@ __global__ void PointwiseOperationsFP(
         gemm_weight_hh_linear[reset_idx], 
         br[row + hidden_dim], 
         linear_rescale_params.R_sum_mul_h_zp[row + hidden_dim],
-        linear_rescale_params.div_gemm_h_to_weight_hh_linear_[row + hidden_dim], 
-        linear_rescale_params.div_br_to_weight_hh_linear_[row + hidden_dim],
+        linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row + hidden_dim], 
+        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row + hidden_dim],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_reset_mask);
@@ -455,8 +468,8 @@ __global__ void PointwiseOperationsFP(
         gemm_weight_hh_linear[new_idx], 
         br[row + 2 * hidden_dim], 
         linear_rescale_params.R_sum_mul_h_zp[row + 2 * hidden_dim],
-        linear_rescale_params.div_gemm_h_to_weight_hh_linear_[row + 2 * hidden_dim], 
-        linear_rescale_params.div_br_to_weight_hh_linear_[row + 2 * hidden_dim],
+        linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row + 2 * hidden_dim], 
+        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row + 2 * hidden_dim],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_new_mask);
@@ -606,34 +619,43 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     g.zp_update_gate_output_ = static_cast<float>(src.zp_update_gate_output_);
     int8_t shift_ih_u = src.shift_weight_ih_linear_ - src.shift_update_gate_input_;
     int8_t shift_hh_u = src.shift_weight_hh_linear_ - src.shift_update_gate_input_;
-    g.div_weight_ih_linear_to_update_gate_input_ = ldexpf(1.0f, shift_ih_u);
-    g.div_weight_hh_linear_to_update_gate_input_ = ldexpf(1.0f, shift_hh_u);
+    // 直接计算倒数（优化：乘法替代除法）
+    float div_ih_u = exp2_scale(-shift_ih_u);
+    float div_hh_u = exp2_scale(-shift_hh_u);
+    g.inv_div_weight_ih_linear_to_update_gate_input_ = 1.0f / div_ih_u;
+    g.inv_div_weight_hh_linear_to_update_gate_input_ = 1.0f / div_hh_u;
 
     // Reset gate
     g.zp_reset_gate_input_ = static_cast<float>(src.zp_reset_gate_input_);
     g.zp_reset_gate_output_ = static_cast<float>(src.zp_reset_gate_output_);
     int8_t shift_ih_r = src.shift_weight_ih_linear_ - src.shift_reset_gate_input_;
     int8_t shift_hh_r = src.shift_weight_hh_linear_ - src.shift_reset_gate_input_;
-    g.div_weight_ih_linear_to_reset_gate_input_ = ldexpf(1.0f, shift_ih_r);
-    g.div_weight_hh_linear_to_reset_gate_input_ = ldexpf(1.0f, shift_hh_r);
+    float div_ih_r = exp2_scale(-shift_ih_r);
+    float div_hh_r = exp2_scale(-shift_hh_r);
+    g.inv_div_weight_ih_linear_to_reset_gate_input_ = 1.0f / div_ih_r;
+    g.inv_div_weight_hh_linear_to_reset_gate_input_ = 1.0f / div_hh_r;
 
     // New gate
     g.zp_new_gate_input_ = static_cast<float>(src.zp_new_gate_input_);
     g.zp_new_gate_output_ = static_cast<float>(src.zp_new_gate_output_);
     int8_t shift_ih_n = src.shift_weight_ih_linear_ - src.shift_new_gate_input_;
     int8_t shift_rh_n = (src.shift_reset_gate_output_ + src.shift_weight_hh_linear_) - src.shift_new_gate_input_;
-    g.div_weight_ih_linear_to_new_gate_input_ = ldexpf(1.0f, shift_ih_n);
-    g.div_reset_mul_hh_to_new_gate_input_ = ldexpf(1.0f, shift_rh_n);
+    float div_ih_n = exp2_scale(-shift_ih_n);
+    float div_rh_n = exp2_scale(-shift_rh_n);
+    g.inv_div_weight_ih_linear_to_new_gate_input_ = 1.0f / div_ih_n;
+    g.inv_div_reset_mul_hh_to_new_gate_input_ = 1.0f / div_rh_n;
 
     // Hidden state
     // quant_one = rshift_round(1, -shift) + zp = (1 << shift) + zp = 2^shift + zp
     // 注意：rshift_round(1, -n) 当 n>0 时等于 1 << n
-    g.quant_one_in_update_gate_scale_ = ldexpf(1.0f, src.shift_update_gate_output_) + 
+    g.quant_one_in_update_gate_scale_ = exp2_scale(-src.shift_update_gate_output_) + 
                                         static_cast<float>(src.zp_update_gate_output_);
     int8_t shift_un = (src.shift_update_gate_output_ + src.shift_new_gate_output_) - src.shift_h_;
     int8_t shift_uh = src.shift_update_gate_output_;  // shift_update_gate_output_ + shift_h_ - shift_h_
-    g.div_update_new_to_h_ = ldexpf(1.0f, shift_un);
-    g.div_update_old_to_h_ = ldexpf(1.0f, shift_uh);
+    float div_un = exp2_scale(-shift_un);
+    float div_uh = exp2_scale(-shift_uh);
+    g.inv_div_update_new_to_h_ = 1.0f / div_un;
+    g.inv_div_update_old_to_h_ = 1.0f / div_uh;
 
     // 激活函数 scale = 2^(-shift)
     g.scale_update_gate_input_ = exp2_scale(src.shift_update_gate_input_);
@@ -652,26 +674,34 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     l.zp_weight_ih_linear_ = static_cast<float>(src.zp_weight_ih_linear_);
     l.zp_weight_hh_linear_ = static_cast<float>(src.zp_weight_hh_linear_);
 
-    std::vector<float> div_gemm_x(channel), div_bw(channel);
-    std::vector<float> div_gemm_h(channel), div_br(channel);
+    // 直接计算倒数数组（优化：乘法替代除法）
+    std::vector<float> inv_div_gemm_x(channel), inv_div_bw(channel);
+    std::vector<float> inv_div_gemm_h(channel), inv_div_br(channel);
     for (int i = 0; i < channel; ++i) {
         // GEMM: scale_W * scale_x -> scale_weight_ih_linear
         // shift = (shift_W + shift_x) - shift_weight_ih_linear
         int8_t shift_gx = (src.shift_W_[i] + src.shift_x_) - src.shift_weight_ih_linear_;
         // bias: 先 shift 到 GEMM scale，再和 GEMM 一起 shift
         int8_t shift_bw = src.shift_bw_[i] - (src.shift_W_[i] + src.shift_x_);
-        div_gemm_x[i] = ldexpf(1.0f, shift_gx);
-        div_bw[i] = ldexpf(1.0f, shift_bw);
+        float div_gemm_x = exp2_scale(-shift_gx);
+        float div_bw = exp2_scale(-shift_bw);
+        // 直接计算倒数
+        inv_div_gemm_x[i] = 1.0f / div_gemm_x;
+        inv_div_bw[i] = 1.0f / div_bw;
 
         int8_t shift_gh = (src.shift_R_[i] + src.shift_h_) - src.shift_weight_hh_linear_;
         int8_t shift_br = src.shift_br_[i] - (src.shift_R_[i] + src.shift_h_);
-        div_gemm_h[i] = ldexpf(1.0f, shift_gh);
-        div_br[i] = ldexpf(1.0f, shift_br);
+        float div_gemm_h = exp2_scale(-shift_gh);
+        float div_br = exp2_scale(-shift_br);
+        // 直接计算倒数
+        inv_div_gemm_h[i] = 1.0f / div_gemm_h;
+        inv_div_br[i] = 1.0f / div_br;
     }
-    l.div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(div_gemm_x);
-    l.div_bw_to_weight_ih_linear_ = dev::vector<float>(div_bw);
-    l.div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(div_gemm_h);
-    l.div_br_to_weight_hh_linear_ = dev::vector<float>(div_br);
+    // 只存储倒数数组
+    l.inv_div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(inv_div_gemm_x);
+    l.inv_div_bw_to_weight_ih_linear_ = dev::vector<float>(inv_div_bw);
+    l.inv_div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(inv_div_gemm_h);
+    l.inv_div_br_to_weight_hh_linear_ = dev::vector<float>(inv_div_br);
     
     l.output_bw_ih_ = src.bitwidth_config_.weight_ih_linear_;
     l.output_bw_hh_ = src.bitwidth_config_.weight_hh_linear_;
@@ -680,12 +710,12 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     // 注意：
     //   - W_sum_mul_x_zp 和 R_sum_mul_h_zp 指针在 EnsureBuffersAllocated 中更新（确保缓冲区已分配）
     //   - bw 和 br 指针在 IterateInternal 中更新（从参数传入）
-    linear_rescale_params_.div_gemm_x_to_weight_ih_linear_ = l.div_gemm_x_to_weight_ih_linear_.data();
-    linear_rescale_params_.div_bw_to_weight_ih_linear_ = l.div_bw_to_weight_ih_linear_.data();
+    linear_rescale_params_.inv_div_gemm_x_to_weight_ih_linear_ = l.inv_div_gemm_x_to_weight_ih_linear_.data();
+    linear_rescale_params_.inv_div_bw_to_weight_ih_linear_ = l.inv_div_bw_to_weight_ih_linear_.data();
     linear_rescale_params_.zp_weight_ih_linear_ = l.zp_weight_ih_linear_;
     linear_rescale_params_.output_bw_ih_ = l.output_bw_ih_;
-    linear_rescale_params_.div_gemm_h_to_weight_hh_linear_ = l.div_gemm_h_to_weight_hh_linear_.data();
-    linear_rescale_params_.div_br_to_weight_hh_linear_ = l.div_br_to_weight_hh_linear_.data();
+    linear_rescale_params_.inv_div_gemm_h_to_weight_hh_linear_ = l.inv_div_gemm_h_to_weight_hh_linear_.data();
+    linear_rescale_params_.inv_div_br_to_weight_hh_linear_ = l.inv_div_br_to_weight_hh_linear_.data();
     linear_rescale_params_.zp_weight_hh_linear_ = l.zp_weight_hh_linear_;
     linear_rescale_params_.output_bw_hh_ = l.output_bw_hh_;
 
