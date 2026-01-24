@@ -600,8 +600,18 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) { return tanh<float>(
  * @param params    门计算参数
  * @param debug_idx 调试索引，-1 表示不输出调试信息
  */
+/**
+ * @brief 计算更新门 update_gate = sigmoid(weight_ih_linear + weight_hh_linear)
+ * 
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
+ * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
+ */
+template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
+                 uint8_t* input_was_clamped = nullptr,
+                 uint8_t* output_was_clamped = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // 重缩放到 update_gate_input 空间
     const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
@@ -611,47 +621,74 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
 
     const auto &bw_cfg = params.bitwidth_config_;
     const auto &lut = params.sigmoid_update_gate_lut_;
+    
+    // 使用 if constexpr 避免运行时分支
+    if constexpr (Training) {
+        // 对门输入进行位宽截断并记录 mask
+        const int32_t clamped_input = clamp_by_bitwidth_with_mask(update_gate_input, bw_cfg.update_gate_input_, *input_was_clamped);
+        
 #ifdef USE_REAL_ACTIVATION
-    const int32_t update_gate = real_sigmoid(update_gate_input, 
-                                              lut.shift_bits_x, lut.zp_x,
-                                              lut.shift_bits_y, lut.zp_y,
-                                              bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+        // 使用截断后的输入计算激活函数
+        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
+        float y_float = sigmoid<float>(x_float);
+        const int32_t update_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y, 
+                                                        bw_cfg.update_gate_output_, *output_was_clamped);
 #else
-    const int32_t update_gate = piecewise_linear(update_gate_input, lut, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+        // 非 real activation 时，使用分段线性
+        int32_t result = piecewise_linear_raw(clamped_input, lut);
+        const int32_t update_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.update_gate_output_, *output_was_clamped);
+#endif
+        return update_gate;
+    } else {
+#ifdef USE_REAL_ACTIVATION
+        const int32_t update_gate = real_sigmoid(update_gate_input, 
+                                                  lut.shift_bits_x, lut.zp_x,
+                                                  lut.shift_bits_y, lut.zp_y,
+                                                  bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
+#else
+        const int32_t update_gate = piecewise_linear(update_gate_input, lut, bw_cfg.update_gate_input_, bw_cfg.update_gate_output_);
 #endif
 
 #ifdef DEBUG_QUANT
-    if (debug_idx == 0) {
-        float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
-                         (float)(1 << params.test.shift_update_gate_input_);
-        float update_gate_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                     (float)(1 << params.test.shift_update_gate_output_);
-        printf("[QUANT_I32] computeUpdateGate: update_gate_input_q=%d, update_gate_input_fp=%.6f, update_gate_q=%d, update_gate_fp=%.6f\n", 
-               update_gate_input, update_gate_input_fp, update_gate, update_gate_fp);
-    }
+        if (debug_idx == 0) {
+            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
+                             (float)(1 << params.test.shift_update_gate_input_);
+            float update_gate_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                         (float)(1 << params.test.shift_update_gate_output_);
+            printf("[QUANT_I32] computeUpdateGate: update_gate_input_q=%d, update_gate_input_fp=%.6f, update_gate_q=%d, update_gate_fp=%.6f\n", 
+                   update_gate_input, update_gate_input_fp, update_gate, update_gate_fp);
+        }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
-    if (debug_idx >= 0 && debug_idx < 3) {
-        float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
-                         (float)(1 << params.test.shift_update_gate_input_);
-        float update_gate_quant_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                           (float)(1 << params.test.shift_update_gate_output_);
-        float update_gate_theory = sigmoid_fp(update_gate_input_fp);
-        float error = update_gate_quant_fp - update_gate_theory;
-        printf("[UpdateGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, update_gate_input, update_gate_input_fp, update_gate, update_gate_quant_fp, update_gate_theory, error);
-    }
+        if (debug_idx >= 0 && debug_idx < 3) {
+            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
+                             (float)(1 << params.test.shift_update_gate_input_);
+            float update_gate_quant_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                               (float)(1 << params.test.shift_update_gate_output_);
+            float update_gate_theory = sigmoid_fp(update_gate_input_fp);
+            float error = update_gate_quant_fp - update_gate_theory;
+            printf("[UpdateGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+                   debug_idx, update_gate_input, update_gate_input_fp, update_gate, update_gate_quant_fp, update_gate_theory, error);
+        }
 #endif
 
-    return update_gate;
+        return update_gate;
+    }
 }
 
 /**
  * @brief 计算重置门 reset_gate = sigmoid(weight_ih_linear + weight_hh_linear)
+ * 
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
+ * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
  */
+template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
+                 uint8_t* input_was_clamped = nullptr,
+                 uint8_t* output_was_clamped = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
     const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
@@ -660,40 +697,58 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
 
     const auto &bw_cfg = params.bitwidth_config_;
     const auto &lut = params.sigmoid_reset_gate_lut_;
+    
+    // 使用 if constexpr 避免运行时分支
+    if constexpr (Training) {
+        // 对门输入进行位宽截断并记录 mask
+        const int32_t clamped_input = clamp_by_bitwidth_with_mask(reset_gate_input, bw_cfg.reset_gate_input_, *input_was_clamped);
+        
 #ifdef USE_REAL_ACTIVATION
-    const int32_t reset_gate = real_sigmoid(reset_gate_input,
-                                             lut.shift_bits_x, lut.zp_x,
-                                             lut.shift_bits_y, lut.zp_y,
-                                             bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
+        float y_float = sigmoid<float>(x_float);
+        const int32_t reset_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y,
+                                                       bw_cfg.reset_gate_output_, *output_was_clamped);
 #else
-    const int32_t reset_gate = piecewise_linear(reset_gate_input, lut, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+        int32_t result = piecewise_linear_raw(clamped_input, lut);
+        const int32_t reset_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.reset_gate_output_, *output_was_clamped);
+#endif
+        return reset_gate;
+    } else {
+#ifdef USE_REAL_ACTIVATION
+        const int32_t reset_gate = real_sigmoid(reset_gate_input,
+                                                 lut.shift_bits_x, lut.zp_x,
+                                                 lut.shift_bits_y, lut.zp_y,
+                                                 bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
+#else
+        const int32_t reset_gate = piecewise_linear(reset_gate_input, lut, bw_cfg.reset_gate_input_, bw_cfg.reset_gate_output_);
 #endif
 
 #ifdef DEBUG_QUANT
-    if (debug_idx == 0) {
-        float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
-                         (float)(1 << params.test.shift_reset_gate_input_);
-        float reset_gate_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
-                     (float)(1 << params.test.shift_reset_gate_output_);
-        printf("[QUANT_I32] computeResetGate: reset_gate_input_q=%d, reset_gate_input_fp=%.6f, reset_gate_q=%d, reset_gate_fp=%.6f\n", 
-               reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_fp);
-    }
+        if (debug_idx == 0) {
+            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
+                             (float)(1 << params.test.shift_reset_gate_input_);
+            float reset_gate_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
+                         (float)(1 << params.test.shift_reset_gate_output_);
+            printf("[QUANT_I32] computeResetGate: reset_gate_input_q=%d, reset_gate_input_fp=%.6f, reset_gate_q=%d, reset_gate_fp=%.6f\n", 
+                   reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_fp);
+        }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
-    if (debug_idx >= 0 && debug_idx < 3) {
-        float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
-                         (float)(1 << params.test.shift_reset_gate_input_);
-        float reset_gate_quant_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
-                           (float)(1 << params.test.shift_reset_gate_output_);
-        float reset_gate_theory = sigmoid_fp(reset_gate_input_fp);
-        float error = reset_gate_quant_fp - reset_gate_theory;
-        printf("[ResetGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_quant_fp, reset_gate_theory, error);
-    }
+        if (debug_idx >= 0 && debug_idx < 3) {
+            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
+                             (float)(1 << params.test.shift_reset_gate_input_);
+            float reset_gate_quant_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
+                               (float)(1 << params.test.shift_reset_gate_output_);
+            float reset_gate_theory = sigmoid_fp(reset_gate_input_fp);
+            float error = reset_gate_quant_fp - reset_gate_theory;
+            printf("[ResetGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+                   debug_idx, reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_quant_fp, reset_gate_theory, error);
+        }
 #endif
 
-    return reset_gate;
+        return reset_gate;
+    }
 }
 
 /**
@@ -701,21 +756,24 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
  * 
  * 乘法scale融合：r * weight_hh_linear 的结果直接对齐到 new_gate_input，省略中间层
  * 
+ * @tparam Training 是否训练模式（决定是否使用 mask）
  * @param weight_ih_linear    输入 Linear 变换结果
- * @param weight_hh_linear    隐状态 Linear 变换结果
+ * @param weight_hh_linear    隐状态 Linear 变换结果（即 R*h + br，用于反向传播时直接保存到 v）
  * @param reset_gate          重置门输出
- * @param weight_hh_linear_g  [out] 中间结果，用于存储到 v（训练时反向传播需要）
+ * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
+ * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
  */
+template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
-                 const GateQuantParams &params, int32_t &weight_hh_linear_g,
+                 const GateQuantParams &params,
+                 uint8_t* input_was_clamped = nullptr,
+                 uint8_t* output_was_clamped = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // Linear 融合后，weight_hh_linear 就是 R*h + br
-    weight_hh_linear_g = weight_hh_linear;
-
     // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input（融合中间层）
     const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
-    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
     const int64_t reset_hidden_mul = r_diff * hh_diff;
 
     // 乘法结果直接 shift 到 new_gate_input 空间（融合后省略中间 zp）
@@ -728,51 +786,74 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
 
     const auto &bw_cfg = params.bitwidth_config_;
     const auto &lut = params.tanh_new_gate_lut_;
+    
+    // 使用 if constexpr 避免运行时分支
+    if constexpr (Training) {
+        // 对门输入进行位宽截断并记录 mask
+        const int32_t clamped_input = clamp_by_bitwidth_with_mask(new_gate_input, bw_cfg.new_gate_input_, *input_was_clamped);
+        
 #ifdef USE_REAL_ACTIVATION
-    const int32_t new_gate = real_tanh(new_gate_input,
-                                        lut.shift_bits_x, lut.zp_x,
-                                        lut.shift_bits_y, lut.zp_y,
-                                        bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+        float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
+        float y_float = tanh<float>(x_float);
+        const int32_t new_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y,
+                                                     bw_cfg.new_gate_output_, *output_was_clamped);
 #else
-    const int32_t new_gate = piecewise_linear(new_gate_input, lut, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+        int32_t result = piecewise_linear_raw(clamped_input, lut);
+        const int32_t new_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.new_gate_output_, *output_was_clamped);
+#endif
+        return new_gate;
+    } else {
+#ifdef USE_REAL_ACTIVATION
+        const int32_t new_gate = real_tanh(new_gate_input,
+                                            lut.shift_bits_x, lut.zp_x,
+                                            lut.shift_bits_y, lut.zp_y,
+                                            bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+#else
+        const int32_t new_gate = piecewise_linear(new_gate_input, lut, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
 #endif
 
 #ifdef DEBUG_QUANT
-    if (debug_idx == 0) {
-        float hh_fp = (float)(weight_hh_linear_g - params.zp_weight_hh_linear_) /
-                      (float)(1 << params.test.shift_weight_hh_linear_);
-        float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
-                         (float)(1 << params.test.shift_new_gate_input_);
-        float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                     (float)(1 << params.test.shift_new_gate_output_);
-        printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
-               hh_fp, new_gate_input_fp, new_gate_fp);
-    }
+        if (debug_idx == 0) {
+            float hh_fp = (float)(weight_hh_linear - params.zp_weight_hh_linear_) /
+                          (float)(1 << params.test.shift_weight_hh_linear_);
+            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
+                             (float)(1 << params.test.shift_new_gate_input_);
+            float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                         (float)(1 << params.test.shift_new_gate_output_);
+            printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
+                   hh_fp, new_gate_input_fp, new_gate_fp);
+        }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
-    if (debug_idx >= 0 && debug_idx < 3) {
-        float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
-                         (float)(1 << params.test.shift_new_gate_input_);
-        float new_gate_quant_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                           (float)(1 << params.test.shift_new_gate_output_);
-        float new_gate_theory = tanh_fp(new_gate_input_fp);
-        float error = new_gate_quant_fp - new_gate_theory;
-        printf("[NewGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
-               debug_idx, new_gate_input, new_gate_input_fp, new_gate, new_gate_quant_fp, new_gate_theory, error);
-    }
+        if (debug_idx >= 0 && debug_idx < 3) {
+            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
+                             (float)(1 << params.test.shift_new_gate_input_);
+            float new_gate_quant_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                               (float)(1 << params.test.shift_new_gate_output_);
+            float new_gate_theory = tanh_fp(new_gate_input_fp);
+            float error = new_gate_quant_fp - new_gate_theory;
+            printf("[NewGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
+                   debug_idx, new_gate_input, new_gate_input_fp, new_gate, new_gate_quant_fp, new_gate_theory, error);
+        }
 #endif
 
-    return new_gate;
+        return new_gate;
+    }
 }
 
 /**
  * @brief 计算隐藏状态 h_new = update_gate * h_old + (1 - update_gate) * new_gate
  * 
  * 乘法scale融合：u*h 和 (1-u)*n 的结果直接对齐到 h，省略中间层
+ * 
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
  */
+template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
+                 uint8_t* was_clamped = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // 计算 update_gate * h_old，直接对齐到 h（融合中间层）
     const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
@@ -795,39 +876,44 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
     // 计算 h_new = old_shifted + new_shifted + zp_h
     const int32_t h_new = old_shifted + new_shifted + params.zp_h_;
 
-    const int32_t h = clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
+    // 使用 if constexpr 避免运行时分支
+    if constexpr (Training) {
+        return clamp_by_bitwidth_with_mask(h_new, params.bitwidth_config_.h_, *was_clamped);
+    } else {
+        const int32_t h = clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
 
 #ifdef DEBUG_QUANT
-    if (debug_idx == 0) {
-        float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                     (float)(1 << params.test.shift_update_gate_output_);
-        float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                     (float)(1 << params.test.shift_new_gate_output_);
-        float h_old_fp = (float)(h_old - params.zp_h_) / 
+        if (debug_idx == 0) {
+            float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                         (float)(1 << params.test.shift_update_gate_output_);
+            float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                         (float)(1 << params.test.shift_new_gate_output_);
+            float h_old_fp = (float)(h_old - params.zp_h_) / 
+                             (float)(1 << params.test.shift_h_);
+            float h_fp = (float)(h - params.zp_h_) / 
                          (float)(1 << params.test.shift_h_);
-        float h_fp = (float)(h - params.zp_h_) / 
-                     (float)(1 << params.test.shift_h_);
-        printf("[QUANT_I32] computeHiddenState: u_fp=%.6f, n_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
-               u_fp, n_fp, h_old_fp, h_fp);
-    }
+            printf("[QUANT_I32] computeHiddenState: u_fp=%.6f, n_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
+                   u_fp, n_fp, h_old_fp, h_fp);
+        }
 #endif
 
 #ifdef DEBUG_QUANT_DETAIL
-    if (debug_idx >= 0 && debug_idx < 3) {
-        float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                     (float)(1 << params.test.shift_update_gate_output_);
-        float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                     (float)(1 << params.test.shift_new_gate_output_);
-        float h_old_fp = (float)(h_old - params.zp_h_) / 
-                         (float)(1 << params.test.shift_h_);
-        float h_quant_fp = (float)(h - params.zp_h_) / 
-                           (float)(1 << params.test.shift_h_);
-        printf("[HiddenState] idx=%d u_fp=%.4f n_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
-               debug_idx, u_fp, n_fp, h_old_fp, h, h_quant_fp);
-    }
+        if (debug_idx >= 0 && debug_idx < 3) {
+            float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
+                         (float)(1 << params.test.shift_update_gate_output_);
+            float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
+                         (float)(1 << params.test.shift_new_gate_output_);
+            float h_old_fp = (float)(h_old - params.zp_h_) / 
+                             (float)(1 << params.test.shift_h_);
+            float h_quant_fp = (float)(h - params.zp_h_) / 
+                               (float)(1 << params.test.shift_h_);
+            printf("[HiddenState] idx=%d u_fp=%.4f n_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
+                   debug_idx, u_fp, n_fp, h_old_fp, h, h_quant_fp);
+        }
 #endif
 
-    return h;
+        return h;
+    }
 }
 
 // ============================================================================
@@ -843,130 +929,8 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 //   - gate_output_mask 影响传回下一层的梯度
 // ============================================================================
 
-/**
- * @brief 计算更新门（带输入和输出 mask 分离输出，用于 QAT）
- * 
- * @param input_was_clamped [out] 门输入是否被截断
- * @param output_was_clamped [out] 门输出是否被截断
- */
-__host__ __device__ __forceinline__ 
-int32_t computeUpdateGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, 
-                                    const GateQuantParams &params, 
-                                    uint8_t &input_was_clamped,
-                                    uint8_t &output_was_clamped,
-                                    [[maybe_unused]] int debug_idx = -1) {
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
-    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_update_gate_input_);
-    const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
-    const auto &bw_cfg = params.bitwidth_config_;
-    const auto &lut = params.sigmoid_update_gate_lut_;
-    
-    // 对门输入进行位宽截断并记录 mask
-    const int32_t clamped_input = clamp_by_bitwidth_with_mask(update_gate_input, bw_cfg.update_gate_input_, input_was_clamped);
-    
-#ifdef USE_REAL_ACTIVATION
-    // 使用截断后的输入计算激活函数
-    float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-    float y_float = sigmoid<float>(x_float);
-    const int32_t update_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y, 
-                                                    bw_cfg.update_gate_output_, output_was_clamped);
-#else
-    // 非 real activation 时，使用分段线性
-    int32_t result = piecewise_linear_raw(clamped_input, lut);
-    const int32_t update_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.update_gate_output_, output_was_clamped);
-#endif
-    return update_gate;
-}
 
-/**
- * @brief 计算复位门（带输入和输出 mask 分离输出，用于 QAT）
- */
-__host__ __device__ __forceinline__ 
-int32_t computeResetGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, 
-                                   const GateQuantParams &params, 
-                                   uint8_t &input_was_clamped,
-                                   uint8_t &output_was_clamped,
-                                   [[maybe_unused]] int debug_idx = -1) {
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
-    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
-    const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
-
-    const auto &bw_cfg = params.bitwidth_config_;
-    const auto &lut = params.sigmoid_reset_gate_lut_;
-    
-    // 对门输入进行位宽截断并记录 mask
-    const int32_t clamped_input = clamp_by_bitwidth_with_mask(reset_gate_input, bw_cfg.reset_gate_input_, input_was_clamped);
-    
-#ifdef USE_REAL_ACTIVATION
-    float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-    float y_float = sigmoid<float>(x_float);
-    const int32_t reset_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y,
-                                                   bw_cfg.reset_gate_output_, output_was_clamped);
-#else
-    int32_t result = piecewise_linear_raw(clamped_input, lut);
-    const int32_t reset_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.reset_gate_output_, output_was_clamped);
-#endif
-    return reset_gate;
-}
-
-/**
- * @brief 计算新门（带输入和输出 mask 分离输出，用于 QAT）
- */
-__host__ __device__ __forceinline__ 
-int32_t computeNewGate_with_mask(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
-                                 const GateQuantParams &params, int32_t &weight_hh_linear_g, 
-                                 uint8_t &input_was_clamped,
-                                 uint8_t &output_was_clamped,
-                                 [[maybe_unused]] int debug_idx = -1) {
-    weight_hh_linear_g = weight_hh_linear;
-    
-    const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
-    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
-    const int64_t reset_hidden_mul = r_diff * hh_diff;
-    const int32_t rh_shifted = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_mul_hh_to_new_gate_input_));
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
-    const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
-
-    const auto &bw_cfg = params.bitwidth_config_;
-    const auto &lut = params.tanh_new_gate_lut_;
-    
-    // 对门输入进行位宽截断并记录 mask
-    const int32_t clamped_input = clamp_by_bitwidth_with_mask(new_gate_input, bw_cfg.new_gate_input_, input_was_clamped);
-    
-#ifdef USE_REAL_ACTIVATION
-    float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
-    float y_float = tanh<float>(x_float);
-    const int32_t new_gate = quantize_with_mask(y_float, lut.shift_bits_y, lut.zp_y,
-                                                 bw_cfg.new_gate_output_, output_was_clamped);
-#else
-    int32_t result = piecewise_linear_raw(clamped_input, lut);
-    const int32_t new_gate = clamp_by_bitwidth_with_mask(result, bw_cfg.new_gate_output_, output_was_clamped);
-#endif
-    return new_gate;
-}
-
-/**
- * @brief 计算隐藏状态（带 mask 输出，用于 QAT）
- */
-__host__ __device__ __forceinline__ 
-int32_t computeHiddenState_with_mask(int32_t update_gate, int32_t new_gate, int32_t h_old, 
-                                     const GateQuantParams &params, uint8_t &was_clamped,
-                                     [[maybe_unused]] int debug_idx = -1) {
-    const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
-    const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
-    const int64_t old_contribution_mul = u_diff * h_diff;
-    const int32_t old_shifted = static_cast<int32_t>(rshift_round(old_contribution_mul, params.shift_update_old_to_h_));
-
-    // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
-    const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
-    const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
-    const int64_t new_contribution_mul = one_minus_u * n_diff;
-    const int32_t new_shifted = static_cast<int32_t>(rshift_round(new_contribution_mul, params.shift_update_new_to_h_));
-
-    const int32_t h_new = old_shifted + new_shifted + params.zp_h_;
-    return clamp_by_bitwidth_with_mask(h_new, params.bitwidth_config_.h_, was_clamped);
-}
 
 // ============================================================================
 // GPU Kernel 函数声明
