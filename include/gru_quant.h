@@ -197,11 +197,9 @@ private:
 
     int max_steps_ = 0;
 
-    // GEMM 原始结果（未 rescale）
-    dev::vector<float> tmp_gemm_result_;
-    // Linear 变换结果（rescale 后）
-    dev::vector<float> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch]
-    dev::vector<float> tmp_weight_hh_linear_;  // [hidden*3 * batch]
+    // Linear 变换结果（cuBLAS GEMM 直接写入，然后原地 rescale）
+    dev::vector<float> tmp_weight_ih_linear_;  // [hidden*3 * max_steps * batch] W*x + bw
+    dev::vector<float> tmp_weight_hh_linear_;  // [hidden*3 * batch] R*h + br
 
     // 权重和常量（预计算，用于零点补偿）
     dev::vector<double> W_sum_mul_x_zp_;  // [hidden*3]

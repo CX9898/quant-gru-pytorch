@@ -129,7 +129,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
 
 // 量化模式选择宏：默认使用浮点存储版（方案2）
 // 如需使用 INT32 版本（方案1），注释掉此行
-// #define USE_FP_STORAGE 1
+#define USE_FP_STORAGE 1
 
 // 统一前向传播接口（推理/训练）
 // 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
