@@ -287,6 +287,27 @@ struct LinearQuantParamsGPUFP {
     QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
 };
 
+/**
+ * @brief Linear Rescale 参数（用于 kernel，打包所有 BiasRescale 需要的参数）
+ * 
+ * 用于减少 kernel 参数数量，将所有 BiasRescale 相关参数打包到一个结构体中
+ */
+struct LinearRescaleParamsFP {
+    // weight_ih_linear 相关参数
+    const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x
+    const float *div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] W*x per-channel 除数
+    const float *div_bw_to_weight_ih_linear_;      ///< [3*hidden] bw per-channel 除数
+    float zp_weight_ih_linear_;                     ///< weight_ih_linear 输出零点
+    QuantBitWidth output_bw_ih_;                     ///< weight_ih_linear 输出位宽
+    
+    // weight_hh_linear 相关参数
+    const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h
+    const float *div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] R*h per-channel 除数
+    const float *div_br_to_weight_hh_linear_;      ///< [3*hidden] br per-channel 除数
+    float zp_weight_hh_linear_;                     ///< weight_hh_linear 输出零点
+    QuantBitWidth output_bw_hh_;                     ///< weight_hh_linear 输出位宽
+};
+
 // ============================================================================
 // 反向传播 Rescale 参数（用于 QAT 梯度 scale 补偿）
 // ============================================================================

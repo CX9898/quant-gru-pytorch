@@ -198,21 +198,21 @@ OMP_PARALLEL_FOR_2D
             const int new_idx = weight_idx + 2 * hidden_size;
 
             // GEMM+bias 融合版本：直接使用 Wx_bw 和 Rh_br
-            const int32_t update_gate = computeUpdateGate(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gate_params_);
-            const int32_t reset_gate = computeResetGate(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gate_params_);
+            // CPU 版本不使用 mask（推理模式），传递 false 模板参数
+            const int32_t update_gate = computeUpdateGate<false>(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gate_params_);
+            const int32_t reset_gate = computeResetGate<false>(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gate_params_);
 
-            int32_t weight_hh_linear_g;
-            const int32_t new_gate = computeNewGate(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gate_params_, weight_hh_linear_g);
+            const int32_t new_gate = computeNewGate<false>(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gate_params_);
 
             if (training && v != nullptr) {
                 const int base_v_idx = col * (hidden_size * 4) + row;
                 v[base_v_idx + 0 * hidden_size] = update_gate;
                 v[base_v_idx + 1 * hidden_size] = reset_gate;
                 v[base_v_idx + 2 * hidden_size] = new_gate;
-                v[base_v_idx + 3 * hidden_size] = weight_hh_linear_g;
+                v[base_v_idx + 3 * hidden_size] = tmp_weight_hh_linear_[new_idx];  // 直接使用 tmp_weight_hh_linear_[new_idx]
             }
 
-            int32_t cur_h = computeHiddenState(update_gate, new_gate, h[output_idx], gate_params_);
+            int32_t cur_h = computeHiddenState<false>(update_gate, new_gate, h[output_idx], gate_params_);
 
             if (zoneout_prob > 0.0f && zoneout_mask != nullptr) {
                 if (zoneout_mask[output_idx] != 0) cur_h = h[output_idx];

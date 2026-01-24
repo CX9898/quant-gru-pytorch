@@ -174,14 +174,14 @@ public:
              uint8_t *h_mask = nullptr);
 
 private:
-    void ComputeLinearX(const float *W, const float *x, const float *bw, int steps,
-                        uint8_t *weight_ih_linear_mask = nullptr);
+    void ComputeLinearX(const float *W, const float *x, const float *bw, int steps);
     void ComputeLinearH(const float *R, const float *h, const float *br,
                         uint8_t *weight_hh_linear_mask = nullptr);
-    void IterateInternal(const float *R, const float *br,
+    void IterateInternal(const float *R, const float *bw, const float *br,
                          const float *h, float *h_out, float *v,
                          const float *cur_weight_ih_linear,
                          float zoneout_prob, const float *zoneout_mask,
+                         uint8_t *weight_ih_linear_mask = nullptr,
                          uint8_t *weight_hh_linear_mask = nullptr,
                          uint8_t *gate_input_mask = nullptr,
                          uint8_t *gate_output_mask = nullptr,
@@ -206,6 +206,9 @@ private:
     dev::vector<float> W_sum_mul_x_zp_;  // [hidden*3]
     dev::vector<float> R_sum_mul_h_zp_;  // [hidden*3]
     bool weight_sums_computed_ = false;
+
+    // LinearRescaleParamsFP（在 setRescaleParam 中填充静态部分，在 IterateInternal 中更新 bw/br）
+    LinearRescaleParamsFP linear_rescale_params_;
 
     const float *cached_W_ = nullptr;
     const float *cached_R_ = nullptr;
