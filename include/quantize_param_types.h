@@ -279,10 +279,10 @@ struct LinearQuantParamsGPUFP {
     float zp_weight_hh_linear_;  ///< R*h+br 输出零点
 
     // 倒数数组（用于优化：乘法替代除法）
-    dev::vector<float> inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)
-    dev::vector<float> inv_div_bw_to_weight_ih_linear_;      ///< [3*hidden] 1.0f / (2^shift_bw)
-    dev::vector<float> inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)
-    dev::vector<float> inv_div_br_to_weight_hh_linear_;      ///< [3*hidden] 1.0f / (2^shift_br)
+    dev::vector<float> inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间
+    dev::vector<float> inv_div_bw_to_gemm_x_;              ///< [3*hidden] 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（scale_W*scale_x）
+    dev::vector<float> inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间
+    dev::vector<float> inv_div_br_to_gemm_h_;              ///< [3*hidden] 1.0f / (2^shift_br)，从br空间到GEMM_h空间（scale_R*scale_h）
 
     QuantBitWidth output_bw_ih_;  ///< weight_ih_linear 输出位宽
     QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
@@ -296,15 +296,15 @@ struct LinearQuantParamsGPUFP {
 struct LinearRescaleParamsFP {
     // weight_ih_linear 相关参数
     const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x
-    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)
-    const float *inv_div_bw_to_weight_ih_linear_;      ///< [3*hidden] 1.0f / (2^shift_bw)
+    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间
+    const float *inv_div_bw_to_gemm_x_;              ///< [3*hidden] 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（scale_W*scale_x）
     float zp_weight_ih_linear_;                     ///< weight_ih_linear 输出零点
     QuantBitWidth output_bw_ih_;                     ///< weight_ih_linear 输出位宽
     
     // weight_hh_linear 相关参数
     const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h
-    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)
-    const float *inv_div_br_to_weight_hh_linear_;      ///< [3*hidden] 1.0f / (2^shift_br)
+    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间
+    const float *inv_div_br_to_gemm_h_;              ///< [3*hidden] 1.0f / (2^shift_br)，从br空间到GEMM_h空间（scale_R*scale_h）
     float zp_weight_hh_linear_;                     ///< weight_hh_linear 输出零点
     QuantBitWidth output_bw_hh_;                     ///< weight_hh_linear 输出位宽
 };

@@ -71,10 +71,23 @@ float mul_round(float x, float inv_divisor) {
 /**
  * @brief 内联函数：对 GEMM 结果进行 Bias + Rescale（融合到 PointwiseOperationsFP）
  * 
- * 计算: result = clamp(round((gemm_result - W_sum_mul_zp) / div_gemm 
- *                          + round(bias / div_bias) + zp_out))
+ * 计算流程（两步转换）:
+ *   1. bias从scale_bw转换到GEMM空间: bias_in_gemm = round(bias * inv_div_bw_to_gemm)
+ *   2. GEMM结果和bias相加（都在GEMM空间）: combined = (gemm_result - W_sum_mul_zp) + bias_in_gemm
+ *   3. 一起转换到weight_ih_linear空间: result = round(combined * inv_div_gemm) + zp_out
+ * 
+ * 最终公式: result = clamp(round(((gemm_result - W_sum_mul_zp) 
+ *                                + round(bias * inv_div_bw_to_gemm)) 
+ *                                * inv_div_gemm) + zp_out)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param gemm_result GEMM原始结果（在GEMM空间，scale_W*scale_x）
+ * @param bias bias值（在scale_bw空间）
+ * @param W_sum_mul_zp 预计算的sum(W)*zp_x（零点补偿）
+ * @param inv_div_gemm 从GEMM空间到weight_ih_linear空间的倒数
+ * @param inv_div_bias 从bias空间到GEMM空间的倒数（实际是inv_div_bw_to_gemm_x_）
+ * @param zp_out 输出零点
+ * @param output_bw 输出位宽配置
  * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
  */
 template <bool Training>
@@ -89,11 +102,13 @@ float biasRescaleInline(
     QuantBitWidth output_bw,
     uint8_t* was_clamped = nullptr
 ) {
-    // GEMM 结果减去零点补偿
+    // Step 1: GEMM结果减去零点补偿（已在GEMM空间）
     const float val = gemm_result - W_sum_mul_zp;
-    // bias 先 rescale（使用倒数，乘法替代除法）
+    
+    // Step 2: bias从scale_bw空间转换到GEMM空间（使用倒数，乘法替代除法）
     const float bias_term = round_f(bias * inv_div_bias);
-    // GEMM + bias 一起 rescale（使用倒数，乘法替代除法）
+    
+    // Step 3: GEMM结果和bias相加（都在GEMM空间），然后一起转换到weight_ih_linear空间
     const float result = round_f((val + bias_term) * inv_div_gemm) + zp_out;
     
     // 使用 if constexpr 避免运行时分支
@@ -457,7 +472,7 @@ __global__ void PointwiseOperationsFP(
         bw_update,  // 从 shared memory 读取（原：bw[row]）
         linear_rescale_params.W_sum_mul_x_zp[row_update],
         linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row_update], 
-        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row_update],
+        linear_rescale_params.inv_div_bw_to_gemm_x_[row_update],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_update_mask);
@@ -466,7 +481,7 @@ __global__ void PointwiseOperationsFP(
         bw_reset,  // 从 shared memory 读取（原：bw[row + hidden_dim]）
         linear_rescale_params.W_sum_mul_x_zp[row_reset],
         linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row_reset], 
-        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row_reset],
+        linear_rescale_params.inv_div_bw_to_gemm_x_[row_reset],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_reset_mask);
@@ -475,7 +490,7 @@ __global__ void PointwiseOperationsFP(
         bw_new,  // 从 shared memory 读取（原：bw[row + 2 * hidden_dim]）
         linear_rescale_params.W_sum_mul_x_zp[row_new],
         linear_rescale_params.inv_div_gemm_x_to_weight_ih_linear_[row_new], 
-        linear_rescale_params.inv_div_bw_to_weight_ih_linear_[row_new],
+        linear_rescale_params.inv_div_bw_to_gemm_x_[row_new],
         linear_rescale_params.zp_weight_ih_linear_, 
         linear_rescale_params.output_bw_ih_, 
         &ih_new_mask);
@@ -487,7 +502,7 @@ __global__ void PointwiseOperationsFP(
         br_update,  // 从 shared memory 读取（原：br[row]）
         linear_rescale_params.R_sum_mul_h_zp[row_update],
         linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row_update], 
-        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row_update],
+        linear_rescale_params.inv_div_br_to_gemm_h_[row_update],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_update_mask);
@@ -496,7 +511,7 @@ __global__ void PointwiseOperationsFP(
         br_reset,  // 从 shared memory 读取（原：br[row + hidden_dim]）
         linear_rescale_params.R_sum_mul_h_zp[row_reset],
         linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row_reset], 
-        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row_reset],
+        linear_rescale_params.inv_div_br_to_gemm_h_[row_reset],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_reset_mask);
@@ -505,7 +520,7 @@ __global__ void PointwiseOperationsFP(
         br_new,  // 从 shared memory 读取（原：br[row + 2 * hidden_dim]）
         linear_rescale_params.R_sum_mul_h_zp[row_new],
         linear_rescale_params.inv_div_gemm_h_to_weight_hh_linear_[row_new], 
-        linear_rescale_params.inv_div_br_to_weight_hh_linear_[row_new],
+        linear_rescale_params.inv_div_br_to_gemm_h_[row_new],
         linear_rescale_params.zp_weight_hh_linear_, 
         linear_rescale_params.output_bw_hh_, 
         &hh_new_mask);
@@ -731,9 +746,9 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     }
     // 只存储倒数数组
     l.inv_div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(inv_div_gemm_x);
-    l.inv_div_bw_to_weight_ih_linear_ = dev::vector<float>(inv_div_bw);
+    l.inv_div_bw_to_gemm_x_ = dev::vector<float>(inv_div_bw);
     l.inv_div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(inv_div_gemm_h);
-    l.inv_div_br_to_weight_hh_linear_ = dev::vector<float>(inv_div_br);
+    l.inv_div_br_to_gemm_h_ = dev::vector<float>(inv_div_br);
     
     l.output_bw_ih_ = src.bitwidth_config_.weight_ih_linear_;
     l.output_bw_hh_ = src.bitwidth_config_.weight_hh_linear_;
@@ -743,11 +758,11 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     //   - W_sum_mul_x_zp 和 R_sum_mul_h_zp 指针在 EnsureBuffersAllocated 中更新（确保缓冲区已分配）
     //   - bw 和 br 指针在 IterateInternal 中更新（从参数传入）
     linear_rescale_params_.inv_div_gemm_x_to_weight_ih_linear_ = l.inv_div_gemm_x_to_weight_ih_linear_.data();
-    linear_rescale_params_.inv_div_bw_to_weight_ih_linear_ = l.inv_div_bw_to_weight_ih_linear_.data();
+    linear_rescale_params_.inv_div_bw_to_gemm_x_ = l.inv_div_bw_to_gemm_x_.data();
     linear_rescale_params_.zp_weight_ih_linear_ = l.zp_weight_ih_linear_;
     linear_rescale_params_.output_bw_ih_ = l.output_bw_ih_;
     linear_rescale_params_.inv_div_gemm_h_to_weight_hh_linear_ = l.inv_div_gemm_h_to_weight_hh_linear_.data();
-    linear_rescale_params_.inv_div_br_to_weight_hh_linear_ = l.inv_div_br_to_weight_hh_linear_.data();
+    linear_rescale_params_.inv_div_br_to_gemm_h_ = l.inv_div_br_to_gemm_h_.data();
     linear_rescale_params_.zp_weight_hh_linear_ = l.zp_weight_hh_linear_;
     linear_rescale_params_.output_bw_hh_ = l.output_bw_hh_;
 
