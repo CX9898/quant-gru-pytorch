@@ -241,7 +241,9 @@ template <typename T>
 void BackwardPass<T>::Run(const int steps, const T *W_t, const T *R_t, const T *bw, const T *br,
                           const T *x_t, const T *h, const T *v, const T *dh_new, T *dx, T *dW,
                           T *dR, T *dbw, T *dbr, T *dh, T *dp, T *dq, const T *zoneout_mask) {
-    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
+    // 浮点模式：禁用 TensorCore 以提高精度（修复 backward 精度问题）
+    // TensorCore 使用 TF32 精度，可能导致约 1% 的梯度差异
+    // const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);  // 注释掉以禁用 TensorCore
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const T alpha = static_cast<T>(1.0);

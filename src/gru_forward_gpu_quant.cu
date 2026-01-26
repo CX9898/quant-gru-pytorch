@@ -844,7 +844,9 @@ void ForwardPassQuant::Run(
     uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
-    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
+    // 量化模式：禁用 TensorCore 以提高精度（与浮点模式保持一致）
+    // TensorCore 使用 TF32 精度，可能导致精度问题
+    // const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);  // 注释掉以禁用 TensorCore
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const int batch_size = data_->batch_size;
