@@ -545,8 +545,9 @@ class GRUFunction(torch.autograd.Function):
                               x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
                               weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
         
-        # 保存量化参数（用于反向传播的 rescale 补偿）
+        # 保存量化参数（保留以保持接口兼容性）
         # 注意：quant_params 不是 tensor，需要单独保存
+        # 注意：反向传播中不再使用quant_params，因为使用的是反量化后的浮点值，不需要rescale补偿
         ctx.quant_params = quant_params
 
         return output, h_n
@@ -600,15 +601,16 @@ class GRUFunction(torch.autograd.Function):
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
         # 调用 C++ 统一反向接口
-        # 量化模式时传入所有 mask 和 quant_params，C++ 端应用 STE 和 rescale 补偿
+        # 量化模式时传入所有 mask 和 quant_params，C++ 端应用 STE
         # 非量化模式时 mask 为空 tensor，C++ 端会忽略
+        # 注意：不需要rescale补偿，因为反向传播使用的是反量化后的浮点值，梯度计算已经是正确的
         dx, dW, dR, dbw, dbr, dh = gru_ops.backward(
             is_quant=ctx.use_quantization,
             time_steps=time_steps, batch_size=batch_size,
             input_size=input_size, hidden_size=hidden_size,
             W=W, R=R, bw=bw, br=br, x=input,
             dh_new=dh_new, h=h, v=v,
-            # 量化参数（用于 rescale 补偿）
+            # 量化参数（保留以保持接口兼容性，但反向传播中不再使用）
             quant_params=ctx.quant_params,
             # QAT masks（C++ 端应用 STE）
             x_mask=x_mask,
@@ -1961,7 +1963,7 @@ class QuantGRU(nn.Module):
         h0_forward, h0_reverse = self._parse_initial_state(hx, batch_size, device, to_cuda=True)
 
         # 前向方向
-        # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到 QuantGRUReScale
+        # LUT 现在存储在 quant_params 中，通过 setRescaleParam 复制到前向传播的 rescale 参数
         output_forward, h_n_forward = GRUFunction.apply(
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
