@@ -189,7 +189,8 @@ void backwardInterface(bool is_quant,
                        const uint8_t *gate_input_mask, const uint8_t *gate_output_mask,
                        const uint8_t *h_mask) {
     if (is_quant) {
-        // 量化版反向传播（支持 QAT mask 和 rescale 补偿）
+        // 量化版反向传播（支持 QAT mask）
+        // 注意：quant_params 保留以保持接口兼容性，但不再用于rescale补偿
         quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
                          W_t, R_t, bw, br, x_t, dh_new, h, v, g_blas_handle,
                          dx, dW, dR, dbw, dbr, dh,
@@ -298,13 +299,11 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
     dev::vector<float> dp_dev(time_steps * batch_size * hidden_size * 3);
     dev::vector<float> dq_dev(time_steps * batch_size * hidden_size * 3);
 
-    // 使用量化版反向传播类（支持 QAT mask 和 rescale 补偿）
+    // 使用量化版反向传播类（支持 QAT mask）
+    // 注意：不需要rescale补偿，因为反向传播使用的是反量化后的浮点值，梯度计算已经是正确的
+    // quant_params 参数保留以保持接口兼容性，但不再使用
+    (void)quant_params;  // suppress unused parameter warning
     gru::BackwardPassQuant<float> backward(batch_size, input_size, hidden_size, g_blas_handle);
-    
-    // 设置 rescale 参数（如果提供了量化参数）
-    if (quant_params != nullptr) {
-        backward.setRescaleParam(*quant_params);
-    }
 
     backward.Run(time_steps, W_t, R_t, bw, br, x_t, h, v, dh_new,
                  dx, dW, dR, dbw, dbr, dh,

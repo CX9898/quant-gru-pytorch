@@ -221,11 +221,10 @@ private:
 /**
  * @brief 量化 GRU 反向传播类
  *
- * 基于原始 BackwardPass 实现，增加 QAT mask 支持和 rescale 补偿：
+ * 基于原始 BackwardPass 实现，增加 QAT mask 支持：
  *   - 在反向传播中应用 clamp mask（Straight-Through Estimator）
  *   - 被 clamp 的值（mask=1）梯度置零
  *   - 未被 clamp 的值（mask=0）梯度正常传播
- *   - 梯度乘以 rescale 因子补偿前向传播中的 div_round 操作
  *
  * QAT Mask 对应关系（前向 → 反向）：
  *   - x_mask [T*N, C] → dx
@@ -239,9 +238,9 @@ private:
  *   - gate_mask [T*N, H*3] → 门梯度（在 pointwise kernel 中处理）
  *   - h_mask [T*N, H] → 隐状态梯度（在 pointwise kernel 中处理）
  *
- * Rescale 补偿：
- *   前向传播中有 y = div_round(x, divisor)
- *   反向传播中需要 ∂L/∂x = ∂L/∂y * divisor
+ * 注意：
+ *   - 反向传播使用的是反量化后的浮点值，梯度计算已经是正确的
+ *   - 不需要rescale补偿，因为前向传播中的rescale已经在反量化时处理了
  *
  * 模板参数 T: 数据类型（float 或 double）
  */
@@ -259,10 +258,6 @@ public:
                       const cudaStream_t &stream = 0);
 
     ~BackwardPassQuant();
-
-    /// @brief 设置反向传播 rescale 参数（从前向传播参数计算）
-    /// @param params 前向传播量化参数
-    void setRescaleParam(const GRUQuantParams &params);
 
     /// @brief 多步反向传播
     /// @param steps 时间步数
@@ -324,10 +319,6 @@ private:
 
     struct private_data;
     private_data *data_;
-
-    // 反向传播 rescale 参数
-    BackwardRescaleParams rescale_params_;
-    bool rescale_params_set_ = false;
 };
 
 }  // namespace gru
