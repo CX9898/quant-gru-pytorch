@@ -32,22 +32,26 @@ INPUT_DTYPE = torch.float32
 
 # ============================================================================
 # 测试阈值配置
-# 当余弦相似度低于下限或MSE高于上限时，测试将立即报错
+# 当余弦相似度低于下限或MSE/MAE高于上限时，测试将立即报错
 # ============================================================================
 # 非量化版本阈值（应该非常精确）
 NON_QUANT_MSE_THRESHOLD = 1e-5
+NON_QUANT_MAE_THRESHOLD = 0.003  # 约等于 sqrt(1e-5) * 3，留有余量
 NON_QUANT_COS_SIM_THRESHOLD = 0.9999
 
 # 8bit 量化版本阈值
 INT8_MSE_THRESHOLD = 0.001
+INT8_MAE_THRESHOLD = 0.05  # 约等于 sqrt(0.001) * 1.5，留有余量
 INT8_COS_SIM_THRESHOLD = 0.999
 
 # 16bit 量化版本阈值（比8bit更精确）
 INT16_MSE_THRESHOLD = 0.0001
+INT16_MAE_THRESHOLD = 0.015  # 约等于 sqrt(0.0001) * 1.5，留有余量
 INT16_COS_SIM_THRESHOLD = 0.999
 
 # 训练测试阈值
 TRAINING_MSE_THRESHOLD = 1e-4
+TRAINING_MAE_THRESHOLD = 0.015  # 约等于 sqrt(1e-4) * 1.5，留有余量
 TRAINING_COS_SIM_THRESHOLD = 0.999
 
 # ============================================================================
@@ -204,6 +208,10 @@ def compare_gru_outputs(
     mse_output = torch.mean((output_pt_cpu - output_custom_cpu) ** 2).item()
     mse_h_n = torch.mean((h_n_pt_cpu - h_n_custom_cpu) ** 2).item()
 
+    # 计算绝对误差（MAE: Mean Absolute Error）
+    mae_output = torch.mean(torch.abs(output_pt_cpu - output_custom_cpu)).item()
+    mae_h_n = torch.mean(torch.abs(h_n_pt_cpu - h_n_custom_cpu)).item()
+
     # 计算相对误差（使用整体范数，避免接近0的值导致虚高）
     # 公式: ||a - b||_2 / ||a||_2
     diff_norm_output = torch.norm(output_pt_cpu - output_custom_cpu).item()
@@ -231,6 +239,7 @@ def compare_gru_outputs(
     if len(output_pt_cpu.shape) == 3:
         seq_len = output_pt_cpu.shape[0] if not quant_gru.batch_first else output_pt_cpu.shape[1]
         mse_per_timestep = []
+        mae_per_timestep = []
         cos_sim_per_timestep = []
 
         for t in range(seq_len):
@@ -242,7 +251,9 @@ def compare_gru_outputs(
                 output_custom_t = output_custom_cpu[t, :, :].flatten()
 
             mse_t = torch.mean((output_pt_t - output_custom_t) ** 2).item()
+            mae_t = torch.mean(torch.abs(output_pt_t - output_custom_t)).item()
             mse_per_timestep.append(mse_t)
+            mae_per_timestep.append(mae_t)
 
             cos_sim_t = cosine_similarity(
                 output_pt_t.unsqueeze(0),
@@ -251,16 +262,20 @@ def compare_gru_outputs(
             cos_sim_per_timestep.append(cos_sim_t)
     else:
         mse_per_timestep = None
+        mae_per_timestep = None
         cos_sim_per_timestep = None
 
     results = {
         'mse_output': mse_output,
         'mse_h_n': mse_h_n,
+        'mae_output': mae_output,
+        'mae_h_n': mae_h_n,
         'rel_error_output': rel_error_output,
         'rel_error_h_n': rel_error_h_n,
         'cos_sim_output': cos_sim_output,
         'cos_sim_h_n': cos_sim_h_n,
         'mse_per_timestep': mse_per_timestep,
+        'mae_per_timestep': mae_per_timestep,
         'cos_sim_per_timestep': cos_sim_per_timestep,
         'output_pt': output_pt_cpu,
         'output_custom': output_custom_cpu,
@@ -284,20 +299,23 @@ def print_results(results: dict, quant_gru: QuantGRU):
 
     print("整体统计:")
     print(f"  输出 MSE:           {results['mse_output']:.10f}")
+    print(f"  输出绝对误差:       {results['mae_output']:.10f}")
     print(f"  输出相对误差:       {results['rel_error_output'] * 100:.6f}%")
     print(f"  输出余弦相似度:     {results['cos_sim_output']:.10f}")
     print(f"  最终状态 MSE:       {results['mse_h_n']:.10f}")
+    print(f"  最终状态绝对误差:   {results['mae_h_n']:.10f}")
     print(f"  最终状态相对误差:   {results['rel_error_h_n'] * 100:.6f}%")
     print(f"  最终状态余弦相似度: {results['cos_sim_h_n']:.10f}")
     print()
 
     if results['mse_per_timestep'] is not None:
         mse_list = results['mse_per_timestep']
+        mae_list = results['mae_per_timestep']
         cos_sim_list = results['cos_sim_per_timestep']
         seq_len = len(mse_list)
 
         print("每个时间步的统计:")
-        print(f"{'时间步':<8} {'MSE':<20} {'Cosine Similarity':<20}")
+        print(f"{'时间步':<8} {'MSE':<20} {'MAE':<20} {'Cosine Similarity':<20}")
         print("-" * 80)
 
         # 打印前10个、后10个和中间的几个时间步
@@ -307,12 +325,12 @@ def print_results(results: dict, quant_gru: QuantGRU):
         print_indices.extend(list(range(max(0, seq_len - 10), seq_len)))
 
         for t in sorted(set(print_indices)):
-            print(f"{t:<8} {mse_list[t]:<20.10f} {cos_sim_list[t]:<20.10f}")
+            print(f"{t:<8} {mse_list[t]:<20.10f} {mae_list[t]:<20.10f} {cos_sim_list[t]:<20.10f}")
 
         print("-" * 80)
-        print(f"{'平均':<8} {np.mean(mse_list):<20.10f} {np.mean(cos_sim_list):<20.10f}")
-        print(f"{'最小':<8} {np.min(mse_list):<20.10f} {np.min(cos_sim_list):<20.10f}")
-        print(f"{'最大':<8} {np.max(mse_list):<20.10f} {np.max(cos_sim_list):<20.10f}")
+        print(f"{'平均':<8} {np.mean(mse_list):<20.10f} {np.mean(mae_list):<20.10f} {np.mean(cos_sim_list):<20.10f}")
+        print(f"{'最小':<8} {np.min(mse_list):<20.10f} {np.min(mae_list):<20.10f} {np.min(cos_sim_list):<20.10f}")
+        print(f"{'最大':<8} {np.max(mse_list):<20.10f} {np.max(mae_list):<20.10f} {np.max(cos_sim_list):<20.10f}")
         print()
 
     print("=" * 80)
@@ -358,9 +376,10 @@ def test_non_quantized():
 
     # 验证结果（非量化应该非常接近）
     test_name = "test_non_quantized"
-    mse_ok = check_threshold(results['mse_output'], 1e-5, '<', test_name, "MSE")
-    cos_ok = check_threshold(results['cos_sim_output'], 0.9999, '>', test_name, "余弦相似度")
-    if mse_ok and cos_ok:
+    mse_ok = check_threshold(results['mse_output'], NON_QUANT_MSE_THRESHOLD, '<', test_name, "MSE")
+    mae_ok = check_threshold(results['mae_output'], NON_QUANT_MAE_THRESHOLD, '<', test_name, "绝对误差")
+    cos_ok = check_threshold(results['cos_sim_output'], NON_QUANT_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
+    if mse_ok and mae_ok and cos_ok:
         print("✅ 非量化测试通过！")
 
 
@@ -420,10 +439,12 @@ def test_quantized_int8():
     # 检查阈值
     test_name = "test_quantized_int8"
     mse_ok = check_threshold(results['mse_output'], INT8_MSE_THRESHOLD, '<', test_name, "MSE")
+    mae_ok = check_threshold(results['mae_output'], INT8_MAE_THRESHOLD, '<', test_name, "绝对误差")
     cos_ok = check_threshold(results['cos_sim_output'], INT8_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    if mse_ok and cos_ok:
+    if mse_ok and mae_ok and cos_ok:
         print(f"✅ 8bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+              f"绝对误差: {results['mae_output']:.6f} (阈值: {INT8_MAE_THRESHOLD}), "
               f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
 
 
@@ -482,10 +503,12 @@ def test_quantized_int16():
     # 检查阈值（16bit 量化应该比 8bit 更精确）
     test_name = "test_quantized_int16"
     mse_ok = check_threshold(results['mse_output'], INT16_MSE_THRESHOLD, '<', test_name, "MSE")
+    mae_ok = check_threshold(results['mae_output'], INT16_MAE_THRESHOLD, '<', test_name, "绝对误差")
     cos_ok = check_threshold(results['cos_sim_output'], INT16_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    if mse_ok and cos_ok:
+    if mse_ok and mae_ok and cos_ok:
         print(f"✅ 16bit 量化测试通过！MSE: {results['mse_output']:.6f} (阈值: {INT16_MSE_THRESHOLD}), "
+              f"绝对误差: {results['mae_output']:.6f} (阈值: {INT16_MAE_THRESHOLD}), "
               f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {INT16_COS_SIM_THRESHOLD})")
 
 
@@ -557,9 +580,10 @@ def test_batch_first():
     # 检查阈值（使用 8bit 阈值）
     test_name = "test_batch_first"
     mse_ok = check_threshold(results['mse_output'], INT8_MSE_THRESHOLD, '<', test_name, "MSE")
+    mae_ok = check_threshold(results['mae_output'], INT8_MAE_THRESHOLD, '<', test_name, "绝对误差")
     cos_ok = check_threshold(results['cos_sim_output'], INT8_COS_SIM_THRESHOLD, '>', test_name, "余弦相似度")
 
-    if mse_ok and cos_ok:
+    if mse_ok and mae_ok and cos_ok:
         print(f"✅ batch_first=True 测试通过！")
 
 
@@ -633,6 +657,7 @@ def compare_gru_training(
             return {'name': name, 'available': False}
         
         mse = torch.mean((a - b) ** 2).item()
+        mae = torch.mean(torch.abs(a - b)).item()
         max_diff = torch.max(torch.abs(a - b)).item()
         
         # 相对误差（使用整体范数，避免接近0的值导致虚高）
@@ -652,6 +677,7 @@ def compare_gru_training(
             'name': name,
             'available': True,
             'mse': mse,
+            'mae': mae,
             'max_diff': max_diff,
             'rel_error': rel_error,
             'cos_sim': cos_sim
@@ -696,6 +722,7 @@ def print_training_results(results: dict, quant_gru: QuantGRU):
     m = results['forward']
     print(f"前向传播比较:")
     print(f"  MSE:          {m['mse']:.10f}")
+    print(f"  绝对误差:     {m['mae']:.10f}")
     print(f"  最大差异:     {m['max_diff']:.10f}")
     print(f"  相对误差:     {m['rel_error']*100:.6f}%")
     print(f"  余弦相似度:   {m['cos_sim']:.10f}")
@@ -805,11 +832,13 @@ def test_training_quantized_int8():
     # 检查阈值
     test_name = "test_training_quantized_int8"
     mse_ok = check_threshold(results['forward']['mse'], INT8_MSE_THRESHOLD, '<', test_name, "前向MSE")
+    mae_ok = check_threshold(results['forward']['mae'], INT8_MAE_THRESHOLD, '<', test_name, "前向绝对误差")
     cos_ok = check_threshold(results['forward']['cos_sim'], INT8_COS_SIM_THRESHOLD, '>', test_name, "前向余弦相似度")
 
-    if mse_ok and cos_ok:
+    if mse_ok and mae_ok and cos_ok:
         print(f"✅ 8bit 量化训练测试通过！")
         print(f"   前向 MSE: {results['forward']['mse']:.6f} (阈值: {INT8_MSE_THRESHOLD}), "
+              f"绝对误差: {results['forward']['mae']:.6f} (阈值: {INT8_MAE_THRESHOLD}), "
               f"余弦相似度: {results['forward']['cos_sim']:.6f} (阈值: {INT8_COS_SIM_THRESHOLD})")
 
 
@@ -1160,19 +1189,23 @@ def test_quantized_vs_non_quantized(bitwidth=8):
     # 根据位宽选择阈值
     if bitwidth == 8:
         mse_threshold = INT8_MSE_THRESHOLD
+        mae_threshold = INT8_MAE_THRESHOLD
         cos_sim_threshold = INT8_COS_SIM_THRESHOLD
     else:
         mse_threshold = INT16_MSE_THRESHOLD
+        mae_threshold = INT16_MAE_THRESHOLD
         cos_sim_threshold = INT16_COS_SIM_THRESHOLD
 
     # 检查阈值
     test_name = f"test_quantized_vs_non_quantized ({bitwidth}bit)"
     mse_ok = check_threshold(results['mse_output'], mse_threshold, '<', test_name, "MSE")
+    mae_ok = check_threshold(results['mae_output'], mae_threshold, '<', test_name, "绝对误差")
     cos_ok = check_threshold(results['cos_sim_output'], cos_sim_threshold, '>', test_name, "余弦相似度")
 
-    if mse_ok and cos_ok:
+    if mse_ok and mae_ok and cos_ok:
         print(f"✅ QuantGRU 非量化 vs {bitwidth}bit 量化测试通过！"
               f"MSE: {results['mse_output']:.6f} (阈值: {mse_threshold}), "
+              f"绝对误差: {results['mae_output']:.6f} (阈值: {mae_threshold}), "
               f"余弦相似度: {results['cos_sim_output']:.6f} (阈值: {cos_sim_threshold})")
 
 
