@@ -257,6 +257,51 @@ __global__ void dequantificationVFP(const float *quant_data, float *data, int ti
     data[hh_idx] = dequantize_f(quant_data[hh_idx], shift_hh, zp_hh);
 }
 
+// ============================================================================
+// Bias 特殊量化 kernel（使用 round(bias / scale / 128) * 128）
+// ============================================================================
+
+/**
+ * @brief Bias 特殊量化到 float 存储
+ * 
+ * 量化公式: q = clamp(round((bias / scale) / 128) * 128, qmin, qmax)
+ * 这是为了与 PyTorch 的量化行为保持一致
+ */
+__global__ void quantificationBiasFP(const float *src, float *quant_data, 
+                                      size_t channel_size,
+                                      const int8_t *__restrict__ exp2_invs,
+                                      QuantBitWidth bw) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (channel_idx >= channel_size) return;
+    
+    float scale = exp2_scale(exp2_invs[channel_idx]);
+    // 特殊量化: round((bias / scale) / 128) * 128
+    float normalized = src[channel_idx] / scale;
+    float q = round_f(normalized / 128.0f) * 128.0f;
+    quant_data[channel_idx] = clamp_f(q, bw);
+}
+
+/**
+ * @brief Bias 特殊量化到 float 存储（带 mask 输出，用于 QAT）
+ */
+__global__ void quantificationBiasFPWithMask(const float *src, float *quant_data, uint8_t *mask,
+                                              size_t channel_size,
+                                              const int8_t *__restrict__ exp2_invs,
+                                              QuantBitWidth bw) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (channel_idx >= channel_size) return;
+    
+    float scale = exp2_scale(exp2_invs[channel_idx]);
+    // 特殊量化: round((bias / scale) / 128) * 128
+    float normalized = src[channel_idx] / scale;
+    float q = round_f(normalized / 128.0f) * 128.0f;
+    uint8_t was_clamped;
+    quant_data[channel_idx] = clamp_f_with_mask(q, bw, was_clamped);
+    mask[channel_idx] = was_clamped;
+}
+
 }  // namespace kernel
 
 namespace kernel {
@@ -498,11 +543,40 @@ void quantificationPerChannelBitwidthWithMask(const float *src, int32_t *quant_d
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
     kernel::quantificationPerChannelBitwidthWithMask<<<gridDim, blockDim>>>(src, quant_data, mask,
-                                                                             input_size, channel_size, 
+                                                                             input_size, channel_size,
                                                                              exp2_invs.data(), bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("quantificationPerChannelBitwidthWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+// ============================================================================
+// Bias 特殊量化函数（使用 round(bias / scale / 128) * 128）
+// ============================================================================
+
+void quantificationBiasFP(const float *src, float *quant_data, size_t channel_size,
+                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+    size_t block = 256;
+    size_t grid = (channel_size + block - 1) / block;
+    kernel::quantificationBiasFP<<<grid, block>>>(src, quant_data, channel_size, exp2_invs.data(), bw);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("quantificationBiasFP kernel launch failed: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+
+void quantificationBiasFPWithMask(const float *src, float *quant_data, uint8_t *mask,
+                                   size_t channel_size,
+                                   const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+    size_t block = 256;
+    size_t grid = (channel_size + block - 1) / block;
+    kernel::quantificationBiasFPWithMask<<<grid, block>>>(src, quant_data, mask, channel_size, exp2_invs.data(), bw);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("quantificationBiasFPWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
     }
     cudaDeviceSynchronize();
 }
