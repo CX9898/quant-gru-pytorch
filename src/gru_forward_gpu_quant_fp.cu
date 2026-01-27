@@ -122,12 +122,8 @@ __device__ __forceinline__ float biasRescaleInline(float gemm_result, float bias
     const float combined = val + bias_term;
     const float result = mul_round(combined, inv_div_gemm) + zp_out;
 
-    // 使用 if constexpr 避免运行时分支
-    if constexpr (Training) {
-        return clamp_f_with_mask(result, output_bw, *was_clamped);
-    } else {
-        return clamp_f(result, output_bw);
-    }
+    // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
+    return clamp_f<Training>(result, output_bw, was_clamped);
 }
 
 /**
@@ -149,22 +145,17 @@ __device__ __forceinline__ float computeUpdateGateFP(float weight_ih_linear, flo
                                p.inv_div_weight_hh_linear_to_update_gate_input_);
     const float input = ih + hh + p.zp_update_gate_input_;
 
-    // 使用 if constexpr 避免运行时分支
-    float output;
-    if constexpr (Training) {
-        const float clamped_input =
-            clamp_f_with_mask(input, p.bitwidth_config_.update_gate_input_, *input_was_clamped);
-        output = real_sigmoid_f_with_mask(
-            clamped_input, p.scale_update_gate_input_, p.zp_update_gate_input_,
-            p.scale_update_gate_output_, p.zp_update_gate_output_,
-            p.bitwidth_config_.update_gate_output_, *output_was_clamped);
-    } else {
-        output = real_sigmoid_f(input, p.scale_update_gate_input_, p.zp_update_gate_input_,
-                                p.scale_update_gate_output_, p.zp_update_gate_output_,
-                                p.bitwidth_config_.update_gate_output_);
-    }
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, p.bitwidth_config_.update_gate_input_,
+        input_was_clamped);
 
-    return output;
+    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+    return real_sigmoid_f<Training>(
+        clamped_input, p.scale_update_gate_input_, p.zp_update_gate_input_,
+        p.scale_update_gate_output_, p.zp_update_gate_output_,
+        p.bitwidth_config_.update_gate_output_,
+        output_was_clamped);
 }
 
 /**
@@ -185,22 +176,17 @@ __device__ __forceinline__ float computeResetGateFP(float weight_ih_linear, floa
                          p.inv_div_weight_hh_linear_to_reset_gate_input_);
     float input = ih + hh + p.zp_reset_gate_input_;
 
-    // 使用 if constexpr 避免运行时分支
-    float output;
-    if constexpr (Training) {
-        const float clamped_input =
-            clamp_f_with_mask(input, p.bitwidth_config_.reset_gate_input_, *input_was_clamped);
-        output = real_sigmoid_f_with_mask(
-            clamped_input, p.scale_reset_gate_input_, p.zp_reset_gate_input_,
-            p.scale_reset_gate_output_, p.zp_reset_gate_output_,
-            p.bitwidth_config_.reset_gate_output_, *output_was_clamped);
-    } else {
-        output = real_sigmoid_f(input, p.scale_reset_gate_input_, p.zp_reset_gate_input_,
-                                p.scale_reset_gate_output_, p.zp_reset_gate_output_,
-                                p.bitwidth_config_.reset_gate_output_);
-    }
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, p.bitwidth_config_.reset_gate_input_,
+        input_was_clamped);
 
-    return output;
+    // 调用模板版本的 real_sigmoid_f，内部根据 Training 决定是否使用 mask
+    return real_sigmoid_f<Training>(
+        clamped_input, p.scale_reset_gate_input_, p.zp_reset_gate_input_,
+        p.scale_reset_gate_output_, p.zp_reset_gate_output_,
+        p.bitwidth_config_.reset_gate_output_,
+        output_was_clamped);
 }
 
 /**
@@ -228,21 +214,17 @@ __device__ __forceinline__ float computeNewGateFP(float weight_ih_linear, float 
                                p.inv_div_weight_ih_linear_to_new_gate_input_);
     const float input = ih + rh + p.zp_new_gate_input_;
 
-    // 使用 if constexpr 避免运行时分支
-    float output;
-    if constexpr (Training) {
-        const float clamped_input =
-            clamp_f_with_mask(input, p.bitwidth_config_.new_gate_input_, *input_was_clamped);
-        output = real_tanh_f_with_mask(clamped_input, p.scale_new_gate_input_, p.zp_new_gate_input_,
-                                       p.scale_new_gate_output_, p.zp_new_gate_output_,
-                                       p.bitwidth_config_.new_gate_output_, *output_was_clamped);
-    } else {
-        output = real_tanh_f(input, p.scale_new_gate_input_, p.zp_new_gate_input_,
-                             p.scale_new_gate_output_, p.zp_new_gate_output_,
-                             p.bitwidth_config_.new_gate_output_);
-    }
+    // 对输入进行 clamp（根据 Training 决定是否使用 mask）
+    const float clamped_input = clamp_f<Training>(
+        input, p.bitwidth_config_.new_gate_input_,
+        input_was_clamped);
 
-    return output;
+    // 调用模板版本的 real_tanh_f，内部根据 Training 决定是否使用 mask
+    return real_tanh_f<Training>(
+        clamped_input, p.scale_new_gate_input_, p.zp_new_gate_input_,
+        p.scale_new_gate_output_, p.zp_new_gate_output_,
+        p.bitwidth_config_.new_gate_output_,
+        output_was_clamped);
 }
 
 /**
@@ -305,12 +287,8 @@ __device__ __forceinline__ float computeHiddenStateFP(float update_gate, float n
     const float h_new =
         mul_round(old_contribution_add_new_contribution, p.inv_div_update_old_to_h_) + p.zp_h_;
 
-    // 使用 if constexpr 避免运行时分支
-    if constexpr (Training) {
-        return clamp_f_with_mask(h_new, p.bitwidth_config_.h_, *was_clamped);
-    } else {
-        return clamp_f(h_new, p.bitwidth_config_.h_);
-    }
+    // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
+    return clamp_f<Training>(h_new, p.bitwidth_config_.h_, was_clamped);
 }
 
 // ============================================================================
@@ -334,36 +312,19 @@ __device__ __forceinline__ float computeHiddenStateFP(float update_gate, float n
  * @param N batch * steps
  * @param output_bw 输出位宽配置
  */
-__global__ void biasRescaleKernel(const float *__restrict__ gemm_result, float *__restrict__ output,
-                                  const float *__restrict__ bias,
-                                  const float *__restrict__ W_sum_mul_zp,
-                                  const float *__restrict__ div_gemm,
-                                  const float *__restrict__ div_bias, float zp_out, int M, int N,
-                                  QuantBitWidth output_bw) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= M * N) return;
-
-    const int row = idx % M;  // 列主序
-
-    // GEMM 结果减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
-    const float val = gemm_result[idx] - W_sum_mul_zp[row];
-
-    // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
-    const float bias_term = round_f(bias[row] / div_bias[row]);
-
-    // GEMM + bias 一起 rescale（最终结果在量化范围内）
-    const float result = round_f((val + bias_term) / div_gemm[row]) + zp_out;
-
-    output[idx] = clamp_f(result, output_bw);
-}
-
 /**
- * @brief GEMM 结果加 bias 并 rescale（原地处理，带可选 mask 输出版本）
- * @tparam Training 训练模式时保存 clamp mask
+ * @brief GEMM 结果加 bias 并 rescale
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ * @param gemm_result 输入：GEMM 结果（非原地版本）或 nullptr（原地版本）
+ * @param output 输出：rescale 后的结果（非原地版本）或 nullptr（原地版本）
+ * @param data 输入/输出：GEMM 结果（原地版本，当 gemm_result 为 nullptr 时使用）
+ * @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
  */
-template <bool Training>
-__global__ void biasRescaleKernelWithMask(
-    float *__restrict__ data,  // 输入：GEMM 结果，输出：rescale 后的结果（原地处理）
+template <bool Training = false>
+__global__ void biasRescaleKernel(
+    const float *__restrict__ gemm_result,  // 非原地版本输入，或 nullptr（使用 data）
+    float *__restrict__ output,             // 非原地版本输出，或 nullptr（使用 data）
+    float *__restrict__ data,               // 原地版本输入/输出
     const float *__restrict__ bias, const float *__restrict__ W_sum_mul_zp,
     const float *__restrict__ div_gemm, const float *__restrict__ div_bias, float zp_out, int M,
     int N, QuantBitWidth output_bw, uint8_t *__restrict__ mask) {
@@ -373,19 +334,27 @@ __global__ void biasRescaleKernelWithMask(
     const int row = idx % M;
 
     // 读取 GEMM 结果，减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
-    const float val = data[idx] - W_sum_mul_zp[row];
+    const float val = (gemm_result != nullptr) ? (gemm_result[idx] - W_sum_mul_zp[row]) 
+                                               : (data[idx] - W_sum_mul_zp[row]);
+    
     // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
     const float bias_term = round_f(bias[row] / div_bias[row]);
+    
     // GEMM + bias 一起 rescale（最终结果在量化范围内）
     const float result = round_f((val + bias_term) / div_gemm[row]) + zp_out;
 
-    // 原地写回结果
-    if constexpr (Training) {
-        uint8_t was_clamped;
-        data[idx] = clamp_f_with_mask(static_cast<float>(result), output_bw, was_clamped);
-        mask[idx] = was_clamped;
+    // 写回结果（使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask）
+    uint8_t was_clamped;
+    float clamped_result = clamp_f<Training>(result, output_bw, Training ? &was_clamped : nullptr);
+    
+    if (output != nullptr) {
+        output[idx] = clamped_result;
     } else {
-        data[idx] = clamp_f(static_cast<float>(result), output_bw);
+        data[idx] = clamped_result;
+    }
+    
+    if constexpr (Training) {
+        mask[idx] = was_clamped;
     }
 }
 

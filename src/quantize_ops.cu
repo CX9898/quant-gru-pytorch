@@ -106,17 +106,6 @@ __global__ void computeWeightSumMulZP_i32(
     weight_sum[row] = sum;
 }
 
-// 统一 int32_t 输出，使用位宽配置进行 clamp
-template <typename T>
-__global__ void quantificationBitwidth(const T *data, int32_t *quant_data, size_t size, 
-                                        int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) {
-        return;
-    }
-
-    quant_data[idx] = ::quantize(data[idx], exp2_inv, zp, bw);
-}
 
 template <typename T, typename QuantT>
 __global__ void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv,
@@ -133,17 +122,29 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
 // 浮点存储版量化 kernel（用于 GPU-FP 实现）
 // ============================================================================
 
+// ============================================================================
+// 量化 kernel（统一模板版本，支持可选 mask 输出）
+// ============================================================================
+
 // 量化到 float 存储（值仍是定点整数）
-__global__ void quantificationFP(const float *data, float *quant_data, size_t size, 
-                                  int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training = false>
+__global__ void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
+                                  size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    quant_data[idx] = quantize_f(data[idx], exp2_inv, zp, bw);
+    uint8_t was_clamped;
+    quant_data[idx] = quantize_f<Training>(data[idx], exp2_inv, zp, bw, Training ? &was_clamped : nullptr);
+    if constexpr (Training) {
+        mask[idx] = was_clamped;
+    }
 }
 
 // Per-channel 量化到 float 存储
-__global__ void quantificationPerChannelFP(const float *src, float *quant_data, 
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training = false>
+__global__ void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *mask,
                                             size_t input_size, size_t channel_size,
                                             const int8_t *__restrict__ exp2_invs,
                                             QuantBitWidth bw) {
@@ -153,7 +154,11 @@ __global__ void quantificationPerChannelFP(const float *src, float *quant_data,
     if (channel_idx >= channel_size || input_idx >= input_size) return;
     
     const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = quantize_f(src[idx], exp2_invs[channel_idx], bw);  // per-channel 无零点
+    uint8_t was_clamped;
+    quant_data[idx] = quantize_f<Training>(src[idx], exp2_invs[channel_idx], 0, bw, Training ? &was_clamped : nullptr);
+    if constexpr (Training) {
+        mask[idx] = was_clamped;
+    }
 }
 
 // 从 float 存储的量化值反量化
@@ -165,62 +170,40 @@ __global__ void dequantificationFP(const float *quant_data, float *data, size_t 
     data[idx] = dequantize_f(quant_data[idx], exp2_inv, zp);
 }
 
-// ============================================================================
-// 带 mask 版本的量化 kernel（用于 QAT）
-// ============================================================================
-
-// 量化到 float 存储（带 mask 输出）
-__global__ void quantificationFPWithMask(const float *data, float *quant_data, uint8_t *mask,
-                                          size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+// 量化到 int32 存储
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <typename T, bool Training = false>
+__global__ void quantificationBitwidth(const T *data, int32_t *quant_data, uint8_t *mask,
+                                        size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
     uint8_t was_clamped;
-    quant_data[idx] = quantize_f_with_mask(data[idx], exp2_inv, zp, bw, was_clamped);
-    mask[idx] = was_clamped;
+    quant_data[idx] = ::quantize<Training>(data[idx], exp2_inv, zp, bw, Training ? &was_clamped : nullptr);
+    if constexpr (Training) {
+        mask[idx] = was_clamped;
+    }
 }
 
-// 量化到 int32 存储（带 mask 输出）
-__global__ void quantificationBitwidthWithMask(const float *data, int32_t *quant_data, uint8_t *mask,
-                                                size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) return;
-    
-    uint8_t was_clamped;
-    quant_data[idx] = quantize_with_mask(data[idx], exp2_inv, zp, bw, was_clamped);
-    mask[idx] = was_clamped;
-}
-
-// Per-channel 量化到 float 存储（带 mask 输出）
-__global__ void quantificationPerChannelFPWithMask(const float *src, float *quant_data, uint8_t *mask,
-                                                    size_t input_size, size_t channel_size,
-                                                    const int8_t *__restrict__ exp2_invs,
-                                                    QuantBitWidth bw) {
+// Per-channel 量化到 int32 存储
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <typename T, bool Training = false>
+__global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_data, uint8_t *mask,
+                                                  size_t input_size, size_t channel_size, 
+                                                  const int8_t *exp2_invs, QuantBitWidth bw) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (channel_idx >= channel_size || input_idx >= input_size) return;
-    
-    const size_t idx = input_idx * channel_size + channel_idx;
-    uint8_t was_clamped;
-    quant_data[idx] = quantize_f_with_mask(src[idx], exp2_invs[channel_idx], 0, bw, was_clamped);
-    mask[idx] = was_clamped;
-}
+    if (channel_idx >= channel_size || input_idx >= input_size) {
+        return;
+    }
 
-// Per-channel 量化到 int32 存储（带 mask 输出）
-__global__ void quantificationPerChannelBitwidthWithMask(const float *src, int32_t *quant_data, uint8_t *mask,
-                                                          size_t input_size, size_t channel_size,
-                                                          const int8_t *__restrict__ exp2_invs,
-                                                          QuantBitWidth bw) {
-    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    
-    if (channel_idx >= channel_size || input_idx >= input_size) return;
-    
+    const int8_t exp2_inv = exp2_invs[channel_idx];
     const size_t idx = input_idx * channel_size + channel_idx;
     uint8_t was_clamped;
-    quant_data[idx] = quantize_with_mask(src[idx], exp2_invs[channel_idx], 0, bw, was_clamped);
-    mask[idx] = was_clamped;
+    quant_data[idx] = ::quantize<Training>(src[idx], exp2_inv, 0, bw, Training ? &was_clamped : nullptr);
+    if constexpr (Training) {
+        mask[idx] = was_clamped;
+    }
 }
 
 // 从 float 存储的量化值反量化 V 向量
@@ -267,7 +250,12 @@ __global__ void dequantificationVFP(const float *quant_data, float *data, int ti
  * 量化公式: q = clamp(round((bias / scale) / 128) * 128, qmin, qmax)
  * 这是为了与 PyTorch 的量化行为保持一致
  */
-__global__ void quantificationBiasFP(const float *src, float *quant_data, 
+/**
+ * @brief Bias 特殊量化到 float 存储
+ * @tparam Training 是否训练模式（决定是否使用 mask）
+ */
+template <bool Training = false>
+__global__ void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
                                       size_t channel_size,
                                       const int8_t *__restrict__ exp2_invs,
                                       QuantBitWidth bw) {
@@ -279,27 +267,11 @@ __global__ void quantificationBiasFP(const float *src, float *quant_data,
     // 特殊量化: round((bias / scale) / 128) * 128
     float normalized = src[channel_idx] / scale;
     float q = round_f(normalized / 128.0f) * 128.0f;
-    quant_data[channel_idx] = clamp_f(q, bw);
-}
-
-/**
- * @brief Bias 特殊量化到 float 存储（带 mask 输出，用于 QAT）
- */
-__global__ void quantificationBiasFPWithMask(const float *src, float *quant_data, uint8_t *mask,
-                                              size_t channel_size,
-                                              const int8_t *__restrict__ exp2_invs,
-                                              QuantBitWidth bw) {
-    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (channel_idx >= channel_size) return;
-    
-    float scale = exp2_scale(exp2_invs[channel_idx]);
-    // 特殊量化: round((bias / scale) / 128) * 128
-    float normalized = src[channel_idx] / scale;
-    float q = round_f(normalized / 128.0f) * 128.0f;
     uint8_t was_clamped;
-    quant_data[channel_idx] = clamp_f_with_mask(q, bw, was_clamped);
-    mask[channel_idx] = was_clamped;
+    quant_data[channel_idx] = clamp_f<Training>(q, bw, Training ? &was_clamped : nullptr);
+    if constexpr (Training) {
+        mask[channel_idx] = was_clamped;
+    }
 }
 
 }  // namespace kernel
@@ -352,21 +324,6 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
     data[hh_idx] = dequantize<int32_t>(quant_data[hh_idx], shift_hh, zp_hh);
 }
 
-// 统一 int32_t 输出，使用位宽配置进行 clamp
-template <typename T>
-__global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_data, size_t input_size,
-                                                  size_t channel_size, const int8_t *exp2_invs,
-                                                  QuantBitWidth bw) {
-    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    if (channel_idx >= channel_size || input_idx >= input_size) {
-        return;
-    }
-
-    const int8_t exp2_inv = exp2_invs[channel_idx];
-    const size_t idx = input_idx * channel_size + channel_idx;
-    quant_data[idx] = ::quantize(src[idx], exp2_inv, 0, bw);
-}
 
 template <typename T, typename QuantT>
 __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
@@ -448,12 +405,26 @@ template void computeWeightSumMulzp<int32_t>(const int32_t *W_q, int32_t *weight
 
 namespace dev {
 
+// ============================================================================
+// 量化函数（统一接口，支持可选 mask 输出）
+// ============================================================================
+
+// ============================================================================
+// 量化函数（统一接口，支持可选 mask 输出）
+// ============================================================================
+
+// ============================================================================
+// 量化函数（模板版本，使用模板参数控制 mask 行为）
+// ============================================================================
+
 // 统一 int32_t 输出，使用位宽配置进行 clamp
-void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size, 
-                             int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training>
+void quantificationBitwidth(const float *data, int32_t *quant_data, uint8_t *mask,
+                             size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
-    kernel::quantificationBitwidth<<<grid, block>>>(data, quant_data, size, exp2_inv, zp, bw);
+    kernel::quantificationBitwidth<float, Training><<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("Kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -461,15 +432,14 @@ void quantificationBitwidth(const float *data, int32_t *quant_data, size_t size,
     cudaDeviceSynchronize();
 }
 
-// ============================================================================
 // 浮点存储版量化函数（用于 GPU-FP 实现）
-// ============================================================================
-
-void quantificationFP(const float *data, float *quant_data, size_t size,
-                      int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training>
+void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
+                      size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
-    kernel::quantificationFP<<<grid, block>>>(data, quant_data, size, exp2_inv, zp, bw);
+    kernel::quantificationFP<Training><<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("quantificationFP kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -477,14 +447,16 @@ void quantificationFP(const float *data, float *quant_data, size_t size,
     cudaDeviceSynchronize();
 }
 
-void quantificationPerChannelFP(const float *src, float *quant_data, size_t input_size,
-                                size_t channel_size, const dev::vector<int8_t> &exp2_invs,
-                                QuantBitWidth bw) {
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training>
+void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *mask,
+                                size_t input_size, size_t channel_size, 
+                                const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
-    kernel::quantificationPerChannelFP<<<gridDim, blockDim>>>(src, quant_data, input_size,
-                                                               channel_size, exp2_invs.data(), bw);
+    kernel::quantificationPerChannelFP<Training><<<gridDim, blockDim>>>(src, quant_data, mask, input_size,
+                                                                         channel_size, exp2_invs.data(), bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("quantificationPerChannelFP kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -492,75 +464,59 @@ void quantificationPerChannelFP(const float *src, float *quant_data, size_t inpu
     cudaDeviceSynchronize();
 }
 
-// ============================================================================
-// 带 mask 版本的量化函数（用于 QAT）
-// ============================================================================
-
-void quantificationFPWithMask(const float *data, float *quant_data, uint8_t *mask,
-                              size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
-    size_t block = 256;
-    size_t grid = (size + block - 1) / block;
-    kernel::quantificationFPWithMask<<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("quantificationFPWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
-}
-
-void quantificationBitwidthWithMask(const float *data, int32_t *quant_data, uint8_t *mask,
-                                    size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
-    size_t block = 256;
-    size_t grid = (size + block - 1) / block;
-    kernel::quantificationBitwidthWithMask<<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("quantificationBitwidthWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
-}
-
-void quantificationPerChannelFPWithMask(const float *src, float *quant_data, uint8_t *mask,
-                                        size_t input_size, size_t channel_size,
-                                        const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+// 统一 int32_t 输出，使用位宽配置进行 clamp
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training>
+void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, uint8_t *mask,
+                                       size_t input_size, size_t channel_size, 
+                                       const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
-    kernel::quantificationPerChannelFPWithMask<<<gridDim, blockDim>>>(src, quant_data, mask,
-                                                                       input_size, channel_size, 
-                                                                       exp2_invs.data(), bw);
+    kernel::quantificationPerChannelBitwidth<float, Training><<<gridDim, blockDim>>>(src, quant_data, mask,
+                                                                                      input_size, channel_size,
+                                                                                      exp2_invs.data(), bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        printf("quantificationPerChannelFPWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
+        printf("quantificationPerChannelBitwidth kernel launch failed: %s\n", cudaGetErrorString(err));
     }
     cudaDeviceSynchronize();
 }
 
-void quantificationPerChannelBitwidthWithMask(const float *src, int32_t *quant_data, uint8_t *mask,
-                                              size_t input_size, size_t channel_size,
-                                              const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
-    const dim3 blockDim(32, 16);
-    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
-                       (input_size + blockDim.y - 1) / blockDim.y);
-    kernel::quantificationPerChannelBitwidthWithMask<<<gridDim, blockDim>>>(src, quant_data, mask,
-                                                                             input_size, channel_size,
-                                                                             exp2_invs.data(), bw);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("quantificationPerChannelBitwidthWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
-}
+// 显式实例化模板函数
+template void quantificationBitwidth<false>(const float *data, int32_t *quant_data, uint8_t *mask,
+                                            size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+template void quantificationBitwidth<true>(const float *data, int32_t *quant_data, uint8_t *mask,
+                                           size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
 
-// ============================================================================
+template void quantificationFP<false>(const float *data, float *quant_data, uint8_t *mask,
+                                     size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+template void quantificationFP<true>(const float *data, float *quant_data, uint8_t *mask,
+                                    size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+
+template void quantificationPerChannelFP<false>(const float *src, float *quant_data, uint8_t *mask,
+                                                size_t input_size, size_t channel_size,
+                                                const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+template void quantificationPerChannelFP<true>(const float *src, float *quant_data, uint8_t *mask,
+                                               size_t input_size, size_t channel_size,
+                                               const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+
+template void quantificationPerChannelBitwidth<false>(const float *src, int32_t *quant_data, uint8_t *mask,
+                                                      size_t input_size, size_t channel_size,
+                                                      const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+template void quantificationPerChannelBitwidth<true>(const float *src, int32_t *quant_data, uint8_t *mask,
+                                                     size_t input_size, size_t channel_size,
+                                                     const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+
 // Bias 特殊量化函数（使用 round(bias / scale / 128) * 128）
-// ============================================================================
-
-void quantificationBiasFP(const float *src, float *quant_data, size_t channel_size,
+// @tparam Training 是否训练模式（决定是否使用 mask）
+template <bool Training>
+void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
+                          size_t channel_size,
                           const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (channel_size + block - 1) / block;
-    kernel::quantificationBiasFP<<<grid, block>>>(src, quant_data, channel_size, exp2_invs.data(), bw);
+    kernel::quantificationBiasFP<Training><<<grid, block>>>(src, quant_data, mask, channel_size, exp2_invs.data(), bw);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         printf("quantificationBiasFP kernel launch failed: %s\n", cudaGetErrorString(err));
@@ -568,18 +524,13 @@ void quantificationBiasFP(const float *src, float *quant_data, size_t channel_si
     cudaDeviceSynchronize();
 }
 
-void quantificationBiasFPWithMask(const float *src, float *quant_data, uint8_t *mask,
-                                   size_t channel_size,
-                                   const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
-    size_t block = 256;
-    size_t grid = (channel_size + block - 1) / block;
-    kernel::quantificationBiasFPWithMask<<<grid, block>>>(src, quant_data, mask, channel_size, exp2_invs.data(), bw);
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("quantificationBiasFPWithMask kernel launch failed: %s\n", cudaGetErrorString(err));
-    }
-    cudaDeviceSynchronize();
-}
+// 显式实例化模板函数
+template void quantificationBiasFP<false>(const float *src, float *quant_data, uint8_t *mask,
+                                          size_t channel_size,
+                                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+template void quantificationBiasFP<true>(const float *src, float *quant_data, uint8_t *mask,
+                                         size_t channel_size,
+                                         const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
 void dequantificationFP(const float *quant_data, float *data, size_t size,
                         int8_t exp2_inv, int32_t zp) {
@@ -653,18 +604,6 @@ template void dequantificationV<float>(const int32_t *quant_data, float *data, i
                                        int8_t shift_g, int32_t zp_g, 
                                        int8_t shift_hh, int32_t zp_hh);
 
-// 统一 int32_t 输出，使用位宽配置进行 clamp
-void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
-                                       size_t channel_size, const dev::vector<int8_t> &exp2_invs,
-                                       QuantBitWidth bw) {
-    const dim3 blockDim(32, 16);
-    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
-                       (input_size + blockDim.y - 1) / blockDim.y);
-
-    kernel::quantificationPerChannelBitwidth<<<gridDim, blockDim>>>(src, quant_data, input_size,
-                                                                     channel_size, exp2_invs.data(), bw);
-    cudaDeviceSynchronize();
-}
 
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
