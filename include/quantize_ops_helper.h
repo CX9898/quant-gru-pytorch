@@ -1228,6 +1228,20 @@ void quantificationPerChannelBitwidthWithMask(const float *src, int32_t *quant_d
                                               size_t input_size, size_t channel_size,
                                               const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
+// ============================================================================
+// Bias 特殊量化函数（使用 round(bias / scale / 128) * 128）
+// ============================================================================
+
+/// @brief GPU Bias 特殊量化（float 输出）
+/// 量化公式: q = clamp(round((bias / scale) / 128) * 128, qmin, qmax)
+void quantificationBiasFP(const float *src, float *quant_data, size_t channel_size,
+                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+
+/// @brief GPU Bias 特殊量化（float 输出，带 mask）
+void quantificationBiasFPWithMask(const float *src, float *quant_data, uint8_t *mask,
+                                  size_t channel_size,
+                                  const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
