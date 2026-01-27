@@ -342,14 +342,14 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 
     // 统一 int32_t 输出，使用 clamp_by_bitwidth 限制到实际位宽
     const auto &bw_cfg = quant_parms.bitwidth_config_;
-    dev::quantificationPerChannelBitwidth(W, W_quant, input_size, 3 * hidden_size, 
-                                           shift_W_dev, bw_cfg.W_);
-    dev::quantificationPerChannelBitwidth(R, R_quant, hidden_size, 3 * hidden_size, 
-                                           shift_R_dev, bw_cfg.R_);
-    dev::quantificationPerChannelBitwidth(bw, bw_quant, 1, 3 * hidden_size, 
-                                           shift_bw_dev, bw_cfg.bw_);
-    dev::quantificationPerChannelBitwidth(br, br_quant, 1, 3 * hidden_size, 
-                                           shift_br_dev, bw_cfg.br_);
+    dev::quantificationPerChannelBitwidth<false>(W, W_quant, nullptr, input_size, 3 * hidden_size, 
+                                                  shift_W_dev, bw_cfg.W_);
+    dev::quantificationPerChannelBitwidth<false>(R, R_quant, nullptr, hidden_size, 3 * hidden_size, 
+                                                  shift_R_dev, bw_cfg.R_);
+    dev::quantificationPerChannelBitwidth<false>(bw, bw_quant, nullptr, 1, 3 * hidden_size, 
+                                                  shift_bw_dev, bw_cfg.bw_);
+    dev::quantificationPerChannelBitwidth<false>(br, br_quant, nullptr, 1, 3 * hidden_size, 
+                                                 shift_br_dev, bw_cfg.br_);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -461,28 +461,27 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     dev::vector<int32_t> bw_q(hidden3);
     dev::vector<int32_t> br_q(hidden3);
 
+    // 量化权重（使用模板参数区分训练/推理）
     if (is_training) {
-        // QAT 训练：使用带 mask 的量化函数
-        dev::quantificationPerChannelBitwidthWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelBitwidthWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelBitwidthWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelBitwidthWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationPerChannelBitwidth<true>(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelBitwidth<true>(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelBitwidth<true>(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelBitwidth<true>(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
     } else {
-        // 推理：使用不带 mask 的量化函数
-        dev::quantificationPerChannelBitwidth(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelBitwidth(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelBitwidth(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelBitwidth(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationPerChannelBitwidth<false>(W, W_q.data(), nullptr, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelBitwidth<false>(R, R_q.data(), nullptr, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelBitwidth<false>(bw, bw_q.data(), nullptr, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelBitwidth<false>(br, br_q.data(), nullptr, 1, hidden3, shift_br_dev, bw_cfg.br_);
     }
 
     // 2. 量化输入 x
     dev::vector<int32_t> x_quant(x_size);
     if (is_training) {
-        dev::quantificationBitwidthWithMask(x, x_quant.data(), x_mask, x_size, 
-                                             quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
+        dev::quantificationBitwidth<true>(x, x_quant.data(), x_mask, x_size, 
+                                          quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
     } else {
-        dev::quantificationBitwidth(x, x_quant.data(), x_size, quant_parms.shift_x_, 
-                                     quant_parms.zp_x_, bw_cfg.x_);
+        dev::quantificationBitwidth<false>(x, x_quant.data(), nullptr, x_size, 
+                                           quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
     }
 
     // 3. 量化初始隐藏状态 h0（空 vector 的 .data() 返回 nullptr）
@@ -490,11 +489,11 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     if (h0 != nullptr) {
         h0_quant.resize(h0_size);
         if (is_training) {
-            dev::quantificationBitwidthWithMask(h0, h0_quant.data(), h0_mask, h0_size, 
-                                                 quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+            dev::quantificationBitwidth<true>(h0, h0_quant.data(), h0_mask, h0_size, 
+                                              quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
         } else {
-            dev::quantificationBitwidth(h0, h0_quant.data(), h0_size, 
-                                         quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+            dev::quantificationBitwidth<false>(h0, h0_quant.data(), nullptr, h0_size, 
+                                               quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
         }
     }
 
@@ -699,31 +698,31 @@ void quantGRUForwardFP(
     dev::vector<float> h_q(h_size);
     dev::vector<float> v_internal(v != nullptr ? time_steps * batch_size * hidden_size * 4 : 0);
     
-    // 量化权重和输入
+    // 量化权重和输入（使用模板参数区分训练/推理）
     if (is_training) {
-        dev::quantificationPerChannelFPWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelFPWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelFPWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelFPWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
-        dev::quantificationFPWithMask(x, x_q.data(), x_mask, x_size, quant_params.shift_x_,
-                                      quant_params.zp_x_, bw_cfg.x_);
+        dev::quantificationPerChannelFP<true>(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelFP<true>(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelFP<true>(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFP<true>(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationFP<true>(x, x_q.data(), x_mask, x_size, quant_params.shift_x_,
+                                    quant_params.zp_x_, bw_cfg.x_);
     } else {
-        dev::quantificationPerChannelFP(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelFP(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelFP(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelFP(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
-        dev::quantificationFP(x, x_q.data(), x_size, quant_params.shift_x_, 
-                              quant_params.zp_x_, bw_cfg.x_);
+        dev::quantificationPerChannelFP<false>(W, W_q.data(), nullptr, input_size, hidden3, shift_W_dev, bw_cfg.W_);
+        dev::quantificationPerChannelFP<false>(R, R_q.data(), nullptr, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
+        dev::quantificationPerChannelFP<false>(bw, bw_q.data(), nullptr, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFP<false>(br, br_q.data(), nullptr, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationFP<false>(x, x_q.data(), nullptr, x_size, quant_params.shift_x_,
+                                     quant_params.zp_x_, bw_cfg.x_);
     }
     
     // 量化 h0
     if (h0 != nullptr) {
         if (is_training) {
-            dev::quantificationFPWithMask(h0, h_q.data(), h0_mask, NH, quant_params.shift_h_,
-                                          quant_params.zp_h_, bw_cfg.h_);
+            dev::quantificationFP<true>(h0, h_q.data(), h0_mask, NH, quant_params.shift_h_,
+                                       quant_params.zp_h_, bw_cfg.h_);
         } else {
-            dev::quantificationFP(h0, h_q.data(), NH, quant_params.shift_h_,
-                                  quant_params.zp_h_, bw_cfg.h_);
+            dev::quantificationFP<false>(h0, h_q.data(), nullptr, NH, quant_params.shift_h_,
+                                        quant_params.zp_h_, bw_cfg.h_);
         }
     } else {
         // 填充零点值（表示初始隐状态为 0）

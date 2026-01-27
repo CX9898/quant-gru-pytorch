@@ -107,82 +107,17 @@ __global__ void quantizedGemmFused(const int32_t *__restrict__ A,  // [M, K] 权
 // C: [M, N] 输出，列主序
 // bias: [M] 偏置（per-channel）
 // shift_gemm_per_row: [M] GEMM 的 per-row shift
-// shift_bias_per_row: [M] bias 的 per-row shift
+// 融合 GEMM + bias: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
+// 
+// @tparam Training 是否训练模式（决定是否使用 mask）
+// @param C_mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+template <bool Training>
 __global__ void quantizedGemmBiasFused(
     const int32_t *__restrict__ A,               // [M, K] 权重，列主序
     const int32_t *__restrict__ B,               // [K, N] 输入，列主序
     int32_t *__restrict__ C,                     // [M, N] 输出，列主序
     const int32_t *__restrict__ bias,            // [M] 偏置
-    int M, int N, int K,
-    int32_t zp_B,                                // 输入的 zero-point
-    const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
-    const int8_t *__restrict__ shift_bias_per_row,   // [M] bias per-row shift
-    int32_t zp_out,                              // 输出的 zero-point
-    QuantBitWidth output_bw                      // 输出位宽配置
-) {
-    __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];
-    __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
-
-    const int row = blockIdx.y * TILE_SIZE + threadIdx.y;  // m in [0, M)
-    const int col = blockIdx.x * TILE_SIZE + threadIdx.x;  // n in [0, N)
-
-    int64_t acc = 0;
-
-    const int numTiles = (K + TILE_SIZE - 1) / TILE_SIZE;
-
-    for (int t = 0; t < numTiles; t++) {
-        // 加载 A tile（列主序：A[k*M + m]）
-        const int aK = t * TILE_SIZE + threadIdx.x;
-        if (row < M && aK < K) {
-            As[threadIdx.y][threadIdx.x] = A[aK * M + row];
-        } else {
-            As[threadIdx.y][threadIdx.x] = 0;
-        }
-
-        // 加载 B tile 并减去 zp_B（列主序：B[n*K + k]）
-        const int bK = t * TILE_SIZE + threadIdx.y;
-        if (col < N && bK < K) {
-            Bs[threadIdx.y][threadIdx.x] = B[col * K + bK] - zp_B;
-        } else {
-            Bs[threadIdx.y][threadIdx.x] = 0;
-        }
-
-        __syncthreads();
-
-#pragma unroll
-        for (int k = 0; k < TILE_SIZE; k++) {
-            acc += static_cast<int64_t>(As[threadIdx.y][k]) * Bs[k][threadIdx.x];
-        }
-
-        __syncthreads();
-    }
-
-    // 写回结果：rshift(GEMM, shift_gemm) + rshift(bias, shift_bias) + zp_out
-    if (row < M && col < N) {
-        const int8_t n_gemm = shift_gemm_per_row[row];
-        const int8_t n_bias = shift_bias_per_row[row];
-        const int32_t bias_val = bias[row];
-
-        // 使用 rshift_round 进行 rescale
-        const int64_t bias_result = rshift_round(static_cast<int64_t>(bias_val), n_bias);
-        const int64_t gemm_result = rshift_round(acc + static_cast<int64_t>(bias_result), n_gemm);
-
-        // 合并结果
-        const int64_t result = gemm_result + zp_out;
-
-        // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
-        C[col * M + row] = clamp_by_bitwidth(static_cast<int32_t>(result), output_bw);
-    }
-}
-
-// 融合 GEMM + bias + mask: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
-// 带 mask 版本，用于 QAT 训练
-__global__ void quantizedGemmBiasFusedWithMask(
-    const int32_t *__restrict__ A,               // [M, K] 权重，列主序
-    const int32_t *__restrict__ B,               // [K, N] 输入，列主序
-    int32_t *__restrict__ C,                     // [M, N] 输出，列主序
-    uint8_t *__restrict__ C_mask,                // [M, N] clamp mask，列主序
-    const int32_t *__restrict__ bias,            // [M] 偏置
+    uint8_t *__restrict__ C_mask,                // [M, N] clamp mask，训练模式时有效
     int M, int N, int K,
     int32_t zp_B,                                // 输入的 zero-point
     const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
@@ -242,8 +177,11 @@ __global__ void quantizedGemmBiasFusedWithMask(
 
         // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
         uint8_t was_clamped;
-        C[col * M + row] = clamp_by_bitwidth_with_mask(static_cast<int32_t>(result), output_bw, was_clamped);
-        C_mask[col * M + row] = was_clamped;
+        C[col * M + row] = clamp_by_bitwidth<Training>(static_cast<int32_t>(result), output_bw, 
+                                                        Training ? &was_clamped : nullptr);
+        if constexpr (Training) {
+            C_mask[col * M + row] = was_clamped;
+        }
     }
 }
 
@@ -629,18 +567,18 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    // training 模式保存 mask（调用方需保证 mask 指针有效）
+    // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
     if (training) {
-        kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
-            W, x, tmp_weight_ih_linear_.data(), weight_ih_linear_mask, bw, M, N, K,
+        kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
+            W, x, tmp_weight_ih_linear_.data(), bw, weight_ih_linear_mask, M, N, K,
             linear_params_.zp_x_,
             linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
             linear_params_.shift_bw_to_weight_ih_linear_.data(),
             gate_params_.zp_weight_ih_linear_,
             gate_params_.bitwidth_config_.weight_ih_linear_);
     } else {
-        kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
-            W, x, tmp_weight_ih_linear_.data(), bw, M, N, K,
+        kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
+            W, x, tmp_weight_ih_linear_.data(), bw, nullptr, M, N, K,
             linear_params_.zp_x_,
             linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
             linear_params_.shift_bw_to_weight_ih_linear_.data(),
@@ -665,18 +603,18 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    // training 模式保存 mask（调用方需保证 mask 指针有效）
+    // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
     if (training) {
-        kernel::quantizedGemmBiasFusedWithMask<<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), weight_hh_linear_mask, br, M, N, K,
+        kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
+            R, h, tmp_weight_hh_linear_.data(), br, weight_hh_linear_mask, M, N, K,
             linear_params_.zp_h_,
             linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
             linear_params_.shift_br_to_weight_hh_linear_.data(),
             gate_params_.zp_weight_hh_linear_,
             gate_params_.bitwidth_config_.weight_hh_linear_);
     } else {
-        kernel::quantizedGemmBiasFused<<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), br, M, N, K,
+        kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
+            R, h, tmp_weight_hh_linear_.data(), br, nullptr, M, N, K,
             linear_params_.zp_h_,
             linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
             linear_params_.shift_br_to_weight_hh_linear_.data(),
