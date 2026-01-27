@@ -703,17 +703,15 @@ void quantGRUForwardFP(
     if (is_training) {
         dev::quantificationPerChannelFPWithMask(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
         dev::quantificationPerChannelFPWithMask(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        // Bias 使用特殊量化: round((bias / scale) / 128) * 128
-        dev::quantificationBiasFPWithMask(bw, bw_q.data(), bw_mask, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationBiasFPWithMask(br, br_q.data(), br_mask, hidden3, shift_br_dev, bw_cfg.br_);
-        dev::quantificationFPWithMask(x, x_q.data(), x_mask, x_size, quant_params.shift_x_, 
+        dev::quantificationPerChannelFPWithMask(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFPWithMask(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationFPWithMask(x, x_q.data(), x_mask, x_size, quant_params.shift_x_,
                                       quant_params.zp_x_, bw_cfg.x_);
     } else {
         dev::quantificationPerChannelFP(W, W_q.data(), input_size, hidden3, shift_W_dev, bw_cfg.W_);
         dev::quantificationPerChannelFP(R, R_q.data(), hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        // Bias 使用特殊量化: round((bias / scale) / 128) * 128
-        dev::quantificationBiasFP(bw, bw_q.data(), hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationBiasFP(br, br_q.data(), hidden3, shift_br_dev, bw_cfg.br_);
+        dev::quantificationPerChannelFP(bw, bw_q.data(), 1, hidden3, shift_bw_dev, bw_cfg.bw_);
+        dev::quantificationPerChannelFP(br, br_q.data(), 1, hidden3, shift_br_dev, bw_cfg.br_);
         dev::quantificationFP(x, x_q.data(), x_size, quant_params.shift_x_, 
                               quant_params.zp_x_, bw_cfg.x_);
     }

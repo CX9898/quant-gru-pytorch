@@ -252,8 +252,8 @@ struct GateQuantParamsFP {
 
     // -------------------- 隐状态更新参数 --------------------
     float quant_one_in_update_gate_scale_;  ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
-    float inv_div_update_new_to_h_;             ///< 1.0f / (2^shift)，(1-u)*n 到 h 的倒数
     float inv_div_update_old_to_h_;             ///< 1.0f / (2^shift)，u*h 到 h 的倒数
+    float inv_div_new_gate_output_to_h_;       ///< 1.0f / (2^shift)，new_gate_output 到 h 的倒数（用于先将new_gate对齐到h scale）
 
     // -------------------- 激活函数 scale（用于 real_sigmoid/real_tanh）--------------------
     float scale_update_gate_input_;   ///< = 2^(-shift)，反量化 scale
