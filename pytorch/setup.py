@@ -5,7 +5,7 @@ import os
 here = os.path.abspath(os.path.dirname(__file__))
 
 setup(
-    name='gru_quant',
+    name='quant_gru',
     ext_modules=[
         CUDAExtension(
             name='gru_interface_binding',
