@@ -202,39 +202,56 @@ class HistogramCollector {
             data_max = 0.0f;
         }
 
-        // 与 AIMET _create_bin_edges 一致：如果 min == max，使用 ±0.5 扩展
-        // 这是为了兼容 PyTorch 的 torch.histc 实现
-        if (data_min == data_max) {
-            data_min = data_min - 0.5f;
-            data_max = data_max + 0.5f;
-        }
-
+        // 与 AIMET 完全一致的处理流程：
+        // 1. 先计算原始 min/max（用于存储和 range_limit 计算）
+        // 2. 如果 min == max，在 _add_to_histogram 时使用扩展的 bin_edges（与 _create_bin_edges 一致）
+        // 3. 首次收集时，计算 range_limit 时使用 minimum_range 机制
+        
+        float original_min = data_min;
+        float original_max = data_max;
+        
         // 与 AIMET minimum_scale 逻辑完全一致
         float minimum_scale = get_minimum_scale(config_.num_bins);
         float minimum_range = minimum_scale * config_.num_bins;
-        float input_range = data_max - data_min;
+        float input_range = original_max - original_min;
+        
+        // 用于 range_limit 计算的 min/max（与 AIMET merge_stats 首次收集一致）
+        float range_limit_min = original_min;
+        float range_limit_max = original_max;
         
         // 如果范围太小，使用最小范围并确保 0 在范围内
         // 与 AIMET merge_stats 中的 zero_range_mask 处理一致
         if (input_range < minimum_range || std::isnan(input_range) || std::isinf(input_range)) {
             // 确保 0 在范围内
-            data_min = std::min(data_min, 0.0f);
-            data_max = std::max(data_max, 0.0f);
+            range_limit_min = std::min(original_min, 0.0f);
+            range_limit_max = std::max(original_max, 0.0f);
             input_range = minimum_range;
-            // 基于 data_min 扩展
-            data_max = data_min + minimum_range;
+            // 注意：AIMET 中 input0_max 保持为 input0_max_safe，不更新为 input0_min_safe + minimum_range
+            // 但 range_limit 的计算使用 input_range = minimum_range
         }
 
         if (!hist_.is_valid()) {
             // 首次收集：初始化直方图
+            // 与 AIMET 一致：存储原始的 min/max（不扩展）
             hist_.reset(config_.num_bins);
-            hist_.min_val = data_min;
-            hist_.max_val = data_max;
-            _add_to_histogram(data, size);
+            hist_.min_val = original_min;
+            hist_.max_val = original_max;
+            
+            // 与 AIMET collect_stats 一致：如果 min == max，在计算 histogram 时使用扩展的 bin_edges
+            // 但存储的 min_val/max_val 仍然是原始的（不扩展）
+            if (original_min == original_max) {
+                // 使用扩展的范围计算 histogram（与 _create_bin_edges 一致）
+                float expanded_min = original_min - 0.5f;
+                float expanded_max = original_max + 0.5f;
+                _add_to_histogram_with_range(data, size, expanded_min, expanded_max);
+            } else {
+                _add_to_histogram(data, size);
+            }
             
             // 设置范围限制（与 AIMET growth_limit 完全一致）
-            range_limit_min_ = data_min - input_range * config_.growth_limit / 2.0f;
-            range_limit_max_ = data_max + input_range * config_.growth_limit / 2.0f;
+            // 使用 range_limit_min/range_limit_max 和 input_range（可能已更新为 minimum_range）
+            range_limit_min_ = range_limit_min - input_range * config_.growth_limit / 2.0f;
+            range_limit_max_ = range_limit_max + input_range * config_.growth_limit / 2.0f;
             range_limit_set_ = true;
         } else {
             // 后续收集：应用范围限制（与 AIMET clamp 逻辑完全一致）
@@ -361,6 +378,38 @@ class HistogramCollector {
             } else {
                 // 范围内的值：与 AIMET _get_bin_num 一致（只有上界 clamp）
                 bin_idx = std::min(bin_idx, hist_.num_bins - 1);
+                hist_.counts[bin_idx] += 1.0f;
+            }
+        }
+        hist_.total_count += size;
+    }
+
+    /**
+     * 使用指定的范围将数据添加到直方图（用于首次收集时 min == max 的情况）
+     * 与 AIMET collect_stats 中的 _create_bin_edges 扩展逻辑一致
+     */
+    void _add_to_histogram_with_range(const float* data, size_t size, float expanded_min, float expanded_max) {
+        float bin_width = (expanded_max - expanded_min) / config_.num_bins;
+        float inv_bin_width = 1.0f / bin_width;
+        
+        // 与 AIMET torch.histc + 边界外统计完全一致
+        for (size_t i = 0; i < size; ++i) {
+            float val = data[i];
+            
+            // 跳过 inf/NaN（与 AIMET torch.histc 行为一致）
+            if (!std::isfinite(val)) continue;
+            
+            // 计算 bin 索引（使用扩展的范围）
+            int bin_idx = static_cast<int>((val - expanded_min) * inv_bin_width);
+            
+            // 与 AIMET 一致：边界外的值加到边界 bin
+            if (val < expanded_min) {
+                hist_.counts[0] += 1.0f;
+            } else if (val > expanded_max) {
+                hist_.counts[config_.num_bins - 1] += 1.0f;
+            } else {
+                // 范围内的值：与 AIMET _get_bin_num 一致（只有上界 clamp）
+                bin_idx = std::min(bin_idx, config_.num_bins - 1);
                 hist_.counts[bin_idx] += 1.0f;
             }
         }

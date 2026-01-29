@@ -411,12 +411,6 @@ void ForwardPass<T>::Run(const int steps,
     }
 
     cublasSetStream(blas_handle, save_stream);
-
-    // 校准模式下同步 GPU 操作，确保预激活值数据可用
-    // 注意：updateGRUQuantizationRanges 已移至 gru_interface.cc 中独立调用
-    if (calibration_mode_) {
-        cudaDeviceSynchronize();
-    }
 }
 
 // template

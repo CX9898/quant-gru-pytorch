@@ -240,88 +240,6 @@ void runQuantInferenceFP(int time_steps, int batch_size, int input_size, int hid
                       W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
 }
 
-// ==================== 直方图收集性能比较 ====================
-
-void compareHistogramCollectionPerformance(int time_steps, int batch_size, int input_size,
-                                            int hidden_size, const float *W_dev, const float *R_dev,
-                                            const float *bw_dev, const float *br_dev,
-                                            const float *x_dev, int num_runs = 5) {
-    printf("\n========== Histogram Collection Performance (CPU vs GPU) ==========\n");
-    printf("Config: T=%d, B=%d, I=%d, H=%d, runs=%d\n",
-           time_steps, batch_size, input_size, hidden_size, num_runs);
-
-    dev::vector<float> h_dev((time_steps + 1) * batch_size * hidden_size);
-    dev::vector<float> v_dev(time_steps * batch_size * hidden_size * 4);
-    CudaTimer timer;
-
-    // CPU 直方图收集（前向传播在 GPU，直方图收集在 CPU）
-    printf("\n----- CPU Histogram Collection -----\n");
-    float cpu_total_ms = 0.0f;
-    for (int run = 0; run < num_runs; ++run) {
-        GRUHistogramCollectors cpu_hist(hidden_size);
-        h_dev.zero();
-        
-        timer.start();
-        forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
-                                W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                                &cpu_hist, h_dev.data(), v_dev.data());
-        float elapsed = timer.stop();
-        cpu_total_ms += elapsed;
-        if (run == 0) printf("  Run 1: %.3f ms\n", elapsed);
-    }
-    float cpu_avg = cpu_total_ms / num_runs;
-    printf("  Average: %.3f ms\n", cpu_avg);
-
-    // GPU 直方图收集
-    printf("\n----- GPU Histogram Collection -----\n");
-    float gpu_total_ms = 0.0f;
-    for (int run = 0; run < num_runs; ++run) {
-        GRUGPUHistogramCollectors gpu_hist(hidden_size);
-        h_dev.zero();
-        
-        timer.start();
-        forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                                  W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                                  CalibrationMethod::SQNR, nullptr, &gpu_hist,
-                                  h_dev.data(), v_dev.data());
-        float elapsed = timer.stop();
-        gpu_total_ms += elapsed;
-        if (run == 0) printf("  Run 1: %.3f ms\n", elapsed);
-    }
-    float gpu_avg = gpu_total_ms / num_runs;
-    printf("  Average: %.3f ms\n", gpu_avg);
-
-    // 结果对比
-    printf("\n----- Summary -----\n");
-    printf("  CPU: %.3f ms, GPU: %.3f ms, Speedup: %.2fx\n", 
-           cpu_avg, gpu_avg, cpu_avg / gpu_avg);
-
-    // 验证一致性
-    printf("\n----- Verifying Consistency -----\n");
-    GRUHistogramCollectors cpu_hist(hidden_size);
-    GRUGPUHistogramCollectors gpu_hist(hidden_size);
-    
-    h_dev.zero();
-    forwardWithHistogramCPU(true, time_steps, batch_size, input_size, hidden_size,
-                            W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                            &cpu_hist, h_dev.data(), v_dev.data());
-    
-    h_dev.zero();
-    forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
-                              W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
-                              CalibrationMethod::SQNR, nullptr, &gpu_hist, h_dev.data(), v_dev.data());
-    
-    GRUHistogramCollectors gpu_hist_cpu = convertGPUHistogramsToCPU(gpu_hist);
-    
-    compareHistogramStats("x", cpu_hist.x_hist.histogram(), gpu_hist_cpu.x_hist.histogram());
-    compareHistogramStats("h", cpu_hist.h_hist.histogram(), gpu_hist_cpu.h_hist.histogram());
-    compareHistogramStats("Wx", cpu_hist.Wx_hist.histogram(), gpu_hist_cpu.Wx_hist.histogram());
-    compareHistogramStats("Rh", cpu_hist.Rh_hist.histogram(), gpu_hist_cpu.Rh_hist.histogram());
-    compareHistogramStats("update_gate_output", cpu_hist.update_gate_output_hist.histogram(), gpu_hist_cpu.update_gate_output_hist.histogram());
-    compareHistogramStats("reset_gate_output", cpu_hist.reset_gate_output_hist.histogram(), gpu_hist_cpu.reset_gate_output_hist.histogram());
-    compareHistogramStats("new_gate_output", cpu_hist.new_gate_output_hist.histogram(), gpu_hist_cpu.new_gate_output_hist.histogram());
-}
-
 // ==================== 校准函数 ====================
 
 /**
@@ -481,10 +399,6 @@ int main(int argc, char *argv[]) {
 
     // 拷贝到 GPU
     dev::vector<float> W_dev(W), R_dev(R), bw_dev(bw), br_dev(br), x_dev(x);
-
-    // 直方图收集性能对比
-    compareHistogramCollectionPerformance(T, B, I, H, W_dev.data(), R_dev.data(),
-                                          bw_dev.data(), br_dev.data(), x_dev.data(), 5);
 
     // 校准
     printf("\n========== Calibration ==========\n");

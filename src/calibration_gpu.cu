@@ -567,7 +567,6 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
     collectors.update_gate_output_hist.collect(z_out_dev.data(), total_size, stream);
     collectors.reset_gate_output_hist.collect(r_out_dev.data(), total_size, stream);
     collectors.new_gate_output_hist.collect(g_out_dev.data(), total_size, stream);
-    // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
     collectors.mul_reset_hidden_hist.collect(rRh_dev.data(), total_size, stream);
     collectors.mul_new_contribution_hist.collect(new_contrib_dev.data(), total_size, stream);
     collectors.mul_old_contribution_hist.collect(old_contrib_dev.data(), total_size, stream);

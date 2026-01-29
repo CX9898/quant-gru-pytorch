@@ -850,7 +850,6 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                           quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "scale_reset_gate_output");
             histCalibrate(hist_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_, bitwidth_config.new_gate_output_symmetric_,
                           quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "scale_new_gate_output");
-            // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
             histCalibrate(hist_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_, bitwidth_config.mul_reset_hidden_symmetric_,
                           quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "scale_mul_reset_hidden");
             histCalibrate(hist_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_, bitwidth_config.mul_new_contribution_symmetric_,
@@ -935,7 +934,6 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
                         bitwidth_config.reset_gate_output_, quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_, "reset_gate_output");
     compute_scalar_sqnr(gpu_collectors.new_gate_output_hist, bitwidth_config.new_gate_output_symmetric_,
                         bitwidth_config.new_gate_output_, quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_, "new_gate_output");
-    // Rh_add_br_g 已废弃，使用 weight_hh_linear 的量化参数
     compute_scalar_sqnr(gpu_collectors.mul_reset_hidden_hist, bitwidth_config.mul_reset_hidden_symmetric_,
                         bitwidth_config.mul_reset_hidden_, quant_params.shift_mul_reset_hidden_, quant_params.zp_mul_reset_hidden_, "mul_reset_hidden");
     compute_scalar_sqnr(gpu_collectors.mul_new_contribution_hist, bitwidth_config.mul_new_contribution_symmetric_,
@@ -1090,61 +1088,3 @@ void forwardWithCalibrationGPU(
     }
 }
 
-// =====================================================================
-// CPU 直方图收集（用于性能对比）
-// =====================================================================
-
-void forwardWithHistogramCPU(
-    bool is_training,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br, const float *x,
-    const float *h0,
-    const cublasHandle_t &g_blas_handle,
-    GRUHistogramCollectors *hist_collectors,
-    float *h, float *v) {
-    
-    if (!hist_collectors) {
-        throw std::invalid_argument("hist_collectors is required for CPU histogram calibration");
-    }
-    
-    // 分配临时缓冲区
-    dev::vector<float> tmp_Wx_dev(time_steps * batch_size * hidden_size * 3);
-    dev::vector<float> tmp_Rh_dev(time_steps * batch_size * hidden_size * 3);
-
-    // 处理初始隐藏状态
-    const int NH = batch_size * hidden_size;
-    if (h0 != nullptr) {
-        d2d(h, h0, NH);
-    } else {
-        cudaMemset(h, 0, NH * sizeof(float));
-    }
-
-    // 创建 ForwardPass 对象
-    gru::ForwardPass<float> forward(is_training, batch_size, input_size, hidden_size, g_blas_handle);
-
-    // 设置校准模式
-    forward.setCalibrationMode(true);
-
-    // 执行前向传播
-    forward.Run(time_steps, W, R, bw, br, x, h, v, tmp_Wx_dev.data(), tmp_Rh_dev.data(), 0.0f, nullptr);
-
-    // 同步 CUDA 操作
-    cudaDeviceSynchronize();
-
-    // 检查 CUDA 错误
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in forwardWithHistogramCPU: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in forwardWithHistogramCPU: ") + err_str);
-    }
-    
-    // CPU 直方图收集（需要先将 GPU 数据拷贝到 CPU）
-    // 使用 Wx+bw 和 Rh+br 的结果（而非纯 GEMM 输出）进行直方图收集
-    collectAllHistograms(*hist_collectors, x, h, v,
-                         forward.getWxAddBw(), forward.getRhAddBr(),
-                         W, R, bw, br,
-                         time_steps, batch_size, input_size, hidden_size,
-                         forward.getZPres(), forward.getRPres(), forward.getGPres(),
-                         forward.getPresSize());
-}
