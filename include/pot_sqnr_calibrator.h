@@ -473,7 +473,8 @@ inline void calibrateQuantParamsFromHistogram(
         throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
     }
     
-    const int64_t num_steps = bw.qmax() - bw.qmin();
+    // 使用 auto scale 版本计算 num_steps（用于 SQNR/Percentile 校准）
+    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
     const bool is_unsigned = bw.is_unsigned_;
     
     // 步骤 1: 使用对应的校准方法计算连续 scale
