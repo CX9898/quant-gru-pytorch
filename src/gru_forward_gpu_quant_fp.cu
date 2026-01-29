@@ -38,7 +38,7 @@
 // 如果定义了 USE_SYMMETRIC_QUANTIZATION，则所有零点(zp)相关运算将被优化掉
 // 对称量化时，所有零点都为0，可以简化计算
 // 使用方式：在编译时定义 -DUSE_SYMMETRIC_QUANTIZATION
-#define USE_SYMMETRIC_QUANTIZATION
+// #define USE_SYMMETRIC_QUANTIZATION
 
 namespace kernel {
 
