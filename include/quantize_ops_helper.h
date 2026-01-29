@@ -938,9 +938,9 @@ void applyZeroPointCompensation2D(int32_t *Y_int32, const int32_t *weight_sum, c
 inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth bw,
                                  bool is_symmetric, float &aligned_min, float &aligned_max,
                                  int8_t &exp2_inv, int32_t &zp, const std::string &name = "") {
-    // 从位宽配置获取量化范围
-    const int32_t quant_min = bw.qmin();
-    const int32_t quant_max = bw.qmax();
+    // 从位宽配置获取量化范围（使用 auto scale 版本用于计算 num_steps 和 scale）
+    const int32_t quant_min = bw.qmin_auto_scale();
+    const int32_t quant_max = bw.qmax_auto_scale();
     const int num_steps = quant_max - quant_min;  // 量化级数
     
     // 与 AIMET 一致: num_steps 检查
