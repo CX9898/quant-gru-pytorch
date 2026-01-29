@@ -210,8 +210,11 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
                        const float *W, const float *R, const float *bw, const float *br,
                        const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU):");
-    forwardInterface(false, true, time_steps, batch_size, input_size, hidden_size,
-                     W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
+    quantGRUForwardFP(false, time_steps, batch_size, input_size, hidden_size,
+                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr,
+                      nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                      nullptr, nullptr, nullptr, nullptr, nullptr,
+                      nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // ==================== CPU 量化推理 ====================
@@ -629,12 +632,13 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Forward:");
-            forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                             br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                             h_train.data(), v_train.data(),
-                             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                             weight_ih_mask.data(), weight_hh_mask.data(),
-                             gate_mask.data(), h_mask.data());
+            quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
+                              h_train.data(), v_train.data(),
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                              weight_ih_mask.data(), weight_hh_mask.data(),
+                              gate_mask.data(), h_mask.data(),
+                              nullptr, nullptr, nullptr, nullptr, nullptr);
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -754,11 +758,12 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_int(T * B * H * 4);
         dev::vector<uint8_t> mask_ih_int(T * B * H * 3), mask_hh_int(T * B * H * 3);
         dev::vector<uint8_t> mask_gate_int(T * B * H * 3), mask_h_int(T * B * H);
-        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                         br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data(),
-                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                         mask_ih_int.data(), mask_hh_int.data(), mask_gate_int.data(), mask_h_int.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                          h_int.data(), v_int.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          mask_ih_int.data(), mask_hh_int.data(), mask_gate_int.data(), mask_h_int.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr);
         
         // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
@@ -788,9 +793,12 @@ int main(int argc, char *argv[]) {
         // 推理模式也测试一下
         dev::vector<float> h_int_inf((T + 1) * B * H);
         dev::vector<float> h_fp_inf((T + 1) * B * H);
-        forwardInterface(false, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                         br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                         h_int_inf.data(), nullptr);
+        quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                          h_int_inf.data(), nullptr,
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          nullptr, nullptr, nullptr, nullptr, nullptr,
+                          nullptr, nullptr, nullptr, nullptr, nullptr);
         quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                           h_fp_inf.data(), nullptr);
@@ -823,11 +831,12 @@ int main(int argc, char *argv[]) {
         dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
         dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
         
-        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                         br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data(),
-                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                         m1.data(), m2.data(), m3.data(), m4.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+                           h_int.data(), v_int.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                           m1.data(), m2.data(), m3.data(), m4.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr);
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
@@ -860,11 +869,12 @@ int main(int argc, char *argv[]) {
         dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
         dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
         
-        forwardInterface(true, true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                         br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
-                         h_int.data(), v_int.data(),
-                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                         m1.data(), m2.data(), m3.data(), m4.data());
+        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
+                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+                           h_int.data(), v_int.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                           m1.data(), m2.data(), m3.data(), m4.data(),
+                           nullptr, nullptr, nullptr, nullptr, nullptr);
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),

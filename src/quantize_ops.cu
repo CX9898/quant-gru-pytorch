@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <limits>
 #include <type_traits>
+#include <stdexcept>
+#include <string>
+#include <cstdio>
 
 #include "dev_vector.h"
 #include "quantize_ops_helper.h"
@@ -168,6 +171,57 @@ __global__ void dequantificationFP(const float *quant_data, float *data, size_t 
     if (idx >= size) return;
     
     data[idx] = dequantize_f(quant_data[idx], exp2_inv, zp);
+}
+
+// 从 float 存储的量化值原地反量化（in-place）
+__global__ void dequantificationFPInplace(float *data, size_t size,
+                                          int8_t exp2_inv, int32_t zp) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    data[idx] = dequantize_f(data[idx], exp2_inv, zp);
+}
+
+// 从 float 存储的量化值进行 per-channel 反量化
+__global__ void dequantificationPerChannelFP(const float *quant_data, float *data,
+                                             size_t input_size, size_t channel_size,
+                                             const int8_t *__restrict__ exp2_invs) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (channel_idx >= channel_size || input_idx >= input_size) {
+        return;
+    }
+
+    const int8_t exp2_inv = exp2_invs[channel_idx];
+    
+    // 内存布局：idx = input_idx * channel_size + channel_idx
+    // 与 quantificationPerChannelFP 保持一致
+    const size_t idx = input_idx * channel_size + channel_idx;
+    
+    // 使用 dequantize_f 进行反量化（无零点，因为权重通常是对称量化）
+    data[idx] = dequantize_f(quant_data[idx], exp2_inv, 0);
+}
+
+// 从 float 存储的量化值进行 per-channel 原地反量化（in-place）
+__global__ void dequantificationPerChannelFPInplace(float *data,
+                                                    size_t input_size, size_t channel_size,
+                                                    const int8_t *__restrict__ exp2_invs) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (channel_idx >= channel_size || input_idx >= input_size) {
+        return;
+    }
+
+    const int8_t exp2_inv = exp2_invs[channel_idx];
+    
+    // 内存布局：idx = input_idx * channel_size + channel_idx
+    // 与 quantificationPerChannelFP 保持一致
+    const size_t idx = input_idx * channel_size + channel_idx;
+    
+    // 原地反量化：直接修改 data[idx]
+    data[idx] = dequantize_f(data[idx], exp2_inv, 0);
 }
 
 // 量化到 int32 存储
@@ -540,6 +594,21 @@ void dequantificationFP(const float *quant_data, float *data, size_t size,
     cudaDeviceSynchronize();
 }
 
+void dequantificationFPInplace(float *data, size_t size,
+                               int8_t exp2_inv, int32_t zp) {
+    size_t block = 256;
+    size_t grid = (size + block - 1) / block;
+    kernel::dequantificationFPInplace<<<grid, block>>>(data, size, exp2_inv, zp);
+    cudaDeviceSynchronize();
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in dequantificationFPInplace: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in dequantificationFPInplace: ") + err_str);
+    }
+}
+
 void dequantificationVFP(const float *quant_data, float *data, int time_steps, int batch_size,
                          int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
                          int32_t zp_r, int8_t shift_g, int32_t zp_g,
@@ -556,6 +625,46 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
         printf("dequantificationVFP kernel launch failed: %s\n", cudaGetErrorString(err));
     }
     cudaDeviceSynchronize();
+}
+
+void dequantificationPerChannelFP(const float *quant_data, float *data,
+                                  size_t input_size, size_t channel_size,
+                                  const dev::vector<int8_t> &exp2_invs) {
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+
+    kernel::dequantificationPerChannelFP<<<gridDim, blockDim>>>(
+        quant_data, data, input_size, channel_size, exp2_invs.data());
+    
+    cudaDeviceSynchronize();
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in dequantificationPerChannelFP: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in dequantificationPerChannelFP: ") + err_str);
+    }
+}
+
+void dequantificationPerChannelFPInplace(float *data,
+                                        size_t input_size, size_t channel_size,
+                                        const dev::vector<int8_t> &exp2_invs) {
+    const dim3 blockDim(32, 16);
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+
+    kernel::dequantificationPerChannelFPInplace<<<gridDim, blockDim>>>(
+        data, input_size, channel_size, exp2_invs.data());
+    
+    cudaDeviceSynchronize();
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in dequantificationPerChannelFPInplace: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in dequantificationPerChannelFPInplace: ") + err_str);
+    }
 }
 
 template <typename T, typename QuantT>

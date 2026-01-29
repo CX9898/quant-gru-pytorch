@@ -163,7 +163,7 @@ struct GRUQuantParamsPy {
     int32_t zp_mul_old_contribution_;
 
     // ⚠️ 关键字段：位宽配置必须在 Python 和 C++ 之间正确传递
-    // 否则 forwardInterface 会使用默认的 8 位配置
+    // 否则会使用默认的 8 位配置
     OperatorQuantConfigPy bitwidth_config_;
 
     // 方法声明（实现在文件末尾）
@@ -247,12 +247,13 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
 }
 
 // =====================================================================
-// forward: 正常前向传播（推理/训练）
+// forward_quant_wrapper: 量化前向传播（训练/推理）
 // =====================================================================
-// 返回: (h, v, x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+// 返回: (h, v, W_q, R_q, bw_q, br_q, x_q, x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
 //        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
 //   h: [T+1, B, H] 隐藏状态序列（包含初始状态）
 //   v: [T, B, H*4] 中间值（训练时需要，推理时可忽略）
+//   W_q, R_q, bw_q, br_q, x_q: 量化后的值（仅在训练模式时有效，推理模式为空张量）
 //   输入量化 mask:
 //   x_mask: [T, B, I] 输入序列量化 mask
 //   h0_mask: [B, H] 初始隐状态量化 mask
@@ -267,11 +268,11 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
 //   gate_output_mask: [T, B, H*3] 门输出 clamp mask
 //   h_mask: [T, B, H] QAT mask
 std::tuple<torch::Tensor, torch::Tensor, 
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> 
-forward_wrapper(
+forward_quant_wrapper(
     bool is_training,  // 是否开启训练模式
-    bool is_quant,     // 是否使用量化推理
     int time_steps, int batch_size, int input_size, int hidden_size,
     const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
     const torch::Tensor &br, const torch::Tensor &x,
@@ -305,7 +306,34 @@ forward_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
-    // 创建 QAT mask 张量（训练+量化模式时分配，否则为空张量）
+    // 创建量化值输出张量（仅在训练模式时分配，推理模式为空张量）
+    const int hidden3 = hidden_size * 3;
+    torch::Tensor W_q, R_q, bw_q, br_q, x_q;
+    float *W_q_ptr = nullptr, *R_q_ptr = nullptr, *bw_q_ptr = nullptr, *br_q_ptr = nullptr, *x_q_ptr = nullptr;
+    
+    if (is_training) {
+        W_q = torch::empty({input_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        R_q = torch::empty({hidden_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        bw_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        br_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        x_q = torch::empty({time_steps, batch_size, input_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        
+        W_q_ptr = W_q.data_ptr<float>();
+        R_q_ptr = R_q.data_ptr<float>();
+        bw_q_ptr = bw_q.data_ptr<float>();
+        br_q_ptr = br_q.data_ptr<float>();
+        x_q_ptr = x_q.data_ptr<float>();
+    } else {
+        // 返回空张量（numel() == 0）
+        auto empty = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+        W_q = empty.clone();
+        R_q = empty.clone();
+        bw_q = empty.clone();
+        br_q = empty.clone();
+        x_q = empty.clone();
+    }
+
+    // 创建 QAT mask 张量（训练模式时分配，否则为空张量）
     // 输入量化 mask
     torch::Tensor x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor;
     // 计算过程 mask
@@ -318,10 +346,7 @@ forward_wrapper(
     uint8_t *weight_ih_mask_ptr = nullptr, *weight_hh_mask_ptr = nullptr;
     uint8_t *gate_input_mask_ptr = nullptr, *gate_output_mask_ptr = nullptr, *h_mask_ptr = nullptr;
     
-    const bool need_mask = is_training && is_quant;
-    if (need_mask) {
-        const int hidden3 = hidden_size * 3;
-        
+    if (is_training) {
         // 输入量化 mask
         x_mask_tensor = torch::empty({time_steps, batch_size, input_size},
                                      torch::dtype(torch::kUInt8).device(torch::kCUDA));
@@ -377,23 +402,73 @@ forward_wrapper(
         h_mask = empty_mask.clone();
     }
 
-    // 只有量化时才调用 to_cpp()（避免非量化时白白生成 LUT）
-    GRUQuantParams cpp_params;
-    if (is_quant) {
-        cpp_params = quant_params.to_cpp();  // 包含 LUT 生成
-    }
+    // 转换量化参数
+    GRUQuantParams cpp_params = quant_params.to_cpp();
     
-    forwardInterface(is_training, is_quant, time_steps, batch_size, input_size, hidden_size,
-                     W.data_ptr<float>(), R.data_ptr<float>(), 
-                     bw.data_ptr<float>(), br.data_ptr<float>(), 
-                     x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
-                     h.data_ptr<float>(), v.data_ptr<float>(),
-                     x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
-                     weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr);
+    // 调用量化前向传播，直接写入量化值输出指针（零拷贝）
+    quantGRUForwardFP(is_training, time_steps, batch_size, input_size, hidden_size,
+                      W.data_ptr<float>(), R.data_ptr<float>(), 
+                      bw.data_ptr<float>(), br.data_ptr<float>(), 
+                      x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
+                      h.data_ptr<float>(), v.data_ptr<float>(),
+                      x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
+                      weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr,
+                      W_q_ptr, R_q_ptr, bw_q_ptr, br_q_ptr, x_q_ptr);
 
-    return std::make_tuple(h, v, 
+    return std::make_tuple(h, v, W_q, R_q, bw_q, br_q, x_q,
                            x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor,
                            weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
+}
+
+// =====================================================================
+// forward_fp_wrapper: 浮点前向传播（训练/推理）
+// =====================================================================
+// 返回: (h, v)
+//   h: [T+1, B, H] 隐藏状态序列（包含初始状态）
+//   v: [T, B, H*4] 中间值（训练时需要，推理时可忽略）
+std::tuple<torch::Tensor, torch::Tensor> 
+forward_fp_wrapper(
+    bool is_training,  // 是否开启训练模式
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
+    const torch::Tensor &br, const torch::Tensor &x,
+    const torch::Tensor &h0) {  // 初始隐藏状态，可以为空张量
+    
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // h0 可以为空张量（未提供初始状态）
+    const float *h0_ptr = nullptr;
+    if (h0.defined() && h0.numel() > 0) {
+        TORCH_CHECK(h0.is_cuda() && h0.dtype() == torch::kFloat32,
+                    "h0 must be CUDA float32 tensor");
+        TORCH_CHECK(h0.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
+                    "h0 must have shape [batch_size, hidden_size]");
+        h0_ptr = h0.data_ptr<float>();
+    }
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 创建输出张量
+    auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    
+    // 调用浮点前向传播（直接调用 hasteGRUForward）
+    hasteGRUForward(is_training, time_steps, batch_size, input_size, hidden_size,
+                    W.data_ptr<float>(), R.data_ptr<float>(), 
+                    bw.data_ptr<float>(), br.data_ptr<float>(), 
+                    x.data_ptr<float>(), h0_ptr, g_blas_handle,
+                    h.data_ptr<float>(), v.data_ptr<float>());
+
+    return std::make_tuple(h, v);
 }
 
 // =====================================================================
@@ -473,202 +548,103 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     return std::make_tuple(h, v);
 }
 
+
+
 // =====================================================================
-// quant_gru_forward_int32: 纯定点 GRU 前向传播（用于验证）
+// backward_quant_wrapper: 量化反向传播（使用保存的量化值）
 // =====================================================================
-// 输入输出都是 int32 张量，不涉及浮点转换
-// 用于验证 CPU 定点实现与 GPU 定点实现的一致性
-torch::Tensor quant_gru_forward_int32_wrapper(
+// 输入: W_q, R_q, bw_q, br_q, x_q 是前向传播保存的量化值
+// 函数会直接反量化这些值，然后进行反向传播
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+backward_quant_wrapper(
     int time_steps, int batch_size, int input_size, int hidden_size,
-    const torch::Tensor &W_q, const torch::Tensor &R_q,
-    const torch::Tensor &bw_q, const torch::Tensor &br_q,
-    const torch::Tensor &x_q, const torch::Tensor &h0_q,
-    const GRUQuantParamsPy &quant_params) {
-    
-    // 检查输入类型和设备
-    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kInt32, "W_q must be CUDA int32 tensor");
-    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kInt32, "R_q must be CUDA int32 tensor");
-    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kInt32, "bw_q must be CUDA int32 tensor");
-    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kInt32, "br_q must be CUDA int32 tensor");
-    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kInt32, "x_q must be CUDA int32 tensor");
-    
-    // h0_q 可以为空
-    const int32_t *h0_ptr = nullptr;
-    if (h0_q.defined() && h0_q.numel() > 0) {
-        TORCH_CHECK(h0_q.is_cuda() && h0_q.dtype() == torch::kInt32, "h0_q must be CUDA int32 tensor");
-        h0_ptr = h0_q.data_ptr<int32_t>();
-    }
-    
-    // 确保 cublas handle 已初始化
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
-    }
-    
-    // 创建输出张量
-    auto h_q = torch::empty({time_steps + 1, batch_size, hidden_size},
-                            torch::dtype(torch::kInt32).device(torch::kCUDA));
-    
+    torch::Tensor &W_q, torch::Tensor &R_q, torch::Tensor &bw_q,
+    torch::Tensor &br_q, torch::Tensor &x_q,
+    const torch::Tensor &dh_new,
+    const torch::Tensor &h,
+    const torch::Tensor &v,
+    const GRUQuantParamsPy &quant_params,
+    // QAT masks（仅在训练模式时有效）
+    const torch::Tensor &x_mask,
+    const torch::Tensor &h0_mask,
+    const torch::Tensor &W_mask,
+    const torch::Tensor &R_mask,
+    const torch::Tensor &bw_mask,
+    const torch::Tensor &br_mask,
+    const torch::Tensor &weight_ih_linear_mask,
+    const torch::Tensor &weight_hh_linear_mask,
+    const torch::Tensor &gate_input_mask,
+    const torch::Tensor &gate_output_mask,
+    const torch::Tensor &h_mask) {
+
+    // 检查输入张量的类型和设备
+    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kFloat32, "W_q must be CUDA float32 tensor");
+    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kFloat32, "R_q must be CUDA float32 tensor");
+    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kFloat32, "bw_q must be CUDA float32 tensor");
+    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kFloat32, "br_q must be CUDA float32 tensor");
+    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kFloat32, "x_q must be CUDA float32 tensor");
+    TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
+                "dh_new must be CUDA float32 tensor");
+    TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
+    TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
+
+    // 检查张量形状
+    const int hidden3 = hidden_size * 3;
+    TORCH_CHECK(W_q.sizes() == torch::IntArrayRef({input_size, hidden3}),
+                "W_q must have shape [input_size, hidden_size * 3]");
+    TORCH_CHECK(R_q.sizes() == torch::IntArrayRef({hidden_size, hidden3}),
+                "R_q must have shape [hidden_size, hidden_size * 3]");
+    TORCH_CHECK(bw_q.sizes() == torch::IntArrayRef({hidden3}),
+                "bw_q must have shape [hidden_size * 3]");
+    TORCH_CHECK(br_q.sizes() == torch::IntArrayRef({hidden3}),
+                "br_q must have shape [hidden_size * 3]");
+    TORCH_CHECK(x_q.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x_q must have shape [time_steps, batch_size, input_size]");
+    TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "h must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(v.sizes() == torch::IntArrayRef({time_steps, batch_size, hidden_size * 4}),
+                "v must have shape [time_steps, batch_size, hidden_size * 4]");
+
     // 转换量化参数
     GRUQuantParams cpp_params = quant_params.to_cpp();
+
+    // 拷贝 shift 到 device（用于 per-channel 反量化）
+    dev::vector<int8_t> shift_W_dev(cpp_params.shift_W_);
+    dev::vector<int8_t> shift_R_dev(cpp_params.shift_R_);
+    dev::vector<int8_t> shift_bw_dev(cpp_params.shift_bw_);
+    dev::vector<int8_t> shift_br_dev(cpp_params.shift_br_);
+
+    // 原地反量化（直接修改保存的量化值）
+    // 注意：这些量化值是从 forward 保存的中间变量，在 backward 中只使用一次
+    // backward 完成后这些 Tensor 会被 PyTorch 自动释放，不需要保护原始数据
+    dev::dequantificationPerChannelFPInplace(
+        W_q.data_ptr<float>(), input_size, hidden3, shift_W_dev);
+    dev::dequantificationPerChannelFPInplace(
+        R_q.data_ptr<float>(), hidden_size, hidden3, shift_R_dev);
+    dev::dequantificationPerChannelFPInplace(
+        bw_q.data_ptr<float>(), 1, hidden3, shift_bw_dev);
+    dev::dequantificationPerChannelFPInplace(
+        br_q.data_ptr<float>(), 1, hidden3, shift_br_dev);
     
-    // 调用 C++ 函数（推理模式，不输出 v）
-    quantGRUForwardInt32(
-        false, time_steps, batch_size, input_size, hidden_size,
-        W_q.data_ptr<int32_t>(), R_q.data_ptr<int32_t>(),
-        bw_q.data_ptr<int32_t>(), br_q.data_ptr<int32_t>(),
-        x_q.data_ptr<int32_t>(), h0_ptr,
-        cpp_params, g_blas_handle,
-        h_q.data_ptr<int32_t>(), nullptr);
-    
-    return h_q;
-}
+    const std::size_t x_size = time_steps * batch_size * input_size;
+    dev::dequantificationFPInplace(x_q.data_ptr<float>(), x_size,
+                                   cpp_params.shift_x_, cpp_params.zp_x_);
 
-// GRU 反向传播包装函数
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-haste_gru_backward_wrapper(int time_steps, int batch_size, int input_size, int hidden_size,
-                           const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
-                           const torch::Tensor &br, const torch::Tensor &x,
-                           const torch::Tensor &dh_new,  // 来自上层网络或损失函数的反向梯度
-                           const torch::Tensor &h,       // 前向传播的隐藏状态
-                           const torch::Tensor &v) {     // 前向传播的中间值，必需
-
-    // 检查输入张量的类型和设备
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-    TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
-                "dh_new must be CUDA float32 tensor");
-    TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
-    TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
-
-    // 检查张量形状
-    // 根据 haste 的实现，gru_backward 期望转置后的格式：
-    // x_t: [input_size, time_steps, batch_size] (转置后的 x)
-    // kernel_t: [hidden_size * 3, input_size] (转置后的 kernel)
-    // recurrent_kernel_t: [hidden_size * 3, hidden_size] (转置后的 recurrent_kernel)
-
-    // 检查 x 的形状，需要转置为 [input_size, time_steps, batch_size]
-    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
-                "x must have shape [time_steps, batch_size, input_size]");
-    torch::Tensor x_t = x.permute({2, 0, 1}).contiguous();  // [T,B,I] -> [I,T,B]
-
-    // 检查 W 的形状，需要转置为 [hidden_size * 3, input_size]
-    TORCH_CHECK(W.sizes() == torch::IntArrayRef({input_size, hidden_size * 3}),
-                "W must have shape [input_size, hidden_size * 3]");
-    torch::Tensor W_t = W.t().contiguous();  // [C, H*3] -> [H*3, C]
-
-    // 检查 R 的形状，需要转置为 [hidden_size * 3, hidden_size]
-    TORCH_CHECK(R.sizes() == torch::IntArrayRef({hidden_size, hidden_size * 3}),
-                "R must have shape [hidden_size, hidden_size * 3]");
-    torch::Tensor R_t = R.t().contiguous();  // [H, H*3] -> [H*3, H]
-
-    TORCH_CHECK(bw.sizes() == torch::IntArrayRef({hidden_size * 3}),
-                "bw must have shape [hidden_size * 3]");
-    TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
-                "br must have shape [hidden_size * 3]");
-    TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
-                "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
-    TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
-                "h must have shape [time_steps + 1, batch_size, hidden_size]");
-    TORCH_CHECK(v.sizes() == torch::IntArrayRef({time_steps, batch_size, hidden_size * 4}),
-                "v must have shape [time_steps, batch_size, hidden_size * 4]");
-
-    // 确保 cublas handle 已初始化
-    if (g_blas_handle == nullptr) {
-        init_gru_cublas(g_blas_handle);
+    // 同步 CUDA 操作
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in backward_quant_wrapper dequant: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in backward_quant_wrapper dequant: ") + err_str);
     }
 
-    // 创建输出张量
-    auto dx = torch::empty({time_steps, batch_size, input_size},
-                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dW = torch::zeros({input_size, hidden_size * 3},
-                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dR = torch::zeros({hidden_size, hidden_size * 3},
-                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dbw = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dbr = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-    auto dh =
-        torch::zeros({batch_size, hidden_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-
-    // 调用 C++ 函数
-    // 注意：需要将张量展平为连续内存布局
-    // C++ BackwardPass 期望转置后的格式（与 haste 一致）：
-    // W_t: [H*3, C], R_t: [H*3, H], x_t: [I, T, B]
-    hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
-                     W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W
-                     R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R
-                     bw.data_ptr<float>(), br.data_ptr<float>(),
-                     x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x
-                     dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
-                     g_blas_handle, dx.data_ptr<float>(), dW.data_ptr<float>(),
-                     dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
-                     dh.data_ptr<float>());
-
-    return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
-}
-
-// ============================================================================
-// 统一反向传播包装函数（支持 QAT mask）
-// ============================================================================
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-backward_wrapper(bool is_quant,
-                 int time_steps, int batch_size, int input_size, int hidden_size,
-                 const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
-                 const torch::Tensor &br, const torch::Tensor &x,
-                 const torch::Tensor &dh_new,
-                 const torch::Tensor &h,
-                 const torch::Tensor &v,
-                 // 以下为量化相关参数
-                 const GRUQuantParamsPy &quant_params,
-                 // QAT masks
-                 const torch::Tensor &x_mask,
-                 const torch::Tensor &h0_mask,
-                 const torch::Tensor &W_mask,
-                 const torch::Tensor &R_mask,
-                 const torch::Tensor &bw_mask,
-                 const torch::Tensor &br_mask,
-                 const torch::Tensor &weight_ih_linear_mask,
-                 const torch::Tensor &weight_hh_linear_mask,
-                 const torch::Tensor &gate_input_mask,
-                 const torch::Tensor &gate_output_mask,
-                 const torch::Tensor &h_mask) {
-
-    // 检查输入张量的类型和设备
-    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
-    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
-    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
-    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
-    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
-    TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
-                "dh_new must be CUDA float32 tensor");
-    TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
-    TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
-
-    // 检查张量形状
-    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
-                "x must have shape [time_steps, batch_size, input_size]");
-    torch::Tensor x_t = x.permute({2, 0, 1}).contiguous();  // [T,B,I] -> [I,T,B]
-
-    TORCH_CHECK(W.sizes() == torch::IntArrayRef({input_size, hidden_size * 3}),
-                "W must have shape [input_size, hidden_size * 3]");
-    torch::Tensor W_t = W.t().contiguous();  // [C, H*3] -> [H*3, C]
-
-    TORCH_CHECK(R.sizes() == torch::IntArrayRef({hidden_size, hidden_size * 3}),
-                "R must have shape [hidden_size, hidden_size * 3]");
-    torch::Tensor R_t = R.t().contiguous();  // [H, H*3] -> [H*3, H]
-
-    TORCH_CHECK(bw.sizes() == torch::IntArrayRef({hidden_size * 3}),
-                "bw must have shape [hidden_size * 3]");
-    TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
-                "br must have shape [hidden_size * 3]");
-    TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
-                "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
-    TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
-                "h must have shape [time_steps + 1, batch_size, hidden_size]");
-    TORCH_CHECK(v.sizes() == torch::IntArrayRef({time_steps, batch_size, hidden_size * 4}),
-                "v must have shape [time_steps, batch_size, hidden_size * 4]");
+    // 转置操作（使用反量化后的值）
+    torch::Tensor x_t = x_q.permute({2, 0, 1}).contiguous();  // [T,B,I] -> [I,T,B]
+    torch::Tensor W_t = W_q.t().contiguous();  // [C, H*3] -> [H*3, C]
+    torch::Tensor R_t = R_q.t().contiguous();  // [H, H*3] -> [H*3, H]
 
     // 确保 cublas handle 已初始化
     if (g_blas_handle == nullptr) {
@@ -691,42 +667,108 @@ backward_wrapper(bool is_quant,
         return t.numel() > 0 ? t.data_ptr<uint8_t>() : nullptr;
     };
 
-    // 转换量化参数（保留以保持接口兼容性，但反向传播中不再使用）
-    // 注意：反向传播不需要quant_params，因为使用的是反量化后的浮点值
-    const GRUQuantParams *quant_params_ptr = nullptr;
-    GRUQuantParams cpp_params;
-    if (is_quant && quant_params.hidden_ > 0) {
-        cpp_params = quant_params.to_cpp();
-        quant_params_ptr = &cpp_params;
+    // 调用 C++ 量化反向接口（使用反量化后的转置值）
+    quantGRUBackward(time_steps, batch_size, input_size, hidden_size,
+                     W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W（已反量化）
+                     R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R（已反量化）
+                     bw_q.data_ptr<float>(), br_q.data_ptr<float>(),  // 已反量化
+                     x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x（已反量化）
+                     dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
+                     g_blas_handle,
+                     dx.data_ptr<float>(), dW.data_ptr<float>(),
+                     dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
+                     dh.data_ptr<float>(),
+                     // 量化相关参数（用于 mask 生成，不用于 rescale 补偿）
+                     &cpp_params,
+                     // QAT masks
+                     get_mask_ptr(x_mask),
+                     get_mask_ptr(h0_mask),
+                     get_mask_ptr(W_mask),
+                     get_mask_ptr(R_mask),
+                     get_mask_ptr(bw_mask),
+                     get_mask_ptr(br_mask),
+                     get_mask_ptr(weight_ih_linear_mask),
+                     get_mask_ptr(weight_hh_linear_mask),
+                     get_mask_ptr(gate_input_mask),
+                     get_mask_ptr(gate_output_mask),
+                     get_mask_ptr(h_mask));
+
+    return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
+}
+
+// =====================================================================
+// backward_fp_wrapper: 浮点反向传播
+// =====================================================================
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+backward_fp_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
+    const torch::Tensor &br, const torch::Tensor &x,
+    const torch::Tensor &dh_new,
+    const torch::Tensor &h,
+    const torch::Tensor &v) {
+
+    // 检查输入张量的类型和设备
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+    TORCH_CHECK(dh_new.is_cuda() && dh_new.dtype() == torch::kFloat32,
+                "dh_new must be CUDA float32 tensor");
+    TORCH_CHECK(h.is_cuda() && h.dtype() == torch::kFloat32, "h must be CUDA float32 tensor");
+    TORCH_CHECK(v.is_cuda() && v.dtype() == torch::kFloat32, "v must be CUDA float32 tensor");
+
+    // 检查张量形状
+    TORCH_CHECK(x.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x must have shape [time_steps, batch_size, input_size]");
+    TORCH_CHECK(W.sizes() == torch::IntArrayRef({input_size, hidden_size * 3}),
+                "W must have shape [input_size, hidden_size * 3]");
+    TORCH_CHECK(R.sizes() == torch::IntArrayRef({hidden_size, hidden_size * 3}),
+                "R must have shape [hidden_size, hidden_size * 3]");
+    TORCH_CHECK(bw.sizes() == torch::IntArrayRef({hidden_size * 3}),
+                "bw must have shape [hidden_size * 3]");
+    TORCH_CHECK(br.sizes() == torch::IntArrayRef({hidden_size * 3}),
+                "br must have shape [hidden_size * 3]");
+    TORCH_CHECK(dh_new.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "dh_new must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(h.sizes() == torch::IntArrayRef({time_steps + 1, batch_size, hidden_size}),
+                "h must have shape [time_steps + 1, batch_size, hidden_size]");
+    TORCH_CHECK(v.sizes() == torch::IntArrayRef({time_steps, batch_size, hidden_size * 4}),
+                "v must have shape [time_steps, batch_size, hidden_size * 4]");
+
+    // 转置操作
+    torch::Tensor x_t = x.permute({2, 0, 1}).contiguous();  // [T,B,I] -> [I,T,B]
+    torch::Tensor W_t = W.t().contiguous();  // [C, H*3] -> [H*3, C]
+    torch::Tensor R_t = R.t().contiguous();  // [H, H*3] -> [H*3, H]
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
     }
 
-    // 调用 C++ 统一反向接口
-    backwardInterface(
-        is_quant,
-        time_steps, batch_size, input_size, hidden_size,
-        W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W
-        R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R
-        bw.data_ptr<float>(), br.data_ptr<float>(),
-        x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x
-        dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
-        g_blas_handle,
-        dx.data_ptr<float>(), dW.data_ptr<float>(),
-        dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
-        dh.data_ptr<float>(),
-        // 量化相关参数（用于 mask 生成，不用于 rescale 补偿）
-        quant_params_ptr,
-        // QAT masks
-        get_mask_ptr(x_mask),
-        get_mask_ptr(h0_mask),
-        get_mask_ptr(W_mask),
-        get_mask_ptr(R_mask),
-        get_mask_ptr(bw_mask),
-        get_mask_ptr(br_mask),
-        get_mask_ptr(weight_ih_linear_mask),
-        get_mask_ptr(weight_hh_linear_mask),
-        get_mask_ptr(gate_input_mask),
-        get_mask_ptr(gate_output_mask),
-        get_mask_ptr(h_mask));
+    // 创建输出张量
+    auto dx = torch::empty({time_steps, batch_size, input_size},
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dW = torch::zeros({input_size, hidden_size * 3},
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dR = torch::zeros({hidden_size, hidden_size * 3},
+                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dbw = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dbr = torch::zeros({hidden_size * 3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto dh = torch::zeros({batch_size, hidden_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // 调用 C++ 浮点反向接口（直接调用 hasteGRUBackward）
+    hasteGRUBackward(time_steps, batch_size, input_size, hidden_size,
+                     W_t.data_ptr<float>(),  // [H*3, C] - 转置后的 W
+                     R_t.data_ptr<float>(),  // [H*3, H] - 转置后的 R
+                     bw.data_ptr<float>(), br.data_ptr<float>(),
+                     x_t.data_ptr<float>(),  // [I, T, B] - 转置后的 x
+                     dh_new.data_ptr<float>(), h.data_ptr<float>(), v.data_ptr<float>(),
+                     g_blas_handle,
+                     dx.data_ptr<float>(), dW.data_ptr<float>(),
+                     dR.data_ptr<float>(), dbw.data_ptr<float>(), dbr.data_ptr<float>(),
+                     dh.data_ptr<float>());
 
     return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
 }
@@ -1102,7 +1144,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_mul_new_contribution_", &GRUQuantParamsPy::zp_mul_new_contribution_)
         .def_readwrite("shift_mul_old_contribution_", &GRUQuantParamsPy::shift_mul_old_contribution_)
         .def_readwrite("zp_mul_old_contribution_", &GRUQuantParamsPy::zp_mul_old_contribution_)
-        // ⚠️ 关键字段：位宽配置，决定 forwardInterface 使用 int8 还是 int16
+        // ⚠️ 关键字段：位宽配置，决定量化函数使用 int8 还是 int16
         .def_readwrite("bitwidth_config_", &GRUQuantParamsPy::bitwidth_config_);
 
     // 根据量化范围计算量化参数（支持自定义位宽配置）
@@ -1138,46 +1180,52 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("percentile_value") = 99.99f);
 
     // =====================================================================
-    // forward: 正常前向传播（推理/训练，支持 QAT mask）
+    // forward_quant: 量化前向传播（返回量化值）
     // =====================================================================
-    m.def("forward", &forward_wrapper,
-          "GRU forward pass for inference/training with QAT mask support.\n"
+    m.def("forward_quant", &forward_quant_wrapper,
+          "GRU quantized forward pass (returns quantized values for backward).\n"
           "\n"
           "Args:\n"
-          "  is_training: Enable training mode (saves intermediate values)\n"
-          "  is_quant: Use quantized inference (requires quant_params)\n"
+          "  is_training: Enable training mode (saves quantized values)\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
           "  W, R, bw, br: Weight matrices and biases\n"
           "  x: Input tensor [T, B, I]\n"
           "  h0: Initial hidden state [B, H], optional\n"
-          "  quant_params: Quantization parameters (used when is_quant=True)\n"
+          "  quant_params: Quantization parameters\n"
           "\n"
           "Returns:\n"
-          "  tuple(h, v, x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,\n"
-          "        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)\n"
+          "  tuple(h, v, W_q, R_q, bw_q, br_q, x_q, ...masks)\n"
           "  - h: Hidden states [T+1, B, H]\n"
           "  - v: Intermediate values [T, B, H*4]\n"
-          "  Input quantization masks (empty if not training+quant):\n"
-          "  - x_mask: [T, B, I] input sequence quantization mask\n"
-          "  - h0_mask: [B, H] initial hidden state quantization mask\n"
-          "  - W_mask: [I, H*3] input weight quantization mask\n"
-          "  - R_mask: [H, H*3] recurrent weight quantization mask\n"
-          "  - bw_mask: [H*3] input bias quantization mask\n"
-          "  - br_mask: [H*3] recurrent bias quantization mask\n"
-          "  Computation masks (empty if not training+quant):\n"
-          "  - weight_ih_linear_mask: [T, B, H*3] (uint8, 1=clamped)\n"
-          "  - weight_hh_linear_mask: [T, B, H*3] (uint8, 1=clamped)\n"
-          "  - gate_input_mask: [T, B, H*3] gate input clamp mask (uint8, 1=clamped)\n"
-          "  - gate_output_mask: [T, B, H*3] gate output clamp mask (uint8, 1=clamped)\n"
-          "  - h_mask: [T, B, H] hidden state mask (uint8, 1=clamped)\n"
-          "\n"
-          "Note: QAT masks are only populated when is_training=True and is_quant=True.\n"
-          "      Check mask.numel() > 0 to determine if masks are valid.",
-          py::arg("is_training"), py::arg("is_quant"),
+          "  - W_q, R_q, bw_q, br_q, x_q: Quantized values (empty if not training)\n"
+          "  - ...masks: QAT masks (empty if not training)\n",
+          py::arg("is_training"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),
           py::arg("quant_params"));
+
+    // =====================================================================
+    // forward_fp: 浮点前向传播
+    // =====================================================================
+    m.def("forward_fp", &forward_fp_wrapper,
+          "GRU floating-point forward pass.\n"
+          "\n"
+          "Args:\n"
+          "  is_training: Enable training mode\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bw, br: Weight matrices and biases\n"
+          "  x: Input tensor [T, B, I]\n"
+          "  h0: Initial hidden state [B, H], optional\n"
+          "\n"
+          "Returns:\n"
+          "  tuple(h, v)\n"
+          "  - h: Hidden states [T+1, B, H]\n"
+          "  - v: Intermediate values [T, B, H*4]\n",
+          py::arg("is_training"),
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
+          py::arg("h0") = torch::Tensor());
 
     // =====================================================================
     // forward_calibrate: 校准前向传播（统一接口，原地累积）
@@ -1221,62 +1269,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("quant_ranges") = nullptr,
           py::arg("hist_collectors") = nullptr);
 
+
     // =====================================================================
-    // quant_gru_forward_int32: 纯定点 GRU 前向传播（用于验证）
+    // backward_quant: 量化反向传播（使用保存的量化值）
     // =====================================================================
-    m.def("quant_gru_forward_int32", &quant_gru_forward_int32_wrapper,
-          "Quantized GRU forward pass with int32 input/output for verification.\n"
+    m.def("backward_quant", &backward_quant_wrapper,
+          "GRU quantized backward pass (uses saved quantized values from forward).\n"
           "\n"
           "Args:\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
-          "  W_q, R_q, bw_q, br_q: Quantized weights (int32 CUDA tensors)\n"
-          "  x_q: Quantized input [T, B, I] (int32 CUDA tensor)\n"
-          "  h0_q: Quantized initial hidden state [B, H] (int32 CUDA tensor, optional)\n"
-          "  quant_params: Quantization parameters\n"
-          "\n"
-          "Returns:\n"
-          "  h_q: Quantized hidden states [T+1, B, H] (int32 CUDA tensor)",
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
-          py::arg("W_q"), py::arg("R_q"), py::arg("bw_q"), py::arg("br_q"),
-          py::arg("x_q"), py::arg("h0_q"),
-          py::arg("quant_params"));
-
-    // GRU 反向传播（非量化版，保留兼容性）
-    m.def("haste_gru_backward", &haste_gru_backward_wrapper, "Non-quantized GRU backward pass",
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"),
-          py::arg("x"), py::arg("dh_new"), py::arg("h"),
-          py::arg("v"));  // 中间值v，必需；返回 (dx, dW, dR, dbw, dbr, dh) 元组
-
-    // GRU 统一反向传播接口（支持 QAT mask）
-    m.def("backward", &backward_wrapper,
-          "Unified GRU backward pass with optional QAT mask support.\n"
-          "\n"
-          "Args:\n"
-          "  is_quant: Whether to use quantized backward (applies masks via STE)\n"
-          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
-          "  W, R, bw, br: Weight tensors in Haste format\n"
-          "  x: Input tensor [T, B, I]\n"
+          "  W_q, R_q, bw_q, br_q, x_q: Quantized values from forward pass\n"
           "  dh_new: Upstream gradient [T+1, B, H]\n"
           "  h: Hidden states from forward [T+1, B, H]\n"
           "  v: Intermediate values from forward [T, B, H*4]\n"
-          "  quant_params: Quantization parameters (保留以保持接口兼容性，但不再使用)\n"
-          "  x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask: Input/weight clamp masks\n"
-          "  weight_ih_linear_mask, weight_hh_linear_mask: Linear output clamp masks\n"
-          "  gate_input_mask, gate_output_mask: Gate input/output clamp masks\n"
-          "  h_mask: Hidden state clamp mask\n"
+          "  quant_params: Quantization parameters\n"
+          "  ...masks: QAT masks (empty if not training)\n"
           "\n"
           "Returns:\n"
-          "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n"
-          "\n"
-          "Note:\n"
-          "  - When is_quant=True, masks are applied in C++ via Straight-Through Estimator (STE)\n"
-          "  - When is_quant=False, masks and quant_params are ignored\n"
-          "  - No rescale compensation needed: backward pass uses dequantized float values, gradient computation is already correct",
-          py::arg("is_quant"),
-          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"),
-          py::arg("hidden_size"), py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"),
-          py::arg("x"), py::arg("dh_new"), py::arg("h"), py::arg("v"),
+          "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W_q"), py::arg("R_q"), py::arg("bw_q"), py::arg("br_q"), py::arg("x_q"),
+          py::arg("dh_new"), py::arg("h"), py::arg("v"),
           py::arg("quant_params"),
           py::arg("x_mask") = torch::Tensor(),
           py::arg("h0_mask") = torch::Tensor(),
@@ -1289,4 +1302,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("gate_input_mask") = torch::Tensor(),
           py::arg("gate_output_mask") = torch::Tensor(),
           py::arg("h_mask") = torch::Tensor());
+
+    // =====================================================================
+    // backward_fp: 浮点反向传播
+    // =====================================================================
+    m.def("backward_fp", &backward_fp_wrapper,
+          "GRU floating-point backward pass.\n"
+          "\n"
+          "Args:\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bw, br: Weight tensors\n"
+          "  x: Input tensor [T, B, I]\n"
+          "  dh_new: Upstream gradient [T+1, B, H]\n"
+          "  h: Hidden states from forward [T+1, B, H]\n"
+          "  v: Intermediate values from forward [T, B, H*4]\n"
+          "\n"
+          "Returns:\n"
+          "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
+          py::arg("dh_new"), py::arg("h"), py::arg("v"));
 }
