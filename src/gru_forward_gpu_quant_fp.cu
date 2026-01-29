@@ -32,6 +32,14 @@
 #include "gru_quant.h"
 #include "parallel_algorithm.h"
 
+// ============================================================================
+// 对称量化宏定义
+// ============================================================================
+// 如果定义了 USE_SYMMETRIC_QUANTIZATION，则所有零点(zp)相关运算将被优化掉
+// 对称量化时，所有零点都为0，可以简化计算
+// 使用方式：在编译时定义 -DUSE_SYMMETRIC_QUANTIZATION
+#define USE_SYMMETRIC_QUANTIZATION
+
 namespace kernel {
 
 // ============================================================================
@@ -113,14 +121,20 @@ __device__ __forceinline__ float biasRescaleInline(float gemm_result, float bias
                                                    float zp_out, QuantBitWidth output_bw,
                                                    uint8_t *was_clamped = nullptr) {
     // Step 1: GEMM结果减去零点补偿（已在GEMM空间）
-    const float val = gemm_result - W_sum_mul_zp;
+    float val = gemm_result;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    val -= W_sum_mul_zp;
+#endif
 
     // Step 2: bias从scale_bw空间转换到GEMM空间（使用倒数，乘法替代除法）
     const float bias_term = round_f(bias * inv_div_bias);
 
     // Step 3: GEMM结果和bias相加（都在GEMM空间），然后一起转换到weight_ih_linear空间
     const float combined = val + bias_term;
-    const float result = mul_round(combined, inv_div_gemm) + zp_out;
+    float result = mul_round(combined, inv_div_gemm);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    result += zp_out;
+#endif
 
     // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
     return clamp_f<Training>(result, output_bw, was_clamped);
@@ -139,11 +153,20 @@ __device__ __forceinline__ float computeUpdateGateFP(float weight_ih_linear, flo
                                                      uint8_t *input_was_clamped = nullptr,
                                                      uint8_t *output_was_clamped = nullptr) {
     // 重缩放到 update_gate_input 空间（使用倒数，乘法替代除法）
-    const float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_,
+    float weight_ih_linear_val = weight_ih_linear;
+    float weight_hh_linear_val = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+    weight_hh_linear_val -= p.zp_weight_hh_linear_;
+#endif
+    const float ih = mul_round(weight_ih_linear_val,
                                p.inv_div_weight_ih_linear_to_update_gate_input_);
-    const float hh = mul_round(weight_hh_linear - p.zp_weight_hh_linear_,
+    const float hh = mul_round(weight_hh_linear_val,
                                p.inv_div_weight_hh_linear_to_update_gate_input_);
-    const float input = ih + hh + p.zp_update_gate_input_;
+    float input = ih + hh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_update_gate_input_;
+#endif
 
     // 对输入进行 clamp（根据 Training 决定是否使用 mask）
     const float clamped_input = clamp_f<Training>(
@@ -170,11 +193,20 @@ __device__ __forceinline__ float computeResetGateFP(float weight_ih_linear, floa
                                                     const GateQuantParamsFP &p,
                                                     uint8_t *input_was_clamped = nullptr,
                                                     uint8_t *output_was_clamped = nullptr) {
-    float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_,
+    float weight_ih_linear_val = weight_ih_linear;
+    float weight_hh_linear_val = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+    weight_hh_linear_val -= p.zp_weight_hh_linear_;
+#endif
+    float ih = mul_round(weight_ih_linear_val,
                          p.inv_div_weight_ih_linear_to_reset_gate_input_);
-    float hh = mul_round(weight_hh_linear - p.zp_weight_hh_linear_,
+    float hh = mul_round(weight_hh_linear_val,
                          p.inv_div_weight_hh_linear_to_reset_gate_input_);
-    float input = ih + hh + p.zp_reset_gate_input_;
+    float input = ih + hh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_reset_gate_input_;
+#endif
 
     // 对输入进行 clamp（根据 Training 决定是否使用 mask）
     const float clamped_input = clamp_f<Training>(
@@ -204,15 +236,26 @@ __device__ __forceinline__ float computeNewGateFP(float weight_ih_linear, float 
                                                   uint8_t *output_was_clamped = nullptr) {
     // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input
     // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
-    const float r_diff = reset_gate - p.zp_reset_gate_output_;
-    const float hh_diff = weight_hh_linear - p.zp_weight_hh_linear_;
+    float r_diff = reset_gate;
+    float hh_diff = weight_hh_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    r_diff -= p.zp_reset_gate_output_;
+    hh_diff -= p.zp_weight_hh_linear_;
+#endif
     const float reset_hidden_mul = r_diff * hh_diff;
     const float rh = mul_round(reset_hidden_mul, p.inv_div_reset_mul_hh_to_new_gate_input_);
 
     // weight_ih_linear 重缩放到 new_gate_input 空间（使用倒数，乘法替代除法）
-    const float ih = mul_round(weight_ih_linear - p.zp_weight_ih_linear_,
+    float weight_ih_linear_val = weight_ih_linear;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    weight_ih_linear_val -= p.zp_weight_ih_linear_;
+#endif
+    const float ih = mul_round(weight_ih_linear_val,
                                p.inv_div_weight_ih_linear_to_new_gate_input_);
-    const float input = ih + rh + p.zp_new_gate_input_;
+    float input = ih + rh;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    input += p.zp_new_gate_input_;
+#endif
 
     // 对输入进行 clamp（根据 Training 决定是否使用 mask）
     const float clamped_input = clamp_f<Training>(
@@ -251,26 +294,37 @@ __device__ __forceinline__ float computeHiddenStateFP(float update_gate, float n
                                                       uint8_t *was_clamped = nullptr) {
     // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
     // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
-    const float n_diff_from_zp = new_gate - p.zp_new_gate_output_;
-    const float new_gate_aligned_to_h =
-        mul_round(n_diff_from_zp, p.inv_div_new_gate_output_to_h_) + p.zp_h_;
+    float n_diff_from_zp = new_gate;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    n_diff_from_zp -= p.zp_new_gate_output_;
+#endif
+    float new_gate_aligned_to_h = mul_round(n_diff_from_zp, p.inv_div_new_gate_output_to_h_);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    new_gate_aligned_to_h += p.zp_h_;
+#endif
 
     // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
     // u_diff 在 update_gate_output scale，h_diff 在 h scale
     // 乘积 scale = scale_update_gate_output * scale_h
     // 使用 float 精度（单个乘积最大 4,161,409，在 FP32 精确范围内）
-    const float u_diff = update_gate - p.zp_update_gate_output_;
-    const float h_diff = h_old - p.zp_h_;
+    float u_diff = update_gate;
+    float h_diff = h_old;
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    u_diff -= p.zp_update_gate_output_;
+    h_diff -= p.zp_h_;
+#endif
     const float old_contribution_mul = u_diff * h_diff;  // scale = scale_u * scale_h
 
     // ========== 步骤3: 计算 new_contribution = (1 - update_gate) * new_gate_aligned ==========
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     const float one_minus_u = p.quant_one_in_update_gate_scale_ - update_gate;
-    const float one_minus_u_diff =
-        one_minus_u - p.zp_update_gate_output_;  // 在 update_gate_output scale
-
-    const float n_diff_aligned = new_gate_aligned_to_h - p.zp_h_;  // 在 h scale
+    float one_minus_u_diff = one_minus_u;  // 在 update_gate_output scale
+    float n_diff_aligned = new_gate_aligned_to_h;  // 在 h scale
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    one_minus_u_diff -= p.zp_update_gate_output_;
+    n_diff_aligned -= p.zp_h_;
+#endif
     // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
     // 乘积 scale = scale_update_gate_output * scale_h
     const float new_contribution_mul =
@@ -284,8 +338,11 @@ __device__ __forceinline__ float computeHiddenStateFP(float update_gate, float n
     // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
     // inv_div_update_old_to_h_ = 1.0 / (2^shift_update_gate_output) = 1.0 /
     // scale_update_gate_output 所以除以 scale_update_gate_output 即可得到 h scale
-    const float h_new =
-        mul_round(old_contribution_add_new_contribution, p.inv_div_update_old_to_h_) + p.zp_h_;
+    float h_new =
+        mul_round(old_contribution_add_new_contribution, p.inv_div_update_old_to_h_);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    h_new += p.zp_h_;
+#endif
 
     // 使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask
     return clamp_f<Training>(h_new, p.bitwidth_config_.h_, was_clamped);
@@ -334,14 +391,19 @@ __global__ void biasRescaleKernel(
     const int row = idx % M;
 
     // 读取 GEMM 结果，减去零点补偿（W_sum_mul_zp 是 float，权重总是 8bit）
-    const float val = (gemm_result != nullptr) ? (gemm_result[idx] - W_sum_mul_zp[row]) 
-                                               : (data[idx] - W_sum_mul_zp[row]);
+    float val = (gemm_result != nullptr) ? gemm_result[idx] : data[idx];
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    val -= W_sum_mul_zp[row];
+#endif
     
     // bias 先 rescale（bias 是 8bit/16bit 整数，可以用 float 精确表示）
     const float bias_term = round_f(bias[row] / div_bias[row]);
     
     // GEMM + bias 一起 rescale（最终结果在量化范围内）
-    const float result = round_f((val + bias_term) / div_gemm[row]) + zp_out;
+    float result = round_f((val + bias_term) / div_gemm[row]);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    result += zp_out;
+#endif
 
     // 写回结果（使用模板版本的 clamp_f，内部根据 Training 决定是否使用 mask）
     uint8_t was_clamped;
@@ -682,7 +744,10 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     // 注意：rshift_round(1, -n) 当 n>0 时等于 1 << n
     // 用于计算 (1 - update_gate) = quant_one - update_gate
     g.quant_one_in_update_gate_scale_ =
-        exp2_scale(-src.shift_update_gate_output_) + static_cast<float>(src.zp_update_gate_output_);
+        exp2_scale(-src.shift_update_gate_output_);
+#ifndef USE_SYMMETRIC_QUANTIZATION
+    g.quant_one_in_update_gate_scale_ += static_cast<float>(src.zp_update_gate_output_);
+#endif
 
     // shift_uh: u * h_old 到 h 的 shift
     // u 在 update_gate_output scale，h_old 在 h scale
