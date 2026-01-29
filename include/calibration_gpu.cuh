@@ -500,14 +500,6 @@ struct GRUQuantizationRanges;  // 前向声明
 /**
  * @brief GPU 加速的 MINMAX 量化范围更新
  *
- * 完全在 GPU 上计算 min/max，避免大量 GPU→CPU 数据传输
- * 仅传输最终的 min/max 结果（几十个 float）
- *
- * 性能对比（T=100, B=32, H=256, I=128）：
- *   - CPU 版本（updateGRUQuantizationRanges）：~15-20 ms（主要是 D2H 传输）
- *   - GPU 版本（updateGRUQuantizationRangesGPU）：~1-2 ms
- *   - 加速比：8-15x
- *
  * @param time_steps 时间步数
  * @param batch_size 批大小
  * @param input_size 输入维度

@@ -263,17 +263,6 @@ void forwardWithCalibrationGPU(
     GRUGPUHistogramCollectors *gpu_hist_collectors,   // SQNR/Percentile 时必须非空
     float *h, float *v);
 
-// CPU 直方图收集（用于性能对比）
-// 前向传播在 GPU 上执行，直方图收集在 CPU 上执行
-void forwardWithHistogramCPU(
-    bool is_training,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br, const float *x,
-    const float *h0,
-    const cublasHandle_t &g_blas_handle,
-    GRUHistogramCollectors *hist_collectors,
-    float *h, float *v);
-
 // 将 GPU 直方图收集器转换为 CPU 版本
 // 用于与 calculateGRUQuantitativeParametersFromHistograms 配合使用
 GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors &gpu_collectors);
@@ -284,13 +273,6 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
     bool verbose = false);
-
-// =====================================================================
-// MINMAX 范围更新接口
-// =====================================================================
-// 
-// updateGRUQuantizationRanges 定义在 include/calibration_utils.h 中
-// 此处只是为了 API 文档完整性而保留注释
 
 // =====================================================================
 // 反向传播接口
