@@ -21,6 +21,22 @@ struct QuantBitWidth {
         return is_unsigned_ ? (1 << bits_) - 1 : (1 << (bits_ - 1)) - 1;
     }
     
+    // Auto scale专用的qmin函数
+    // 所有位宽：qmin保持不变（与qmin()相同）
+    __host__ __device__ int32_t qmin_auto_scale() const {
+        if (bits_ >= 32) return static_cast<int32_t>(0x80000000);
+        return is_unsigned_ ? 0 : -(1 << (bits_ - 1));
+    }
+    
+    // Auto scale专用的qmax函数
+    // 有符号数：qmax从 (1 << (bits_ - 1)) - 1 改为 (1 << (bits_ - 1))
+    // 无符号数：qmax从 (1 << bits_) - 1 改为 (1 << bits_)
+    // 例如：int8: 127->128, uint8: 255->256, int4: 7->8, uint4: 15->16
+    __host__ __device__ int32_t qmax_auto_scale() const {
+        if (bits_ >= 32) return 0x7FFFFFFF;
+        return is_unsigned_ ? (1 << bits_) : (1 << (bits_ - 1));
+    }
+    
     __host__ __device__ int64_t range() const {
         return static_cast<int64_t>(qmax()) - static_cast<int64_t>(qmin());
     }
