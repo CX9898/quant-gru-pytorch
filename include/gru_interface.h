@@ -244,31 +244,6 @@ void hasteGRUForward(
     const cublasHandle_t &g_blas_handle,
     float *h, float *v);
 
-// 统一前向传播接口（推理/训练）
-// 注意：校准请使用 forwardWithCalibrationMinMaxGPU 或 forwardWithCalibrationHistogramGPU
-// 量化模式选择：通过 USE_FP_STORAGE 宏控制
-//   - 定义 USE_FP_STORAGE（默认）：使用浮点存储版（方案2，推荐）
-//   - 未定义 USE_FP_STORAGE：使用 INT32 存储版（方案1）
-void forwardInterface(
-    bool is_training, bool is_quant,
-    int time_steps, int batch_size, int input_size, int hidden_size,
-    const float *W, const float *R, const float *bw, const float *br, const float *x,
-    const float *h0,
-    const GRUQuantParams &quant_gru_scales, const cublasHandle_t &g_blas_handle,
-    float *h, float *v,
-    // 输入量化 mask（外部分配，nullptr=不保存）
-    uint8_t *x_mask = nullptr,
-    uint8_t *h0_mask = nullptr,
-    uint8_t *W_mask = nullptr,
-    uint8_t *R_mask = nullptr,
-    uint8_t *bw_mask = nullptr,
-    uint8_t *br_mask = nullptr,
-    // 计算过程 mask（外部分配，nullptr=不保存）
-    uint8_t *weight_ih_linear_mask = nullptr,
-    uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_input_mask = nullptr,
-    uint8_t *gate_output_mask = nullptr,
-    uint8_t *h_mask = nullptr);
 
 // =====================================================================
 // 统一校准前向传播（GPU）
@@ -374,7 +349,14 @@ void quantGRUForwardFP(
     uint8_t *weight_hh_linear_mask = nullptr,
     uint8_t *gate_input_mask = nullptr,
     uint8_t *gate_output_mask = nullptr,
-    uint8_t *h_mask = nullptr);
+    uint8_t *h_mask = nullptr,
+    // 新增：输出量化后的值（仅在训练模式时使用，推理模式可为 nullptr）
+    // 函数会直接写入这些指针指向的内存，无需拷贝
+    float *W_q_out = nullptr,  // [input_size, hidden_size * 3]
+    float *R_q_out = nullptr,  // [hidden_size, hidden_size * 3]
+    float *bw_q_out = nullptr, // [hidden_size * 3]
+    float *br_q_out = nullptr, // [hidden_size * 3]
+    float *x_q_out = nullptr);  // [time_steps, batch_size, input_size]
 
 
 // =====================================================================
@@ -459,40 +441,3 @@ void quantGRUBackward(
     const uint8_t *gate_output_mask = nullptr,
     const uint8_t *h_mask = nullptr);
 
-// ============================================================================
-// 统一反向传播接口
-// ============================================================================
-//
-// 根据 is_quant 参数选择调用 quantGRUBackward 或 hasteGRUBackward。
-// 与 forwardInterface 对称的设计。
-//
-// @param is_quant 是否使用量化版本
-//   - true: 调用 quantGRUBackward（支持 QAT mask 和 rescale 补偿）
-//   - false: 调用 hasteGRUBackward（忽略所有 mask 参数和 quant_params）
-//
-// @param quant_params 量化参数（用于 rescale 补偿），nullptr=不应用 rescale
-//
-void backwardInterface(
-    bool is_quant,
-    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
-    const float *W_t, const float *R_t,
-    const float *bw, const float *br,
-    const float *x_t,
-    const float *dh_new,
-    const float *h, const float *v,
-    const cublasHandle_t &g_blas_handle,
-    float *dx, float *dW, float *dR, float *dbw, float *dbr, float *dh,
-    // 以下为量化相关参数（is_quant=true 时有效）
-    const GRUQuantParams *quant_params = nullptr,  // 量化参数（用于 rescale 补偿），nullptr=不应用
-    // QAT masks
-    const uint8_t *x_mask = nullptr,
-    const uint8_t *h0_mask = nullptr,
-    const uint8_t *W_mask = nullptr,
-    const uint8_t *R_mask = nullptr,
-    const uint8_t *bw_mask = nullptr,
-    const uint8_t *br_mask = nullptr,
-    const uint8_t *weight_ih_linear_mask = nullptr,
-    const uint8_t *weight_hh_linear_mask = nullptr,
-    const uint8_t *gate_input_mask = nullptr,
-    const uint8_t *gate_output_mask = nullptr,
-    const uint8_t *h_mask = nullptr);

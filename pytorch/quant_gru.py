@@ -517,37 +517,64 @@ class GRUFunction(torch.autograd.Function):
         else:
             quant_params = gru_ops.GRUQuantParams()
 
-        # 调用 C++ 前向接口（返回 13 个值）
-        (output_full, v,
-         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-         weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = gru_ops.forward(
-            is_training=is_training,
-            is_quant=use_quantization,
-            time_steps=time_steps,
-            batch_size=batch_size,
-            input_size=input_size,
-            hidden_size=hidden_size,
-            W=W,
-            R=R,
-            bw=bw,
-            br=br,
-            x=input,
-            h0=h0_tensor,
-            quant_params=quant_params
-        )
+        # 根据 use_quantization 调用不同的前向函数
+        if use_quantization:
+            # 量化模式：调用 forward_quant，返回量化值
+            (output_full, v,
+             W_q, R_q, bw_q, br_q, x_q,
+             x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+             weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = gru_ops.forward_quant(
+                is_training=is_training,
+                time_steps=time_steps,
+                batch_size=batch_size,
+                input_size=input_size,
+                hidden_size=hidden_size,
+                W=W,
+                R=R,
+                bw=bw,
+                br=br,
+                x=input,
+                h0=h0_tensor,
+                quant_params=quant_params
+            )
+        else:
+            # 浮点模式：调用 forward_fp，不返回 mask
+            output_full, v = gru_ops.forward_fp(
+                is_training=is_training,
+                time_steps=time_steps,
+                batch_size=batch_size,
+                input_size=input_size,
+                hidden_size=hidden_size,
+                W=W,
+                R=R,
+                bw=bw,
+                br=br,
+                x=input,
+                h0=h0_tensor
+            )
+            # 浮点模式：不保存量化值和 mask，所以不需要创建
 
         # 分离输出: output_full[0] 是初始状态，[1:] 是时间步输出
         output = output_full[1:]
         h_n = output_full[-1:]
 
-        # 保存反向传播所需的中间结果（包括所有 11 个 mask）
-        ctx.save_for_backward(W, R, bw, br, input, output_full, v,
-                              x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-                              weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
+        # 保存反向传播所需的中间结果
+        # 根据 use_quantization 区分保存内容，减少内存占用
+        if use_quantization:
+            # 量化模式：只保存量化值、output_full、v 和 mask
+            # backward_quant_wrapper 只需要量化值，不需要原始 W, R, bw, br, input
+            # x_q 反量化后就是 input 的量化版本，可以直接使用
+            # 顺序：(W_q, R_q, bw_q, br_q, x_q, output_full, v, ...masks)
+            ctx.save_for_backward(W_q, R_q, bw_q, br_q, x_q,
+                                  output_full, v,
+                                  x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                                  weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask)
+        else:
+            # 浮点模式：只保存原始值，不保存量化值和 mask
+            # 顺序：(W, R, bw, br, input, output_full, v)
+            ctx.save_for_backward(W, R, bw, br, input, output_full, v)
         
-        # 保存量化参数（保留以保持接口兼容性）
-        # 注意：quant_params 不是 tensor，需要单独保存
-        # 注意：反向传播中不再使用quant_params，因为使用的是反量化后的浮点值，不需要rescale补偿
+        # 保存量化参数
         ctx.quant_params = quant_params
 
         return output, h_n
@@ -570,18 +597,34 @@ class GRUFunction(torch.autograd.Function):
             - 未被 clamp 的值（mask=0）梯度正常传播
             - 所有 mask 在 C++ 端应用，提高效率
         """
-        (W, R, bw, br, input, h, v,
-         x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-         weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = ctx.saved_tensors
+        # 从 saved_tensors 中提取值（根据 use_quantization 区分顺序）
         time_steps, batch_size = ctx.time_steps, ctx.batch_size
         input_size, hidden_size = ctx.input_size, ctx.hidden_size
+        
+        if ctx.use_quantization:
+            # 量化模式：顺序 (W_q, R_q, bw_q, br_q, x_q, output_full, v, ...masks)
+            (W_q, R_q, bw_q, br_q, x_q,
+             h, v,
+             x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+             weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = ctx.saved_tensors
+        else:
+            # 浮点模式：顺序 (W, R, bw, br, input, output_full, v)
+            (W, R, bw, br, input, h, v) = ctx.saved_tensors
 
         # 确保所有张量在 CUDA 上
         device = grad_output.device
-        tensors = [W, R, bw, br, input, h]
-        W, R, bw, br, input, h = [t.to(device) if not t.is_cuda else t for t in tensors]
-        if v is not None and not v.is_cuda:
-            v = v.to(device)
+        if ctx.use_quantization:
+            # 量化模式：只需要处理 h、v（量化值会在 backward_quant 中处理）
+            h = h.to(device) if not h.is_cuda else h
+            if v is not None and not v.is_cuda:
+                v = v.to(device)
+        else:
+            # 浮点模式：需要处理 W, R, bw, br, input, h
+            tensors = [W, R, bw, br, input, h]
+            W, R, bw, br, input, h = [t.to(device) if not t.is_cuda else t for t in tensors]
+            if v is not None and not v.is_cuda:
+                v = v.to(device)
+        
         if not grad_output.is_cuda:
             grad_output = grad_output.to(device)
         if grad_h_n is not None and not grad_h_n.is_cuda:
@@ -600,31 +643,50 @@ class GRUFunction(torch.autograd.Function):
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
-        # 调用 C++ 统一反向接口
-        # 量化模式时传入所有 mask 和 quant_params，C++ 端应用 STE
-        # 非量化模式时 mask 为空 tensor，C++ 端会忽略
-        # 注意：不需要rescale补偿，因为反向传播使用的是反量化后的浮点值，梯度计算已经是正确的
-        dx, dW, dR, dbw, dbr, dh = gru_ops.backward(
-            is_quant=ctx.use_quantization,
-            time_steps=time_steps, batch_size=batch_size,
-            input_size=input_size, hidden_size=hidden_size,
-            W=W, R=R, bw=bw, br=br, x=input,
-            dh_new=dh_new, h=h, v=v,
-            # 量化参数（保留以保持接口兼容性，但反向传播中不再使用）
-            quant_params=ctx.quant_params,
-            # QAT masks（C++ 端应用 STE）
-            x_mask=x_mask,
-            h0_mask=h0_mask,
-            W_mask=W_mask,
-            R_mask=R_mask,
-            bw_mask=bw_mask,
-            br_mask=br_mask,
-            weight_ih_linear_mask=weight_ih_linear_mask,
-            weight_hh_linear_mask=weight_hh_linear_mask,
-            gate_input_mask=gate_input_mask,
-            gate_output_mask=gate_output_mask,
-            h_mask=h_mask
-        )
+        # 根据 use_quantization 调用不同的反向函数
+        if ctx.use_quantization:
+            # 量化模式：使用保存的量化值，调用 backward_quant
+            # 确保量化值在正确的设备上（量化模式下一定有量化值，因为已经区分保存了）
+            W_q = W_q.to(device) if not W_q.is_cuda else W_q
+            R_q = R_q.to(device) if not R_q.is_cuda else R_q
+            bw_q = bw_q.to(device) if not bw_q.is_cuda else bw_q
+            br_q = br_q.to(device) if not br_q.is_cuda else br_q
+            x_q = x_q.to(device) if not x_q.is_cuda else x_q
+            
+            # 确保 mask 在正确的设备上
+            masks = [x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+                     weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask]
+            x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask, \
+            weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask = \
+                [m.to(device) if m.numel() > 0 and not m.is_cuda else m for m in masks]
+            
+            dx, dW, dR, dbw, dbr, dh = gru_ops.backward_quant(
+                time_steps=time_steps, batch_size=batch_size,
+                input_size=input_size, hidden_size=hidden_size,
+                W_q=W_q, R_q=R_q, bw_q=bw_q, br_q=br_q, x_q=x_q,
+                dh_new=dh_new, h=h, v=v,
+                quant_params=ctx.quant_params,
+                # QAT masks（C++ 端应用 STE）
+                x_mask=x_mask,
+                h0_mask=h0_mask,
+                W_mask=W_mask,
+                R_mask=R_mask,
+                bw_mask=bw_mask,
+                br_mask=br_mask,
+                weight_ih_linear_mask=weight_ih_linear_mask,
+                weight_hh_linear_mask=weight_hh_linear_mask,
+                gate_input_mask=gate_input_mask,
+                gate_output_mask=gate_output_mask,
+                h_mask=h_mask
+            )
+        else:
+            # 浮点模式：调用 backward_fp，不需要 mask
+            dx, dW, dR, dbw, dbr, dh = gru_ops.backward_fp(
+                time_steps=time_steps, batch_size=batch_size,
+                input_size=input_size, hidden_size=hidden_size,
+                W=W, R=R, bw=bw, br=br, x=input,
+                dh_new=dh_new, h=h, v=v
+            )
 
         # 梯度格式转换: Haste (z,r,n) -> PyTorch (r,z,n)
         dW_pytorch = reorder_weights_haste_to_pytorch(dW.t()).contiguous()

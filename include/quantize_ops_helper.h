@@ -1124,6 +1124,33 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
                          int32_t zp_r, int8_t shift_g, int32_t zp_g,
                          int8_t shift_hh, int32_t zp_hh);
 
+/// @brief GPU Per-channel 反量化（float 输入的量化值）
+/// @param quant_data 量化后的数据（float 存储，实际是定点整数）
+/// @param data 反量化后的输出数据
+/// @param input_size 输入维度（对于 W 是 input_size，对于 R 是 hidden_size）
+/// @param channel_size 通道数（hidden_size * 3）
+/// @param exp2_invs per-channel 的缩放因子指数向量
+void dequantificationPerChannelFP(const float *quant_data, float *data,
+                                  size_t input_size, size_t channel_size,
+                                  const dev::vector<int8_t> &exp2_invs);
+
+/// @brief GPU Per-channel 原地反量化（float 输入的量化值）
+/// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
+/// @param input_size 输入维度（对于 W 是 input_size，对于 R 是 hidden_size）
+/// @param channel_size 通道数（hidden_size * 3）
+/// @param exp2_invs per-channel 的缩放因子指数向量
+void dequantificationPerChannelFPInplace(float *data,
+                                         size_t input_size, size_t channel_size,
+                                         const dev::vector<int8_t> &exp2_invs);
+
+/// @brief GPU 原地反量化（float 输入的量化值）
+/// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
+/// @param size 数据大小
+/// @param exp2_inv 缩放因子指数
+/// @param zp 零点
+void dequantificationFPInplace(float *data, size_t size,
+                               int8_t exp2_inv, int32_t zp);
+
 // ============================================================================
 // 带 mask 版本的量化函数（用于 QAT）
 // ============================================================================
