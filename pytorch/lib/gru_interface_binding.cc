@@ -242,7 +242,6 @@ struct GRUHistogramCollectorsPy {
 GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
     GRUHistogramCollectorsPy &hist_collectors,
     const OperatorQuantConfigPy &bitwidth_config = OperatorQuantConfigPy(),
-    bool verbose = false,
     bool use_percentile = false,
     float percentile_value = 99.99f) {
 
@@ -253,11 +252,11 @@ GRUQuantParamsPy calculate_gru_quantitative_parameters_from_histograms_wrapper(
         // Percentile 方案：转换为 CPU 直方图后计算
         GRUHistogramCollectors cpu_collectors = hist_collectors.to_cpu();
         quant_params = calculateGRUQuantitativeParametersFromHistograms(
-            cpu_collectors, cpp_bitwidth, verbose, true, percentile_value);
+            cpu_collectors, cpp_bitwidth, true, percentile_value);
     } else {
         // SQNR 方案：直接使用 GPU 计算
         quant_params = calculateGRUQuantitativeParametersFromGPUHistograms(
-            hist_collectors.gpu_collectors, cpp_bitwidth, verbose);
+            hist_collectors.gpu_collectors, cpp_bitwidth);
     }
 
     GRUQuantParamsPy py_params;
@@ -1230,7 +1229,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  - SQNR (default): AIMET tf_enhanced style, searches optimal scale to minimize quantization noise\n"
           "  - Percentile: AIMET percentile style, uses percentile range for clipping",
           py::arg("hist_collectors"), py::arg("bitwidth_config") = OperatorQuantConfigPy(),
-          py::arg("verbose") = false,
           py::arg("use_percentile") = false,
           py::arg("percentile_value") = 99.99f);
 
