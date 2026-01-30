@@ -257,6 +257,34 @@ __global__ void dequantificationPerChannelFPInplace(float *data,
     data[idx] = dequantize_f(data[idx], exp2_inv, 0);
 }
 
+// Per-gate 原地反量化（用于 GRU 权重）
+// 数据布局: [input_size, hidden_size * 3]，每个 gate 有 hidden_size 个通道
+__global__ void dequantificationPerGateFPInplace(float *data,
+                                                 size_t input_size, size_t hidden_size,
+                                                 int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g) {
+    const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    const size_t channel_size = hidden_size * 3;
+    if (channel_idx >= channel_size || input_idx >= input_size) return;
+    
+    // 计算 gate 索引：0=z, 1=r, 2=g
+    const size_t gate_idx = channel_idx / hidden_size;
+    int8_t exp2_inv;
+    if (gate_idx == 0) {
+        exp2_inv = exp2_inv_z;
+    } else if (gate_idx == 1) {
+        exp2_inv = exp2_inv_r;
+    } else {
+        exp2_inv = exp2_inv_g;
+    }
+    
+    const size_t idx = input_idx * channel_size + channel_idx;
+    
+    // 原地反量化：直接修改 data[idx]（无零点，因为权重通常是对称量化）
+    data[idx] = dequantize_f(data[idx], exp2_inv, 0);
+}
+
 // 量化到 int32 存储
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <typename T, bool Training = false>
@@ -699,78 +727,6 @@ template void quantificationWeightFP<true>(const float *src, float *quant_data, 
                                            const dev::vector<int8_t> &shift_channel,
                                            QuantBitWidth bw);
 
-// GRU 权重量化统一接口（封装 W, R, bw, br）
-// @tparam Training 是否训练模式（决定是否使用 mask）
-template <bool Training>
-void quantizeGRUWeights(const float *W, const float *R, const float *bw, const float *br,
-                        float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
-                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
-                        size_t input_size, size_t hidden_size,
-                        const GRUQuantParams &quant_params) {
-    const auto &bw_cfg = quant_params.bitwidth_config_;
-    
-    // 占位符空 vector（当不是 PER_CHANNEL 时使用，函数内部不会访问）
-    static const dev::vector<int8_t> empty_shift;
-    
-    // 只在 PER_CHANNEL 粒度时创建 shift 数组
-    dev::vector<int8_t> shift_W_dev, shift_R_dev, shift_bw_dev, shift_br_dev;
-    if (bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
-        shift_W_dev = dev::vector<int8_t>(quant_params.shift_W_);
-    }
-    if (bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
-        shift_R_dev = dev::vector<int8_t>(quant_params.shift_R_);
-    }
-    if (bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
-        shift_bw_dev = dev::vector<int8_t>(quant_params.shift_bw_);
-    }
-    if (bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
-        shift_br_dev = dev::vector<int8_t>(quant_params.shift_br_);
-    }
-    
-    // 量化 W
-    quantificationWeightFP<Training>(W, W_q_out, W_mask, input_size, hidden_size,
-                                     bw_cfg.W_granularity_,
-                                     quant_params.shift_W_tensor_,
-                                     quant_params.shift_W_gate_,
-                                     bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_W_dev : empty_shift,
-                                     bw_cfg.W_);
-    
-    // 量化 R
-    quantificationWeightFP<Training>(R, R_q_out, R_mask, hidden_size, hidden_size,
-                                     bw_cfg.R_granularity_,
-                                     quant_params.shift_R_tensor_,
-                                     quant_params.shift_R_gate_,
-                                     bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_R_dev : empty_shift,
-                                     bw_cfg.R_);
-    
-    // 量化 bw
-    quantificationWeightFP<Training>(bw, bw_q_out, bw_mask, 1, hidden_size,
-                                     bw_cfg.bw_granularity_,
-                                     quant_params.shift_bw_tensor_,
-                                     quant_params.shift_bw_gate_,
-                                     bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_bw_dev : empty_shift,
-                                     bw_cfg.bw_);
-    
-    // 量化 br
-    quantificationWeightFP<Training>(br, br_q_out, br_mask, 1, hidden_size,
-                                     bw_cfg.br_granularity_,
-                                     quant_params.shift_br_tensor_,
-                                     quant_params.shift_br_gate_,
-                                     bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_br_dev : empty_shift,
-                                     bw_cfg.br_);
-}
-
-template void quantizeGRUWeights<false>(const float *W, const float *R, const float *bw, const float *br,
-                                       float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
-                                       uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
-                                       size_t input_size, size_t hidden_size,
-                                       const GRUQuantParams &quant_params);
-template void quantizeGRUWeights<true>(const float *W, const float *R, const float *bw, const float *br,
-                                       float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
-                                       uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
-                                       size_t input_size, size_t hidden_size,
-                                       const GRUQuantParams &quant_params);
-
 template void quantificationPerChannelBitwidth<false>(const float *src, int32_t *quant_data, uint8_t *mask,
                                                       size_t input_size, size_t channel_size,
                                                       const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
@@ -900,6 +856,60 @@ void dequantificationPerChannelFPInplace(float *data,
         const char *err_str = cudaGetErrorString(err);
         fprintf(stderr, "CUDA error in dequantificationPerChannelFPInplace: %s\n", err_str);
         throw std::runtime_error(std::string("CUDA error in dequantificationPerChannelFPInplace: ") + err_str);
+    }
+}
+
+void dequantificationPerGateFPInplace(float *data,
+                                     size_t input_size, size_t hidden_size,
+                                     int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g) {
+    const dim3 blockDim(32, 16);
+    const size_t channel_size = hidden_size * 3;
+    const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
+                       (input_size + blockDim.y - 1) / blockDim.y);
+
+    kernel::dequantificationPerGateFPInplace<<<gridDim, blockDim>>>(
+        data, input_size, hidden_size, exp2_inv_z, exp2_inv_r, exp2_inv_g);
+    
+    cudaDeviceSynchronize();
+    
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in dequantificationPerGateFPInplace: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in dequantificationPerGateFPInplace: ") + err_str);
+    }
+}
+
+// 统一的反量化接口：根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 反量化
+void dequantificationWeightFPInplace(float *data,
+                                     size_t input_size, size_t hidden_size,
+                                     OperatorQuantConfig::QuantizationGranularity granularity,
+                                     int8_t shift_tensor,
+                                     const std::array<int8_t, 3> &shift_gate,
+                                     const dev::vector<int8_t> &shift_channel) {
+    const size_t channel_size = hidden_size * 3;
+    const size_t total_size = input_size * channel_size;
+    
+    if (granularity == OperatorQuantConfig::PER_TENSOR) {
+        // Per-tensor: 直接调用 dequantificationFPInplace
+        dequantificationFPInplace(data, total_size, shift_tensor, 0);
+    } else if (granularity == OperatorQuantConfig::PER_GATE) {
+        // Per-gate: 调用 dequantificationPerGateFPInplace
+        dequantificationPerGateFPInplace(data, input_size, hidden_size,
+                                        shift_gate[0], shift_gate[1], shift_gate[2]);
+    } else if (granularity == OperatorQuantConfig::PER_CHANNEL) {
+        // Per-channel: 调用 dequantificationPerChannelFPInplace
+        // 检查 shift_channel 是否有效
+        if (shift_channel.size() == 0) {
+            printf("dequantificationWeightFPInplace: shift_channel is empty for PER_CHANNEL granularity (expected size: %zu)\n", channel_size);
+            return;
+        }
+        if (shift_channel.size() != channel_size) {
+            printf("dequantificationWeightFPInplace: shift_channel size mismatch for PER_CHANNEL granularity (got %zu, expected %zu)\n", 
+                   shift_channel.size(), channel_size);
+            return;
+        }
+        dequantificationPerChannelFPInplace(data, input_size, channel_size, shift_channel);
     }
 }
 

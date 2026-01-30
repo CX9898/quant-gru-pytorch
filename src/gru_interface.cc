@@ -411,6 +411,135 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 }
 
 // =====================================================================
+// GRU 权重量化统一接口（封装 W, R, bw, br）- 浮点存储版本
+// =====================================================================
+
+// GRU 权重量化统一接口（根据 granularity 自动选择量化方式）
+template <bool Training>
+void quantizeGRUWeights(const float *W, const float *R, const float *bw, const float *br,
+                        float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
+                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
+                        size_t input_size, size_t hidden_size,
+                        const GRUQuantParams &quant_params) {
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    
+    // 占位符空 vector（当不是 PER_CHANNEL 时使用，函数内部不会访问）
+    static const dev::vector<int8_t> empty_shift;
+    
+    // 只在 PER_CHANNEL 粒度时创建 shift 数组
+    dev::vector<int8_t> shift_W_dev, shift_R_dev, shift_bw_dev, shift_br_dev;
+    if (bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_W_dev = dev::vector<int8_t>(quant_params.shift_W_);
+    }
+    if (bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_R_dev = dev::vector<int8_t>(quant_params.shift_R_);
+    }
+    if (bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_bw_dev = dev::vector<int8_t>(quant_params.shift_bw_);
+    }
+    if (bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_br_dev = dev::vector<int8_t>(quant_params.shift_br_);
+    }
+    
+    // 量化 W
+    dev::quantificationWeightFP<Training>(W, W_q_out, W_mask, input_size, hidden_size,
+                                          bw_cfg.W_granularity_,
+                                          quant_params.shift_W_tensor_,
+                                          quant_params.shift_W_gate_,
+                                          bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_W_dev : empty_shift,
+                                          bw_cfg.W_);
+    
+    // 量化 R
+    dev::quantificationWeightFP<Training>(R, R_q_out, R_mask, hidden_size, hidden_size,
+                                          bw_cfg.R_granularity_,
+                                          quant_params.shift_R_tensor_,
+                                          quant_params.shift_R_gate_,
+                                          bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_R_dev : empty_shift,
+                                          bw_cfg.R_);
+    
+    // 量化 bw
+    dev::quantificationWeightFP<Training>(bw, bw_q_out, bw_mask, 1, hidden_size,
+                                          bw_cfg.bw_granularity_,
+                                          quant_params.shift_bw_tensor_,
+                                          quant_params.shift_bw_gate_,
+                                          bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_bw_dev : empty_shift,
+                                          bw_cfg.bw_);
+    
+    // 量化 br
+    dev::quantificationWeightFP<Training>(br, br_q_out, br_mask, 1, hidden_size,
+                                          bw_cfg.br_granularity_,
+                                          quant_params.shift_br_tensor_,
+                                          quant_params.shift_br_gate_,
+                                          bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_br_dev : empty_shift,
+                                          bw_cfg.br_);
+}
+
+// 显式实例化模板
+template void quantizeGRUWeights<false>(const float *W, const float *R, const float *bw, const float *br,
+                                        float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
+                                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
+                                        size_t input_size, size_t hidden_size,
+                                        const GRUQuantParams &quant_params);
+template void quantizeGRUWeights<true>(const float *W, const float *R, const float *bw, const float *br,
+                                       float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
+                                       uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
+                                       size_t input_size, size_t hidden_size,
+                                       const GRUQuantParams &quant_params);
+
+// 反量化 GRU 权重（W, R, bw, br）- 使用统一接口，内部根据 granularity 自动选择
+void dequantizeGRUWeights(float *W_q, float *R_q, float *bw_q, float *br_q,
+                          size_t input_size, size_t hidden_size,
+                          const GRUQuantParams &quant_params) {
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    
+    // 占位符空 vector（当不是 PER_CHANNEL 时使用，函数内部不会访问）
+    static const dev::vector<int8_t> empty_shift;
+    
+    // 只在 PER_CHANNEL 粒度时创建 shift 数组
+    dev::vector<int8_t> shift_W_dev, shift_R_dev, shift_bw_dev, shift_br_dev;
+    if (bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_W_dev = dev::vector<int8_t>(quant_params.shift_W_);
+    }
+    if (bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_R_dev = dev::vector<int8_t>(quant_params.shift_R_);
+    }
+    if (bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_bw_dev = dev::vector<int8_t>(quant_params.shift_bw_);
+    }
+    if (bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL) {
+        shift_br_dev = dev::vector<int8_t>(quant_params.shift_br_);
+    }
+    
+    // 反量化 W
+    dev::dequantificationWeightFPInplace(W_q, input_size, hidden_size,
+                                         bw_cfg.W_granularity_,
+                                         quant_params.shift_W_tensor_,
+                                         quant_params.shift_W_gate_,
+                                         bw_cfg.W_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_W_dev : empty_shift);
+    
+    // 反量化 R
+    dev::dequantificationWeightFPInplace(R_q, hidden_size, hidden_size,
+                                        bw_cfg.R_granularity_,
+                                        quant_params.shift_R_tensor_,
+                                        quant_params.shift_R_gate_,
+                                        bw_cfg.R_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_R_dev : empty_shift);
+    
+    // 反量化 bw
+    dev::dequantificationWeightFPInplace(bw_q, 1, hidden_size,
+                                        bw_cfg.bw_granularity_,
+                                        quant_params.shift_bw_tensor_,
+                                        quant_params.shift_bw_gate_,
+                                        bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_bw_dev : empty_shift);
+    
+    // 反量化 br
+    dev::dequantificationWeightFPInplace(br_q, 1, hidden_size,
+                                        bw_cfg.br_granularity_,
+                                        quant_params.shift_br_tensor_,
+                                        quant_params.shift_br_gate_,
+                                        bw_cfg.br_granularity_ == OperatorQuantConfig::PER_CHANNEL ? shift_br_dev : empty_shift);
+}
+
+// =====================================================================
 // 纯定点 GRU 前向传播（GPU 核心实现）
 // =====================================================================
 
@@ -788,18 +917,18 @@ void quantGRUForwardFP(
     
     // 量化权重（W, R, bw, br）- 使用统一接口，内部根据 granularity 自动选择
     if (is_training) {
-        dev::quantizeGRUWeights<true>(W, R, bw, br,
-                                      W_q_out, R_q_out, bw_q_out, br_q_out,
-                                      W_mask, R_mask, bw_mask, br_mask,
-                                      input_size, hidden_size, quant_params);
+        quantizeGRUWeights<true>(W, R, bw, br,
+                                 W_q_out, R_q_out, bw_q_out, br_q_out,
+                                 W_mask, R_mask, bw_mask, br_mask,
+                                 input_size, hidden_size, quant_params);
         // x (始终 per-tensor)
         dev::quantificationFP<true>(x, x_q_out, x_mask, x_size, quant_params.shift_x_,
                                     quant_params.zp_x_, bw_cfg.x_);
     } else {
-        dev::quantizeGRUWeights<false>(W, R, bw, br,
-                                       W_q_out, R_q_out, bw_q_out, br_q_out,
-                                       nullptr, nullptr, nullptr, nullptr,
-                                       input_size, hidden_size, quant_params);
+        quantizeGRUWeights<false>(W, R, bw, br,
+                                  W_q_out, R_q_out, bw_q_out, br_q_out,
+                                  nullptr, nullptr, nullptr, nullptr,
+                                  input_size, hidden_size, quant_params);
         // x (始终 per-tensor)
         dev::quantificationFP<false>(x, x_q_out, nullptr, x_size, quant_params.shift_x_,
                                      quant_params.zp_x_, bw_cfg.x_);
