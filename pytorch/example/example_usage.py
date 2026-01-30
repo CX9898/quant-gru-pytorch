@@ -798,15 +798,15 @@ def example_adjust_quant_config():
     print("-" * 50)
     
     # 查看单个算子配置
-    config = gru.get_quant_config("z_out")
-    print(f"   z_out 配置: {config}")
+    config = gru.get_quant_config("update_gate_output")
+    print(f"   update_gate_output 配置: {config}")
     
     # 查看所有配置（使用调试工具）
     print("\n📊 所有量化配置:")
-    print_quant_config(gru, ["x", "h", "z_out", "r_out", "g_out"])
+    print_quant_config(gru, ["x", "h", "update_gate_output", "reset_gate_output", "new_gate_output"])
     
     # ========== 调整配置 ==========
-    print("\n🔧 调整 z_out 位宽: 8bit -> 16bit")
+    print("\n🔧 调整 update_gate_output 位宽: 8bit -> 16bit")
     print("-" * 50)
     
     # 调整前获取基准输出
@@ -818,7 +818,7 @@ def example_adjust_quant_config():
         output_before, _ = gru(test_input)
     
     # 调整位宽（会自动调整 scale）
-    gru.adjust_quant_config("z_out", bitwidth=16, verbose=True)
+    gru.adjust_quant_config("update_gate_output", bitwidth=16, verbose=True)
     
     # 调整后输出
     with torch.no_grad():
@@ -829,8 +829,8 @@ def example_adjust_quant_config():
     print(f"\n   调整前后输出差异 (MSE): {diff:.8f}")
     
     # 查看调整后的配置
-    new_config = gru.get_quant_config("z_out")
-    print(f"   调整后 z_out 配置: {new_config}")
+    new_config = gru.get_quant_config("update_gate_output")
+    print(f"   调整后 update_gate_output 配置: {new_config}")
     
     print("\n✅ 量化配置调整示例完成！")
 
