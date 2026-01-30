@@ -70,7 +70,6 @@ struct GRUGPUHistogramCollectors;  // GPU 版本
 GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors,
     const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
-    bool verbose = false,
     bool use_percentile = false,
     float percentile_value = 99.99f);
 
@@ -309,8 +308,7 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
 // 避免 GPU→CPU 传输，直接在 GPU 上计算 SQNR
 GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     GRUGPUHistogramCollectors &gpu_collectors,
-    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig(),
-    bool verbose = false);
+    const OperatorQuantConfig &bitwidth_config = OperatorQuantConfig());
 
 // =====================================================================
 // 反向传播接口

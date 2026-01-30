@@ -1066,7 +1066,7 @@ GRUHistogramCollectors convertGPUHistogramsToCPU(const GRUGPUHistogramCollectors
 
 GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     const GRUHistogramCollectors &hist_collectors, const OperatorQuantConfig &bitwidth_config,
-    bool verbose, bool use_percentile, float percentile_value) {
+    bool use_percentile, float percentile_value) {
     GRUQuantParams quant_params;
     quant_params.hidden_ = hist_collectors.hidden_;
     quant_params.bitwidth_config_ = bitwidth_config;
@@ -1079,7 +1079,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                              int8_t& shift, int32_t& zp, const char* name) {
         if (!hist.is_valid()) throw std::runtime_error(std::string(name) + " is invalid.");
         calibrateQuantParamsFromHistogram(hist.histogram(), bw, sym, shift, zp,
-                                          verbose ? name : nullptr, use_percentile, percentile_value);
+                                          nullptr, use_percentile, percentile_value);
     };
 
     // 根据 granularity 设置权重参数
@@ -1207,8 +1207,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
  * 直接使用 GPU 上的直方图数据计算 SQNR，避免 GPU→CPU 传输
  */
 GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
-    GRUGPUHistogramCollectors &gpu_collectors, const OperatorQuantConfig &bitwidth_config,
-    bool verbose) {
+    GRUGPUHistogramCollectors &gpu_collectors, const OperatorQuantConfig &bitwidth_config) {
     
     GRUQuantParams quant_params;
     quant_params.hidden_ = gpu_collectors.hidden_;
@@ -1245,10 +1244,6 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         out_shift = pot_result.exp2_inv;
         out_zp = pot_result.zero_point;
         
-        if (verbose && name) {
-            printf("[GPU-SQNR][%s] bits=%d unsigned=%d range=[%.4f,%.4f] shift=%d zp=%d\n",
-                   name, quant_bw.bits_, is_unsigned, hist.min_val, hist.max_val, out_shift, out_zp);
-        }
     };
     
     // 标量直方图

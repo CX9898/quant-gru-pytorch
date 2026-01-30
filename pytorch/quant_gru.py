@@ -1220,7 +1220,6 @@ class QuantGRU(nn.Module):
             self.quant_params = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
                 hist_collectors=self.hist_collectors,
                 bitwidth_config=bitwidth_config,
-                verbose=verbose,
                 use_percentile=use_percentile,
                 percentile_value=self.percentile_value)
         else:
@@ -1235,7 +1234,6 @@ class QuantGRU(nn.Module):
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters_from_histograms(
                     hist_collectors=self.hist_collectors_reverse,
                     bitwidth_config=bitwidth_config,
-                    verbose=verbose,
                     use_percentile=use_percentile,
                     percentile_value=self.percentile_value)
             else:
@@ -1246,6 +1244,10 @@ class QuantGRU(nn.Module):
 
         # 量化参数已更新，清除脏标志
         self._quant_params_dirty = False
+        
+        # verbose=True 时打印量化参数
+        if verbose:
+            print_quant_params(self)
 
     def reset_calibration(self):
         """重置校准状态，清除所有累积的范围和参数"""
@@ -2202,14 +2204,54 @@ def print_quant_params(gru: 'QuantGRU'):
     print(f"  [mul_new_contribution]    shift={params.shift_mul_new_contribution_:3d}, zp={params.zp_mul_new_contribution_}")
     print(f"  [mul_old_contribution]    shift={params.shift_mul_old_contribution_:3d}, zp={params.zp_mul_old_contribution_}")
     print("-" * 60)
-    if params.shift_W_:
-        print(f"  [W] shift (first 5): {list(params.shift_W_[:5])} ...")
-    if params.shift_R_:
-        print(f"  [R] shift (first 5): {list(params.shift_R_[:5])} ...")
-    if params.shift_bw_:
-        print(f"  [bw] shift (first 5): {list(params.shift_bw_[:5])} ...")
-    if params.shift_br_:
-        print(f"  [br] shift (first 5): {list(params.shift_br_[:5])} ...")
+    
+    # 权重和 bias 量化参数（根据 granularity 打印）
+    bitwidth_config = params.bitwidth_config_
+    
+    # W 权重
+    if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
+        print(f"  [W] (per-tensor)         shift={params.shift_W_tensor_:3d}, zp=0")
+    elif bitwidth_config.W_granularity_ == 1:  # PER_GATE
+        print(f"  [W] (per-gate)           shift=[z={params.shift_W_gate_[0]:3d}, r={params.shift_W_gate_[1]:3d}, g={params.shift_W_gate_[2]:3d}], zp=0")
+    elif bitwidth_config.W_granularity_ == 2:  # PER_CHANNEL
+        if params.shift_W_:
+            print(f"  [W] (per-channel)       shift (first 5): {list(params.shift_W_[:5])} ...")
+        else:
+            print(f"  [W] (per-channel)       shift: (empty)")
+    
+    # R 权重
+    if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
+        print(f"  [R] (per-tensor)         shift={params.shift_R_tensor_:3d}, zp=0")
+    elif bitwidth_config.R_granularity_ == 1:  # PER_GATE
+        print(f"  [R] (per-gate)           shift=[z={params.shift_R_gate_[0]:3d}, r={params.shift_R_gate_[1]:3d}, g={params.shift_R_gate_[2]:3d}], zp=0")
+    elif bitwidth_config.R_granularity_ == 2:  # PER_CHANNEL
+        if params.shift_R_:
+            print(f"  [R] (per-channel)       shift (first 5): {list(params.shift_R_[:5])} ...")
+        else:
+            print(f"  [R] (per-channel)       shift: (empty)")
+    
+    # bw 偏置
+    if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
+        print(f"  [bw] (per-tensor)        shift={params.shift_bw_tensor_:3d}, zp=0")
+    elif bitwidth_config.bw_granularity_ == 1:  # PER_GATE
+        print(f"  [bw] (per-gate)          shift=[z={params.shift_bw_gate_[0]:3d}, r={params.shift_bw_gate_[1]:3d}, g={params.shift_bw_gate_[2]:3d}], zp=0")
+    elif bitwidth_config.bw_granularity_ == 2:  # PER_CHANNEL
+        if params.shift_bw_:
+            print(f"  [bw] (per-channel)      shift (first 5): {list(params.shift_bw_[:5])} ...")
+        else:
+            print(f"  [bw] (per-channel)      shift: (empty)")
+    
+    # br 偏置
+    if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
+        print(f"  [br] (per-tensor)        shift={params.shift_br_tensor_:3d}, zp=0")
+    elif bitwidth_config.br_granularity_ == 1:  # PER_GATE
+        print(f"  [br] (per-gate)          shift=[z={params.shift_br_gate_[0]:3d}, r={params.shift_br_gate_[1]:3d}, g={params.shift_br_gate_[2]:3d}], zp=0")
+    elif bitwidth_config.br_granularity_ == 2:  # PER_CHANNEL
+        if params.shift_br_:
+            print(f"  [br] (per-channel)      shift (first 5): {list(params.shift_br_[:5])} ...")
+        else:
+            print(f"  [br] (per-channel)      shift: (empty)")
+    
     print("=" * 60)
 
 
