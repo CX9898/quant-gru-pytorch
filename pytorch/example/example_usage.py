@@ -62,6 +62,13 @@ def example_quantization_with_json():
     示例 2: 使用 JSON 配置进行量化
     
     推荐方式：通过 JSON 文件配置量化参数
+    
+    注意：在 JSON 配置文件中，可以为权重(W, R)和偏置(bw, br)设置量化粒度：
+    - "quantization_granularity": "PER_TENSOR" - 整个tensor一个scale
+    - "quantization_granularity": "PER_GATE" - 每个门一个scale（3个门）
+    - "quantization_granularity": "PER_CHANNEL" - 每个输出通道一个scale（默认）
+    
+    详见示例 13 了解如何通过代码设置量化粒度
     """
     print("\n" + "=" * 60)
     print("示例 2: 使用 JSON 配置进行量化")
@@ -192,35 +199,35 @@ def example_compare_precision(bitwidth=8):
     ).cuda()
     
     # 创建量化模型（复制权重）
-    gru_quant = QuantGRU(
+    quant_gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
     ).cuda()
     
     # 复制权重
-    gru_quant.weight_ih_l0.data.copy_(gru_float.weight_ih_l0.data)
-    gru_quant.weight_hh_l0.data.copy_(gru_float.weight_hh_l0.data)
-    gru_quant.bias_ih_l0.data.copy_(gru_float.bias_ih_l0.data)
-    gru_quant.bias_hh_l0.data.copy_(gru_float.bias_hh_l0.data)
+    quant_gru.weight_ih_l0.data.copy_(gru_float.weight_ih_l0.data)
+    quant_gru.weight_hh_l0.data.copy_(gru_float.weight_hh_l0.data)
+    quant_gru.bias_ih_l0.data.copy_(gru_float.bias_ih_l0.data)
+    quant_gru.bias_hh_l0.data.copy_(gru_float.bias_hh_l0.data)
     
     # 校准并开启量化
     x = torch.randn(batch_size, seq_len, input_size).cuda()
-    gru_quant.set_all_bitwidth(bitwidth)
+    quant_gru.set_all_bitwidth(bitwidth)
     
-    gru_quant.calibrating = True
-    _ = gru_quant(x)
-    gru_quant.calibrating = False
+    quant_gru.calibrating = True
+    _ = quant_gru(x)
+    quant_gru.calibrating = False
     
-    gru_quant.use_quantization = True
+    quant_gru.use_quantization = True
     
     # 比较输出
     gru_float.eval()
-    gru_quant.eval()
+    quant_gru.eval()
     
     with torch.no_grad():
         output_float, _ = gru_float(x)
-        output_quant, _ = gru_quant(x)
+        output_quant, _ = quant_gru(x)
     
     # 计算误差
     mse = torch.mean((output_float - output_quant) ** 2).item()
@@ -346,41 +353,41 @@ def example_calibration_method():
     
     for method in ['minmax', 'sqnr', 'percentile']:
         # 创建量化模型（复制权重）
-        gru_quant = QuantGRU(
+        quant_gru = QuantGRU(
             input_size=input_size,
             hidden_size=hidden_size,
             batch_first=True
         ).cuda()
         
         # 复制权重
-        gru_quant.weight_ih_l0.data.copy_(gru_base.weight_ih_l0.data)
-        gru_quant.weight_hh_l0.data.copy_(gru_base.weight_hh_l0.data)
-        gru_quant.bias_ih_l0.data.copy_(gru_base.bias_ih_l0.data)
-        gru_quant.bias_hh_l0.data.copy_(gru_base.bias_hh_l0.data)
+        quant_gru.weight_ih_l0.data.copy_(gru_base.weight_ih_l0.data)
+        quant_gru.weight_hh_l0.data.copy_(gru_base.weight_hh_l0.data)
+        quant_gru.bias_ih_l0.data.copy_(gru_base.bias_ih_l0.data)
+        quant_gru.bias_hh_l0.data.copy_(gru_base.bias_hh_l0.data)
         
         # 设置校准方法
-        gru_quant.calibration_method = method
+        quant_gru.calibration_method = method
         
         # 如果是 percentile 方法，可以设置百分位值
         if method == 'percentile':
-            gru_quant.percentile_value = 99.99
+            quant_gru.percentile_value = 99.99
         
         # 设置位宽
-        gru_quant.set_all_bitwidth(16)
+        quant_gru.set_all_bitwidth(16)
         
         # 多批次校准（sqnr/percentile 方法在多批次下效果更好）
-        gru_quant.calibrating = True
+        quant_gru.calibrating = True
         for _ in range(3):
             calib_data = torch.randn(batch_size, seq_len, input_size).cuda()
-            _ = gru_quant(calib_data)
-        gru_quant.calibrating = False
+            _ = quant_gru(calib_data)
+        quant_gru.calibrating = False
         
         # 开启量化并推理
-        gru_quant.use_quantization = True
-        gru_quant.eval()
+        quant_gru.use_quantization = True
+        quant_gru.eval()
         
         with torch.no_grad():
-            quant_output, _ = gru_quant(test_input)
+            quant_output, _ = quant_gru(test_input)
         
         # 计算余弦相似度
         cos_sim = torch.nn.functional.cosine_similarity(
@@ -891,6 +898,133 @@ def example_debug_tools():
     print("\n✅ 调试工具示例完成！")
 
 
+def example_weight_bias_granularity():
+    """
+    示例 13: 权重和偏置的量化粒度设置
+    
+    演示如何为权重(W, R)和偏置(bw, br)设置不同的量化粒度：
+    - PER_TENSOR: 整个tensor使用一个scale（最简单，精度可能较低）
+    - PER_GATE: 每个门使用一个scale（3个门：update, reset, new）
+    - PER_CHANNEL: 每个输出通道使用一个scale（默认，精度最高）
+    
+    注意：量化粒度仅对 W, R, bw, br 四个算子有效
+    """
+    print("\n" + "=" * 60)
+    print("示例 13: 权重和偏置的量化粒度设置")
+    print("=" * 60)
+    
+    # 模型参数
+    input_size = 64
+    hidden_size = 128
+    batch_size = 8
+    seq_len = 20
+    
+    # 创建基准模型（FP32）
+    gru_base = QuantGRU(
+        input_size=input_size,
+        hidden_size=hidden_size,
+        batch_first=True,
+        use_quantization=False
+    ).cuda()
+    
+    # 生成测试数据
+    torch.manual_seed(42)
+    test_input = torch.randn(batch_size, seq_len, input_size).cuda()
+    
+    # FP32 基准输出
+    gru_base.eval()
+    with torch.no_grad():
+        fp32_output, _ = gru_base(test_input)
+    
+    print("\n📊 对比三种量化粒度:")
+    print("-" * 60)
+    
+    granularity_configs = [
+        ('PER_TENSOR', '整个tensor一个scale（最简单）'),
+        ('PER_GATE', '每个门一个scale（3个门）'),
+        ('PER_CHANNEL', '每个输出通道一个scale（默认）')
+    ]
+    
+    results = {}
+    
+    for granularity_name, description in granularity_configs:
+        print(f"\n🔧 配置: {granularity_name}")
+        print(f"   描述: {description}")
+        
+        # 创建量化模型（复制权重）
+        quant_gru = QuantGRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            batch_first=True
+        ).cuda()
+        
+        # 复制权重
+        quant_gru.weight_ih_l0.data.copy_(gru_base.weight_ih_l0.data)
+        quant_gru.weight_hh_l0.data.copy_(gru_base.weight_hh_l0.data)
+        quant_gru.bias_ih_l0.data.copy_(gru_base.bias_ih_l0.data)
+        quant_gru.bias_hh_l0.data.copy_(gru_base.bias_hh_l0.data)
+        
+        # 设置位宽
+        quant_gru.set_all_bitwidth(8)
+        
+        # 设置量化粒度（仅对 W, R, bw, br 有效）
+        granularity_map = {
+            'PER_TENSOR': 0,
+            'PER_GATE': 1,
+            'PER_CHANNEL': 2
+        }
+        granularity_value = granularity_map[granularity_name]
+        
+        # 设置权重和偏置的量化粒度
+        quant_gru._bitwidth_config.W_granularity_ = granularity_value
+        quant_gru._bitwidth_config.R_granularity_ = granularity_value
+        quant_gru._bitwidth_config.bw_granularity_ = granularity_value
+        quant_gru._bitwidth_config.br_granularity_ = granularity_value
+        
+        print(f"   ✅ W_granularity = {granularity_value} ({granularity_name})")
+        print(f"   ✅ R_granularity = {granularity_value} ({granularity_name})")
+        print(f"   ✅ bw_granularity = {granularity_value} ({granularity_name})")
+        print(f"   ✅ br_granularity = {granularity_value} ({granularity_name})")
+        
+        # 校准
+        quant_gru.calibration_method = 'minmax'
+        quant_gru.calibrating = True
+        _ = quant_gru(test_input)
+        quant_gru.calibrating = False
+        quant_gru.finalize_calibration()
+        
+        # 开启量化并推理
+        quant_gru.use_quantization = True
+        quant_gru.eval()
+        
+        with torch.no_grad():
+            quant_output, _ = quant_gru(test_input)
+        
+        # 计算精度指标
+        mse = torch.mean((fp32_output - quant_output) ** 2).item()
+        cos_sim = torch.nn.functional.cosine_similarity(
+            fp32_output.flatten().unsqueeze(0),
+            quant_output.flatten().unsqueeze(0)
+        ).item()
+        
+        results[granularity_name] = {
+            'mse': mse,
+            'cos_sim': cos_sim
+        }
+        
+        print(f"   📈 MSE: {mse:.8f}")
+        print(f"   📈 余弦相似度: {cos_sim:.6f}")
+    
+    print("\n" + "-" * 60)
+    print("\n📊 量化粒度对比总结:")
+    print("-" * 60)
+    for granularity_name, description in granularity_configs:
+        result = results[granularity_name]
+        print(f"   {granularity_name:<15} MSE: {result['mse']:.8f}, 余弦相似度: {result['cos_sim']:.6f}")
+    
+    print("\n✅ 量化粒度设置示例完成！")
+
+
 def main():
     """运行所有示例"""
     print("=" * 60)
@@ -938,6 +1072,9 @@ def main():
         
         # 示例 12: 调试工具使用
         example_debug_tools()
+        
+        # 示例 13: 权重和偏置的量化粒度设置
+        example_weight_bias_granularity()
         
         print("\n" + "=" * 60)
         print("  所有示例运行完成！")
