@@ -12,6 +12,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>  // for PRId64
 #include <cmath>
 #include <cstdint>
@@ -623,6 +624,18 @@ struct GRUHistogramCollectors {
     std::vector<HistogramCollector> R_hist;
     std::vector<HistogramCollector> bw_hist;
     std::vector<HistogramCollector> br_hist;
+    
+    // Per-Tensor 直方图（与 GPU 版本对应）
+    HistogramCollector W_tensor_hist;
+    HistogramCollector R_tensor_hist;
+    HistogramCollector bw_tensor_hist;
+    HistogramCollector br_tensor_hist;
+    
+    // Per-Gate 直方图（与 GPU 版本对应）
+    std::array<HistogramCollector, 3> W_gate_hist;   // [z, r, g] 三个门的直方图
+    std::array<HistogramCollector, 3> R_gate_hist;
+    std::array<HistogramCollector, 3> bw_gate_hist;
+    std::array<HistogramCollector, 3> br_gate_hist;
 
     GRUHistogramCollectors() = default;
 
@@ -658,6 +671,20 @@ struct GRUHistogramCollectors {
         R_hist.assign(channel_size, HistogramCollector(cfg));
         bw_hist.assign(channel_size, HistogramCollector(cfg));
         br_hist.assign(channel_size, HistogramCollector(cfg));
+        
+        // Per-Tensor 直方图
+        W_tensor_hist = HistogramCollector(cfg);
+        R_tensor_hist = HistogramCollector(cfg);
+        bw_tensor_hist = HistogramCollector(cfg);
+        br_tensor_hist = HistogramCollector(cfg);
+        
+        // Per-Gate 直方图
+        for (int i = 0; i < 3; ++i) {
+            W_gate_hist[i] = HistogramCollector(cfg);
+            R_gate_hist[i] = HistogramCollector(cfg);
+            bw_gate_hist[i] = HistogramCollector(cfg);
+            br_gate_hist[i] = HistogramCollector(cfg);
+        }
     }
 
     bool is_valid() const { return hidden_ > 0 && x_hist.is_valid(); }

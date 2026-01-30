@@ -96,6 +96,13 @@ struct OperatorQuantConfigPy {
     bool mul_reset_hidden_unsigned_;
     bool mul_old_contribution_unsigned_, mul_new_contribution_unsigned_;
 
+    // 量化粒度配置（仅对 W, R, bw, br 有效）
+    // 0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL
+    int W_granularity_ = 2;  // 默认 PER_CHANNEL
+    int R_granularity_ = 2;
+    int bw_granularity_ = 2;
+    int br_granularity_ = 2;
+
     // 方法声明（实现在文件末尾）
     OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
     OperatorQuantConfig to_cpp() const;                // 转换为 C++ 结构体
@@ -306,32 +313,23 @@ forward_quant_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
 
-    // 创建量化值输出张量（仅在训练模式时分配，推理模式为空张量）
+    // 创建量化值输出张量（训练和推理模式都需要分配，因为 quantGRUForwardFP 要求这些指针非空）
     const int hidden3 = hidden_size * 3;
     torch::Tensor W_q, R_q, bw_q, br_q, x_q;
     float *W_q_ptr = nullptr, *R_q_ptr = nullptr, *bw_q_ptr = nullptr, *br_q_ptr = nullptr, *x_q_ptr = nullptr;
     
-    if (is_training) {
-        W_q = torch::empty({input_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        R_q = torch::empty({hidden_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        bw_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        br_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        x_q = torch::empty({time_steps, batch_size, input_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        
-        W_q_ptr = W_q.data_ptr<float>();
-        R_q_ptr = R_q.data_ptr<float>();
-        bw_q_ptr = bw_q.data_ptr<float>();
-        br_q_ptr = br_q.data_ptr<float>();
-        x_q_ptr = x_q.data_ptr<float>();
-    } else {
-        // 返回空张量（numel() == 0）
-        auto empty = torch::empty({0}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
-        W_q = empty.clone();
-        R_q = empty.clone();
-        bw_q = empty.clone();
-        br_q = empty.clone();
-        x_q = empty.clone();
-    }
+    // 无论训练还是推理模式，都需要分配内存（quantGRUForwardFP 要求这些指针非空）
+    W_q = torch::empty({input_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    R_q = torch::empty({hidden_size, hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    bw_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    br_q = torch::empty({hidden3}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    x_q = torch::empty({time_steps, batch_size, input_size}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    
+    W_q_ptr = W_q.data_ptr<float>();
+    R_q_ptr = R_q.data_ptr<float>();
+    bw_q_ptr = bw_q.data_ptr<float>();
+    br_q_ptr = br_q.data_ptr<float>();
+    x_q_ptr = x_q.data_ptr<float>();
 
     // 创建 QAT mask 张量（训练模式时分配，否则为空张量）
     // 输入量化 mask
@@ -411,9 +409,9 @@ forward_quant_wrapper(
                       bw.data_ptr<float>(), br.data_ptr<float>(), 
                       x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
                       h.data_ptr<float>(), v.data_ptr<float>(),
+                      W_q_ptr, R_q_ptr, bw_q_ptr, br_q_ptr, x_q_ptr,
                       x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
-                      weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr,
-                      W_q_ptr, R_q_ptr, bw_q_ptr, br_q_ptr, x_q_ptr);
+                      weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr);
 
     return std::make_tuple(h, v, W_q, R_q, bw_q, br_q, x_q,
                            x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor,
@@ -488,6 +486,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     const torch::Tensor &br, const torch::Tensor &x,
     const torch::Tensor &h0,
     const std::string &calib_method_str,  // 校准方法: 'minmax', 'sqnr', 'percentile'
+    const OperatorQuantConfigPy &bitwidth_config,  // 位宽配置（必须）
     GRUQuantizationRangesPy *quant_ranges = nullptr,      // MINMAX 需要
     GRUHistogramCollectorsPy *hist_collectors = nullptr) {  // SQNR/Percentile 需要
     
@@ -534,6 +533,9 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
     auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
                           torch::dtype(torch::kFloat32).device(torch::kCUDA));
     
+    // 转换位宽配置为 C++ 对象
+    OperatorQuantConfig cpp_bitwidth_config = bitwidth_config.to_cpp();
+    
     // 统一调用校准前向传播
     forwardWithCalibrationGPU(
         is_training, time_steps, batch_size, input_size, hidden_size,
@@ -543,6 +545,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
         calib_method,
         quant_ranges ? &(quant_ranges->cpp_ranges) : nullptr,
         hist_collectors ? &(hist_collectors->gpu_collectors) : nullptr,
+        cpp_bitwidth_config,
         h.data_ptr<float>(), v.data_ptr<float>());
 
     return std::make_tuple(h, v);
@@ -823,6 +826,11 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     cfg.mul_reset_hidden_symmetric_ = mul_reset_hidden_symmetric_;
     cfg.mul_old_contribution_symmetric_ = mul_old_contribution_symmetric_;
     cfg.mul_new_contribution_symmetric_ = mul_new_contribution_symmetric_;
+    // 量化粒度配置
+    cfg.W_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(W_granularity_);
+    cfg.R_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(R_granularity_);
+    cfg.bw_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(bw_granularity_);
+    cfg.br_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(br_granularity_);
     return cfg;
 }
 
@@ -882,6 +890,11 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     mul_reset_hidden_unsigned_ = cfg.mul_reset_hidden_.is_unsigned_;
     mul_old_contribution_unsigned_ = cfg.mul_old_contribution_.is_unsigned_;
     mul_new_contribution_unsigned_ = cfg.mul_new_contribution_.is_unsigned_;
+    // 量化粒度配置
+    W_granularity_ = static_cast<int>(cfg.W_granularity_);
+    R_granularity_ = static_cast<int>(cfg.R_granularity_);
+    bw_granularity_ = static_cast<int>(cfg.bw_granularity_);
+    br_granularity_ = static_cast<int>(cfg.br_granularity_);
 }
 
 // ============================================================================
@@ -1101,7 +1114,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("new_gate_output_unsigned_", &OperatorQuantConfigPy::new_gate_output_unsigned_)
         .def_readwrite("mul_reset_hidden_unsigned_", &OperatorQuantConfigPy::mul_reset_hidden_unsigned_)
         .def_readwrite("mul_old_contribution_unsigned_", &OperatorQuantConfigPy::mul_old_contribution_unsigned_)
-        .def_readwrite("mul_new_contribution_unsigned_", &OperatorQuantConfigPy::mul_new_contribution_unsigned_);
+        .def_readwrite("mul_new_contribution_unsigned_", &OperatorQuantConfigPy::mul_new_contribution_unsigned_)
+        // 量化粒度配置（仅对 W, R, bw, br 有效）
+        .def_readwrite("W_granularity_", &OperatorQuantConfigPy::W_granularity_)
+        .def_readwrite("R_granularity_", &OperatorQuantConfigPy::R_granularity_)
+        .def_readwrite("bw_granularity_", &OperatorQuantConfigPy::bw_granularity_)
+        .def_readwrite("br_granularity_", &OperatorQuantConfigPy::br_granularity_);
 
     // GRUQuantParams 绑定
     py::class_<GRUQuantParamsPy>(m, "GRUQuantParams")
@@ -1241,6 +1259,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  x: Input tensor [T, B, I]\n"
           "  h0: Initial hidden state [B, H], optional\n"
           "  calib_method: Calibration method ('minmax', 'sqnr', 'percentile')\n"
+          "  bitwidth_config: Quantization bitwidth configuration (required)\n"
           "  quant_ranges: Required for 'minmax' mode (updated in-place)\n"
           "  hist_collectors: Required for 'sqnr'/'percentile' mode (updated in-place)\n"
           "\n"
@@ -1253,19 +1272,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  # MINMAX calibration:\n"
           "  ranges = GRUQuantizationRanges(hidden_size)\n"
           "  for batch in batches:\n"
-          "      h, v = forward_calibrate(..., 'minmax', ranges)\n"
-          "  params = calculate_gru_quantitative_parameters(ranges)\n"
+          "      h, v = forward_calibrate(..., 'minmax', bitwidth_config, ranges)\n"
+          "  params = calculate_gru_quantitative_parameters(ranges, bitwidth_config)\n"
           "  \n"
           "  # SQNR/Percentile calibration:\n"
           "  hist = GRUHistogramCollectors(hidden_size)\n"
           "  for batch in batches:\n"
-          "      h, v = forward_calibrate(..., 'sqnr', None, hist)\n"
-          "  params = calculate_gru_quantitative_parameters_from_histograms(hist)",
+          "      h, v = forward_calibrate(..., 'sqnr', bitwidth_config, None, hist)\n"
+          "  params = calculate_gru_quantitative_parameters_from_histograms(hist, bitwidth_config)",
           py::arg("is_training"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),
           py::arg("calib_method"),
+          py::arg("bitwidth_config"),
           py::arg("quant_ranges") = nullptr,
           py::arg("hist_collectors") = nullptr);
 

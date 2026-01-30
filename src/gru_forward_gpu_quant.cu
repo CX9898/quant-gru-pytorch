@@ -111,6 +111,25 @@ __global__ void quantizedGemmFused(const int32_t *__restrict__ A,  // [M, K] 权
 // 
 // @tparam Training 是否训练模式（决定是否使用 mask）
 // @param C_mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+// 辅助函数：根据粒度配置获取 rescale 后的 shift 值（device 函数）
+__device__ __forceinline__ int8_t get_shift_gemm(
+    int8_t granularity,
+    int row,
+    int hidden_size,
+    int8_t shift_tensor,
+    const int8_t shift_gate[3],
+    const int8_t *shift_channel
+) {
+    if (granularity == 0) {  // PER_TENSOR
+        return shift_tensor;
+    } else if (granularity == 1) {  // PER_GATE
+        int gate_idx = row / hidden_size;
+        return shift_gate[gate_idx];
+    } else {  // PER_CHANNEL
+        return shift_channel[row];
+    }
+}
+
 template <bool Training>
 __global__ void quantizedGemmBiasFused(
     const int32_t *__restrict__ A,               // [M, K] 权重，列主序
@@ -120,6 +139,17 @@ __global__ void quantizedGemmBiasFused(
     uint8_t *__restrict__ C_mask,                // [M, N] clamp mask，训练模式时有效
     int M, int N, int K,
     int32_t zp_B,                                // 输入的 zero-point
+    // 粒度配置（gemm 和 bias 的粒度，通过参数内存传递，访问快）
+    int8_t gemm_granularity,  // GEMM 的粒度（W_granularity 或 R_granularity）
+    int8_t bias_granularity,  // bias 的粒度（bw_granularity 或 br_granularity）
+    int hidden_size,
+    // Per-tensor rescale 参数（已计算 rescale，通过参数内存传递）
+    int8_t shift_gemm_tensor,  // GEMM rescale per-tensor shift
+    int8_t shift_bias_tensor,  // bias rescale per-tensor shift
+    // Per-gate rescale 参数（已计算 rescale，通过参数内存传递）
+    const int8_t shift_gemm_gate[3],  // GEMM rescale per-gate shift [z, r, g]
+    const int8_t shift_bias_gate[3],  // bias rescale per-gate shift [z, r, g]
+    // Per-channel 参数（数组指针，PER_CHANNEL 粒度时使用）
     const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
     const int8_t *__restrict__ shift_bias_per_row,   // [M] bias per-row shift
     int32_t zp_out,                              // 输出的 zero-point
@@ -164,8 +194,11 @@ __global__ void quantizedGemmBiasFused(
 
     // 写回结果：rshift(GEMM, shift_gemm) + rshift(bias, shift_bias) + zp_out
     if (row < M && col < N) {
-        const int8_t n_gemm = shift_gemm_per_row[row];
-        const int8_t n_bias = shift_bias_per_row[row];
+        // 根据粒度配置获取 rescale 后的 shift 值（通过参数内存访问，比全局内存快）
+        const int8_t n_gemm = get_shift_gemm(gemm_granularity, row, hidden_size,
+                                            shift_gemm_tensor, shift_gemm_gate, shift_gemm_per_row);
+        const int8_t n_bias = get_shift_gemm(bias_granularity, row, hidden_size,
+                                            shift_bias_tensor, shift_bias_gate, shift_bias_per_row);
         const int32_t bias_val = bias[row];
 
         // 使用 rshift_round 进行 rescale
@@ -568,10 +601,19 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
     // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
+    // ComputeLinearX 使用 W_granularity 和 bw_granularity
     if (training) {
         kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), bw, weight_ih_linear_mask, M, N, K,
             linear_params_.zp_x_,
+            // 粒度配置（W 和 bw）
+            linear_params_.W_granularity_, linear_params_.bw_granularity_,
+            linear_params_.hidden_size_,
+            // Per-tensor 参数
+            linear_params_.shift_gemm_x_tensor_, linear_params_.shift_bw_tensor_,
+            // Per-gate 参数
+            linear_params_.shift_gemm_x_gate_, linear_params_.shift_bw_gate_,
+            // Per-channel 参数（数组指针）
             linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
             linear_params_.shift_bw_to_weight_ih_linear_.data(),
             gate_params_.zp_weight_ih_linear_,
@@ -580,6 +622,14 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
         kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), bw, nullptr, M, N, K,
             linear_params_.zp_x_,
+            // 粒度配置（W 和 bw）
+            linear_params_.W_granularity_, linear_params_.bw_granularity_,
+            linear_params_.hidden_size_,
+            // Per-tensor 参数
+            linear_params_.shift_gemm_x_tensor_, linear_params_.shift_bw_tensor_,
+            // Per-gate 参数
+            linear_params_.shift_gemm_x_gate_, linear_params_.shift_bw_gate_,
+            // Per-channel 参数（数组指针）
             linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
             linear_params_.shift_bw_to_weight_ih_linear_.data(),
             gate_params_.zp_weight_ih_linear_,
@@ -604,10 +654,19 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
     // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
+    // ComputeLinearH 使用 R_granularity 和 br_granularity
     if (training) {
         kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
             R, h, tmp_weight_hh_linear_.data(), br, weight_hh_linear_mask, M, N, K,
             linear_params_.zp_h_,
+            // 粒度配置（R 和 br）
+            linear_params_.R_granularity_, linear_params_.br_granularity_,
+            linear_params_.hidden_size_,
+            // Per-tensor 参数
+            linear_params_.shift_gemm_h_tensor_, linear_params_.shift_br_tensor_,
+            // Per-gate 参数
+            linear_params_.shift_gemm_h_gate_, linear_params_.shift_br_gate_,
+            // Per-channel 参数（数组指针）
             linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
             linear_params_.shift_br_to_weight_hh_linear_.data(),
             gate_params_.zp_weight_hh_linear_,
@@ -616,6 +675,14 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
         kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
             R, h, tmp_weight_hh_linear_.data(), br, nullptr, M, N, K,
             linear_params_.zp_h_,
+            // 粒度配置（R 和 br）
+            linear_params_.R_granularity_, linear_params_.br_granularity_,
+            linear_params_.hidden_size_,
+            // Per-tensor 参数
+            linear_params_.shift_gemm_h_tensor_, linear_params_.shift_br_tensor_,
+            // Per-gate 参数
+            linear_params_.shift_gemm_h_gate_, linear_params_.shift_br_gate_,
+            // Per-channel 参数（数组指针）
             linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
             linear_params_.shift_br_to_weight_hh_linear_.data(),
             gate_params_.zp_weight_hh_linear_,
@@ -692,27 +759,121 @@ void ForwardPassQuant::IterateInternal(
 
 void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
+    const int hidden_size = parms.hidden_;
+    const auto& cfg = parms.bitwidth_config_;
 
-    // ==================== Linear 层参数（per-channel）====================
+    // ==================== Linear 层参数 =====================
     linear_params_.zp_x_ = parms.zp_x_;
     linear_params_.zp_h_ = parms.zp_h_;
 
-    // 计算 per-channel 移位参数
+    // 存储粒度配置和 hidden_size（用于 kernel 中判断）
+    linear_params_.W_granularity_ = static_cast<int8_t>(cfg.W_granularity_);
+    linear_params_.R_granularity_ = static_cast<int8_t>(cfg.R_granularity_);
+    linear_params_.bw_granularity_ = static_cast<int8_t>(cfg.bw_granularity_);
+    linear_params_.br_granularity_ = static_cast<int8_t>(cfg.br_granularity_);
+    linear_params_.hidden_size_ = hidden_size;
+
+    // 计算并存储 per-tensor rescale 参数（通过参数内存传递，访问快）
+    if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+        int8_t shift_W = parms.shift_W_tensor_;
+        linear_params_.shift_gemm_x_tensor_ = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
+        linear_params_.shift_bw_tensor_ = parms.shift_bw_tensor_ - (shift_W + parms.shift_x_);
+    }
+    if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+        int8_t shift_R = parms.shift_R_tensor_;
+        linear_params_.shift_gemm_h_tensor_ = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
+        linear_params_.shift_br_tensor_ = parms.shift_br_tensor_ - (shift_R + parms.shift_h_);
+    }
+
+    // 计算并存储 per-gate rescale 参数（通过参数内存传递，访问快）
+    if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
+        for (int gate = 0; gate < 3; ++gate) {
+            int8_t shift_W = parms.shift_W_gate_[gate];
+            int8_t shift_bw = parms.shift_bw_gate_[gate];
+            linear_params_.shift_gemm_x_gate_[gate] = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
+            linear_params_.shift_bw_gate_[gate] = shift_bw - (shift_W + parms.shift_x_);
+        }
+    }
+    if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
+        for (int gate = 0; gate < 3; ++gate) {
+            int8_t shift_R = parms.shift_R_gate_[gate];
+            int8_t shift_br = parms.shift_br_gate_[gate];
+            linear_params_.shift_gemm_h_gate_[gate] = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
+            linear_params_.shift_br_gate_[gate] = shift_br - (shift_R + parms.shift_h_);
+        }
+    }
+
+    // 计算 per-channel 移位参数（仅 PER_CHANNEL 粒度时使用）
+    // 对于 PER_TENSOR 和 PER_GATE，这些数组不会被使用，但仍需要分配以避免 kernel 中空指针
     std::vector<int8_t> shift_gemm_x(channel);
     std::vector<int8_t> shift_gemm_h(channel);
     std::vector<int8_t> shift_bw(channel);
     std::vector<int8_t> shift_br(channel);
 
+    // 辅助函数：根据粒度配置获取 W 的 shift 值
+    auto get_W_shift = [&](int idx) -> int8_t {
+        if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+            return parms.shift_W_tensor_;
+        } else if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
+            int gate_idx = idx / hidden_size;
+            return parms.shift_W_gate_[gate_idx];
+        } else {  // PER_CHANNEL
+            return parms.shift_W_[idx];
+        }
+    };
+
+    // 辅助函数：根据粒度配置获取 R 的 shift 值
+    auto get_R_shift = [&](int idx) -> int8_t {
+        if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+            return parms.shift_R_tensor_;
+        } else if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
+            int gate_idx = idx / hidden_size;
+            return parms.shift_R_gate_[gate_idx];
+        } else {  // PER_CHANNEL
+            return parms.shift_R_[idx];
+        }
+    };
+
+    // 辅助函数：根据粒度配置获取 bw 的 shift 值
+    auto get_bw_shift = [&](int idx) -> int8_t {
+        if (cfg.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+            return parms.shift_bw_tensor_;
+        } else if (cfg.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
+            int gate_idx = idx / hidden_size;
+            return parms.shift_bw_gate_[gate_idx];
+        } else {  // PER_CHANNEL
+            return parms.shift_bw_[idx];
+        }
+    };
+
+    // 辅助函数：根据粒度配置获取 br 的 shift 值
+    auto get_br_shift = [&](int idx) -> int8_t {
+        if (cfg.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+            return parms.shift_br_tensor_;
+        } else if (cfg.br_granularity_ == OperatorQuantConfig::PER_GATE) {
+            int gate_idx = idx / hidden_size;
+            return parms.shift_br_gate_[gate_idx];
+        } else {  // PER_CHANNEL
+            return parms.shift_br_[idx];
+        }
+    };
+
     for (int idx = 0; idx < channel; ++idx) {
-        shift_gemm_x[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
-        shift_gemm_h[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
+        int8_t shift_W = get_W_shift(idx);
+        int8_t shift_R = get_R_shift(idx);
+        int8_t shift_bw_val = get_bw_shift(idx);
+        int8_t shift_br_val = get_br_shift(idx);
+        
+        shift_gemm_x[idx] = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
+        shift_gemm_h[idx] = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
         // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
         // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
         // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
-        shift_bw[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
-        shift_br[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
+        shift_bw[idx] = shift_bw_val - (shift_W + parms.shift_x_);
+        shift_br[idx] = shift_br_val - (shift_R + parms.shift_h_);
     }
 
+    // 存储 per-channel 数组（PER_CHANNEL 粒度时使用，其他粒度时作为占位符）
     linear_params_.shift_gemm_x_to_weight_ih_linear_ = dev::vector<int8_t>(shift_gemm_x);
     linear_params_.shift_bw_to_weight_ih_linear_ = dev::vector<int8_t>(shift_bw);
     linear_params_.shift_gemm_h_to_weight_hh_linear_ = dev::vector<int8_t>(shift_gemm_h);

@@ -50,6 +50,18 @@ struct QuantBitWidth {
 };
 
 struct OperatorQuantConfig {
+    // ========== 量化粒度控制（仅对 W, R, bw, br 有效）==========
+    enum QuantizationGranularity {
+        PER_TENSOR = 0,
+        PER_GATE = 1,
+        PER_CHANNEL = 2
+    };
+    
+    QuantizationGranularity W_granularity_ = PER_CHANNEL;  // 默认 per-channel
+    QuantizationGranularity R_granularity_ = PER_CHANNEL;
+    QuantizationGranularity bw_granularity_ = PER_CHANNEL;
+    QuantizationGranularity br_granularity_ = PER_CHANNEL;
+
     QuantBitWidth x_{8, false}, h_{8, false};
     QuantBitWidth W_{8, false}, R_{8, false}, bw_{8, false}, br_{8, false};
     QuantBitWidth weight_ih_linear_{8, false}, weight_hh_linear_{8, false};  // GEMM+bias 融合输出

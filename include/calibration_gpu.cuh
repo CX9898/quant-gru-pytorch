@@ -11,6 +11,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -260,6 +261,18 @@ struct GRUGPUHistogramCollectors {
     PerChannelHistogramBatch R_batch;
     PerChannelHistogramBatch bw_batch;
     PerChannelHistogramBatch br_batch;
+    
+    // Per-Tensor 直方图（新增）
+    GPUHistogramCollector W_tensor_hist;
+    GPUHistogramCollector R_tensor_hist;
+    GPUHistogramCollector bw_tensor_hist;
+    GPUHistogramCollector br_tensor_hist;
+    
+    // Per-Gate 直方图（新增）
+    std::array<GPUHistogramCollector, 3> W_gate_hist;   // [z, r, g] 三个门的直方图
+    std::array<GPUHistogramCollector, 3> R_gate_hist;
+    std::array<GPUHistogramCollector, 3> bw_gate_hist;
+    std::array<GPUHistogramCollector, 3> br_gate_hist;
 
     GRUGPUHistogramCollectors() = default;
 
@@ -288,6 +301,20 @@ struct GRUGPUHistogramCollectors {
         mul_reset_hidden_hist = GPUHistogramCollector(cfg);
         mul_new_contribution_hist = GPUHistogramCollector(cfg);
         mul_old_contribution_hist = GPUHistogramCollector(cfg);
+
+        // Per-Tensor 直方图初始化
+        W_tensor_hist = GPUHistogramCollector(cfg);
+        R_tensor_hist = GPUHistogramCollector(cfg);
+        bw_tensor_hist = GPUHistogramCollector(cfg);
+        br_tensor_hist = GPUHistogramCollector(cfg);
+        
+        // Per-Gate 直方图初始化
+        for (int i = 0; i < 3; ++i) {
+            W_gate_hist[i] = GPUHistogramCollector(cfg);
+            R_gate_hist[i] = GPUHistogramCollector(cfg);
+            bw_gate_hist[i] = GPUHistogramCollector(cfg);
+            br_gate_hist[i] = GPUHistogramCollector(cfg);
+        }
 
         int channel_size = hidden_ * 3;
         W_batch.reset(channel_size, num_bins_);
@@ -361,6 +388,23 @@ void collect_gate_histograms(GRUGPUHistogramCollectors& collectors, const float*
 void collect_per_channel_histograms(std::vector<GPUHistogramCollector>& collectors,
                                     const float* data_dev, int input_size, int channel_size,
                                     cudaStream_t stream = 0);
+
+/**
+ * @brief 收集 per-gate 直方图（GPU 版本）
+ *
+ * 对于 2D 数据（W, R）：提取每个门的所有数据并构建直方图
+ * 对于 1D 数据（bw, br）：直接使用指针偏移提取数据
+ *
+ * @param gate_collectors 三个门的直方图收集器 [z, r, g]
+ * @param data_dev 输入数据（GPU）
+ * @param input_size 输入维度（对于 W: input_size, 对于 R: hidden_size, 对于 bw/br: 1）
+ * @param hidden_size 隐藏层大小
+ * @param is_2d 是否为 2D 数据（true=W/R, false=bw/br）
+ * @param stream CUDA 流
+ */
+void collect_per_gate_histograms(std::array<GPUHistogramCollector, 3>& gate_collectors,
+                                 const float* data_dev, int input_size, int hidden_size,
+                                 bool is_2d, cudaStream_t stream = 0);
 
 /**
  * @brief 收集 per-channel 直方图（GPU 版本，写入共享批量结构）

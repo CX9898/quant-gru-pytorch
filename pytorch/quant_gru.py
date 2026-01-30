@@ -1077,6 +1077,22 @@ class QuantGRU(nn.Module):
                 # 设置 unsigned 属性（只标记 UINT 例外）
                 if unsigned_attr:
                     setattr(self._bitwidth_config, unsigned_attr, op_cfg.get('is_unsigned', default_unsigned))
+                
+                # 设置量化粒度配置（仅对 W, R, bw, br 有效）
+                if json_key in ['W', 'R', 'bw', 'br']:
+                    granularity_str = op_cfg.get('quantization_granularity', 'PER_CHANNEL')
+                    granularity_map = {
+                        'PER_TENSOR': 0,
+                        'PER_GATE': 1,
+                        'PER_CHANNEL': 2
+                    }
+                    if granularity_str not in granularity_map:
+                        raise ValueError(
+                            f"Invalid quantization_granularity '{granularity_str}' for '{json_key}'. "
+                            f"Must be one of: PER_TENSOR, PER_GATE, PER_CHANNEL"
+                        )
+                    granularity_attr = f"{json_key}_granularity_"
+                    setattr(self._bitwidth_config, granularity_attr, granularity_map[granularity_str])
             else:
                 # 记录缺失字段及其默认值
                 missing_fields.append((json_key, 8, True, default_unsigned))
@@ -1898,6 +1914,7 @@ class QuantGRU(nn.Module):
             W=W, R=R, bw=bw, br=br, x=input,
             h0=h0_forward if h0_forward is not None else torch.empty(0, device=device),
             calib_method=self.calibration_method,
+            bitwidth_config=self._bitwidth_config,
             quant_ranges=quant_ranges,
             hist_collectors=hist_collectors
         )
@@ -1926,6 +1943,7 @@ class QuantGRU(nn.Module):
                 W=W_rev, R=R_rev, bw=bw_rev, br=br_rev, x=input_reversed,
                 h0=h0_reverse if h0_reverse is not None else torch.empty(0, device=device),
                 calib_method=self.calibration_method,
+                bitwidth_config=self._bitwidth_config,
                 quant_ranges=quant_ranges_rev,
                 hist_collectors=hist_collectors_rev
             )
@@ -2325,16 +2343,84 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         # 3. scale
         scale_value = None
         n_value = None
-        if hasattr(quant_params, op_info["shift_attr"]):
-            shift_value = getattr(quant_params, op_info["shift_attr"])
-            if is_per_channel:
-                shift_list = list(shift_value)
-                scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
-                n_value = shift_list
+        enc_type = None
+        
+        # 对于 W/R/bw/br，需要根据粒度配置选择正确的shift值
+        if op_name in ['weight.W', 'weight.R', 'weight.bw', 'weight.br']:
+            json_key = op_name.split('.')[-1]  # 'W', 'R', 'bw', 'br'
+            granularity_attr = f"{json_key}_granularity_"
+            
+            if hasattr(bitwidth_config, granularity_attr):
+                granularity = getattr(bitwidth_config, granularity_attr)
+                
+                if granularity == 0:  # PER_TENSOR
+                    shift_attr = f"shift_{json_key}_tensor_"
+                    if hasattr(quant_params, shift_attr):
+                        shift_value = getattr(quant_params, shift_attr)
+                        n = int(shift_value)
+                        scale_value = _exp2_inv_to_scale(n)
+                        n_value = n
+                        enc_type = "PER_TENSOR"
+                elif granularity == 1:  # PER_GATE
+                    shift_attr = f"shift_{json_key}_gate_"
+                    if hasattr(quant_params, shift_attr):
+                        shift_value = getattr(quant_params, shift_attr)
+                        # shift_*_gate_ 是 std::array<int8_t, 3>，需要转换为list
+                        if hasattr(shift_value, '__iter__') and not isinstance(shift_value, str):
+                            shift_list = list(shift_value)
+                        else:
+                            shift_list = [shift_value] if isinstance(shift_value, (int, float)) else []
+                        if len(shift_list) == 3:
+                            scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
+                            n_value = shift_list
+                            # 注意：如果AIMET不支持PER_GATE，可能需要导出为PER_CHANNEL
+                            # 但数组长度仍为3（每个门一个scale），而不是channel_size
+                            enc_type = "PER_GATE"
+                else:  # PER_CHANNEL (granularity == 2)
+                    shift_attr = op_info["shift_attr"]  # shift_W_, shift_R_, etc.
+                    if hasattr(quant_params, shift_attr):
+                        shift_value = getattr(quant_params, shift_attr)
+                        shift_list = list(shift_value)
+                        scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
+                        n_value = shift_list
+                        enc_type = "PER_CHANNEL"
             else:
-                n = int(shift_value)
-                scale_value = _exp2_inv_to_scale(n)
-                n_value = n
+                # 如果没有粒度配置，使用默认的is_per_channel逻辑（向后兼容）
+                import warnings
+                warnings.warn(
+                    f"Operator '{json_key}' does not have quantization_granularity configured. "
+                    f"Using default based on is_per_channel flag. "
+                    f"Please set quantization_granularity explicitly (PER_TENSOR/PER_GATE/PER_CHANNEL).",
+                    UserWarning,
+                    stacklevel=2
+                )
+                if hasattr(quant_params, op_info["shift_attr"]):
+                    shift_value = getattr(quant_params, op_info["shift_attr"])
+                    if is_per_channel:
+                        shift_list = list(shift_value)
+                        scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
+                        n_value = shift_list
+                        enc_type = "PER_CHANNEL"
+                    else:
+                        n = int(shift_value)
+                        scale_value = _exp2_inv_to_scale(n)
+                        n_value = n
+                        enc_type = "PER_TENSOR"
+        else:
+            # 对于非权重算子，使用原有的逻辑
+            if hasattr(quant_params, op_info["shift_attr"]):
+                shift_value = getattr(quant_params, op_info["shift_attr"])
+                if is_per_channel:
+                    shift_list = list(shift_value)
+                    scale_value = [_exp2_inv_to_scale(e) for e in shift_list]
+                    n_value = shift_list
+                    enc_type = "PER_CHANNEL"
+                else:
+                    n = int(shift_value)
+                    scale_value = _exp2_inv_to_scale(n)
+                    n_value = n
+                    enc_type = "PER_TENSOR"
+        
         if scale_value is not None:
             op_data["scale"] = scale_value
         
@@ -2346,8 +2432,8 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         
         # 5. real_min, 6. real_max: scale * (q - zero_point)
         if scale_value is not None:
-            if is_per_channel:
-                # per-channel: 每个 channel 一个 real_min/real_max
+            if isinstance(scale_value, list):
+                # per-channel 或 per-gate: 每个元素一个 real_min/real_max
                 op_data["real_min"] = [s * (qmin - zp_value) for s in scale_value]
                 op_data["real_max"] = [s * (qmax - zp_value) for s in scale_value]
             else:
@@ -2355,7 +2441,17 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
                 op_data["real_max"] = scale_value * (qmax - zp_value)
         
         # 7. enc_type
-        op_data["enc_type"] = "PER_CHANNEL" if is_per_channel else "PER_TENSOR"
+        if enc_type is None:
+            import warnings
+            warnings.warn(
+                f"Operator '{op_name.split('.')[-1]}' enc_type is None. "
+                f"Using default based on is_per_channel flag. "
+                f"This may indicate missing granularity configuration.",
+                UserWarning,
+                stacklevel=2
+            )
+            enc_type = "PER_CHANNEL" if is_per_channel else "PER_TENSOR"
+        op_data["enc_type"] = enc_type
         
         # 8. n (exp2_inv 指数)
         if n_value is not None:
@@ -2364,11 +2460,25 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         # 去掉前缀（如 "gate.new_gate_output" -> "new_gate_output"）
         short_name = op_name.split('.')[-1] if '.' in op_name else op_name
         
-        # per-channel 放到最后
-        if is_per_channel:
+        # 分类：per-tensor 算子放在前面，per-channel/per-gate 算子放在最后
+        # PER_GATE 也是数组类型（3个元素），所以也放到 per_channel_ops
+        if enc_type and enc_type in ["PER_CHANNEL", "PER_GATE"]:
             per_channel_ops[short_name] = op_data
-        else:
+        elif enc_type == "PER_TENSOR" or (enc_type is None and not is_per_channel):
             operators[short_name] = op_data
+        else:
+            # 兼容旧逻辑：如果没有设置enc_type，使用is_per_channel判断
+            import warnings
+            warnings.warn(
+                f"Operator '{short_name}' enc_type fallback to is_per_channel logic. "
+                f"This may indicate missing granularity configuration.",
+                UserWarning,
+                stacklevel=2
+            )
+            if is_per_channel:
+                per_channel_ops[short_name] = op_data
+            else:
+                operators[short_name] = op_data
     
     # 添加 per-channel 算子到最后
     operators.update(per_channel_ops)
@@ -2430,19 +2540,118 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
         
         # 设置 n / scale（优先使用 n，其次从 scale 计算）
         # n 对应 C++ 中的 shift_xxx_ 属性
-        if "n" in op_data:
-            value = op_data["n"]
-            if op_info["is_per_channel"]:
-                setattr(quant_params, op_info["shift_attr"], list(value))
-            else:
-                setattr(quant_params, op_info["shift_attr"], int(value))
-        elif "scale" in op_data:
-            value = op_data["scale"]
-            if op_info["is_per_channel"]:
-                setattr(quant_params, op_info["shift_attr"], 
-                        [_scale_to_exp2_inv(v) for v in value])
-            else:
-                setattr(quant_params, op_info["shift_attr"], _scale_to_exp2_inv(value))
+        # 对于 W/R/bw/br，需要根据 enc_type 判断粒度
+        if op_name in ['W', 'R', 'bw', 'br']:
+            enc_type = op_data.get("enc_type")
+            if enc_type is None:
+                import warnings
+                warnings.warn(
+                    f"Operator '{op_name}' missing 'enc_type' field in JSON. "
+                    f"Defaulting to PER_CHANNEL for backward compatibility. "
+                    f"Please add 'enc_type' field explicitly (PER_TENSOR/PER_GATE/PER_CHANNEL).",
+                    UserWarning,
+                    stacklevel=2
+                )
+                enc_type = "PER_CHANNEL"
+            
+            if "n" in op_data:
+                value = op_data["n"]
+                if enc_type == "PER_TENSOR":
+                    # 标量
+                    setattr(quant_params, f"shift_{op_name}_tensor_", int(value))
+                    setattr(bitwidth_config, f"{op_name}_granularity_", 0)
+                elif enc_type == "PER_GATE":
+                    # 3元素数组
+                    if isinstance(value, list):
+                        if len(value) == 3:
+                            # 转换为list（C++端是std::array，Python绑定会自动转换）
+                            setattr(quant_params, f"shift_{op_name}_gate_", list(value))
+                            setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                        else:
+                            raise ValueError(
+                                f"PER_GATE granularity for '{op_name}' requires exactly 3 elements, "
+                                f"got {len(value)} elements"
+                            )
+                    else:
+                        raise ValueError(
+                            f"PER_GATE granularity for '{op_name}' requires a list with 3 elements, "
+                            f"got {type(value).__name__}"
+                        )
+                else:  # PER_CHANNEL
+                    # channel_size数组
+                    if isinstance(value, list):
+                        setattr(quant_params, f"shift_{op_name}_", list(value))
+                        setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                    else:
+                        # 兼容旧格式：标量被当作per-channel（只有一个元素）
+                        import warnings
+                        warnings.warn(
+                            f"Operator '{op_name}' with PER_CHANNEL enc_type has scalar 'n' value. "
+                            f"Converting to single-element array for backward compatibility. "
+                            f"Please use array format: [n_value].",
+                            UserWarning,
+                            stacklevel=2
+                        )
+                        setattr(quant_params, f"shift_{op_name}_", [int(value)])
+                        setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+            elif "scale" in op_data:
+                value = op_data["scale"]
+                if enc_type == "PER_TENSOR":
+                    # 标量
+                    shift_val = _scale_to_exp2_inv(value)
+                    setattr(quant_params, f"shift_{op_name}_tensor_", int(shift_val))
+                    setattr(bitwidth_config, f"{op_name}_granularity_", 0)
+                elif enc_type == "PER_GATE":
+                    # 3元素数组
+                    if isinstance(value, list):
+                        if len(value) == 3:
+                            shift_list = [_scale_to_exp2_inv(v) for v in value]
+                            setattr(quant_params, f"shift_{op_name}_gate_", shift_list)
+                            setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                        else:
+                            raise ValueError(
+                                f"PER_GATE granularity for '{op_name}' requires exactly 3 scale values, "
+                                f"got {len(value)} values"
+                            )
+                    else:
+                        raise ValueError(
+                            f"PER_GATE granularity for '{op_name}' requires a list with 3 scale values, "
+                            f"got {type(value).__name__}"
+                        )
+                else:  # PER_CHANNEL
+                    # channel_size数组
+                    if isinstance(value, list):
+                        shift_list = [_scale_to_exp2_inv(v) for v in value]
+                        setattr(quant_params, f"shift_{op_name}_", shift_list)
+                        setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                    else:
+                        # 兼容旧格式：标量被当作per-channel（只有一个元素）
+                        import warnings
+                        warnings.warn(
+                            f"Operator '{op_name}' with PER_CHANNEL enc_type has scalar 'scale' value. "
+                            f"Converting to single-element array for backward compatibility. "
+                            f"Please use array format: [scale_value].",
+                            UserWarning,
+                            stacklevel=2
+                        )
+                        shift_val = _scale_to_exp2_inv(value)
+                        setattr(quant_params, f"shift_{op_name}_", [int(shift_val)])
+                        setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+        else:
+            # 对于非权重算子，使用原有的逻辑
+            if "n" in op_data:
+                value = op_data["n"]
+                if op_info["is_per_channel"]:
+                    setattr(quant_params, op_info["shift_attr"], list(value))
+                else:
+                    setattr(quant_params, op_info["shift_attr"], int(value))
+            elif "scale" in op_data:
+                value = op_data["scale"]
+                if op_info["is_per_channel"]:
+                    setattr(quant_params, op_info["shift_attr"], 
+                            [_scale_to_exp2_inv(v) for v in value])
+                else:
+                    setattr(quant_params, op_info["shift_attr"], _scale_to_exp2_inv(value))
         
         # 设置 zero_point
         if op_info["zp_attr"] and "zero_point" in op_data:

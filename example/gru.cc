@@ -210,10 +210,17 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
                        const float *W, const float *R, const float *bw, const float *br,
                        const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU):");
+    // 分配量化输出缓冲区（必须由外部分配）
+    dev::vector<float> W_q(input_size * hidden_size * 3);
+    dev::vector<float> R_q(hidden_size * hidden_size * 3);
+    dev::vector<float> bw_q(hidden_size * 3);
+    dev::vector<float> br_q(hidden_size * 3);
+    dev::vector<float> x_q(time_steps * batch_size * input_size);
+    
     quantGRUForwardFP(false, time_steps, batch_size, input_size, hidden_size,
                       W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr,
+                      W_q.data(), R_q.data(), bw_q.data(), br_q.data(), x_q.data(),
                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                      nullptr, nullptr, nullptr, nullptr, nullptr,
                       nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
@@ -235,9 +242,19 @@ void runQuantInferenceFP(int time_steps, int batch_size, int input_size, int hid
                          const float *W, const float *R, const float *bw, const float *br,
                          const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU-FP):");
+    // 分配量化输出缓冲区（必须由外部分配）
+    dev::vector<float> W_q(input_size * hidden_size * 3);
+    dev::vector<float> R_q(hidden_size * hidden_size * 3);
+    dev::vector<float> bw_q(hidden_size * 3);
+    dev::vector<float> br_q(hidden_size * 3);
+    dev::vector<float> x_q(time_steps * batch_size * input_size);
+    
     // 直接调用浮点存储版量化前向
     quantGRUForwardFP(false, time_steps, batch_size, input_size, hidden_size,
-                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr);
+                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr,
+                      W_q.data(), R_q.data(), bw_q.data(), br_q.data(), x_q.data(),
+                      nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                      nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 // ==================== 校准函数 ====================
@@ -266,6 +283,7 @@ GRUQuantParams calibrateWithHistogram(
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
                               W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                               CalibrationMethod::SQNR, nullptr, &gpu_hist,
+                              bitwidth_config,
                               h_dev.data(), v_dev.data());
     printf("  [Step 2] Forward + GPU histogram: %.3f ms\n", timer.stop());
 
@@ -352,6 +370,7 @@ GRUQuantParams calibrateWithMinMax(
     forwardWithCalibrationGPU(true, time_steps, batch_size, input_size, hidden_size,
                               W_dev, R_dev, bw_dev, br_dev, x_dev, nullptr, g_blas_handle,
                               CalibrationMethod::MINMAX, &ranges, nullptr,
+                              bitwidth_config,
                               h_dev.data(), v_dev.data());
     
     return calculateGRUQuantitativeParameters(ranges, bitwidth_config);
@@ -383,6 +402,14 @@ int main(int argc, char *argv[]) {
     srand(42);
     setGlobalRandomSeed(42);
 
+    // 初始化 CUDA 设备（确保 Thrust 库使用正确的设备）
+    int device_count;
+    cudaGetDeviceCount(&device_count);
+    if (device_count > 0) {
+        cudaSetDevice(0);
+        printf("CUDA Device: 0\n");
+    }
+    
     // 初始化 cuBLAS
     init_gru_cublas(g_blas_handle);
     cublasSetMathMode(g_blas_handle, CUBLAS_DEFAULT_MATH);
@@ -539,20 +566,37 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_train(T * B * H * 4);
         
         // training=true 时需要分配 mask 缓冲区
+        // 输入量化 mask
+        dev::vector<uint8_t> x_mask(T * B * I);
+        dev::vector<uint8_t> h0_mask(B * H);
+        dev::vector<uint8_t> W_mask(I * H * 3);
+        dev::vector<uint8_t> R_mask(H * H * 3);
+        dev::vector<uint8_t> bw_mask(H * 3);
+        dev::vector<uint8_t> br_mask(H * 3);
+        // 计算过程 mask
         dev::vector<uint8_t> weight_ih_mask(T * B * H * 3);
         dev::vector<uint8_t> weight_hh_mask(T * B * H * 3);
-        dev::vector<uint8_t> gate_mask(T * B * H * 3);
+        dev::vector<uint8_t> gate_input_mask(T * B * H * 3);
+        dev::vector<uint8_t> gate_output_mask(T * B * H * 3);
         dev::vector<uint8_t> h_mask(T * B * H);
+        
+        // 分配输出量化值缓冲区
+        dev::vector<float> W_q_out(I * H * 3);
+        dev::vector<float> R_q_out(H * H * 3);
+        dev::vector<float> bw_q_out(H * 3);
+        dev::vector<float> br_q_out(H * 3);
+        dev::vector<float> x_q_out(T * B * I);
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Forward:");
             quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                               br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
                               h_train.data(), v_train.data(),
-                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                              W_q_out.data(), R_q_out.data(), bw_q_out.data(), br_q_out.data(), x_q_out.data(),
+                              x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(), 
+                              bw_mask.data(), br_mask.data(),
                               weight_ih_mask.data(), weight_hh_mask.data(),
-                              gate_mask.data(), h_mask.data(),
-                              nullptr, nullptr, nullptr, nullptr, nullptr);
+                              gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -566,10 +610,15 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Backward:");
-            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
+            quantGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
                              br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
-                             dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data());
+                             dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data(),
+                             &quant_params,  // 量化参数
+                             x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(),
+                             bw_mask.data(), br_mask.data(),
+                             weight_ih_mask.data(), weight_hh_mask.data(),
+                             gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
         }
 
         d2h(gradients_quant.dx, dx_dev);
@@ -592,19 +641,37 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_train(T * B * H * 4);
         
         // training=true 时需要分配 mask 缓冲区
+        // 输入量化 mask
+        dev::vector<uint8_t> x_mask_fp(T * B * I);
+        dev::vector<uint8_t> h0_mask_fp(B * H);
+        dev::vector<uint8_t> W_mask_fp(I * H * 3);
+        dev::vector<uint8_t> R_mask_fp(H * H * 3);
+        dev::vector<uint8_t> bw_mask_fp(H * 3);
+        dev::vector<uint8_t> br_mask_fp(H * 3);
+        // 计算过程 mask
         dev::vector<uint8_t> weight_ih_mask_fp(T * B * H * 3);
         dev::vector<uint8_t> weight_hh_mask_fp(T * B * H * 3);
-        dev::vector<uint8_t> gate_mask_fp(T * B * H * 3);
+        dev::vector<uint8_t> gate_input_mask_fp(T * B * H * 3);
+        dev::vector<uint8_t> gate_output_mask_fp(T * B * H * 3);
         dev::vector<uint8_t> h_mask_fp(T * B * H);
+        
+        // 分配输出量化值缓冲区
+        dev::vector<float> W_q_out_fp(I * H * 3);
+        dev::vector<float> R_q_out_fp(H * H * 3);
+        dev::vector<float> bw_q_out_fp(H * 3);
+        dev::vector<float> br_q_out_fp(H * 3);
+        dev::vector<float> x_q_out_fp(T * B * I);
 
         {
             ScopeTimer t("QuantTraining (GPU-FP) Forward:");
             quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                               br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
                               h_train.data(), v_train.data(),
-                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                              W_q_out_fp.data(), R_q_out_fp.data(), bw_q_out_fp.data(), br_q_out_fp.data(), x_q_out_fp.data(),
+                              x_mask_fp.data(), h0_mask_fp.data(), W_mask_fp.data(), R_mask_fp.data(), 
+                              bw_mask_fp.data(), br_mask_fp.data(),
                               weight_ih_mask_fp.data(), weight_hh_mask_fp.data(),
-                              gate_mask_fp.data(), h_mask_fp.data());
+                              gate_input_mask_fp.data(), gate_output_mask_fp.data(), h_mask_fp.data());
         }
 
         dev::vector<float> dx_dev(T * B * I);
@@ -618,10 +685,15 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining (GPU-FP) Backward:");
-            hasteGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
+            quantGRUBackward(T, B, I, H, W_t_dev.data(), R_t_dev.data(), bw_dev.data(),
                              br_dev.data(), x_t_dev.data(), dh_dev.data(), h_train.data(),
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
-                             dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data());
+                             dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data(),
+                             &quant_params,  // 量化参数
+                             x_mask_fp.data(), h0_mask_fp.data(), W_mask_fp.data(), R_mask_fp.data(),
+                             bw_mask_fp.data(), br_mask_fp.data(),
+                             weight_ih_mask_fp.data(), weight_hh_mask_fp.data(),
+                             gate_input_mask_fp.data(), gate_output_mask_fp.data(), h_mask_fp.data());
         }
 
         d2h(gradients_quant_fp.dx, dx_dev);
@@ -670,25 +742,46 @@ int main(int argc, char *argv[]) {
         // INT32 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
+        // 输入量化 mask
+        dev::vector<uint8_t> x_mask_int(T * B * I);
+        dev::vector<uint8_t> h0_mask_int(B * H);
+        dev::vector<uint8_t> W_mask_int(I * H * 3);
+        dev::vector<uint8_t> R_mask_int(H * H * 3);
+        dev::vector<uint8_t> bw_mask_int(H * 3);
+        dev::vector<uint8_t> br_mask_int(H * 3);
+        // 计算过程 mask
         dev::vector<uint8_t> mask_ih_int(T * B * H * 3), mask_hh_int(T * B * H * 3);
-        dev::vector<uint8_t> mask_gate_int(T * B * H * 3), mask_h_int(T * B * H);
+        dev::vector<uint8_t> mask_gate_input_int(T * B * H * 3), mask_gate_output_int(T * B * H * 3), mask_h_int(T * B * H);
+        dev::vector<float> W_q_int(I * H * 3), R_q_int(H * H * 3), bw_q_int(H * 3), br_q_int(H * 3), x_q_int(T * B * I);
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                           h_int.data(), v_int.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          mask_ih_int.data(), mask_hh_int.data(), mask_gate_int.data(), mask_h_int.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr);
+                          W_q_int.data(), R_q_int.data(), bw_q_int.data(), br_q_int.data(), x_q_int.data(),
+                          x_mask_int.data(), h0_mask_int.data(), W_mask_int.data(), R_mask_int.data(),
+                          bw_mask_int.data(), br_mask_int.data(),
+                          mask_ih_int.data(), mask_hh_int.data(), mask_gate_input_int.data(), mask_gate_output_int.data(), mask_h_int.data());
         
         // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
+        // 输入量化 mask
+        dev::vector<uint8_t> x_mask_fp_test(T * B * I);
+        dev::vector<uint8_t> h0_mask_fp_test(B * H);
+        dev::vector<uint8_t> W_mask_fp_test(I * H * 3);
+        dev::vector<uint8_t> R_mask_fp_test(H * H * 3);
+        dev::vector<uint8_t> bw_mask_fp_test(H * 3);
+        dev::vector<uint8_t> br_mask_fp_test(H * 3);
+        // 计算过程 mask
         dev::vector<uint8_t> mask_ih_fp(T * B * H * 3), mask_hh_fp(T * B * H * 3);
-        dev::vector<uint8_t> mask_gate_fp(T * B * H * 3), mask_h_fp(T * B * H);
+        dev::vector<uint8_t> mask_gate_input_fp(T * B * H * 3), mask_gate_output_fp(T * B * H * 3), mask_h_fp(T * B * H);
+        dev::vector<float> W_q_fp(I * H * 3), R_q_fp(H * H * 3), bw_q_fp(H * 3), br_q_fp(H * 3), x_q_fp(T * B * I);
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_fp.data(), mask_h_fp.data());
+                          W_q_fp.data(), R_q_fp.data(), bw_q_fp.data(), br_q_fp.data(), x_q_fp.data(),
+                          x_mask_fp_test.data(), h0_mask_fp_test.data(), W_mask_fp_test.data(), R_mask_fp_test.data(),
+                          bw_mask_fp_test.data(), br_mask_fp_test.data(),
+                          mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_input_fp.data(), mask_gate_output_fp.data(), mask_h_fp.data());
         
         // 比较
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
@@ -707,15 +800,20 @@ int main(int argc, char *argv[]) {
         // 推理模式也测试一下
         dev::vector<float> h_int_inf((T + 1) * B * H);
         dev::vector<float> h_fp_inf((T + 1) * B * H);
+        dev::vector<float> W_q_inf1(I * H * 3), R_q_inf1(H * H * 3), bw_q_inf1(H * 3), br_q_inf1(H * 3), x_q_inf1(T * B * I);
+        dev::vector<float> W_q_inf2(I * H * 3), R_q_inf2(H * H * 3), bw_q_inf2(H * 3), br_q_inf2(H * 3), x_q_inf2(T * B * I);
         quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                           h_int_inf.data(), nullptr,
+                          W_q_inf1.data(), R_q_inf1.data(), bw_q_inf1.data(), br_q_inf1.data(), x_q_inf1.data(),
                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          nullptr, nullptr, nullptr, nullptr, nullptr,
                           nullptr, nullptr, nullptr, nullptr, nullptr);
         quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                          h_fp_inf.data(), nullptr);
+                          h_fp_inf.data(), nullptr,
+                          W_q_inf2.data(), R_q_inf2.data(), bw_q_inf2.data(), br_q_inf2.data(), x_q_inf2.data(),
+                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                          nullptr, nullptr, nullptr, nullptr, nullptr);
         
         std::vector<float> h_int_inf_cpu, h_fp_inf_cpu;
         d2h(h_int_inf_cpu, h_int_inf);
@@ -742,20 +840,40 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_int(T * B * H * 4);
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
-        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
-        dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
+        // 输入量化 mask (INT 版本)
+        dev::vector<uint8_t> x_mask_z1(T * B * I);
+        dev::vector<uint8_t> h0_mask_z1(B * H);
+        dev::vector<uint8_t> W_mask_z1(I * H * 3);
+        dev::vector<uint8_t> R_mask_z1(H * H * 3);
+        dev::vector<uint8_t> bw_mask_z1(H * 3);
+        dev::vector<uint8_t> br_mask_z1(H * 3);
+        // 输入量化 mask (FP 版本)
+        dev::vector<uint8_t> x_mask_z2(T * B * I);
+        dev::vector<uint8_t> h0_mask_z2(B * H);
+        dev::vector<uint8_t> W_mask_z2(I * H * 3);
+        dev::vector<uint8_t> R_mask_z2(H * H * 3);
+        dev::vector<uint8_t> bw_mask_z2(H * 3);
+        dev::vector<uint8_t> br_mask_z2(H * 3);
+        // 计算过程 mask
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
+        dev::vector<uint8_t> m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H * 3), m9(T * B * H * 3), m10(T * B * H);
+        dev::vector<float> W_q_z1(I * H * 3), R_q_z1(H * H * 3), bw_q_z1(H * 3), br_q_z1(H * 3), x_q_z1(T * B * I);
+        dev::vector<float> W_q_z2(I * H * 3), R_q_z2(H * H * 3), bw_q_z2(H * 3), br_q_z2(H * 3), x_q_z2(T * B * I);
         
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                            br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
                            h_int.data(), v_int.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           m1.data(), m2.data(), m3.data(), m4.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr);
+                           W_q_z1.data(), R_q_z1.data(), bw_q_z1.data(), br_q_z1.data(), x_q_z1.data(),
+                           x_mask_z1.data(), h0_mask_z1.data(), W_mask_z1.data(), R_mask_z1.data(),
+                           bw_mask_z1.data(), br_mask_z1.data(),
+                           m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          m5.data(), m6.data(), m7.data(), m8.data());
+                          W_q_z2.data(), R_q_z2.data(), bw_q_z2.data(), br_q_z2.data(), x_q_z2.data(),
+                          x_mask_z2.data(), h0_mask_z2.data(), W_mask_z2.data(), R_mask_z2.data(),
+                          bw_mask_z2.data(), br_mask_z2.data(),
+                          m6.data(), m7.data(), m8.data(), m9.data(), m10.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);
@@ -780,20 +898,40 @@ int main(int argc, char *argv[]) {
         dev::vector<float> v_int(T * B * H * 4);
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
-        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H);
-        dev::vector<uint8_t> m5(T * B * H * 3), m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H);
+        // 输入量化 mask (INT 版本)
+        dev::vector<uint8_t> x_mask_o1(T * B * I);
+        dev::vector<uint8_t> h0_mask_o1(B * H);
+        dev::vector<uint8_t> W_mask_o1(I * H * 3);
+        dev::vector<uint8_t> R_mask_o1(H * H * 3);
+        dev::vector<uint8_t> bw_mask_o1(H * 3);
+        dev::vector<uint8_t> br_mask_o1(H * 3);
+        // 输入量化 mask (FP 版本)
+        dev::vector<uint8_t> x_mask_o2(T * B * I);
+        dev::vector<uint8_t> h0_mask_o2(B * H);
+        dev::vector<uint8_t> W_mask_o2(I * H * 3);
+        dev::vector<uint8_t> R_mask_o2(H * H * 3);
+        dev::vector<uint8_t> bw_mask_o2(H * 3);
+        dev::vector<uint8_t> br_mask_o2(H * 3);
+        // 计算过程 mask
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
+        dev::vector<uint8_t> m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H * 3), m9(T * B * H * 3), m10(T * B * H);
+        dev::vector<float> W_q_o1(I * H * 3), R_q_o1(H * H * 3), bw_q_o1(H * 3), br_q_o1(H * 3), x_q_o1(T * B * I);
+        dev::vector<float> W_q_o2(I * H * 3), R_q_o2(H * H * 3), bw_q_o2(H * 3), br_q_o2(H * 3), x_q_o2(T * B * I);
         
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                            br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
                            h_int.data(), v_int.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                           m1.data(), m2.data(), m3.data(), m4.data(),
-                           nullptr, nullptr, nullptr, nullptr, nullptr);
+                           W_q_o1.data(), R_q_o1.data(), bw_q_o1.data(), br_q_o1.data(), x_q_o1.data(),
+                           x_mask_o1.data(), h0_mask_o1.data(), W_mask_o1.data(), R_mask_o1.data(),
+                           bw_mask_o1.data(), br_mask_o1.data(),
+                           m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          m5.data(), m6.data(), m7.data(), m8.data());
+                          W_q_o2.data(), R_q_o2.data(), bw_q_o2.data(), br_q_o2.data(), x_q_o2.data(),
+                          x_mask_o2.data(), h0_mask_o2.data(), W_mask_o2.data(), R_mask_o2.data(),
+                          bw_mask_o2.data(), br_mask_o2.data(),
+                          m6.data(), m7.data(), m8.data(), m9.data(), m10.data());
         
         std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
         d2h(h_int_cpu, h_int);

@@ -27,6 +27,7 @@
 //
 // ============================================================================
 
+#include <array>
 #include <vector>
 
 #include "dev_vector.h"
@@ -60,11 +61,22 @@ struct GRUQuantParams {
     int8_t shift_h_;   ///< 隐状态 h 的移位量
     int32_t zp_h_;     ///< 隐状态 h 的零点
 
-    // -------------------- 权重参数（per-channel）--------------------
+    // ========== 多粒度参数存储 ==========
+    // Per-Tensor 参数（标量）
+    int8_t shift_W_tensor_ = 0;
+    int8_t shift_R_tensor_ = 0;
+    int8_t shift_bw_tensor_ = 0;
+    int8_t shift_br_tensor_ = 0;
+    
+    // Per-Gate 参数（数组：索引 0=z, 1=r, 2=g）
+    std::array<int8_t, 3> shift_W_gate_ = {0, 0, 0};  // [z, r, g]
+    std::array<int8_t, 3> shift_R_gate_ = {0, 0, 0};  // [z, r, g]
+    std::array<int8_t, 3> shift_bw_gate_ = {0, 0, 0}; // [z, r, g]
+    std::array<int8_t, 3> shift_br_gate_ = {0, 0, 0}; // [z, r, g]
+    
+    // Per-Channel 参数（现有字段，保持 std::vector）
     std::vector<int8_t> shift_W_;   ///< 输入权重 W 的移位量，size = hidden * 3
     std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
-
-    // -------------------- 偏置参数（per-channel）--------------------
     std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
     std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
 
@@ -170,13 +182,33 @@ struct GateQuantParams {
 /**
  * @brief Linear 层量化参数（GPU 版本，使用 dev::vector）
  *
- * 存储 GEMM+bias 融合计算所需的 per-channel 参数。
+ * 存储 GEMM+bias 融合计算所需的参数，支持 per-tensor、per-gate、per-channel 三种粒度。
  * 仅在 ComputeLinearX/ComputeLinearH 等 GEMM 函数中使用。
  */
 struct LinearQuantParamsGPU {
     int32_t zp_x_;  ///< 输入 x 的零点
     int32_t zp_h_;  ///< 隐状态 h 的零点
 
+    // 粒度配置（从 OperatorQuantConfig 复制，用于 kernel 中判断）
+    int8_t W_granularity_;   ///< W 的量化粒度：0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL
+    int8_t R_granularity_;   ///< R 的量化粒度
+    int8_t bw_granularity_;  ///< bw 的量化粒度
+    int8_t br_granularity_;  ///< br 的量化粒度
+    int hidden_size_;        ///< 隐藏层大小（用于计算 gate_idx）
+
+    // Per-tensor 参数（标量，rescale 后的值，通过参数内存传递，访问快）
+    int8_t shift_gemm_x_tensor_;   ///< W*x rescale per-tensor shift（已计算 rescale）
+    int8_t shift_gemm_h_tensor_;   ///< R*h rescale per-tensor shift（已计算 rescale）
+    int8_t shift_bw_tensor_;       ///< bw rescale per-tensor shift（已计算 rescale）
+    int8_t shift_br_tensor_;       ///< br rescale per-tensor shift（已计算 rescale）
+
+    // Per-gate 参数（3个值，rescale 后的值，通过参数内存传递，访问快）
+    int8_t shift_gemm_x_gate_[3];   ///< W*x rescale per-gate shift [z, r, g]（已计算 rescale）
+    int8_t shift_gemm_h_gate_[3];   ///< R*h rescale per-gate shift [z, r, g]（已计算 rescale）
+    int8_t shift_bw_gate_[3];       ///< bw rescale per-gate shift [z, r, g]（已计算 rescale）
+    int8_t shift_br_gate_[3];       ///< br rescale per-gate shift [z, r, g]（已计算 rescale）
+
+    // Per-channel 参数（数组，全局内存，PER_CHANNEL 粒度时使用）
     dev::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
     dev::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
     dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
@@ -262,88 +294,42 @@ struct GateQuantParamsFP {
     float scale_reset_gate_output_;   ///< = 2^(-shift)
     float scale_new_gate_input_;      ///< = 2^(-shift)
     float scale_new_gate_output_;     ///< = 2^(-shift)
-
-    // -------------------- 位宽配置 --------------------
-    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
 };
 
 /**
- * @brief Linear 层量化参数（GPU 浮点版本）
- *
- * shift 预处理为除数，存储在 GPU 端
- */
-struct LinearQuantParamsGPUFP {
-    float zp_x_;                 ///< 输入 x 的零点
-    float zp_h_;                 ///< 隐状态 h 的零点
-    float zp_weight_ih_linear_;  ///< W*x+bw 输出零点
-    float zp_weight_hh_linear_;  ///< R*h+br 输出零点
-
-    // 倒数数组（用于优化：乘法替代除法）
-    dev::vector<float> inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间
-    dev::vector<float> inv_div_bw_to_gemm_x_;              ///< [3*hidden] 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（scale_W*scale_x）
-    dev::vector<float> inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间
-    dev::vector<float> inv_div_br_to_gemm_h_;              ///< [3*hidden] 1.0f / (2^shift_br)，从br空间到GEMM_h空间（scale_R*scale_h）
-
-    QuantBitWidth output_bw_ih_;  ///< weight_ih_linear 输出位宽
-    QuantBitWidth output_bw_hh_;  ///< weight_hh_linear 输出位宽
-};
-
-/**
- * @brief Linear Rescale 参数（用于 kernel，打包所有 BiasRescale 需要的参数）
+ * @brief Linear Rescale 参数（用于 kernel 和类成员，统一管理所有量化参数）
  * 
  * 用于减少 kernel 参数数量，将所有 BiasRescale 相关参数打包到一个结构体中
+ * 同时作为类成员变量，直接管理数据，避免维护两套数据
+ * 注意：粒度配置通过 OperatorQuantConfig 单独传递，不在此结构体中
  */
 struct LinearRescaleParamsFP {
+    // 基础零点参数
+    float zp_x_;                 ///< 输入 x 的零点
+    float zp_h_;                 ///< 隐状态 h 的零点
     // weight_ih_linear 相关参数
-    const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x
-    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间
-    const float *inv_div_bw_to_gemm_x_;              ///< [3*hidden] 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（scale_W*scale_x）
+    const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x（运行时设置）
+    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间（指向 dev::vector）
+    const float *inv_div_bw_to_gemm_x_;              ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（指向 dev::vector）
     float zp_weight_ih_linear_;                     ///< weight_ih_linear 输出零点
-    QuantBitWidth output_bw_ih_;                     ///< weight_ih_linear 输出位宽
+    // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
+    
+    // Per-tensor 参数（标量，通过参数内存传递，访问快）
+    float inv_div_gemm_x_tensor_;   ///< W*x rescale per-tensor 倒数
+    float inv_div_gemm_h_tensor_;   ///< R*h rescale per-tensor 倒数
+    float inv_div_bw_tensor_;       ///< bw rescale per-tensor 倒数
+    float inv_div_br_tensor_;       ///< br rescale per-tensor 倒数
+
+    // Per-gate 参数（3个值，通过参数内存传递，访问快）
+    float inv_div_gemm_x_gate_[3];   ///< W*x rescale per-gate 倒数 [z, r, g]
+    float inv_div_gemm_h_gate_[3];   ///< R*h rescale per-gate 倒数 [z, r, g]
+    float inv_div_bw_gate_[3];       ///< bw rescale per-gate 倒数 [z, r, g]
+    float inv_div_br_gate_[3];       ///< br rescale per-gate 倒数 [z, r, g]
     
     // weight_hh_linear 相关参数
-    const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h
-    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间
-    const float *inv_div_br_to_gemm_h_;              ///< [3*hidden] 1.0f / (2^shift_br)，从br空间到GEMM_h空间（scale_R*scale_h）
+    const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h（运行时设置）
+    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间（指向 dev::vector）
+    const float *inv_div_br_to_gemm_h_;              ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_br)，从br空间到GEMM_h空间（指向 dev::vector）
     float zp_weight_hh_linear_;                     ///< weight_hh_linear 输出零点
-    QuantBitWidth output_bw_hh_;                     ///< weight_hh_linear 输出位宽
-};
-
-// ============================================================================
-// 反向传播 Rescale 参数（用于 QAT 梯度 scale 补偿）
-// ============================================================================
-
-/**
- * @brief 反向传播 rescale 参数
- *
- * 在前向传播中，有多处 div_round 操作（rescale）：
- *   y = div_round(x, divisor) ≈ x / divisor
- *
- * 在反向传播中，梯度需要乘以 divisor 来补偿 scale 变化：
- *   ∂L/∂x = ∂L/∂y * divisor
- *
- * 这确保了实际值（浮点）的梯度在 rescale 前后保持一致。
- *
- * 参数命名规则：mul_xxx_to_yyy 表示从 xxx 传回 yyy 时梯度需要乘以的因子
- */
-struct BackwardRescaleParams {
-    // -------------------- Update Gate 反向 rescale --------------------
-    // dp_z 从 update_gate_input 传回 weight_ih_linear
-    float mul_update_gate_input_to_weight_ih_linear_;  // = div_weight_ih_linear_to_update_gate_input
-    // dq_z 从 update_gate_input 传回 weight_hh_linear
-    float mul_update_gate_input_to_weight_hh_linear_;  // = div_weight_hh_linear_to_update_gate_input
-
-    // -------------------- Reset Gate 反向 rescale --------------------
-    float mul_reset_gate_input_to_weight_ih_linear_;   // = div_weight_ih_linear_to_reset_gate_input
-    float mul_reset_gate_input_to_weight_hh_linear_;   // = div_weight_hh_linear_to_reset_gate_input
-
-    // -------------------- New Gate 反向 rescale --------------------
-    float mul_new_gate_input_to_weight_ih_linear_;     // = div_weight_ih_linear_to_new_gate_input
-    // r*hh 到 new_gate_input 的 rescale（涉及乘法链）
-    float mul_new_gate_input_to_reset_mul_hh_;         // = div_reset_mul_hh_to_new_gate_input
-
-    // -------------------- Hidden State 反向 rescale --------------------
-    // h_new 从 h 空间传回各部分
-    float mul_h_to_update_new_;                        // = div_update_new_to_h
-    float mul_h_to_update_old_;                        // = div_update_old_to_h
+    // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
 };

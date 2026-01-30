@@ -12,6 +12,7 @@
 
 #include "histogram_collector.h"
 #include "calibration_gpu.cuh"
+#include "quantize_bitwidth_config.h"
 
 // =====================================================================
 // GPU 直方图收集函数声明
@@ -27,6 +28,7 @@ void collectAllHistogramsGPU(
     const float *W, const float *R, const float *bw, const float *br,
     int time_steps, int batch_size, int input_size, int hidden_size,
     const float *z_pres, const float *r_pres, const float *g_pres, size_t pres_size,
+    const OperatorQuantConfig &bitwidth_config,
     cudaStream_t stream = 0);
 
 
