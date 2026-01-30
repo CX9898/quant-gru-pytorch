@@ -1064,6 +1064,10 @@ class QuantGRU(nn.Module):
                 if unsigned_attr and 'is_unsigned' not in op_cfg:
                     unsigned_default_str = "true (UINT)" if default_unsigned else "false (INT)"
                     missing_attrs.append((json_key, 'is_unsigned', unsigned_default_str))
+                # 检查量化粒度配置（仅对 W, R, bw, br 有效）
+                if json_key in ['W', 'R', 'bw', 'br']:
+                    if 'quantization_granularity' not in op_cfg:
+                        missing_attrs.append((json_key, 'quantization_granularity', 'PER_CHANNEL'))
                 
                 bitwidth = op_cfg.get('bitwidth', 8)
                 # 验证位宽范围 (1-32)
