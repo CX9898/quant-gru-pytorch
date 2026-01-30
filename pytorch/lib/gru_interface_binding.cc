@@ -625,23 +625,14 @@ backward_quant_wrapper(
     // 转换量化参数
     GRUQuantParams cpp_params = quant_params.to_cpp();
 
-    // 拷贝 shift 到 device（用于 per-channel 反量化）
-    dev::vector<int8_t> shift_W_dev(cpp_params.shift_W_);
-    dev::vector<int8_t> shift_R_dev(cpp_params.shift_R_);
-    dev::vector<int8_t> shift_bw_dev(cpp_params.shift_bw_);
-    dev::vector<int8_t> shift_br_dev(cpp_params.shift_br_);
-
     // 原地反量化（直接修改保存的量化值）
     // 注意：这些量化值是从 forward 保存的中间变量，在 backward 中只使用一次
     // backward 完成后这些 Tensor 会被 PyTorch 自动释放，不需要保护原始数据
-    dev::dequantificationPerChannelFPInplace(
-        W_q.data_ptr<float>(), input_size, hidden3, shift_W_dev);
-    dev::dequantificationPerChannelFPInplace(
-        R_q.data_ptr<float>(), hidden_size, hidden3, shift_R_dev);
-    dev::dequantificationPerChannelFPInplace(
-        bw_q.data_ptr<float>(), 1, hidden3, shift_bw_dev);
-    dev::dequantificationPerChannelFPInplace(
-        br_q.data_ptr<float>(), 1, hidden3, shift_br_dev);
+    // 使用统一接口，内部根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 反量化
+    dequantizeGRUWeights(
+        W_q.data_ptr<float>(), R_q.data_ptr<float>(),
+        bw_q.data_ptr<float>(), br_q.data_ptr<float>(),
+        input_size, hidden_size, cpp_params);
     
     const std::size_t x_size = time_steps * batch_size * input_size;
     dev::dequantificationFPInplace(x_q.data_ptr<float>(), x_size,
