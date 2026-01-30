@@ -1153,6 +1153,17 @@ void dequantificationPerChannelFPInplace(float *data,
                                          size_t input_size, size_t channel_size,
                                          const dev::vector<int8_t> &exp2_invs);
 
+/// @brief GPU per-gate 原地反量化（用于 GRU 权重）
+/// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
+/// @param input_size 输入维度
+/// @param hidden_size 隐藏层维度
+/// @param exp2_inv_z z gate 的缩放因子指数
+/// @param exp2_inv_r r gate 的缩放因子指数
+/// @param exp2_inv_g g gate 的缩放因子指数
+void dequantificationPerGateFPInplace(float *data,
+                                      size_t input_size, size_t hidden_size,
+                                      int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g);
+
 /// @brief GPU 原地反量化（float 输入的量化值）
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
 /// @param size 数据大小
@@ -1254,33 +1265,20 @@ template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
                                 size_t channel_size, const dev::vector<int8_t> &exp2_invs);
 
-// ============================================================================
-// GRU 权重量化统一接口（封装 W, R, bw, br）
-// ============================================================================
-
-/// @brief GRU 权重量化统一接口（根据 granularity 自动选择量化方式）
-/// @tparam Training 是否训练模式（决定是否使用 mask）
-/// @param W 输入权重 W [input_size, hidden_size * 3]
-/// @param R 循环权重 R [hidden_size, hidden_size * 3]
-/// @param bw 输入偏置 bw [hidden_size * 3]
-/// @param br 循环偏置 br [hidden_size * 3]
-/// @param W_q_out 输出量化权重 W（必须由外部分配内存）
-/// @param R_q_out 输出量化权重 R（必须由外部分配内存）
-/// @param bw_q_out 输出量化偏置 bw（必须由外部分配内存）
-/// @param br_q_out 输出量化偏置 br（必须由外部分配内存）
-/// @param W_mask 训练模式时保存 W 的 clamp mask，推理模式时可为 nullptr
-/// @param R_mask 训练模式时保存 R 的 clamp mask，推理模式时可为 nullptr
-/// @param bw_mask 训练模式时保存 bw 的 clamp mask，推理模式时可为 nullptr
-/// @param br_mask 训练模式时保存 br 的 clamp mask，推理模式时可为 nullptr
+/// @brief 统一的反量化接口：根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 反量化
+/// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
 /// @param input_size 输入维度
 /// @param hidden_size 隐藏层维度
-/// @param quant_params 量化参数（包含 granularity 配置和 shift 值）
-template <bool Training = false>
-void quantizeGRUWeights(const float *W, const float *R, const float *bw, const float *br,
-                        float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
-                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
-                        size_t input_size, size_t hidden_size,
-                        const GRUQuantParams &quant_params);
+/// @param granularity 量化粒度（PER_TENSOR, PER_GATE, PER_CHANNEL）
+/// @param shift_tensor per-tensor 的缩放因子指数（当 granularity == PER_TENSOR 时使用）
+/// @param shift_gate per-gate 的缩放因子指数数组 [z, r, g]（当 granularity == PER_GATE 时使用）
+/// @param shift_channel per-channel 的缩放因子指数向量（当 granularity == PER_CHANNEL 时使用）
+void dequantificationWeightFPInplace(float *data,
+                                     size_t input_size, size_t hidden_size,
+                                     OperatorQuantConfig::QuantizationGranularity granularity,
+                                     int8_t shift_tensor,
+                                     const std::array<int8_t, 3> &shift_gate,
+                                     const dev::vector<int8_t> &shift_channel);
 
 }  // namespace dev
 
