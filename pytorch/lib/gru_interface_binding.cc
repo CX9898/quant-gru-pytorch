@@ -141,6 +141,18 @@ struct GRUQuantParamsPy {
     std::vector<int8_t> shift_R_;
     std::vector<int8_t> shift_bw_;
     std::vector<int8_t> shift_br_;
+    
+    // Per-Tensor 参数（Python 绑定需要访问）
+    int8_t shift_W_tensor_ = 0;
+    int8_t shift_R_tensor_ = 0;
+    int8_t shift_bw_tensor_ = 0;
+    int8_t shift_br_tensor_ = 0;
+    
+    // Per-Gate 参数（Python 绑定需要访问）
+    std::array<int8_t, 3> shift_W_gate_ = {0, 0, 0};
+    std::array<int8_t, 3> shift_R_gate_ = {0, 0, 0};
+    std::array<int8_t, 3> shift_bw_gate_ = {0, 0, 0};
+    std::array<int8_t, 3> shift_br_gate_ = {0, 0, 0};
     // Linear 输出参数 (GEMM+bias)
     int8_t shift_weight_ih_linear_;
     int32_t zp_weight_ih_linear_;
@@ -914,6 +926,18 @@ void GRUQuantParamsPy::from_cpp(const GRUQuantParams &cpp_params) {
     shift_R_ = cpp_params.shift_R_;
     shift_bw_ = cpp_params.shift_bw_;
     shift_br_ = cpp_params.shift_br_;
+    
+    // Per-Tensor 参数
+    shift_W_tensor_ = cpp_params.shift_W_tensor_;
+    shift_R_tensor_ = cpp_params.shift_R_tensor_;
+    shift_bw_tensor_ = cpp_params.shift_bw_tensor_;
+    shift_br_tensor_ = cpp_params.shift_br_tensor_;
+    
+    // Per-Gate 参数
+    shift_W_gate_ = cpp_params.shift_W_gate_;
+    shift_R_gate_ = cpp_params.shift_R_gate_;
+    shift_bw_gate_ = cpp_params.shift_bw_gate_;
+    shift_br_gate_ = cpp_params.shift_br_gate_;
     // Linear 输出参数
     shift_weight_ih_linear_ = cpp_params.shift_weight_ih_linear_;
     zp_weight_ih_linear_ = cpp_params.zp_weight_ih_linear_;
@@ -960,6 +984,18 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     cpp_params.shift_R_ = shift_R_;
     cpp_params.shift_bw_ = shift_bw_;
     cpp_params.shift_br_ = shift_br_;
+    
+    // Per-Tensor 参数
+    cpp_params.shift_W_tensor_ = shift_W_tensor_;
+    cpp_params.shift_R_tensor_ = shift_R_tensor_;
+    cpp_params.shift_bw_tensor_ = shift_bw_tensor_;
+    cpp_params.shift_br_tensor_ = shift_br_tensor_;
+    
+    // Per-Gate 参数
+    cpp_params.shift_W_gate_ = shift_W_gate_;
+    cpp_params.shift_R_gate_ = shift_R_gate_;
+    cpp_params.shift_bw_gate_ = shift_bw_gate_;
+    cpp_params.shift_br_gate_ = shift_br_gate_;
     // Linear 输出参数
     cpp_params.shift_weight_ih_linear_ = shift_weight_ih_linear_;
     cpp_params.zp_weight_ih_linear_ = zp_weight_ih_linear_;
@@ -1130,11 +1166,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_x_", &GRUQuantParamsPy::zp_x_)
         .def_readwrite("shift_h_", &GRUQuantParamsPy::shift_h_)
         .def_readwrite("zp_h_", &GRUQuantParamsPy::zp_h_)
-        // 权重参数（per-channel）
-        .def_readwrite("shift_W_", &GRUQuantParamsPy::shift_W_)
-        .def_readwrite("shift_R_", &GRUQuantParamsPy::shift_R_)
-        .def_readwrite("shift_bw_", &GRUQuantParamsPy::shift_bw_)
-        .def_readwrite("shift_br_", &GRUQuantParamsPy::shift_br_)
+    // 权重参数（per-channel）
+    .def_readwrite("shift_W_", &GRUQuantParamsPy::shift_W_)
+    .def_readwrite("shift_R_", &GRUQuantParamsPy::shift_R_)
+    .def_readwrite("shift_bw_", &GRUQuantParamsPy::shift_bw_)
+    .def_readwrite("shift_br_", &GRUQuantParamsPy::shift_br_)
+    // Per-Tensor 参数
+    .def_readwrite("shift_W_tensor_", &GRUQuantParamsPy::shift_W_tensor_)
+    .def_readwrite("shift_R_tensor_", &GRUQuantParamsPy::shift_R_tensor_)
+    .def_readwrite("shift_bw_tensor_", &GRUQuantParamsPy::shift_bw_tensor_)
+    .def_readwrite("shift_br_tensor_", &GRUQuantParamsPy::shift_br_tensor_)
+    // Per-Gate 参数
+    .def_readwrite("shift_W_gate_", &GRUQuantParamsPy::shift_W_gate_)
+    .def_readwrite("shift_R_gate_", &GRUQuantParamsPy::shift_R_gate_)
+    .def_readwrite("shift_bw_gate_", &GRUQuantParamsPy::shift_bw_gate_)
+    .def_readwrite("shift_br_gate_", &GRUQuantParamsPy::shift_br_gate_)
         // Linear 输出参数 (GEMM+bias)
         .def_readwrite("shift_weight_ih_linear_", &GRUQuantParamsPy::shift_weight_ih_linear_)
         .def_readwrite("zp_weight_ih_linear_", &GRUQuantParamsPy::zp_weight_ih_linear_)
