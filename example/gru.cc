@@ -295,13 +295,13 @@ GRUQuantParams calibrateWithHistogram(
     // Step 4: SQNR 计算对比
     cpu_timer.start();
     GRUQuantParams params_cpu = calculateGRUQuantitativeParametersFromHistograms(
-        hist_cpu, bitwidth_config, false, false);
+        hist_cpu, bitwidth_config, false);
     double sqnr_cpu_ms = cpu_timer.stop_ms();
     printf("  [Step 4a] SQNR param (CPU): %.3f ms\n", sqnr_cpu_ms);
 
     timer.start();
     GRUQuantParams params_gpu = calculateGRUQuantitativeParametersFromGPUHistograms(
-        gpu_hist, bitwidth_config, false);
+        gpu_hist, bitwidth_config);
     float sqnr_gpu_ms = timer.stop();
     printf("  [Step 4b] SQNR param (GPU): %.3f ms (%.1fx speedup)\n", 
            sqnr_gpu_ms, sqnr_cpu_ms / sqnr_gpu_ms);
@@ -342,7 +342,7 @@ GRUQuantParams calibrateWithHistogram(
         for (int run = 0; run < PERC_RUNS; ++run) {
             cpu_timer.start();
             params_percentile = calculateGRUQuantitativeParametersFromHistograms(
-                hist_cpu, bitwidth_config, false, true, 99.99f);
+                hist_cpu, bitwidth_config, true, 99.99f);
             percentile_total += cpu_timer.stop_ms();
         }
         printf("  [Step 5] Percentile param (OpenMP 4T, avg of %d): %.3f ms\n", 
