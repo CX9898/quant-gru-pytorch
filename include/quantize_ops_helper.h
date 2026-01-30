@@ -46,6 +46,7 @@
 #include <cublas_v2.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <iostream>
 #include <vector>
@@ -1124,6 +1125,15 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
                          int32_t zp_r, int8_t shift_g, int32_t zp_g,
                          int8_t shift_hh, int32_t zp_hh);
 
+/// @brief GPU 原地反量化 V 向量（float 输入的量化值）
+/// V 布局: [time_steps, batch_size, hidden_size * 4]
+/// 4个部分使用不同量化参数: [z_out, r_out, g_out, weight_hh_linear_g]
+/// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
+void dequantificationVFPInplace(float *data, int time_steps, int batch_size,
+                                int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
+                                int32_t zp_r, int8_t shift_g, int32_t zp_g,
+                                int8_t shift_hh, int32_t zp_hh);
+
 /// @brief GPU Per-channel 反量化（float 输入的量化值）
 /// @param quant_data 量化后的数据（float 存储，实际是定点整数）
 /// @param data 反量化后的输出数据
@@ -1181,6 +1191,18 @@ void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *ma
                                 size_t input_size, size_t channel_size,
                                 const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
+/// @brief GPU Per-gate 量化（float 输出，用于 GRU 权重）
+/// @tparam Training 是否训练模式（决定是否使用 mask）
+/// @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+/// @param input_size 输入维度（对于 W 是 input_size，对于 R 是 hidden_size）
+/// @param hidden_size 隐藏层维度
+/// @param exp2_inv_z/r/g 三个 gate 的量化参数
+template <bool Training = false>
+void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
+                             size_t input_size, size_t hidden_size,
+                             int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                             QuantBitWidth bw);
+
 /// @brief GPU Per-channel 量化（int32 输出）
 /// @tparam Training 是否训练模式（决定是否使用 mask）
 /// @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
@@ -1202,10 +1224,63 @@ void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
                           size_t channel_size,
                           const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
 
+// ============================================================================
+// 通用权重量化函数（根据 granularity 自动选择）
+// ============================================================================
+
+/// @brief GPU 权重量化（float 输出，根据 granularity 自动选择）
+/// @tparam Training 是否训练模式（决定是否使用 mask）
+/// @param src 输入权重数据
+/// @param quant_data 输出量化数据
+/// @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+/// @param input_size 输入维度（对于 W 是 input_size，对于 R 是 hidden_size）
+/// @param hidden_size 隐藏层维度
+/// @param granularity 量化粒度（PER_TENSOR, PER_GATE, PER_CHANNEL）
+/// @param shift_tensor per-tensor 的 shift 值（granularity == PER_TENSOR 时使用）
+/// @param shift_gate per-gate 的 shift 数组 [z, r, g]（granularity == PER_GATE 时使用）
+/// @param shift_channel per-channel 的 shift 数组（granularity == PER_CHANNEL 时使用，非 PER_CHANNEL 时可为空 vector）
+/// @param bw 位宽配置
+template <bool Training = false>
+void quantificationWeightFP(const float *src, float *quant_data, uint8_t *mask,
+                             size_t input_size, size_t hidden_size,
+                             OperatorQuantConfig::QuantizationGranularity granularity,
+                             int8_t shift_tensor,
+                             const std::array<int8_t, 3> &shift_gate,
+                             const dev::vector<int8_t> &shift_channel,
+                             QuantBitWidth bw);
+
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
                                 size_t channel_size, const dev::vector<int8_t> &exp2_invs);
+
+// ============================================================================
+// GRU 权重量化统一接口（封装 W, R, bw, br）
+// ============================================================================
+
+/// @brief GRU 权重量化统一接口（根据 granularity 自动选择量化方式）
+/// @tparam Training 是否训练模式（决定是否使用 mask）
+/// @param W 输入权重 W [input_size, hidden_size * 3]
+/// @param R 循环权重 R [hidden_size, hidden_size * 3]
+/// @param bw 输入偏置 bw [hidden_size * 3]
+/// @param br 循环偏置 br [hidden_size * 3]
+/// @param W_q_out 输出量化权重 W（必须由外部分配内存）
+/// @param R_q_out 输出量化权重 R（必须由外部分配内存）
+/// @param bw_q_out 输出量化偏置 bw（必须由外部分配内存）
+/// @param br_q_out 输出量化偏置 br（必须由外部分配内存）
+/// @param W_mask 训练模式时保存 W 的 clamp mask，推理模式时可为 nullptr
+/// @param R_mask 训练模式时保存 R 的 clamp mask，推理模式时可为 nullptr
+/// @param bw_mask 训练模式时保存 bw 的 clamp mask，推理模式时可为 nullptr
+/// @param br_mask 训练模式时保存 br 的 clamp mask，推理模式时可为 nullptr
+/// @param input_size 输入维度
+/// @param hidden_size 隐藏层维度
+/// @param quant_params 量化参数（包含 granularity 配置和 shift 值）
+template <bool Training = false>
+void quantizeGRUWeights(const float *W, const float *R, const float *bw, const float *br,
+                        float *W_q_out, float *R_q_out, float *bw_q_out, float *br_q_out,
+                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask,
+                        size_t input_size, size_t hidden_size,
+                        const GRUQuantParams &quant_params);
 
 }  // namespace dev
 

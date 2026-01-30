@@ -261,6 +261,7 @@ void forwardWithCalibrationGPU(
     CalibrationMethod calib_method,
     GRUQuantizationRanges *quant_ranges,              // MINMAX 时必须非空
     GRUGPUHistogramCollectors *gpu_hist_collectors,   // SQNR/Percentile 时必须非空
+    const OperatorQuantConfig &bitwidth_config,      // 位宽配置（用于直方图收集）
     float *h, float *v);
 
 // 将 GPU 直方图收集器转换为 CPU 版本
@@ -319,26 +320,26 @@ void quantGRUForwardFP(
     const GRUQuantParams &quant_params,
     const cublasHandle_t &g_blas_handle,
     float *h, float *v,
-    // 输入量化 mask（外部分配，nullptr=不保存）
-    uint8_t *x_mask = nullptr,
-    uint8_t *h0_mask = nullptr,
-    uint8_t *W_mask = nullptr,
-    uint8_t *R_mask = nullptr,
-    uint8_t *bw_mask = nullptr,
-    uint8_t *br_mask = nullptr,
-    // 计算过程 mask（外部分配，nullptr=不保存）
-    uint8_t *weight_ih_linear_mask = nullptr,
-    uint8_t *weight_hh_linear_mask = nullptr,
-    uint8_t *gate_input_mask = nullptr,
-    uint8_t *gate_output_mask = nullptr,
-    uint8_t *h_mask = nullptr,
-    // 新增：输出量化后的值（仅在训练模式时使用，推理模式可为 nullptr）
+    // 输出量化后的值（必须由外部分配内存，训练和推理模式都需要）
     // 函数会直接写入这些指针指向的内存，无需拷贝
-    float *W_q_out = nullptr,  // [input_size, hidden_size * 3]
-    float *R_q_out = nullptr,  // [hidden_size, hidden_size * 3]
-    float *bw_q_out = nullptr, // [hidden_size * 3]
-    float *br_q_out = nullptr, // [hidden_size * 3]
-    float *x_q_out = nullptr);  // [time_steps, batch_size, input_size]
+    float *W_q_out,  // [input_size, hidden_size * 3]
+    float *R_q_out,  // [hidden_size, hidden_size * 3]
+    float *bw_q_out, // [hidden_size * 3]
+    float *br_q_out, // [hidden_size * 3]
+    float *x_q_out,  // [time_steps, batch_size, input_size]
+    // 输入量化 mask（外部分配，nullptr=不保存）
+    uint8_t *x_mask,
+    uint8_t *h0_mask,
+    uint8_t *W_mask,
+    uint8_t *R_mask,
+    uint8_t *bw_mask,
+    uint8_t *br_mask,
+    // 计算过程 mask（外部分配，nullptr=不保存）
+    uint8_t *weight_ih_linear_mask,
+    uint8_t *weight_hh_linear_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
+    uint8_t *h_mask);
 
 
 // =====================================================================

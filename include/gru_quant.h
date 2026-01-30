@@ -193,7 +193,8 @@ private:
     private_data *data_;
 
     GateQuantParamsFP gate_params_;
-    LinearQuantParamsGPUFP linear_params_;
+    LinearRescaleParamsFP linear_params_;  ///< Linear 层量化参数（统一管理，直接传递给 kernel）
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（单独存储，作为 kernel 参数传递）
 
     int max_steps_ = 0;
 
@@ -207,8 +208,11 @@ private:
     dev::vector<float> R_sum_mul_h_zp_;  // [hidden*3]
     bool weight_sums_computed_ = false;
 
-    // LinearRescaleParamsFP（在 setRescaleParam 中填充静态部分，在 IterateInternal 中更新 bw/br）
-    LinearRescaleParamsFP linear_rescale_params_;
+    // Per-channel 数组存储（PER_CHANNEL 粒度时使用，指针存储在 linear_params_ 中）
+    dev::vector<float> inv_div_gemm_x_to_weight_ih_linear_;  // [3*hidden] PER_CHANNEL 时使用
+    dev::vector<float> inv_div_bw_to_gemm_x_;              // [3*hidden] PER_CHANNEL 时使用
+    dev::vector<float> inv_div_gemm_h_to_weight_hh_linear_;  // [3*hidden] PER_CHANNEL 时使用
+    dev::vector<float> inv_div_br_to_gemm_h_;              // [3*hidden] PER_CHANNEL 时使用
 
     const float *cached_W_ = nullptr;
     const float *cached_R_ = nullptr;

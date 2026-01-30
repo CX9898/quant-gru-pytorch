@@ -9,6 +9,7 @@
 #include <thrust/reduce.h>
 
 #include <algorithm>
+#include <array>
 #include <cfloat>  // for FLT_MAX
 #include <cmath>
 #include <limits>
@@ -743,6 +744,71 @@ void collect_per_channel_histograms_batch(PerChannelHistogramBatch& batch,
     cudaStreamSynchronize(stream);
     
     batch.per_channel_count = input_size;
+}
+
+// ============================================================================
+// Per-Gate 直方图收集实现
+// ============================================================================
+
+/**
+ * @brief 提取 2D 数据中某个门的所有数据到临时缓冲区
+ *
+ * 数据布局: [input_size, channel_size]，其中 channel_size = hidden_size * 3
+ * 对于门 gate (0=z, 1=r, 2=g)，需要提取所有 [input_size, hidden_size] 的数据
+ * 即: data[i * channel_size + gate_start + j]，其中 i ∈ [0, input_size), j ∈ [0, hidden_size)
+ */
+__global__ void extract_gate_data_2d_kernel(
+    const float* __restrict__ src_data,
+    float* __restrict__ dst_data,
+    int input_size,
+    int channel_size,
+    int hidden_size,
+    int gate_idx) {
+    const int gate_start = gate_idx * hidden_size;
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total_size = input_size * hidden_size;
+    
+    if (idx >= total_size) return;
+    
+    const int i = idx / hidden_size;  // input 索引
+    const int j = idx % hidden_size;  // channel 索引（在门内）
+    const int src_idx = i * channel_size + gate_start + j;
+    
+    dst_data[idx] = src_data[src_idx];
+}
+
+void collect_per_gate_histograms(std::array<GPUHistogramCollector, 3>& gate_collectors,
+                                 const float* data_dev, int input_size, int hidden_size,
+                                 bool is_2d, cudaStream_t stream) {
+    if (input_size == 0 || hidden_size == 0) return;
+    
+    if (is_2d) {
+        // 2D 数据（W, R）：需要提取每个门的数据
+        const int channel_size = hidden_size * 3;
+        const int gate_data_size = input_size * hidden_size;
+        
+        // 为每个门分配临时缓冲区
+        dev::vector<float> gate_data_buf(gate_data_size);
+        
+        const int threads = 256;
+        const int blocks = (gate_data_size + threads - 1) / threads;
+        
+        for (int gate = 0; gate < 3; ++gate) {
+            // 提取该门的所有数据
+            extract_gate_data_2d_kernel<<<blocks, threads, 0, stream>>>(
+                data_dev, gate_data_buf.data(), input_size, channel_size, hidden_size, gate);
+            
+            // 收集直方图
+            gate_collectors[gate].collect(gate_data_buf.data(), gate_data_size, stream);
+        }
+    } else {
+        // 1D 数据（bw, br）：直接使用指针偏移
+        for (int gate = 0; gate < 3; ++gate) {
+            const int gate_start = gate * hidden_size;
+            const float* gate_data = data_dev + gate_start;
+            gate_collectors[gate].collect(gate_data, hidden_size, stream);
+        }
+    }
 }
 
 }  // namespace gpu_hist
