@@ -118,13 +118,13 @@ void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, con
                        static_cast<int64_t>(x[n * input_size + k]);
             }
             int64_t gemm_val = acc - W_sum_mul_x_zp_[m];
-            int32_t gemm_result = static_cast<int32_t>(
-                rshift_round(gemm_val, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
-                gate_params_.zp_weight_ih_linear_;
             
-            // 添加 bias: bw 移位到 weight_ih_linear 空间
-            int32_t bias_rescaled = rshift_round(bw[m], linear_params_.shift_bw_to_weight_ih_linear_[m]);
-            int32_t result = gemm_result + bias_rescaled;
+            // bias 先移位到 GEMM 空间，再和 GEMM 结果一起移位到 Linear scale
+            int64_t bias_shifted = rshift_round(static_cast<int64_t>(bw[m]), linear_params_.shift_bw_to_weight_ih_linear_[m]);
+            int64_t gemm_plus_bias = gemm_val + bias_shifted;
+            int32_t result = static_cast<int32_t>(
+                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
+                gate_params_.zp_weight_ih_linear_;
             tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_ih_linear_);
         }
     }
@@ -144,13 +144,13 @@ void ForwardPassQuantCPU::ComputeLinearH(const int32_t *R, const int32_t *h, con
                        static_cast<int64_t>(h[n * hidden_size + k]);
             }
             int64_t gemm_val = acc - R_sum_mul_h_zp_[m];
-            int32_t gemm_result = static_cast<int32_t>(
-                rshift_round(gemm_val, linear_params_.shift_gemm_h_to_weight_hh_linear_[m])) +
-                gate_params_.zp_weight_hh_linear_;
             
-            // 添加 bias: br 移位到 weight_hh_linear 空间
-            int32_t bias_rescaled = rshift_round(br[m], linear_params_.shift_br_to_weight_hh_linear_[m]);
-            int32_t result = gemm_result + bias_rescaled;
+            // bias 先移位到 GEMM 空间，再和 GEMM 结果一起移位到 Linear scale
+            int64_t bias_shifted = rshift_round(static_cast<int64_t>(br[m]), linear_params_.shift_br_to_weight_hh_linear_[m]);
+            int64_t gemm_plus_bias = gemm_val + bias_shifted;
+            int32_t result = static_cast<int32_t>(
+                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_h_to_weight_hh_linear_[m])) +
+                gate_params_.zp_weight_hh_linear_;
             tmp_weight_hh_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_hh_linear_);
         }
     }
@@ -177,18 +177,18 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
             const int new_idx = weight_idx + 2 * hidden_size;
 
             // GEMM+bias 融合版本：直接使用 Wx_bw 和 Rh_br
+            // CPU 版本不使用 mask（推理模式），与主项目保持一致
             const int32_t update_gate = computeUpdateGate(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gate_params_);
             const int32_t reset_gate = computeResetGate(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gate_params_);
 
-            int32_t weight_hh_linear_g;
-            const int32_t new_gate = computeNewGate(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gate_params_, weight_hh_linear_g);
+            const int32_t new_gate = computeNewGate(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gate_params_);
 
             if (training && v != nullptr) {
                 const int base_v_idx = col * (hidden_size * 4) + row;
                 v[base_v_idx + 0 * hidden_size] = update_gate;
                 v[base_v_idx + 1 * hidden_size] = reset_gate;
                 v[base_v_idx + 2 * hidden_size] = new_gate;
-                v[base_v_idx + 3 * hidden_size] = weight_hh_linear_g;
+                v[base_v_idx + 3 * hidden_size] = tmp_weight_hh_linear_[new_idx];  // 直接使用 tmp_weight_hh_linear_[new_idx]，与主项目一致
             }
 
             int32_t cur_h = computeHiddenState(update_gate, new_gate, h[output_idx], gate_params_);
@@ -219,8 +219,11 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     for (int idx = 0; idx < channel; ++idx) {
         linear_params_.shift_gemm_x_to_weight_ih_linear_[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
         linear_params_.shift_gemm_h_to_weight_hh_linear_[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - parms.shift_weight_ih_linear_;
-        linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - parms.shift_weight_hh_linear_;
+        // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
+        // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
+        // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
+        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
+        linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
     }
 
     // ==================== 门计算参数（标量）====================
@@ -240,25 +243,19 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
     gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
 
-    // new gate
+    // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
     gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
     gate_params_.zp_new_gate_output_ = parms.zp_new_gate_output_;
-    gate_params_.shift_reset_gate_mul_hh_to_mul_reset_hidden_ =
-        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_mul_reset_hidden_;
-    gate_params_.zp_mul_reset_hidden_ = parms.zp_mul_reset_hidden_;
     gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
-    gate_params_.shift_mul_reset_hidden_to_new_gate_input_ = parms.shift_mul_reset_hidden_ - parms.shift_new_gate_input_;
+    gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
+        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
 
-    // h_new
+    // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
     gate_params_.quant_one_in_update_gate_scale_ = rshift_round(1, -parms.shift_update_gate_output_) + parms.zp_update_gate_output_;
-    gate_params_.zp_mul_new_contribution_ = parms.zp_mul_new_contribution_;
-    gate_params_.shift_update_new_to_mul_new_contribution_ =
-        (parms.shift_update_gate_output_ + parms.shift_new_gate_output_) - parms.shift_mul_new_contribution_;
-    gate_params_.zp_mul_old_contribution_ = parms.zp_mul_old_contribution_;
-    gate_params_.shift_update_h_to_mul_old_contribution_ =
-        (parms.shift_update_gate_output_ + parms.shift_h_) - parms.shift_mul_old_contribution_;
-    gate_params_.shift_mul_new_contribution_to_h_ = parms.shift_mul_new_contribution_ - parms.shift_h_;
-    gate_params_.shift_mul_old_contribution_to_h_ = parms.shift_mul_old_contribution_ - parms.shift_h_;
+    // new_gate_output 对齐到 h 的移位
+    gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
+    // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
+    gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
 
     // 位宽配置和 LUT
     gate_params_.bitwidth_config_ = parms.bitwidth_config_;
@@ -294,6 +291,22 @@ void ForwardPassQuantCPU::Run(int steps, const int32_t *W, const int32_t *R,
                         v ? v + i * NH * 4 : nullptr,
                         tmp_weight_ih_linear_.data() + i * NH3,
                         zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
+    }
+}
+
+void ForwardPassQuantCPU::GetIntermediateValues(std::vector<int32_t>* weight_ih_linear_out,
+                                                std::vector<int32_t>* weight_hh_linear_out,
+                                                std::vector<int32_t>* gates_out) const {
+    if (weight_ih_linear_out) {
+        *weight_ih_linear_out = tmp_weight_ih_linear_;
+    }
+    if (weight_hh_linear_out) {
+        *weight_hh_linear_out = tmp_weight_hh_linear_;
+    }
+    // gates_out 需要从 v 中提取，但 v 是外部传入的，这里无法获取
+    // 所以 gates_out 暂时留空，或者需要修改接口
+    if (gates_out) {
+        gates_out->clear();
     }
 }
 

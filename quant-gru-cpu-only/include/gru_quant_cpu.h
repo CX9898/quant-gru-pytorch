@@ -47,6 +47,14 @@ class ForwardPassQuantCPU {
              const int32_t *x, int32_t *h, int32_t *v, float zoneout_prob,
              const int32_t *zoneout_mask);
 
+    /// @brief 获取中间值（用于调试和比较）
+    /// @param weight_ih_linear_out 输出 weight_ih_linear (W*x + bw) 的量化值
+    /// @param weight_hh_linear_out 输出 weight_hh_linear (R*h + br) 的量化值（最后一个时间步）
+    /// @param gates_out 输出门控值 [update_gate, reset_gate, new_gate] (最后一个时间步，第一个batch)
+    void GetIntermediateValues(std::vector<int32_t>* weight_ih_linear_out,
+                               std::vector<int32_t>* weight_hh_linear_out,
+                               std::vector<int32_t>* gates_out) const;
+
    private:
     struct PrivateData;
     std::unique_ptr<PrivateData> data_;
