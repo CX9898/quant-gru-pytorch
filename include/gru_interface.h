@@ -77,8 +77,9 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
 // 权重量化接口
 // =====================================================================
 
-// 量化权重矩阵和偏置（统一 int32_t 存储）
+// GPU 权重量化（统一模板接口，支持训练模式 mask）
 // 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
+// @tparam Training 是否训练模式（决定是否使用 mask）
 // 输入（浮点）:
 //   W:  [C, H*3]   输入权重矩阵
 //   R:  [H, H*3]   循环权重矩阵
@@ -89,10 +90,20 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
 //   R_quant:  [H, H*3]   量化后的循环权重
 //   bw_quant: [H*3]      量化后的输入偏置
 //   br_quant: [H*3]      量化后的循环偏置
+// @param W_mask, R_mask, bw_mask, br_mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
+template <bool Training>
 void quantitativeWeight(const int input_size, const int hidden_size,
                         const float *W, const float *R, const float *bw, const float *br,
                         const GRUQuantParams &quant_parms,
-                        int32_t *W_quant, int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant);
+                        int32_t *W_quant, int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant,
+                        uint8_t *W_mask = nullptr, uint8_t *R_mask = nullptr,
+                        uint8_t *bw_mask = nullptr, uint8_t *br_mask = nullptr);
+
+// CPU 权重量化（统一接口）
+void quantitativeWeightCPU(const int input_size, const int hidden_size, const float *W, const float *R,
+                           const float *bw, const float *br,
+                           const GRUQuantParams &quant_parms, int32_t *W_quant,
+                           int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant);
 
 // GRU 权重量化统一接口（封装 W, R, bw, br）- 浮点存储版本
 // 根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 量化
@@ -134,9 +145,100 @@ void dequantizeGRUWeights(float *W_q, float *R_q, float *bw_q, float *br_q,
 // =====================================================================
 // GPU 量化 GRU 前向传播接口
 // =====================================================================
+//
+// 接口使用说明：
+// ============
+//
+// 【GPU 量化接口对比】
+//
+// 1. quantGRUForwardInt (整数版，int32_t 存储)
+//    ──────────────────────────────────────────
+//    特点：
+//      - 量化值使用 int32_t 存储
+//      - 内部调用 quantGRUForwardInt32 进行核心计算
+//      - 使用整数 GEMM 和 LUT 激活函数
+//      - 适合需要精确整数计算的场景
+//    输入/输出：
+//      - 输入：浮点（内部自动量化）
+//      - 输出：浮点（内部自动反量化）
+//    使用场景：
+//      - 需要 bit-exact 整数计算的训练/推理
+//      - 与 CPU 版本进行 bit-exact 对比
+//      - 量化感知训练（QAT）
+//
+// 2. quantGRUForwardFP (浮点存储版)
+//    ──────────────────────────────
+//    特点：
+//      - 量化值使用 float 存储（值仍是定点整数）
+//      - 使用 cuBLAS SGEMM + 单独的 bias/rescale kernel
+//      - 只使用 real_sigmoid/real_tanh，不用 LUT
+//      - shift 预处理为除数，避免运行时位移
+//    输入/输出：
+//      - 输入：浮点（内部自动量化）
+//      - 输出：浮点（内部自动反量化）
+//      - 额外输出：量化值缓冲区（W_q_out, R_q_out 等）
+//    使用场景：
+//      - 需要浮点存储格式的训练/推理
+//      - 需要获取量化中间值的场景
+//      - 量化感知训练（QAT）
+//
+// 3. quantGRUForwardInt32 (核心实现，纯定点)
+//    ────────────────────────────────────────
+//    特点：
+//      - 接受已量化的 int32_t 输入（外部需先量化）
+//      - 输出 int32_t 量化值
+//      - 所有高层接口都调用此函数
+//      - 纯定点计算，无量化/反量化开销
+//    输入/输出：
+//      - 输入：已量化的 int32_t（W_q, R_q, bw_q, br_q, x_q, h0_q）
+//      - 输出：int32_t 量化值（h_q, v_q）
+//    使用场景：
+//      - 需要直接控制量化过程的场景
+//      - 避免重复量化的高性能场景
+//      - 自定义量化流程
+//
+// 【CPU 接口】
+//
+// 4. quantGRUForwardCPU (CPU 版本)
+//    ─────────────────────────────
+//    特点：
+//      - 纯 CPU 实现，不依赖 CUDA
+//      - 支持 int32_t 或 float 输入（函数重载）
+//    输入/输出：
+//      - 版本1：int32_t 权重 + float 输入
+//      - 版本2：float 权重 + float 输入（内部量化）
+//      - 输出：float（反量化后的值）
+//    使用场景：
+//      - CPU 推理或测试
+//      - 跨平台部署
+//      - 与 GPU 版本进行 bit-exact 对比
+//
+// 【浮点接口】
+//
+// 5. hasteGRUForward (浮点版本)
+//    ──────────────────────────
+//    特点：
+//      - 完全浮点计算，无量化
+//      - 使用标准浮点 GEMM 和激活函数
+//    输入/输出：
+//      - 输入：float
+//      - 输出：float
+//    使用场景：
+//      - 基准测试或浮点训练
+//      - 精度对比参考
+//
+// 【选择建议】
+//    - 需要 bit-exact 整数计算 → quantGRUForwardInt
+//    - 需要浮点存储格式 → quantGRUForwardFP
+//    - 需要直接控制量化 → quantGRUForwardInt32
+//    - CPU 推理 → quantGRUForwardCPU
+//    - 浮点基准 → hasteGRUForward
+//
+// =====================================================================
 
-// GPU 量化 GRU 前向传播（浮点输入/输出，内部自动量化权重和激活）
+// GPU 量化 GRU 前向传播（整数版，int32_t 存储，浮点输入/输出）
 // 所有量化值使用 int32_t 存储，实际位宽通过 bitwidth_config_ 控制
+// 内部调用 quantGRUForwardInt32 进行核心计算
 // 输入:
 //   W:  [C, H*3]   浮点输入权重（内部会量化）
 //   R:  [H, H*3]   浮点循环权重（内部会量化）
@@ -161,7 +263,7 @@ void dequantizeGRUWeights(float *W_q, float *R_q, float *bw_q, float *br_q,
 //     gate_input_mask: [T*B*H*3] 门输入 clamp mask
 //     gate_output_mask: [T*B*H*3] 门输出 clamp mask
 //     h_mask: [T*B*H]
-void quantGRUForward(
+void quantGRUForwardInt(
     bool is_training,
     const int time_steps, const int batch_size, const int input_size, const int hidden_size,
     const float *W, const float *R, const float *bw, const float *br, const float *x,
@@ -231,17 +333,17 @@ void quantGRUForwardCPU(
 
 // GPU 纯定点 GRU 前向传播（int32 输入/输出）
 // 这是量化 GRU 的核心计算，所有高层接口都调用此函数
-// 输入（全部 int32，GPU 内存）:
+// 输入（已量化，int32_t，GPU 内存）:
 //   W_q:  [C, H*3]   量化后的输入权重
 //   R_q:  [H, H*3]   量化后的循环权重
 //   bw_q: [H*3]      量化后的输入偏置
 //   br_q: [H*3]      量化后的循环偏置
 //   x_q:  [T, B, I]  量化后的输入序列
-//   h0_q: [B, H]     量化后的初始隐藏状态（可为 nullptr，则使用 zp_h）
-// 输出（int32，GPU 内存）:
-//   h_q:  [(T+1), B, H]  所有时间步的量化隐藏状态
+//   h0_q: [B, H]     量化后的初始隐藏状态（可为 nullptr，nullptr 时使用零点值）
+// 输出（全部 int32，GPU 内存）:
+//   h_q:  [(T+1), B, H]  所有时间步的隐藏状态（量化值）
 //   v_q:  [T, B, H*4]    量化中间值（可为 nullptr）
-// QAT mask 输出（外部分配，nullptr=不保存）:
+// 计算过程 mask（外部分配，nullptr=不保存）:
 //   weight_ih_linear_mask: [T*B, H*3]
 //   weight_hh_linear_mask: [T*B, H*3]
 //   gate_input_mask: [T*B, H*3] 门输入 clamp mask
@@ -255,6 +357,7 @@ void quantGRUForwardInt32(
     const GRUQuantParams &quant_params,
     const cublasHandle_t &g_blas_handle,
     int32_t *h_q, int32_t *v_q,
+    // 计算过程 mask（外部分配，nullptr=不保存）
     uint8_t *weight_ih_linear_mask = nullptr,
     uint8_t *weight_hh_linear_mask = nullptr,
     uint8_t *gate_input_mask = nullptr,

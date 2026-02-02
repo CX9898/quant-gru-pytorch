@@ -52,6 +52,12 @@ class ForwardPassQuant {
              uint8_t *gate_output_mask = nullptr,
              uint8_t *h_mask = nullptr);
 
+    /// @brief 获取中间值（用于调试和比较）
+    /// @param weight_ih_linear_out 输出 weight_ih_linear (W*x + bw) 的量化值
+    /// @param weight_hh_linear_out 输出 weight_hh_linear (R*h + br) 的量化值（最后一个时间步）
+    void GetIntermediateValues(dev::vector<int32_t>* weight_ih_linear_out,
+                               dev::vector<int32_t>* weight_hh_linear_out) const;
+
    private:
     // 内部迭代函数 (Linear 融合版本)
     // cur_linear_x: 当前时间步的 W*x + bw 结果（指向 tmp_linear_x_ 的偏移）
