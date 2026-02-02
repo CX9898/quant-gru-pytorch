@@ -209,19 +209,29 @@ void runFloatInference(int time_steps, int batch_size, int input_size, int hidde
 void runQuantInference(int time_steps, int batch_size, int input_size, int hidden_size,
                        const float *W, const float *R, const float *bw, const float *br,
                        const float *x, const GRUQuantParams &quant_params, float *h) {
-    ScopeTimer t("QuantInference (GPU):");
-    // 分配量化输出缓冲区（必须由外部分配）
-    dev::vector<float> W_q(input_size * hidden_size * 3);
-    dev::vector<float> R_q(hidden_size * hidden_size * 3);
-    dev::vector<float> bw_q(hidden_size * 3);
-    dev::vector<float> br_q(hidden_size * 3);
-    dev::vector<float> x_q(time_steps * batch_size * input_size);
+    ScopeTimer t("QuantInference (GPU-INT):");
+    // 1. 分配输出量化值缓冲区（必须由外部分配）
+    dev::vector<int32_t> W_q_int32(input_size * hidden_size * 3);
+    dev::vector<int32_t> R_q_int32(hidden_size * hidden_size * 3);
+    dev::vector<int32_t> bw_q_int32(hidden_size * 3);
+    dev::vector<int32_t> br_q_int32(hidden_size * 3);
+    const int x_size = time_steps * batch_size * input_size;
+    dev::vector<int32_t> x_q_int32(x_size);
     
-    quantGRUForwardFP(false, time_steps, batch_size, input_size, hidden_size,
-                      W, R, bw, br, x, nullptr, quant_params, g_blas_handle, h, nullptr,
-                      W_q.data(), R_q.data(), bw_q.data(), br_q.data(), x_q.data(),
-                      nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                      nullptr, nullptr, nullptr, nullptr, nullptr);
+    // 2. 分配输出缓冲区（int32_t）
+    dev::vector<int32_t> h_q_int32((time_steps + 1) * batch_size * hidden_size);
+    
+    // 3. 调用 quantGRUForwardInt32（内部会进行量化）
+    quantGRUForwardInt32(false, time_steps, batch_size, input_size, hidden_size,
+                        W, R, bw, br, x, nullptr, quant_params, g_blas_handle,
+                        h_q_int32.data(), nullptr,
+                        W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
+                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                        nullptr, nullptr, nullptr, nullptr, nullptr);
+    
+    // 4. 反量化输出为浮点（使用通用接口）
+    dev::dequantification(h_q_int32.data(), h, (time_steps + 1) * batch_size * hidden_size,
+                          quant_params.shift_h_, quant_params.zp_h_);
 }
 
 // ==================== CPU 量化推理 ====================
@@ -562,42 +572,52 @@ int main(int argc, char *argv[]) {
     printf("\n----- Quant Training (GPU-INT) -----\n");
     GRUTrainGradients gradients_quant;
     {
-        dev::vector<float> h_train((T + 1) * B * H);
-        dev::vector<float> v_train(T * B * H * 4);
+        // 1. 分配输出量化值缓冲区（必须由外部分配，训练和推理模式都需要）
+        dev::vector<int32_t> W_q_int32(I * H * 3), R_q_int32(H * H * 3), bw_q_int32(H * 3), br_q_int32(H * 3);
+        const int x_size = T * B * I;
+        dev::vector<int32_t> x_q_int32(x_size);
         
-        // training=true 时需要分配 mask 缓冲区
-        // 输入量化 mask
+        // 输入量化 mask（训练模式必须生成）
         dev::vector<uint8_t> x_mask(T * B * I);
         dev::vector<uint8_t> h0_mask(B * H);
+        // 权重量化 mask（训练模式必须生成）
         dev::vector<uint8_t> W_mask(I * H * 3);
         dev::vector<uint8_t> R_mask(H * H * 3);
         dev::vector<uint8_t> bw_mask(H * 3);
         dev::vector<uint8_t> br_mask(H * 3);
-        // 计算过程 mask
+        
+        // 2. 分配输出缓冲区（int32_t）
+        dev::vector<int32_t> h_q_int32((T + 1) * B * H);
+        dev::vector<int32_t> v_q_int32(T * B * H * 4);
+        
+        // 计算过程 mask（训练模式必须生成）
         dev::vector<uint8_t> weight_ih_mask(T * B * H * 3);
         dev::vector<uint8_t> weight_hh_mask(T * B * H * 3);
         dev::vector<uint8_t> gate_input_mask(T * B * H * 3);
         dev::vector<uint8_t> gate_output_mask(T * B * H * 3);
         dev::vector<uint8_t> h_mask(T * B * H);
-        
-        // 分配输出量化值缓冲区
-        dev::vector<float> W_q_out(I * H * 3);
-        dev::vector<float> R_q_out(H * H * 3);
-        dev::vector<float> bw_q_out(H * 3);
-        dev::vector<float> br_q_out(H * 3);
-        dev::vector<float> x_q_out(T * B * I);
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Forward:");
-            quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                              br_dev.data(), x_dev.data(), nullptr, quant_params, g_blas_handle,
-                              h_train.data(), v_train.data(),
-                              W_q_out.data(), R_q_out.data(), bw_q_out.data(), br_q_out.data(), x_q_out.data(),
-                              x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(), 
-                              bw_mask.data(), br_mask.data(),
-                              weight_ih_mask.data(), weight_hh_mask.data(),
-                              gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
+            quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                                x_dev.data(), nullptr, quant_params, g_blas_handle,
+                                h_q_int32.data(), v_q_int32.data(),
+                                W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
+                                x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(), bw_mask.data(), br_mask.data(),
+                                weight_ih_mask.data(), weight_hh_mask.data(),
+                                gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
         }
+        
+        // 4. 反量化输出为浮点（用于反向传播，使用通用接口）
+        dev::vector<float> h_train((T + 1) * B * H);
+        dev::vector<float> v_train(T * B * H * 4);
+        dev::dequantification(h_q_int32.data(), h_train.data(), (T + 1) * B * H,
+                              quant_params.shift_h_, quant_params.zp_h_);
+        dev::dequantificationV(v_q_int32.data(), v_train.data(), T, B, H,
+                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
 
         dev::vector<float> dx_dev(T * B * I);
         dev::vector<float> dW_dev(I * H * 3);
@@ -615,8 +635,8 @@ int main(int argc, char *argv[]) {
                              v_train.data(), g_blas_handle, dx_dev.data(), dW_dev.data(),
                              dR_dev.data(), dbx_dev.data(), dbr_dev.data(), dh_out_dev.data(),
                              &quant_params,  // 量化参数
-                             x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(),
-                             bw_mask.data(), br_mask.data(),
+                             x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(),  // 训练模式必须传递 mask
+                             bw_mask.data(), br_mask.data(),  // 训练模式必须传递 mask
                              weight_ih_mask.data(), weight_hh_mask.data(),
                              gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
         }
@@ -740,26 +760,45 @@ int main(int argc, char *argv[]) {
         dev::vector<float> h0_dev(h0_cpu);
         
         // INT32 版本 (训练模式) - 需要分配 mask
-        dev::vector<float> h_int((T + 1) * B * H);
-        dev::vector<float> v_int(T * B * H * 4);
-        // 输入量化 mask
+        // 1. 分配输出量化值缓冲区（必须由外部分配）
+        dev::vector<int32_t> W_q_int32(I * H * 3), R_q_int32(H * H * 3), bw_q_int32(H * 3), br_q_int32(H * 3);
+        const int x_size = T * B * I;
+        dev::vector<int32_t> x_q_int32(x_size);
+        
+        // 输入量化 mask（训练模式必须生成）
         dev::vector<uint8_t> x_mask_int(T * B * I);
         dev::vector<uint8_t> h0_mask_int(B * H);
         dev::vector<uint8_t> W_mask_int(I * H * 3);
         dev::vector<uint8_t> R_mask_int(H * H * 3);
         dev::vector<uint8_t> bw_mask_int(H * 3);
         dev::vector<uint8_t> br_mask_int(H * 3);
+        
+        // 2. 分配输出缓冲区（int32_t）
+        dev::vector<int32_t> h_q_int32((T + 1) * B * H);
+        dev::vector<int32_t> v_q_int32(T * B * H * 4);
         // 计算过程 mask
         dev::vector<uint8_t> mask_ih_int(T * B * H * 3), mask_hh_int(T * B * H * 3);
         dev::vector<uint8_t> mask_gate_input_int(T * B * H * 3), mask_gate_output_int(T * B * H * 3), mask_h_int(T * B * H);
-        dev::vector<float> W_q_int(I * H * 3), R_q_int(H * H * 3), bw_q_int(H * 3), br_q_int(H * 3), x_q_int(T * B * I);
-        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                          h_int.data(), v_int.data(),
-                          W_q_int.data(), R_q_int.data(), bw_q_int.data(), br_q_int.data(), x_q_int.data(),
-                          x_mask_int.data(), h0_mask_int.data(), W_mask_int.data(), R_mask_int.data(),
-                          bw_mask_int.data(), br_mask_int.data(),
-                          mask_ih_int.data(), mask_hh_int.data(), mask_gate_input_int.data(), mask_gate_output_int.data(), mask_h_int.data());
+        
+        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
+        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                            x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                            h_q_int32.data(), v_q_int32.data(),
+                            W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
+                            x_mask_int.data(), h0_mask_int.data(), W_mask_int.data(), R_mask_int.data(), bw_mask_int.data(), br_mask_int.data(),
+                            mask_ih_int.data(), mask_hh_int.data(),
+                            mask_gate_input_int.data(), mask_gate_output_int.data(), mask_h_int.data());
+        
+        // 6. 反量化输出为浮点（用于与 FP 版本比较，使用通用接口）
+        dev::vector<float> h_int((T + 1) * B * H);
+        dev::vector<float> v_int(T * B * H * 4);
+        dev::dequantification(h_q_int32.data(), h_int.data(), (T + 1) * B * H,
+                              quant_params.shift_h_, quant_params.zp_h_);
+        dev::dequantificationV(v_q_int32.data(), v_int.data(), T, B, H,
+                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
         
         // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
@@ -783,8 +822,9 @@ int main(int argc, char *argv[]) {
                           bw_mask_fp_test.data(), br_mask_fp_test.data(),
                           mask_ih_fp.data(), mask_hh_fp.data(), mask_gate_input_fp.data(), mask_gate_output_fp.data(), mask_h_fp.data());
         
-        // 比较
-        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
+        // 比较（需要从 GPU 获取数据到 CPU）
+        std::vector<float> h_int_cpu((T + 1) * B * H), h_fp_cpu((T + 1) * B * H);
+        std::vector<float> v_int_cpu(T * B * H * 4), v_fp_cpu(T * B * H * 4);
         d2h(h_int_cpu, h_int);
         d2h(h_fp_cpu, h_fp);
         d2h(v_int_cpu, v_int);
@@ -798,16 +838,24 @@ int main(int argc, char *argv[]) {
         compareHValues(h_int_out, h_fp_out, T, B, H, "H: INT vs FP (h0 non-null, training)");
         
         // 推理模式也测试一下
-        dev::vector<float> h_int_inf((T + 1) * B * H);
+        // INT32 版本（推理模式）
+        dev::vector<int32_t> W_q_inf_int32(I * H * 3), R_q_inf_int32(H * H * 3), bw_q_inf_int32(H * 3), br_q_inf_int32(H * 3);
+        dev::vector<int32_t> x_q_inf_int32(T * B * I);
+        dev::vector<int32_t> h_q_inf_int32((T + 1) * B * H);
+        quantGRUForwardInt32(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                            x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+                            h_q_inf_int32.data(), nullptr,
+                            W_q_inf_int32.data(), R_q_inf_int32.data(), bw_q_inf_int32.data(), br_q_inf_int32.data(), x_q_inf_int32.data(),
+                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                            nullptr, nullptr, nullptr, nullptr, nullptr);
+        // 使用通用接口反量化输出
+        std::vector<float> h_int_inf_cpu((T + 1) * B * H);
+        dev::dequantification(h_q_inf_int32.data(), h_int_inf_cpu.data(), (T + 1) * B * H,
+                              quant_params.shift_h_, quant_params.zp_h_);
+        
+        // FP 版本（推理模式）
         dev::vector<float> h_fp_inf((T + 1) * B * H);
-        dev::vector<float> W_q_inf1(I * H * 3), R_q_inf1(H * H * 3), bw_q_inf1(H * 3), br_q_inf1(H * 3), x_q_inf1(T * B * I);
         dev::vector<float> W_q_inf2(I * H * 3), R_q_inf2(H * H * 3), bw_q_inf2(H * 3), br_q_inf2(H * 3), x_q_inf2(T * B * I);
-        quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                          br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
-                          h_int_inf.data(), nullptr,
-                          W_q_inf1.data(), R_q_inf1.data(), bw_q_inf1.data(), br_q_inf1.data(), x_q_inf1.data(),
-                          nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                          nullptr, nullptr, nullptr, nullptr, nullptr);
         quantGRUForwardFP(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
                           h_fp_inf.data(), nullptr,
@@ -815,8 +863,7 @@ int main(int argc, char *argv[]) {
                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                           nullptr, nullptr, nullptr, nullptr, nullptr);
         
-        std::vector<float> h_int_inf_cpu, h_fp_inf_cpu;
-        d2h(h_int_inf_cpu, h_int_inf);
+        std::vector<float> h_fp_inf_cpu;
         d2h(h_fp_inf_cpu, h_fp_inf);
         compareHValues(h_int_inf_cpu, h_fp_inf_cpu, T, B, H, "H: INT vs FP (h0 non-null, inference)");
     }
@@ -835,18 +882,62 @@ int main(int argc, char *argv[]) {
         printf("h0=0.0 quantized: shift=%d, zp=%d, scale=%.6f, q_val=%.1f\n", 
                shift_h, zp_h, scale, q_h0);
         
-        // 训练模式 - 需要分配 mask
-        dev::vector<float> h_int((T + 1) * B * H);
-        dev::vector<float> v_int(T * B * H * 4);
+        // 训练模式 - INT32 版本
+        // 1. 分配输出量化值缓冲区（必须由外部分配）
+        dev::vector<int32_t> W_q_z_int32(I * H * 3), R_q_z_int32(H * H * 3), bw_q_z_int32(H * 3), br_q_z_int32(H * 3);
+        const int x_size = T * B * I;
+        dev::vector<int32_t> x_q_z_int32(x_size);
+        
+        // 输入量化 mask（训练模式必须生成）
+        dev::vector<uint8_t> x_mask_z(T * B * I);
+        dev::vector<uint8_t> h0_mask_z(B * H);
+        dev::vector<uint8_t> W_mask_z(I * H * 3);
+        dev::vector<uint8_t> R_mask_z(H * H * 3);
+        dev::vector<uint8_t> bw_mask_z(H * 3);
+        dev::vector<uint8_t> br_mask_z(H * 3);
+        
+        // 2. 分配输出缓冲区（int32_t）
+        dev::vector<int32_t> h_q_z_int32((T + 1) * B * H);
+        dev::vector<int32_t> v_q_z_int32(T * B * H * 4);
+        // 计算过程 mask
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
+        
+        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
+        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                            x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+                            h_q_z_int32.data(), v_q_z_int32.data(),
+                            W_q_z_int32.data(), R_q_z_int32.data(), bw_q_z_int32.data(), br_q_z_int32.data(), x_q_z_int32.data(),
+                            x_mask_z.data(), h0_mask_z.data(), W_mask_z.data(), R_mask_z.data(), bw_mask_z.data(), br_mask_z.data(),
+                            m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
+        
+        // 5. 反量化输出为浮点
+        std::vector<int32_t> h_q_z_int32_cpu((T + 1) * B * H);
+        std::vector<int32_t> v_q_z_int32_cpu(T * B * H * 4);
+        d2h(h_q_z_int32_cpu, h_q_z_int32);
+        d2h(v_q_z_int32_cpu, v_q_z_int32);
+        std::vector<float> h_int_cpu((T + 1) * B * H);
+        std::vector<float> v_int_cpu(T * B * H * 4);
+        for (int i = 0; i < (T + 1) * B * H; i++) {
+            h_int_cpu[i] = dequantize(h_q_z_int32_cpu[i], quant_params.shift_h_, quant_params.zp_h_);
+        }
+        for (int i = 0; i < T * B * H * 4; i++) {
+            int gate_idx = (i / (B * H)) % 4;
+            int8_t shift = (gate_idx == 0) ? quant_params.shift_update_gate_output_ :
+                          (gate_idx == 1) ? quant_params.shift_reset_gate_output_ :
+                          (gate_idx == 2) ? quant_params.shift_new_gate_output_ :
+                          quant_params.shift_weight_hh_linear_;
+            int32_t zp = (gate_idx == 0) ? quant_params.zp_update_gate_output_ :
+                        (gate_idx == 1) ? quant_params.zp_reset_gate_output_ :
+                        (gate_idx == 2) ? quant_params.zp_new_gate_output_ :
+                        quant_params.zp_weight_hh_linear_;
+            v_int_cpu[i] = dequantize(v_q_z_int32_cpu[i], shift, zp);
+        }
+        dev::vector<float> h_int(h_int_cpu);
+        dev::vector<float> v_int(v_int_cpu);
+        
+        // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
-        // 输入量化 mask (INT 版本)
-        dev::vector<uint8_t> x_mask_z1(T * B * I);
-        dev::vector<uint8_t> h0_mask_z1(B * H);
-        dev::vector<uint8_t> W_mask_z1(I * H * 3);
-        dev::vector<uint8_t> R_mask_z1(H * H * 3);
-        dev::vector<uint8_t> bw_mask_z1(H * 3);
-        dev::vector<uint8_t> br_mask_z1(H * 3);
         // 输入量化 mask (FP 版本)
         dev::vector<uint8_t> x_mask_z2(T * B * I);
         dev::vector<uint8_t> h0_mask_z2(B * H);
@@ -855,18 +946,8 @@ int main(int argc, char *argv[]) {
         dev::vector<uint8_t> bw_mask_z2(H * 3);
         dev::vector<uint8_t> br_mask_z2(H * 3);
         // 计算过程 mask
-        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
         dev::vector<uint8_t> m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H * 3), m9(T * B * H * 3), m10(T * B * H);
-        dev::vector<float> W_q_z1(I * H * 3), R_q_z1(H * H * 3), bw_q_z1(H * 3), br_q_z1(H * 3), x_q_z1(T * B * I);
         dev::vector<float> W_q_z2(I * H * 3), R_q_z2(H * H * 3), bw_q_z2(H * 3), br_q_z2(H * 3), x_q_z2(T * B * I);
-        
-        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
-                           h_int.data(), v_int.data(),
-                           W_q_z1.data(), R_q_z1.data(), bw_q_z1.data(), br_q_z1.data(), x_q_z1.data(),
-                           x_mask_z1.data(), h0_mask_z1.data(), W_mask_z1.data(), R_mask_z1.data(),
-                           bw_mask_z1.data(), br_mask_z1.data(),
-                           m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
@@ -875,10 +956,9 @@ int main(int argc, char *argv[]) {
                           bw_mask_z2.data(), br_mask_z2.data(),
                           m6.data(), m7.data(), m8.data(), m9.data(), m10.data());
         
-        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
-        d2h(h_int_cpu, h_int);
+        // 比较（h_int_cpu 和 v_int_cpu 已经在上面定义，只需要从 GPU 获取 FP 版本）
+        std::vector<float> h_fp_cpu, v_fp_cpu;
         d2h(h_fp_cpu, h_fp);
-        d2h(v_int_cpu, v_int);
         d2h(v_fp_cpu, v_fp);
         
         std::vector<float> h_int_out(h_int_cpu.begin() + B * H, h_int_cpu.end());
@@ -894,17 +974,48 @@ int main(int argc, char *argv[]) {
         std::vector<float> h0_ones_cpu(B * H, 1.0f);
         dev::vector<float> h0_ones_dev(h0_ones_cpu);
         
+        // 训练模式 - INT32 版本
+        // 1. 分配输出量化值缓冲区（必须由外部分配）
+        dev::vector<int32_t> W_q_o_int32(I * H * 3), R_q_o_int32(H * H * 3), bw_q_o_int32(H * 3), br_q_o_int32(H * 3);
+        const int x_size = T * B * I;
+        dev::vector<int32_t> x_q_o_int32(x_size);
+        
+        // 输入量化 mask（训练模式必须生成）
+        dev::vector<uint8_t> x_mask_o(T * B * I);
+        dev::vector<uint8_t> h0_mask_o(B * H);
+        dev::vector<uint8_t> W_mask_o(I * H * 3);
+        dev::vector<uint8_t> R_mask_o(H * H * 3);
+        dev::vector<uint8_t> bw_mask_o(H * 3);
+        dev::vector<uint8_t> br_mask_o(H * 3);
+        
+        // 2. 分配输出缓冲区（int32_t）
+        dev::vector<int32_t> h_q_o_int32((T + 1) * B * H);
+        dev::vector<int32_t> v_q_o_int32(T * B * H * 4);
+        // 计算过程 mask
+        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
+        
+        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
+        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
+                            x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+                            h_q_o_int32.data(), v_q_o_int32.data(),
+                            W_q_o_int32.data(), R_q_o_int32.data(), bw_q_o_int32.data(), br_q_o_int32.data(), x_q_o_int32.data(),
+                            x_mask_o.data(), h0_mask_o.data(), W_mask_o.data(), R_mask_o.data(), bw_mask_o.data(), br_mask_o.data(),
+                            m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
+        
+        // 5. 反量化输出为浮点（使用通用接口）
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
+        dev::dequantification(h_q_o_int32.data(), h_int.data(), (T + 1) * B * H,
+                              quant_params.shift_h_, quant_params.zp_h_);
+        dev::dequantificationV(v_q_o_int32.data(), v_int.data(), T, B, H,
+                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
+        
+        // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
         dev::vector<float> v_fp(T * B * H * 4);
-        // 输入量化 mask (INT 版本)
-        dev::vector<uint8_t> x_mask_o1(T * B * I);
-        dev::vector<uint8_t> h0_mask_o1(B * H);
-        dev::vector<uint8_t> W_mask_o1(I * H * 3);
-        dev::vector<uint8_t> R_mask_o1(H * H * 3);
-        dev::vector<uint8_t> bw_mask_o1(H * 3);
-        dev::vector<uint8_t> br_mask_o1(H * 3);
         // 输入量化 mask (FP 版本)
         dev::vector<uint8_t> x_mask_o2(T * B * I);
         dev::vector<uint8_t> h0_mask_o2(B * H);
@@ -913,18 +1024,8 @@ int main(int argc, char *argv[]) {
         dev::vector<uint8_t> bw_mask_o2(H * 3);
         dev::vector<uint8_t> br_mask_o2(H * 3);
         // 计算过程 mask
-        dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
         dev::vector<uint8_t> m6(T * B * H * 3), m7(T * B * H * 3), m8(T * B * H * 3), m9(T * B * H * 3), m10(T * B * H);
-        dev::vector<float> W_q_o1(I * H * 3), R_q_o1(H * H * 3), bw_q_o1(H * 3), br_q_o1(H * 3), x_q_o1(T * B * I);
         dev::vector<float> W_q_o2(I * H * 3), R_q_o2(H * H * 3), bw_q_o2(H * 3), br_q_o2(H * 3), x_q_o2(T * B * I);
-        
-        quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
-                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
-                           h_int.data(), v_int.data(),
-                           W_q_o1.data(), R_q_o1.data(), bw_q_o1.data(), br_q_o1.data(), x_q_o1.data(),
-                           x_mask_o1.data(), h0_mask_o1.data(), W_mask_o1.data(), R_mask_o1.data(),
-                           bw_mask_o1.data(), br_mask_o1.data(),
-                           m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         quantGRUForwardFP(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(),
                           br_dev.data(), x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
                           h_fp.data(), v_fp.data(),
@@ -933,7 +1034,9 @@ int main(int argc, char *argv[]) {
                           bw_mask_o2.data(), br_mask_o2.data(),
                           m6.data(), m7.data(), m8.data(), m9.data(), m10.data());
         
-        std::vector<float> h_int_cpu, h_fp_cpu, v_int_cpu, v_fp_cpu;
+        // 比较（需要从 GPU 获取数据到 CPU）
+        std::vector<float> h_int_cpu((T + 1) * B * H), h_fp_cpu((T + 1) * B * H);
+        std::vector<float> v_int_cpu(T * B * H * 4), v_fp_cpu(T * B * H * 4);
         d2h(h_int_cpu, h_int);
         d2h(h_fp_cpu, h_fp);
         d2h(v_int_cpu, v_int);
