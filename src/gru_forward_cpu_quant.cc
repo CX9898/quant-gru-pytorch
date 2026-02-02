@@ -7,25 +7,12 @@
 //   - 所有量化值使用 int32_t 统一存储，通过 bitwidth_config_ 控制实际位宽
 //   - 复用 quantize_lut_types.h 中的 LUT 结构和 generate_*_lut 函数
 //   - 复用 quantize_ops_helper.h 中的通用函数
-//   - 支持 OpenMP 并行加速
 //
 // ============================================================================
 
 #include "gru_quant_cpu.h"
 
 #include <cstdio>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-// MSVC OpenMP 只支持 2.0 版本，不完全支持 collapse 子句
-// 使用条件编译来区分 MSVC 和 GCC/Clang
-#if defined(_MSC_VER)
-#define OMP_PARALLEL_FOR_2D _Pragma("omp parallel for")
-#else
-#define OMP_PARALLEL_FOR_2D _Pragma("omp parallel for collapse(2)")
-#endif
 
 namespace cpu {
 
@@ -97,7 +84,6 @@ void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *
     const int input_size = data_->input_size;
     const int hidden3 = hidden_size * 3;
 
-#pragma omp parallel for
     for (int m = 0; m < hidden3; m++) {
         int64_t sum = 0;
         for (int k = 0; k < input_size; k++) {
@@ -107,7 +93,6 @@ void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *
         W_sum_mul_x_zp_[m] = sum * linear_params_.zp_x_;
     }
 
-#pragma omp parallel for
     for (int m = 0; m < hidden3; m++) {
         int64_t sum = 0;
         for (int k = 0; k < hidden_size; k++) {
@@ -127,7 +112,6 @@ void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, con
     const int hidden3 = hidden_size * 3;
     const int N = steps * batch_size;
 
-OMP_PARALLEL_FOR_2D
     for (int n = 0; n < N; n++) {
         for (int m = 0; m < hidden3; m++) {
             // GEMM: W*x
@@ -154,7 +138,6 @@ void ForwardPassQuantCPU::ComputeLinearH(const int32_t *R, const int32_t *h, con
     const int hidden_size = data_->hidden_size;
     const int hidden3 = hidden_size * 3;
 
-OMP_PARALLEL_FOR_2D
     for (int n = 0; n < batch_size; n++) {
         for (int m = 0; m < hidden3; m++) {
             // GEMM: R*h
@@ -188,7 +171,6 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
     // 计算 R*h + br GEMM+bias 融合
     ComputeLinearH(R, h, br);
 
-OMP_PARALLEL_FOR_2D
     for (int col = 0; col < batch_size; col++) {
         for (int row = 0; row < hidden_size; row++) {
             const int weight_idx = col * (hidden_size * 3) + row;
