@@ -113,98 +113,178 @@ static std::vector<float> adaptive_segmentation(float x_min, float x_max, int nu
     return points;
 }
 
-SigmoidLUT generate_sigmoid_lut(int8_t shift_x, int32_t zp_x, int8_t shift_y, int32_t zp_y,
-                                 QuantBitWidth in_bw, QuantBitWidth out_bw) {
-    float scale_x = std::pow(2.0f, -shift_x);
-    float x_min = std::max((in_bw.qmin() - zp_x) * scale_x, -8.0f);
-    float x_max = std::min((in_bw.qmax() - zp_x) * scale_x, 8.0f);
+SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                                 int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    // 根据输入位宽确定量化范围（任意位宽支持，与主项目一致）
+    int32_t quant_min = input_bw.qmin();
+    int32_t quant_max = input_bw.qmax();
 
-    SigmoidLUT lut = {};
-    lut.shift_bits_x = shift_x; lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_y; lut.zp_y = zp_y;
+    float scale_x = exp2_scale(shift_bits_x);
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
-    auto pts = adaptive_segmentation(x_min, x_max, NUM_SEGMENTS);
-    
-    struct Coef { float x_end, b, c; };
-    std::vector<Coef> coeffs(NUM_SEGMENTS);
+    // Sigmoid 有效范围限制
+    constexpr float SIGMOID_EFFECTIVE_RANGE = 8.0f;
+    x_min = std::max(x_min, -SIGMOID_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
+
+    SigmoidLUT lut;
+    lut.shift_bits_x = shift_bits_x;
+    lut.zp_x = zp_x;
+    lut.shift_bits_y = shift_bits_y;
+    lut.zp_y = zp_y;
+
+    // 生成分段点
+    std::vector<float> segment_points = adaptive_segmentation(x_min, x_max, NUM_SEGMENTS);
+
+    // 第一遍扫描：拟合所有分段
+    struct SegmentCoeffs { float x_start, x_end, b, c; };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
+
     for (int i = 0; i < NUM_SEGMENTS; i++) {
-        std::vector<float> xs(100), ys(100);
-        for (int j = 0; j < 100; j++) {
-            xs[j] = pts[i] + (pts[i + 1] - pts[i]) * j / 99;
-            ys[j] = 1.0f / (1.0f + std::exp(-xs[j]));
+        float x_start = segment_points[i];
+        float x_end = segment_points[i + 1];
+
+        const int num_samples = 100;
+        std::vector<float> x_seg(num_samples), y_seg(num_samples);
+
+        for (int j = 0; j < num_samples; j++) {
+            float x_val = x_start + (x_end - x_start) * static_cast<float>(j) / (num_samples - 1);
+            x_seg[j] = x_val;
+            y_seg[j] = 1.0f / (1.0f + std::exp(-x_val));  // Sigmoid
         }
-        linear_fit(xs, ys, coeffs[i].b, coeffs[i].c);
-        coeffs[i].x_end = pts[i + 1];
+
+        float b_fp, c_fp;
+        linear_fit(x_seg, y_seg, b_fp, c_fp);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    float scale_y = std::pow(2.0f, -shift_y);
-    float b_max = 0, c_max = 0;
-    for (auto &co : coeffs) {
-        b_max = std::max(b_max, std::abs(co.b));
-        c_max = std::max(c_max, std::abs(co.c + zp_y * scale_y));
-    }
+    // 第二遍扫描：统一量化参数
+    float scale_y = exp2_scale(shift_bits_y);
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
 
-    int8_t shift_b = (out_bw.bits_ <= 8) ? determine_shift_bits_int8(b_max) : determine_shift_bits_int16(b_max);
-    int8_t shift_c = (out_bw.bits_ <= 8) ? determine_shift_bits_int8(c_max) : determine_shift_bits_int16(c_max);
-
+    float b_abs_max = 0.0f, c_abs_max = 0.0f;
     for (int i = 0; i < NUM_SEGMENTS; i++) {
-        int32_t q_b = quantize_coefficient_int32(coeffs[i].b, shift_b);
-        int32_t q_c = quantize_coefficient_int32(coeffs[i].c + zp_y * scale_y, shift_c);
-        int8_t n_bx = shift_b + shift_x - shift_y;
-        int8_t n_yc = shift_c - shift_y;
-        
-        lut.segments[i].q_b = q_b;
-        lut.segments[i].n_BX_total = n_bx;
-        lut.segments[i].term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << -n_yc);
-        lut.segments[i].threshold = clamp_by_bitwidth(static_cast<int32_t>(std::round(coeffs[i].x_end / scale_x + zp_x)), in_bw);
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        float c_adjusted = all_coeffs[i].c + zp_y_offset;
+        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
     }
+
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
+
+    // 根据输出位宽自动确定 shift_bits（与主项目一致）
+    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
+    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
+
+    // 第三遍扫描：量化每段
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        const auto &coeff = all_coeffs[i];
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
+        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
+
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
+        int8_t n_yc = shift_bits_c - shift_bits_y;
+
+        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
+
+        // threshold 量化（任意位宽支持，存储为 int32_t，与主项目一致）
+        int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
+        threshold = clamp_by_bitwidth(threshold, input_bw);
+
+        lut.segments[i].q_b = q_b;
+        lut.segments[i].n_BX_total = n_BX_total;
+        lut.segments[i].term_c_precomputed = term_c_precomputed;
+        lut.segments[i].threshold = threshold;
+    }
+
     return lut;
 }
 
-SigmoidLUT generate_tanh_lut(int8_t shift_x, int32_t zp_x, int8_t shift_y, int32_t zp_y,
-                              QuantBitWidth in_bw, QuantBitWidth out_bw) {
-    float scale_x = std::pow(2.0f, -shift_x);
-    float x_min = std::max((in_bw.qmin() - zp_x) * scale_x, -4.0f);
-    float x_max = std::min((in_bw.qmax() - zp_x) * scale_x, 4.0f);
+SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                              int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    // 根据输入位宽确定量化范围（任意位宽支持，与主项目一致）
+    int32_t quant_min = input_bw.qmin();
+    int32_t quant_max = input_bw.qmax();
 
-    SigmoidLUT lut = {};
-    lut.shift_bits_x = shift_x; lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_y; lut.zp_y = zp_y;
+    float scale_x = exp2_scale(shift_bits_x);
+    float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
+    float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
-    auto pts = adaptive_segmentation(x_min, x_max, NUM_SEGMENTS);
-    
-    struct Coef { float x_end, b, c; };
-    std::vector<Coef> coeffs(NUM_SEGMENTS);
+    // Tanh 有效范围限制
+    constexpr float TANH_EFFECTIVE_RANGE = 4.0f;
+    x_min = std::max(x_min, -TANH_EFFECTIVE_RANGE);
+    x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
+
+    SigmoidLUT lut;
+    lut.shift_bits_x = shift_bits_x;
+    lut.zp_x = zp_x;
+    lut.shift_bits_y = shift_bits_y;
+    lut.zp_y = zp_y;
+
+    std::vector<float> segment_points = adaptive_segmentation(x_min, x_max, NUM_SEGMENTS);
+
+    struct SegmentCoeffs { float x_start, x_end, b, c; };
+    std::vector<SegmentCoeffs> all_coeffs(NUM_SEGMENTS);
+
     for (int i = 0; i < NUM_SEGMENTS; i++) {
-        std::vector<float> xs(100), ys(100);
-        for (int j = 0; j < 100; j++) {
-            xs[j] = pts[i] + (pts[i + 1] - pts[i]) * j / 99;
-            ys[j] = std::tanh(xs[j]);
+        float x_start = segment_points[i];
+        float x_end = segment_points[i + 1];
+
+        const int num_samples = 100;
+        std::vector<float> x_seg(num_samples), y_seg(num_samples);
+
+        for (int j = 0; j < num_samples; j++) {
+            float x_val = x_start + (x_end - x_start) * static_cast<float>(j) / (num_samples - 1);
+            x_seg[j] = x_val;
+            y_seg[j] = std::tanh(x_val);  // Tanh
         }
-        linear_fit(xs, ys, coeffs[i].b, coeffs[i].c);
-        coeffs[i].x_end = pts[i + 1];
+
+        float b_fp, c_fp;
+        linear_fit(x_seg, y_seg, b_fp, c_fp);
+        all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    float scale_y = std::pow(2.0f, -shift_y);
-    float b_max = 0, c_max = 0;
-    for (auto &co : coeffs) {
-        b_max = std::max(b_max, std::abs(co.b));
-        c_max = std::max(c_max, std::abs(co.c + zp_y * scale_y));
+    float scale_y = exp2_scale(shift_bits_y);
+    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
+
+    float b_abs_max = 0.0f, c_abs_max = 0.0f;
+    for (int i = 0; i < NUM_SEGMENTS; i++) {
+        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
+        float c_adjusted = all_coeffs[i].c + zp_y_offset;
+        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
     }
 
-    int8_t shift_b = (out_bw.bits_ <= 8) ? determine_shift_bits_int8(b_max) : determine_shift_bits_int16(b_max);
-    int8_t shift_c = (out_bw.bits_ <= 8) ? determine_shift_bits_int8(c_max) : determine_shift_bits_int16(c_max);
+    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
+    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
+
+    // 根据输出位宽自动确定 shift_bits（与主项目一致）
+    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
+    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
-        int32_t q_b = quantize_coefficient_int32(coeffs[i].b, shift_b);
-        int32_t q_c = quantize_coefficient_int32(coeffs[i].c + zp_y * scale_y, shift_c);
-        int8_t n_bx = shift_b + shift_x - shift_y;
-        int8_t n_yc = shift_c - shift_y;
+        const auto &coeff = all_coeffs[i];
+        float c_adjusted = coeff.c + zp_y_offset;
+
+        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
+        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
+
+        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
+        int8_t n_yc = shift_bits_c - shift_bits_y;
+
+        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
         
+        // threshold 量化（任意位宽支持，存储为 int32_t，与主项目一致）
+        int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
+        threshold = clamp_by_bitwidth(threshold, input_bw);
+
         lut.segments[i].q_b = q_b;
-        lut.segments[i].n_BX_total = n_bx;
-        lut.segments[i].term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << -n_yc);
-        lut.segments[i].threshold = clamp_by_bitwidth(static_cast<int32_t>(std::round(coeffs[i].x_end / scale_x + zp_x)), in_bw);
+        lut.segments[i].n_BX_total = n_BX_total;
+        lut.segments[i].term_c_precomputed = term_c_precomputed;
+        lut.segments[i].threshold = threshold;
     }
+
     return lut;
 }

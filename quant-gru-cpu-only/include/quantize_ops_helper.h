@@ -24,41 +24,107 @@
 // ============================================================================
 
 /**
- * @brief 带四舍五入的右移操作（int32_t 版本）
+ * @brief 计算 2^(-exp2_inv)（与主项目保持一致）
+ */
+inline float exp2_scale(int8_t exp2_inv) {
+    return ldexpf(1.0f, -static_cast<int>(exp2_inv));
+}
+
+/**
+ * @brief 单精度浮点数银行家舍入（round half to even，与主项目保持一致）
+ */
+inline float round_f(float x) {
+    return rintf(x);
+}
+
+/**
+ * @brief 双精度浮点数银行家舍入（round half to even，与主项目保持一致）
+ */
+inline double round_d(double x) {
+    return rint(x);
+}
+
+/**
+ * @brief 浮点数舍入到 int32_t（银行家舍入，与主项目保持一致）
+ */
+inline int32_t round_to_int(float x) {
+    return static_cast<int32_t>(round_f(x));
+}
+
+/**
+ * @brief 双精度浮点数舍入到 int64_t（银行家舍入，与主项目保持一致）
+ */
+inline int64_t round_to_int64(double x) {
+    return static_cast<int64_t>(round_d(x));
+}
+
+/**
+ * @brief 带银行家舍入的右移操作（int32_t 版本，纯定点实现）
  *
  * 实现 round(x / 2^n) 的定点运算，支持正负移位。
+ * 采用 round half to even（银行家舍入）策略，与主项目保持一致。
  *
  * @param x 被移位的值
  * @param n 移位量（正数右移，负数或零左移）
  * @return 移位后的结果
  *
- * @note 对负数采用向零舍入（round toward zero）
+ * @note 纯定点实现，避免浮点转换的精度损失
  */
 inline int32_t rshift_round(int32_t x, int8_t n) {
     if (n <= 0) return x << (-n);
-
-    const int32_t offset = 1 << (n - 1);
-    if (x >= 0) {
-        return (x + offset) >> n;
+    
+    // 处理负数：对绝对值舍入后取反
+    const bool neg = (x < 0);
+    const int32_t abs_x = neg ? -x : x;
+    
+    // 正数的银行家舍入
+    const int32_t half = 1 << (n - 1);
+    const int32_t mask = (1 << n) - 1;
+    const int32_t q = abs_x >> n;      // 商（向下取整）
+    const int32_t r = abs_x & mask;    // 余数
+    
+    int32_t result;
+    if (r > half) {
+        result = q + 1;                // 大于一半，进位
+    } else if (r < half) {
+        result = q;                    // 小于一半，舍去
     } else {
-        return -((-x + offset) >> n);  // 向零舍入
+        // 正好一半：舍入到偶数
+        result = (q & 1) ? (q + 1) : q;
     }
+    
+    return neg ? -result : result;
 }
 
 /**
- * @brief 带四舍五入的右移操作（int64_t 版本）
+ * @brief 带银行家舍入的右移操作（int64_t 版本，纯定点实现）
  *
  * 用于处理 16 位量化时可能超出 int32 范围的乘积。
+ * 采用 round half to even（银行家舍入）策略，与主项目保持一致。
  */
 inline int64_t rshift_round(int64_t x, int8_t n) {
     if (n <= 0) return x << (-n);
-
-    const int64_t offset = static_cast<int64_t>(1) << (n - 1);
-    if (x >= 0) {
-        return (x + offset) >> n;
+    
+    // 处理负数
+    const bool neg = (x < 0);
+    const int64_t abs_x = neg ? -x : x;
+    
+    // 正数的银行家舍入
+    const int64_t half = static_cast<int64_t>(1) << (n - 1);
+    const int64_t mask = (static_cast<int64_t>(1) << n) - 1;
+    const int64_t q = abs_x >> n;
+    const int64_t r = abs_x & mask;
+    
+    int64_t result;
+    if (r > half) {
+        result = q + 1;
+    } else if (r < half) {
+        result = q;
     } else {
-        return -((-x + offset) >> n);  // 向零舍入
+        result = (q & 1) ? (q + 1) : q;
     }
+    
+    return neg ? -result : result;
 }
 
 /**
@@ -192,69 +258,76 @@ inline int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_line
 /**
  * @brief 计算候选门 new_gate = tanh(weight_ih_linear + reset_gate * weight_hh_linear)
  * 
+ * 乘法scale融合：r * weight_hh_linear 的结果直接对齐到 new_gate_input，省略中间层
+ * 与主项目的 computeNewGate<false> 逻辑完全一致
+ * 
  * @param weight_ih_linear    输入 Linear 变换结果
- * @param weight_hh_linear    隐状态 Linear 变换结果
+ * @param weight_hh_linear    隐状态 Linear 变换结果（即 R*h + br，用于反向传播时直接保存到 v）
  * @param reset_gate          重置门输出
- * @param weight_hh_linear_g  [out] 中间结果，用于存储到 v（训练时反向传播需要）
  */
 inline int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
-                               const GateQuantParams &params, int32_t &weight_hh_linear_g) {
+                               const GateQuantParams &params) {
     // Linear 融合后，weight_hh_linear 就是 R*h + br
-    weight_hh_linear_g = weight_hh_linear;
-
-    // 计算 reset_gate * weight_hh_linear (即 mul_reset_hidden)
+    // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input（融合中间层）
     const int64_t r_diff = static_cast<int64_t>(reset_gate) - params.zp_reset_gate_output_;
-    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear_g) - params.zp_weight_hh_linear_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
     const int64_t reset_hidden_mul = r_diff * hh_diff;
 
-    int32_t mul_reset_hidden = static_cast<int32_t>(
-        rshift_round(reset_hidden_mul, params.shift_reset_gate_mul_hh_to_mul_reset_hidden_)) +
-        params.zp_mul_reset_hidden_;
-    mul_reset_hidden = clamp_by_bitwidth(mul_reset_hidden, params.bitwidth_config_.mul_reset_hidden_);
+    // 乘法结果直接 shift 到 new_gate_input 空间（融合后省略中间 zp）
+    const int32_t rh_shifted = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_mul_hh_to_new_gate_input_));
 
-    // 计算 new_gate_input = weight_ih_linear + mul_reset_hidden
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, 
-                                            params.shift_weight_ih_linear_to_new_gate_input_);
-    const int32_t rh_shifted = rshift_round(mul_reset_hidden - params.zp_mul_reset_hidden_, 
-                                            params.shift_mul_reset_hidden_to_new_gate_input_);
+    // weight_ih_linear shift 到 new_gate_input 空间
+    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
 
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
     const auto &bw_cfg = params.bitwidth_config_;
-    return piecewise_linear(new_gate_input, params.tanh_new_gate_lut_, 
-                            bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
+    const auto &lut = params.tanh_new_gate_lut_;
+    
+    // 与主项目的 computeNewGate<false> 逻辑一致：使用 piecewise_linear（推理模式）
+    return piecewise_linear(new_gate_input, lut, bw_cfg.new_gate_input_, bw_cfg.new_gate_output_);
 }
 
 /**
  * @brief 计算隐藏状态 h_new = update_gate * h_old + (1 - update_gate) * new_gate
+ * 
+ * 优化策略：统一 scale 空间，先将 new_gate 对齐到 h scale，使两个乘积的 scale 统一为
+ * S_{update_gate_output} * S_h，在统一 scale 下直接相加，最后一起 rescale 到 h scale。
  */
 inline int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, 
                                    const GateQuantParams &params) {
-    // 计算 mul_old_contribution = update_gate * h_old
+    // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
+    // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
+    const int64_t n_diff_from_zp = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
+    const int32_t new_gate_aligned_to_h = static_cast<int32_t>(
+        rshift_round(n_diff_from_zp, params.shift_new_gate_output_to_h_)) + params.zp_h_;
+
+    // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
+    // u_diff 在 update_gate_output scale，h_diff 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
     const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
-    const int64_t old_contribution_mul = u_diff * h_diff;
+    const int64_t old_contribution_mul = u_diff * h_diff;  // scale = S_u * S_h
 
-    int32_t mul_old_contribution = static_cast<int32_t>(
-        rshift_round(old_contribution_mul, params.shift_update_h_to_mul_old_contribution_)) +
-        params.zp_mul_old_contribution_;
-    mul_old_contribution = clamp_by_bitwidth(mul_old_contribution, params.bitwidth_config_.mul_old_contribution_);
-
-    // 计算 mul_new_contribution = (1 - update_gate) * new_gate
+    // ========== 步骤3: 计算 new_contribution = (1 - update_gate) * new_gate_aligned ==========
+    // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
+    // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
-    const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
-    const int64_t new_contribution_mul = one_minus_u * n_diff;
+    const int64_t one_minus_u_diff = one_minus_u - params.zp_update_gate_output_;  // 在 update_gate_output scale
+    const int64_t n_diff_aligned = static_cast<int64_t>(new_gate_aligned_to_h) - params.zp_h_;  // 在 h scale
+    // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
+    const int64_t new_contribution_mul = one_minus_u_diff * n_diff_aligned;  // scale = S_u * S_h
 
-    int32_t mul_new_contribution = static_cast<int32_t>(
-        rshift_round(new_contribution_mul, params.shift_update_new_to_mul_new_contribution_)) +
-        params.zp_mul_new_contribution_;
-    mul_new_contribution = clamp_by_bitwidth(mul_new_contribution, params.bitwidth_config_.mul_new_contribution_);
+    // ========== 步骤4: 合并两个贡献并 rescale 到 h scale ==========
+    // old_contribution_mul 和 new_contribution_mul 都在 scale_update_gate_output * scale_h
+    // scale，可以直接相加
+    const int64_t combined = old_contribution_mul + new_contribution_mul;
 
-    // 计算 h_new = mul_old_contribution + mul_new_contribution
-    const int32_t h_new =
-        rshift_round(mul_old_contribution - params.zp_mul_old_contribution_, params.shift_mul_old_contribution_to_h_) +
-        rshift_round(mul_new_contribution - params.zp_mul_new_contribution_, params.shift_mul_new_contribution_to_h_) +
-        params.zp_h_;
+    // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
+    // shift_update_old_to_h_ = shift_update_gate_output（因为 scale_h / scale_h = 1）
+    const int32_t h_new = static_cast<int32_t>(
+        rshift_round(combined, params.shift_update_old_to_h_)) + params.zp_h_;
 
     return clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
 }
@@ -264,27 +337,28 @@ inline int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t
 // ============================================================================
 
 /**
- * @brief 量化系数到 int32_t
+ * @brief 量化系数到 int32_t（与主项目完全一致）
  */
-inline int32_t quantize_coefficient_int32(float val, int8_t shift) {
-    float scale = static_cast<float>(1 << shift);
-    return static_cast<int32_t>(std::round(val * scale));
+inline int32_t quantize_coefficient_int32(float val_fp, int8_t shift_bits) {
+    float scale = exp2_scale(shift_bits);
+    int64_t q = round_to_int64(static_cast<double>(val_fp / scale));
+    q = std::max(static_cast<int64_t>(INT32_MIN), std::min(static_cast<int64_t>(INT32_MAX), q));
+    return static_cast<int32_t>(q);
 }
 
-/**
- * @brief 计算 int8 范围内的最优移位量
- */
-inline int8_t determine_shift_bits_int8(float max_val) {
-    if (max_val < 1e-9f) return 7;
-    int8_t shift = static_cast<int8_t>(std::floor(std::log2(127.0f / max_val)));
-    return std::max(static_cast<int8_t>(0), std::min(shift, static_cast<int8_t>(15)));
-}
+// -------------------- Shift bits 自动确定 --------------------
 
 /**
- * @brief 计算 int16 范围内的最优移位量
+ * @brief 根据最大值和位宽配置自动确定 shift_bits（与主项目完全一致）
+ * @param max_val 浮点数的最大绝对值
+ * @param bw 目标量化位宽
+ * @return 使量化值能充分利用目标范围的 shift_bits
  */
-inline int8_t determine_shift_bits_int16(float max_val) {
-    if (max_val < 1e-9f) return 15;
-    int8_t shift = static_cast<int8_t>(std::floor(std::log2(32767.0f / max_val)));
-    return std::max(static_cast<int8_t>(0), std::min(shift, static_cast<int8_t>(30)));
+inline int8_t determine_shift_bits(float max_val, QuantBitWidth bw) {
+    if (max_val < 1e-9f) return 0;
+    // 使用 qmax 作为量化范围上限（对称量化）
+    float qmax = static_cast<float>(bw.qmax());
+    float scale = max_val / qmax;
+    int8_t shift_bits = static_cast<int8_t>(std::floor(-std::log2(scale)));
+    return std::max(static_cast<int8_t>(0), shift_bits);
 }
