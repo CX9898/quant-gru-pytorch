@@ -12,7 +12,7 @@ QuantGRU - 支持量化的 GRU 实现
 关键属性:
     - use_quantization: 是否启用量化(默认 False)
     - calibrating: 是否在 forward 中收集校准数据(默认 False)
-    - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'(默认 'sqnr')
+    - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'(默认 'minmax')
     - export_mode: 是否使用 ONNX 导出模式(默认 False)
     - export_format: ONNX 导出格式 'float'|'qdq'(默认 'float')
 
@@ -1242,6 +1242,13 @@ class QuantGRU(nn.Module):
                 self.quant_params_reverse = gru_ops.calculate_gru_quantitative_parameters(
                     quant_ranges=self.quant_ranges_reverse, bitwidth_config=bitwidth_config)
 
+        # 确保 quant_params 中的 bitwidth_config_ 与当前配置同步
+        # 这样 print_quant_params 可以正确读取粒度信息
+        if self.quant_params is not None:
+            self.quant_params.bitwidth_config_ = self._bitwidth_config
+        if self.bidirectional and self.quant_params_reverse is not None:
+            self.quant_params_reverse.bitwidth_config_ = self._bitwidth_config
+        
         # 量化参数已更新，清除脏标志
         self._quant_params_dirty = False
         
@@ -2206,7 +2213,12 @@ def print_quant_params(gru: 'QuantGRU'):
     print("-" * 60)
     
     # 权重和 bias 量化参数（根据 granularity 打印）
-    bitwidth_config = params.bitwidth_config_
+    # 优先使用 gru._bitwidth_config（当前配置），如果不可用则使用 params.bitwidth_config_
+    # 这样可以确保打印的粒度信息与当前配置一致
+    if hasattr(gru, '_bitwidth_config') and gru._bitwidth_config is not None:
+        bitwidth_config = gru._bitwidth_config
+    else:
+        bitwidth_config = params.bitwidth_config_
     
     # W 权重
     if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
@@ -2218,6 +2230,12 @@ def print_quant_params(gru: 'QuantGRU'):
             print(f"  [W] (per-channel)       shift (first 5): {list(params.shift_W_[:5])} ...")
         else:
             print(f"  [W] (per-channel)       shift: (empty)")
+    else:
+        # 兼容：如果粒度未设置或值异常，根据 shift_W_ 数组判断
+        if params.shift_W_ and len(params.shift_W_) > 0:
+            print(f"  [W] (per-channel)       shift (first 5): {list(params.shift_W_[:5])} ...")
+        else:
+            print(f"  [W] (unknown)           shift: (empty)")
     
     # R 权重
     if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
@@ -2229,6 +2247,12 @@ def print_quant_params(gru: 'QuantGRU'):
             print(f"  [R] (per-channel)       shift (first 5): {list(params.shift_R_[:5])} ...")
         else:
             print(f"  [R] (per-channel)       shift: (empty)")
+    else:
+        # 兼容：如果粒度未设置或值异常，根据 shift_R_ 数组判断
+        if params.shift_R_ and len(params.shift_R_) > 0:
+            print(f"  [R] (per-channel)       shift (first 5): {list(params.shift_R_[:5])} ...")
+        else:
+            print(f"  [R] (unknown)           shift: (empty)")
     
     # bw 偏置
     if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
@@ -2240,6 +2264,12 @@ def print_quant_params(gru: 'QuantGRU'):
             print(f"  [bw] (per-channel)      shift (first 5): {list(params.shift_bw_[:5])} ...")
         else:
             print(f"  [bw] (per-channel)      shift: (empty)")
+    else:
+        # 兼容：如果粒度未设置或值异常，根据 shift_bw_ 数组判断
+        if params.shift_bw_ and len(params.shift_bw_) > 0:
+            print(f"  [bw] (per-channel)      shift (first 5): {list(params.shift_bw_[:5])} ...")
+        else:
+            print(f"  [bw] (unknown)          shift: (empty)")
     
     # br 偏置
     if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
@@ -2251,6 +2281,12 @@ def print_quant_params(gru: 'QuantGRU'):
             print(f"  [br] (per-channel)      shift (first 5): {list(params.shift_br_[:5])} ...")
         else:
             print(f"  [br] (per-channel)      shift: (empty)")
+    else:
+        # 兼容：如果粒度未设置或值异常，根据 shift_br_ 数组判断
+        if params.shift_br_ and len(params.shift_br_) > 0:
+            print(f"  [br] (per-channel)      shift (first 5): {list(params.shift_br_[:5])} ...")
+        else:
+            print(f"  [br] (unknown)          shift: (empty)")
     
     print("=" * 60)
 
