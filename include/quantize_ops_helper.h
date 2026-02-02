@@ -39,7 +39,7 @@
 //   - 推理部署时：不定义此宏，使用 LUT
 //
 // ============================================================================
-#define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
+// #define USE_REAL_ACTIVATION  // 取消注释以启用真实激活函数
 
 #include "cuda_compat.h"
 #include "inline_ops.h"
