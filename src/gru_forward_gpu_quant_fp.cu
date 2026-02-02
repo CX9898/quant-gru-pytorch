@@ -460,15 +460,17 @@ __device__ __forceinline__ float get_inv_div_gemm_x(
     const LinearRescaleParamsFP &params,
     const OperatorQuantConfig &bitwidth_config,
     int idx, int hidden_size) {
-    // 在 device 代码中使用整数值比较（0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL）
-    if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 0) {  // PER_TENSOR
-        return params.inv_div_gemm_x_tensor_;
-    } else if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 1) {  // PER_GATE
-        int gate_idx = idx / hidden_size;
-        return params.inv_div_gemm_x_gate_[gate_idx];
-    } else {  // PER_CHANNEL (2)
-        return params.inv_div_gemm_x_to_weight_ih_linear_[idx];
-    }
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_gemm_x_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.W_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_gemm_x_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_gemm_x_to_weight_ih_linear_[idx];
+    // }
+    return params.inv_div_gemm_x_to_weight_ih_linear_[idx];
 }
 
 /**
@@ -484,15 +486,17 @@ __device__ __forceinline__ float get_inv_div_bw(
     const LinearRescaleParamsFP &params,
     const OperatorQuantConfig &bitwidth_config,
     int idx, int hidden_size) {
-    // 在 device 代码中使用整数值比较（0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL）
-    if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 0) {  // PER_TENSOR
-        return params.inv_div_bw_tensor_;
-    } else if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 1) {  // PER_GATE
-        int gate_idx = idx / hidden_size;
-        return params.inv_div_bw_gate_[gate_idx];
-    } else {  // PER_CHANNEL (2)
-        return params.inv_div_bw_to_gemm_x_[idx];
-    }
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_bw_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.bw_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_bw_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_bw_to_gemm_x_[idx];
+    // }
+    return params.inv_div_bw_to_gemm_x_[idx];
 }
 
 /**
@@ -508,15 +512,17 @@ __device__ __forceinline__ float get_inv_div_gemm_h(
     const LinearRescaleParamsFP &params,
     const OperatorQuantConfig &bitwidth_config,
     int idx, int hidden_size) {
-    // 在 device 代码中使用整数值比较（0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL）
-    if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 0) {  // PER_TENSOR
-        return params.inv_div_gemm_h_tensor_;
-    } else if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 1) {  // PER_GATE
-        int gate_idx = idx / hidden_size;
-        return params.inv_div_gemm_h_gate_[gate_idx];
-    } else {  // PER_CHANNEL (2)
-        return params.inv_div_gemm_h_to_weight_hh_linear_[idx];
-    }
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_gemm_h_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.R_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_gemm_h_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_gemm_h_to_weight_hh_linear_[idx];
+    // }
+    return params.inv_div_gemm_h_to_weight_hh_linear_[idx];
 }
 
 /**
@@ -532,15 +538,17 @@ __device__ __forceinline__ float get_inv_div_br(
     const LinearRescaleParamsFP &params,
     const OperatorQuantConfig &bitwidth_config,
     int idx, int hidden_size) {
-    // 在 device 代码中使用整数值比较（0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL）
-    if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 0) {  // PER_TENSOR
-        return params.inv_div_br_tensor_;
-    } else if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 1) {  // PER_GATE
-        int gate_idx = idx / hidden_size;
-        return params.inv_div_br_gate_[gate_idx];
-    } else {  // PER_CHANNEL (2)
-        return params.inv_div_br_to_gemm_h_[idx];
-    }
+    // 统一使用 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释：
+    // if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 0) {  // PER_TENSOR
+    //     return params.inv_div_br_tensor_;
+    // } else if (static_cast<int8_t>(bitwidth_config.br_granularity_) == 1) {  // PER_GATE
+    //     int gate_idx = idx / hidden_size;
+    //     return params.inv_div_br_gate_[gate_idx];
+    // } else {  // PER_CHANNEL (2)
+    //     return params.inv_div_br_to_gemm_h_[idx];
+    // }
+    return params.inv_div_br_to_gemm_h_[idx];
 }
 
 /**
@@ -880,7 +888,6 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
 
     // ========== 设置 LinearRescaleParamsFP（统一管理，直接传递给 kernel）==========
     auto &l = linear_params_;
-    const auto &cfg = src.bitwidth_config_;
 
     l.zp_x_ = static_cast<float>(src.zp_x_);
     l.zp_h_ = static_cast<float>(src.zp_h_);
@@ -888,103 +895,107 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     l.zp_weight_hh_linear_ = static_cast<float>(src.zp_weight_hh_linear_);
     // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
 
-    // 根据粒度配置初始化对应的参数（只初始化需要的参数）
+    // 统一初始化 per-channel 参数（无论粒度如何，shift 参数都已统一更新到 per-channel 数组）
+    // 原来的判断逻辑已注释，现在统一使用 per-channel 数组
     
-    // W 和 bw 的 rescale 参数
-    if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        // PER_TENSOR: 只初始化 per-tensor 参数
-        int8_t shift_W = src.shift_W_tensor_;
+    // W 和 bw 的 rescale 参数（统一使用 per-channel）
+    std::vector<float> inv_div_gemm_x(channel), inv_div_bw(channel);
+    for (int i = 0; i < channel; ++i) {
+        int8_t shift_W = src.shift_W_[i];
         int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
-        int8_t shift_bw = src.shift_bw_tensor_ - (shift_W + src.shift_x_);
+        int8_t shift_bw = src.shift_bw_[i];
+        int8_t shift_bw_to_gemm = shift_bw - (shift_W + src.shift_x_);
         float div_gemm_x = exp2_scale(-shift_gx);
-        float div_bw = exp2_scale(-shift_bw);
-        l.inv_div_gemm_x_tensor_ = 1.0f / div_gemm_x;
-        l.inv_div_bw_tensor_ = 1.0f / div_bw;
-        // per-channel 数组指针保持为 nullptr，kernel 内部会根据粒度配置判断，不会访问
-        l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
-        l.inv_div_bw_to_gemm_x_ = nullptr;
-    } else if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-        // PER_GATE: 只初始化 per-gate 参数
-        for (int gate = 0; gate < 3; ++gate) {
-            int8_t shift_W = src.shift_W_gate_[gate];
-            int8_t shift_bw = src.shift_bw_gate_[gate];
-            int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
-            int8_t shift_bw_to_gemm = shift_bw - (shift_W + src.shift_x_);
-            float div_gemm_x = exp2_scale(-shift_gx);
-            float div_bw = exp2_scale(-shift_bw_to_gemm);
-            l.inv_div_gemm_x_gate_[gate] = 1.0f / div_gemm_x;
-            l.inv_div_bw_gate_[gate] = 1.0f / div_bw;
-        }
-        // per-channel 数组指针保持为 nullptr，kernel 内部会根据粒度配置判断，不会访问
-        l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
-        l.inv_div_bw_to_gemm_x_ = nullptr;
-    } else {  // PER_CHANNEL
-        // PER_CHANNEL: 只初始化 per-channel 参数
-        std::vector<float> inv_div_gemm_x(channel), inv_div_bw(channel);
-        for (int i = 0; i < channel; ++i) {
-            int8_t shift_W = src.shift_W_[i];
-            int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
-            int8_t shift_bw = src.shift_bw_[i];
-            int8_t shift_bw_to_gemm = shift_bw - (shift_W + src.shift_x_);
-            float div_gemm_x = exp2_scale(-shift_gx);
-            float div_bw = exp2_scale(-shift_bw_to_gemm);
-            inv_div_gemm_x[i] = 1.0f / div_gemm_x;
-            inv_div_bw[i] = 1.0f / div_bw;
-        }
-        // 存储到类成员的 dev::vector，然后设置指针
-        inv_div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(inv_div_gemm_x);
-        inv_div_bw_to_gemm_x_ = dev::vector<float>(inv_div_bw);
-        l.inv_div_gemm_x_to_weight_ih_linear_ = inv_div_gemm_x_to_weight_ih_linear_.data();
-        l.inv_div_bw_to_gemm_x_ = inv_div_bw_to_gemm_x_.data();
+        float div_bw = exp2_scale(-shift_bw_to_gemm);
+        inv_div_gemm_x[i] = 1.0f / div_gemm_x;
+        inv_div_bw[i] = 1.0f / div_bw;
     }
+    // 存储到类成员的 dev::vector，然后设置指针
+    inv_div_gemm_x_to_weight_ih_linear_ = dev::vector<float>(inv_div_gemm_x);
+    inv_div_bw_to_gemm_x_ = dev::vector<float>(inv_div_bw);
+    l.inv_div_gemm_x_to_weight_ih_linear_ = inv_div_gemm_x_to_weight_ih_linear_.data();
+    l.inv_div_bw_to_gemm_x_ = inv_div_bw_to_gemm_x_.data();
+    
+    // 原来的粒度判断逻辑已注释：
+    // const auto &cfg = src.bitwidth_config_;
+    // if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+    //     // PER_TENSOR: 只初始化 per-tensor 参数
+    //     int8_t shift_W = src.shift_W_tensor_;
+    //     int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
+    //     int8_t shift_bw = src.shift_bw_tensor_ - (shift_W + src.shift_x_);
+    //     float div_gemm_x = exp2_scale(-shift_gx);
+    //     float div_bw = exp2_scale(-shift_bw);
+    //     l.inv_div_gemm_x_tensor_ = 1.0f / div_gemm_x;
+    //     l.inv_div_bw_tensor_ = 1.0f / div_bw;
+    //     l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
+    //     l.inv_div_bw_to_gemm_x_ = nullptr;
+    // } else if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
+    //     // PER_GATE: 只初始化 per-gate 参数
+    //     for (int gate = 0; gate < 3; ++gate) {
+    //         int8_t shift_W = src.shift_W_gate_[gate];
+    //         int8_t shift_bw = src.shift_bw_gate_[gate];
+    //         int8_t shift_gx = (shift_W + src.shift_x_) - src.shift_weight_ih_linear_;
+    //         int8_t shift_bw_to_gemm = shift_bw - (shift_W + src.shift_x_);
+    //         float div_gemm_x = exp2_scale(-shift_gx);
+    //         float div_bw = exp2_scale(-shift_bw_to_gemm);
+    //         l.inv_div_gemm_x_gate_[gate] = 1.0f / div_gemm_x;
+    //         l.inv_div_bw_gate_[gate] = 1.0f / div_bw;
+    //     }
+    //     l.inv_div_gemm_x_to_weight_ih_linear_ = nullptr;
+    //     l.inv_div_bw_to_gemm_x_ = nullptr;
+    // } else {  // PER_CHANNEL
+    //     // PER_CHANNEL: 只初始化 per-channel 参数
+    //     ...
+    // }
 
-    // R 和 br 的 rescale 参数
-    if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        // PER_TENSOR: 只初始化 per-tensor 参数
-        int8_t shift_R = src.shift_R_tensor_;
+    // R 和 br 的 rescale 参数（统一使用 per-channel）
+    std::vector<float> inv_div_gemm_h(channel), inv_div_br(channel);
+    for (int i = 0; i < channel; ++i) {
+        int8_t shift_R = src.shift_R_[i];
         int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
-        int8_t shift_br = src.shift_br_tensor_ - (shift_R + src.shift_h_);
+        int8_t shift_br = src.shift_br_[i];
+        int8_t shift_br_to_gemm = shift_br - (shift_R + src.shift_h_);
         float div_gemm_h = exp2_scale(-shift_gh);
-        float div_br = exp2_scale(-shift_br);
-        l.inv_div_gemm_h_tensor_ = 1.0f / div_gemm_h;
-        l.inv_div_br_tensor_ = 1.0f / div_br;
-        // per-channel 数组指针保持为 nullptr，kernel 内部会根据粒度配置判断，不会访问
-        l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
-        l.inv_div_br_to_gemm_h_ = nullptr;
-    } else if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
-        // PER_GATE: 只初始化 per-gate 参数
-        for (int gate = 0; gate < 3; ++gate) {
-            int8_t shift_R = src.shift_R_gate_[gate];
-            int8_t shift_br = src.shift_br_gate_[gate];
-            int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
-            int8_t shift_br_to_gemm = shift_br - (shift_R + src.shift_h_);
-            float div_gemm_h = exp2_scale(-shift_gh);
-            float div_br = exp2_scale(-shift_br_to_gemm);
-            l.inv_div_gemm_h_gate_[gate] = 1.0f / div_gemm_h;
-            l.inv_div_br_gate_[gate] = 1.0f / div_br;
-        }
-        // per-channel 数组指针保持为 nullptr，kernel 内部会根据粒度配置判断，不会访问
-        l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
-        l.inv_div_br_to_gemm_h_ = nullptr;
-    } else {  // PER_CHANNEL
-        // PER_CHANNEL: 只初始化 per-channel 参数
-        std::vector<float> inv_div_gemm_h(channel), inv_div_br(channel);
-        for (int i = 0; i < channel; ++i) {
-            int8_t shift_R = src.shift_R_[i];
-            int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
-            int8_t shift_br = src.shift_br_[i];
-            int8_t shift_br_to_gemm = shift_br - (shift_R + src.shift_h_);
-            float div_gemm_h = exp2_scale(-shift_gh);
-            float div_br = exp2_scale(-shift_br_to_gemm);
-            inv_div_gemm_h[i] = 1.0f / div_gemm_h;
-            inv_div_br[i] = 1.0f / div_br;
-        }
-        // 存储到类成员的 dev::vector，然后设置指针
-        inv_div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(inv_div_gemm_h);
-        inv_div_br_to_gemm_h_ = dev::vector<float>(inv_div_br);
-        l.inv_div_gemm_h_to_weight_hh_linear_ = inv_div_gemm_h_to_weight_hh_linear_.data();
-        l.inv_div_br_to_gemm_h_ = inv_div_br_to_gemm_h_.data();
+        float div_br = exp2_scale(-shift_br_to_gemm);
+        inv_div_gemm_h[i] = 1.0f / div_gemm_h;
+        inv_div_br[i] = 1.0f / div_br;
     }
+    // 存储到类成员的 dev::vector，然后设置指针
+    inv_div_gemm_h_to_weight_hh_linear_ = dev::vector<float>(inv_div_gemm_h);
+    inv_div_br_to_gemm_h_ = dev::vector<float>(inv_div_br);
+    l.inv_div_gemm_h_to_weight_hh_linear_ = inv_div_gemm_h_to_weight_hh_linear_.data();
+    l.inv_div_br_to_gemm_h_ = inv_div_br_to_gemm_h_.data();
+    
+    // 原来的粒度判断逻辑已注释：
+    // if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
+    //     // PER_TENSOR: 只初始化 per-tensor 参数
+    //     int8_t shift_R = src.shift_R_tensor_;
+    //     int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
+    //     int8_t shift_br = src.shift_br_tensor_ - (shift_R + src.shift_h_);
+    //     float div_gemm_h = exp2_scale(-shift_gh);
+    //     float div_br = exp2_scale(-shift_br);
+    //     l.inv_div_gemm_h_tensor_ = 1.0f / div_gemm_h;
+    //     l.inv_div_br_tensor_ = 1.0f / div_br;
+    //     l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
+    //     l.inv_div_br_to_gemm_h_ = nullptr;
+    // } else if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
+    //     // PER_GATE: 只初始化 per-gate 参数
+    //     for (int gate = 0; gate < 3; ++gate) {
+    //         int8_t shift_R = src.shift_R_gate_[gate];
+    //         int8_t shift_br = src.shift_br_gate_[gate];
+    //         int8_t shift_gh = (shift_R + src.shift_h_) - src.shift_weight_hh_linear_;
+    //         int8_t shift_br_to_gemm = shift_br - (shift_R + src.shift_h_);
+    //         float div_gemm_h = exp2_scale(-shift_gh);
+    //         float div_br = exp2_scale(-shift_br_to_gemm);
+    //         l.inv_div_gemm_h_gate_[gate] = 1.0f / div_gemm_h;
+    //         l.inv_div_br_gate_[gate] = 1.0f / div_br;
+    //     }
+    //     l.inv_div_gemm_h_to_weight_hh_linear_ = nullptr;
+    //     l.inv_div_br_to_gemm_h_ = nullptr;
+    // } else {  // PER_CHANNEL
+    //     // PER_CHANNEL: 只初始化 per-channel 参数
+    //     ...
+    // }
 
     // 注意：
     //   - W_sum_mul_x_zp 和 R_sum_mul_h_zp 指针在 EnsureBuffersAllocated 中更新（确保缓冲区已分配）

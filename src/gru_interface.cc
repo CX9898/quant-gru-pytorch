@@ -1086,19 +1086,15 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     };
 
     // 根据 granularity 设置权重参数
-    // 修改：无论什么粒度，都更新 per-channel 参数
-    // 如果是 per-tensor，则将 per-channel 的 scale 都设置为相同的
-    // 如果是 per-gate，则将 per-channel 中的分为三个相同的值
+    // 设计原则：
+    // 1. 直方图收集：根据粒度收集对应的直方图（PER_TENSOR→tensor_hist, PER_GATE→gate_hist, PER_CHANNEL→per-channel hist）
+    // 2. shift 参数更新：无论什么粒度，都统一更新到 per-channel 数组（shift_W_、shift_R_ 等）
+    //    - PER_TENSOR: 从 tensor_hist 计算 tensor 值，然后填充到 per-channel 数组
+    //    - PER_GATE: 从 gate_hist 计算 gate 值，然后填充到 per-channel 数组
+    //    - PER_CHANNEL: 直接计算每个 channel 的值
     
-    // W: 总是先计算 per-channel 参数
     quant_params.shift_W_.resize(channel_size);
-    for (int c = 0; c < channel_size; ++c) {
-        int32_t zp_tmp;
-        histCalibrate(hist_collectors.W_hist[c], bitwidth_config.W_,
-                     bitwidth_config.W_symmetric_, quant_params.shift_W_[c], zp_tmp, "W");
-    }
     
-    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         // Per-tensor: 直接使用独立的 per-tensor 直方图，然后将所有 channel 设置为相同值
         int32_t zp_tmp;
@@ -1118,18 +1114,18 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                 quant_params.shift_W_[c] = quant_params.shift_W_gate_[gate];
             }
         }
+    } else {
+        // PER_CHANNEL: 计算每个 channel 的独立参数
+        for (int c = 0; c < channel_size; ++c) {
+            int32_t zp_tmp;
+            histCalibrate(hist_collectors.W_hist[c], bitwidth_config.W_,
+                         bitwidth_config.W_symmetric_, quant_params.shift_W_[c], zp_tmp, "W");
+        }
     }
-    // PER_CHANNEL: 保持每个 channel 独立计算的值（已在上面计算）
     
-    // R: 总是先计算 per-channel 参数
+    // R: 根据粒度决定是否计算 per-channel 参数
     quant_params.shift_R_.resize(channel_size);
-    for (int c = 0; c < channel_size; ++c) {
-        int32_t zp_tmp;
-        histCalibrate(hist_collectors.R_hist[c], bitwidth_config.R_,
-                     bitwidth_config.R_symmetric_, quant_params.shift_R_[c], zp_tmp, "R");
-    }
     
-    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.R_tensor_hist, bitwidth_config.R_, bitwidth_config.R_symmetric_,
@@ -1147,17 +1143,18 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                 quant_params.shift_R_[c] = quant_params.shift_R_gate_[gate];
             }
         }
+    } else {
+        // PER_CHANNEL: 计算每个 channel 的独立参数
+        for (int c = 0; c < channel_size; ++c) {
+            int32_t zp_tmp;
+            histCalibrate(hist_collectors.R_hist[c], bitwidth_config.R_,
+                         bitwidth_config.R_symmetric_, quant_params.shift_R_[c], zp_tmp, "R");
+        }
     }
     
-    // bw: 总是先计算 per-channel 参数
+    // bw: 根据粒度决定是否计算 per-channel 参数
     quant_params.shift_bw_.resize(channel_size);
-    for (int c = 0; c < channel_size; ++c) {
-        int32_t zp_tmp;
-        histCalibrate(hist_collectors.bw_hist[c], bitwidth_config.bw_,
-                     bitwidth_config.bw_symmetric_, quant_params.shift_bw_[c], zp_tmp, "bw");
-    }
     
-    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.bw_tensor_hist, bitwidth_config.bw_, bitwidth_config.bw_symmetric_,
@@ -1175,17 +1172,18 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                 quant_params.shift_bw_[c] = quant_params.shift_bw_gate_[gate];
             }
         }
+    } else {
+        // PER_CHANNEL: 计算每个 channel 的独立参数
+        for (int c = 0; c < channel_size; ++c) {
+            int32_t zp_tmp;
+            histCalibrate(hist_collectors.bw_hist[c], bitwidth_config.bw_,
+                         bitwidth_config.bw_symmetric_, quant_params.shift_bw_[c], zp_tmp, "bw");
+        }
     }
     
-    // br: 总是先计算 per-channel 参数
+    // br: 根据粒度决定是否计算 per-channel 参数
     quant_params.shift_br_.resize(channel_size);
-    for (int c = 0; c < channel_size; ++c) {
-        int32_t zp_tmp;
-        histCalibrate(hist_collectors.br_hist[c], bitwidth_config.br_,
-                     bitwidth_config.br_symmetric_, quant_params.shift_br_[c], zp_tmp, "br");
-    }
     
-    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.br_tensor_hist, bitwidth_config.br_, bitwidth_config.br_symmetric_,
@@ -1202,6 +1200,13 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
             for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
                 quant_params.shift_br_[c] = quant_params.shift_br_gate_[gate];
             }
+        }
+    } else {
+        // PER_CHANNEL: 计算每个 channel 的独立参数
+        for (int c = 0; c < channel_size; ++c) {
+            int32_t zp_tmp;
+            histCalibrate(hist_collectors.br_hist[c], bitwidth_config.br_,
+                         bitwidth_config.br_symmetric_, quant_params.shift_br_[c], zp_tmp, "br");
         }
     }
 
