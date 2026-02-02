@@ -276,12 +276,12 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
         (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
 
-    // h_new（乘法scale融合：(1-u)*n 和 u*h 直接对齐到 h）
+    // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
     gate_params_.quant_one_in_update_gate_scale_ = rshift_round(1, -parms.shift_update_gate_output_) + parms.zp_update_gate_output_;
-    gate_params_.shift_update_new_to_h_ =
-        (parms.shift_update_gate_output_ + parms.shift_new_gate_output_) - parms.shift_h_;
-    gate_params_.shift_update_old_to_h_ =
-        (parms.shift_update_gate_output_ + parms.shift_h_) - parms.shift_h_;  // = shift_update_gate_output_
+    // new_gate_output 对齐到 h 的移位
+    gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
+    // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
+    gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
 
     // 位宽配置和 LUT
     gate_params_.bitwidth_config_ = parms.bitwidth_config_;
