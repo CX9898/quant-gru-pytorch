@@ -174,20 +174,22 @@ const int n_idx = weight_idx + 2 * hidden_dim;  // [2H, 3H)
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ Step B: 输入 Linear 变换（所有时间步一次性计算）                    │   │
-│  │   weight_ih_linear = quantizedGemmBiasFused(W, x, bw)             │   │
-│  │   // GEMM + 零点补偿 + per-channel rescale + bias                 │   │
+│  │ Step B-1: 输入 Linear 变换 GEMM（所有时间步一次性计算）              │   │
+│  │   q_gemm = cuBLAS SGEMM(W, x)    // 输出未 rescale 的 GEMM 结果     │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                              ↓                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │ 时间步循环 for t = 0 to T-1                                        │   │
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
-│  │  │ Step B: 隐状态 Linear 变换（每时间步计算）                    │  │   │
-│  │  │   weight_hh_linear = quantizedGemmBiasFused(R, h[t], br)   │  │   │
+│  │  │ Step B-2: 隐状态 Linear 变换 GEMM（每时间步计算）                │  │   │
+│  │  │   q_gemm = cuBLAS SGEMM(R, h[t])  // 输出未 rescale 的 GEMM 结果│  │   │
 │  │  └────────────────────────────────────────────────────────────┘  │   │
 │  │                              ↓                                    │   │
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
-│  │  │ Step C: 门控计算（CUDA Kernel 逐元素）                       │  │   │
+│  │  │ Step C: 门控计算（PointwiseOperationsFP Kernel 逐元素）        │  │   │
+│  │  │   // 融合执行 Bias + Rescale（减少全局内存读取）                │  │   │
+│  │  │   weight_ih_linear = BiasRescale(gemm_ih, bw)              │  │   │
+│  │  │   weight_hh_linear = BiasRescale(gemm_hh, br)               │  │   │
 │  │  │   u = sigmoid(weight_ih_linear_u + weight_hh_linear_u)     │  │   │
 │  │  │   r = sigmoid(weight_ih_linear_r + weight_hh_linear_r)     │  │   │
 │  │  │   n = tanh(weight_ih_linear_n + r * weight_hh_linear_n)    │  │   │
@@ -220,26 +222,49 @@ $$W\_sum[c] = \sum_{k} q_W[c, k], \quad R\_sum[c] = \sum_{k} q_R[c, k]$$
 
 ---
 
-### Step B: Linear 层融合计算
+### Step B: Linear 层计算
 
-Linear 层使用 `quantizedGemmBiasFused` kernel，将以下操作融合在一起：
+**实现策略**：GEMM 和 Bias + Rescale 分离执行，减少全局内存读取。
+- **GEMM 阶段**：使用 cuBLAS SGEMM 单独执行矩阵乘法，输出未 rescale 的原始 GEMM 结果
+- **Bias + Rescale 阶段**：在 PointwiseOperationsFP kernel 中融合执行，减少全局内存访问
 
-```cpp
-// 融合 kernel 对每个输出通道 c 执行：
-gemm_result = q_W[c,:] @ q_x                                    // 1. 整数 GEMM
-gemm_corrected = gemm_result - W_sum[c] * zp_x                  // 2. 零点补偿
-gemm_rescaled = rshift_round(gemm_corrected, shift_gemm[c])     // 3. GEMM per-channel rescale
-bias_rescaled = rshift_round(q_bw[c], shift_bw[c])              // 4. bias per-channel rescale
-weight_ih_linear[c] = gemm_rescaled + bias_rescaled + zp_out    // 5. 加法 + 输出零点
-```
+#### B-1. 输入 Linear 变换（所有时间步一次性计算）
 
-**输入 Linear 变换**（所有时间步一次性计算）：
+**GEMM 阶段**（`ComputeLinearX`）：
+- 执行 cuBLAS SGEMM：$q_{gemm}[c] = q_W[c,:] \cdot q_x$
+- 输出未 rescale 的原始 GEMM 结果到 `tmp_weight_ih_linear_`（scale = $S_{W[c]} \cdot S_x$）
 
-$$q_{weight\_ih\_linear}[c] = \frac{S_{W[c]} \cdot S_x}{S_{weight\_ih\_linear}} (q_{gemm}[c] - W\_sum[c] \cdot zp_x) + \frac{S_{bw[c]}}{S_{weight\_ih\_linear}} q_{bw}[c] + Z_{weight\_ih\_linear}$$
+**Bias + Rescale 阶段**（在 PointwiseOperationsFP kernel 中融合执行）：
+对每个输出通道 c 执行以下步骤：
+1. 零点补偿：$q_{gemm\_corrected}[c] = q_{gemm}[c] - W\_sum[c] \cdot Z_x$
+2. Bias rescale 到 GEMM 空间：$q_{bias\_in\_gemm}[c] = \frac{S_{bw[c]}}{S_{W[c]} \cdot S_x} q_{bw}[c]$
+3. GEMM 和 Bias 在 GEMM 空间相加：$q_{combined}[c] = q_{gemm\_corrected}[c] + q_{bias\_in\_gemm}[c]$
+4. 一起 rescale 到输出空间：$q_{weight\_ih\_linear}[c] = \frac{S_{W[c]} \cdot S_x}{S_{weight\_ih\_linear}} q_{combined}[c] + Z_{weight\_ih\_linear}$
 
-**隐状态 Linear 变换**（每时间步计算）：
+**完整公式**：
 
-$$q_{weight\_hh\_linear}[c] = \frac{S_{R[c]} \cdot S_h}{S_{weight\_hh\_linear}} (q_{gemm}[c] - R\_sum[c] \cdot zp_h) + \frac{S_{br[c]}}{S_{weight\_hh\_linear}} q_{br}[c] + Z_{weight\_hh\_linear}$$
+$$q_{weight\_ih\_linear}[c] = \frac{S_{W[c]} \cdot S_x}{S_{weight\_ih\_linear}} \left( (q_{gemm}[c] - W\_sum[c] \cdot Z_x) + \frac{S_{bw[c]}}{S_{W[c]} \cdot S_x} q_{bw}[c] \right) + Z_{weight\_ih\_linear}$$
+
+#### B-2. 隐状态 Linear 变换（每时间步计算）
+
+**GEMM 阶段**（`ComputeLinearH`）：
+- 执行 cuBLAS SGEMM：$q_{gemm}[c] = q_R[c,:] \cdot q_h$
+- 输出未 rescale 的原始 GEMM 结果到 `tmp_weight_hh_linear_`（scale = $S_{R[c]} \cdot S_h$）
+
+**Bias + Rescale 阶段**（在 PointwiseOperationsFP kernel 中融合执行）：
+对每个输出通道 c 执行以下步骤：
+1. 零点补偿：$q_{gemm\_corrected}[c] = q_{gemm}[c] - R\_sum[c] \cdot Z_h$
+2. Bias rescale 到 GEMM 空间：$q_{bias\_in\_gemm}[c] = \frac{S_{br[c]}}{S_{R[c]} \cdot S_h} q_{br}[c]$
+3. GEMM 和 Bias 在 GEMM 空间相加：$q_{combined}[c] = q_{gemm\_corrected}[c] + q_{bias\_in\_gemm}[c]$
+4. 一起 rescale 到输出空间：$q_{weight\_hh\_linear}[c] = \frac{S_{R[c]} \cdot S_h}{S_{weight\_hh\_linear}} q_{combined}[c] + Z_{weight\_hh\_linear}$
+
+**完整公式**：
+
+$$q_{weight\_hh\_linear}[c] = \frac{S_{R[c]} \cdot S_h}{S_{weight\_hh\_linear}} \left( (q_{gemm}[c] - R\_sum[c] \cdot Z_h) + \frac{S_{br[c]}}{S_{R[c]} \cdot S_h} q_{br}[c] \right) + Z_{weight\_hh\_linear}$$
+
+> **优化说明**：
+> - **分离执行**：GEMM 单独执行，Bias + Rescale 在 PointwiseOperationsFP kernel 中融合执行，减少全局内存读取
+> - **Scale 优化**：Bias 先 rescale 到 GEMM 空间，在更大 scale 空间（$S_W \cdot S_x$ 或 $S_R \cdot S_h$）中相加，然后一起 rescale 到输出空间。虽然 rescale 次数相同（2次），但在更大 scale 空间中相加，精度损失更小
 
 ---
 
@@ -259,24 +284,22 @@ $$q_{weight\_hh\_linear}[c] = \frac{S_{R[c]} \cdot S_h}{S_{weight\_hh\_linear}} 
 | $S_A$ | 张量 A 的 scale（= $2^{-shift_A}$） |
 | $Z_A$ | 张量 A 的零点 (zero point) |
 
-**量化加法推导**：
+**量化加法推导**（以更新门为例）：
 
-设浮点运算 $y = x_1 + x_2$，其中：
-- $x_1$ 的量化参数为 $(S_1, Z_1)$：$x_1 = (q_1 - Z_1) \cdot S_1$
-- $x_2$ 的量化参数为 $(S_2, Z_2)$：$x_2 = (q_2 - Z_2) \cdot S_2$
-- $y$ 的量化参数为 $(S_y, Z_y)$：$y = (q_y - Z_y) \cdot S_y$
+浮点运算：$update\_gate\_input = weight\_ih\_linear + weight\_hh\_linear$
 
-代入 $y = x_1 + x_2$：
+量化表示：
+- $weight\_ih\_linear = (q_{weight\_ih\_linear} - Z_{weight\_ih\_linear}) \cdot S_{weight\_ih\_linear}$
+- $weight\_hh\_linear = (q_{weight\_hh\_linear} - Z_{weight\_hh\_linear}) \cdot S_{weight\_hh\_linear}$
+- $update\_gate\_input = (q_{update\_gate\_input} - Z_{update\_gate\_input}) \cdot S_{update\_gate\_input}$
 
-$$(q_y - Z_y) \cdot S_y = (q_1 - Z_1) \cdot S_1 + (q_2 - Z_2) \cdot S_2$$
+代入 $update\_gate\_input = weight\_ih\_linear + weight\_hh\_linear$：
 
-解出 $q_y$：
+$$(q_{update\_gate\_input} - Z_{update\_gate\_input}) \cdot S_{update\_gate\_input} = (q_{weight\_ih\_linear} - Z_{weight\_ih\_linear}) \cdot S_{weight\_ih\_linear} + (q_{weight\_hh\_linear} - Z_{weight\_hh\_linear}) \cdot S_{weight\_hh\_linear}$$
 
-$$q_y = \frac{S_1}{S_y}(q_1 - Z_1) + \frac{S_2}{S_y}(q_2 - Z_2) + Z_y$$
+解出 $q_{update\_gate\_input}$：
 
-**应用到更新门**：$x_1 = weight\_ih\_linear$，$x_2 = weight\_hh\_linear$，$y = update\_gate\_input$
-
-$$q_{update\_gate\_input} = \frac{S_{ih}}{S_{gate}}(q_{ih} - Z_{ih}) + \frac{S_{hh}}{S_{gate}}(q_{hh} - Z_{hh}) + Z_{gate}$$
+$$q_{update\_gate\_input} = \frac{S_{weight\_ih\_linear}}{S_{update\_gate\_input}}(q_{weight\_ih\_linear} - Z_{weight\_ih\_linear}) + \frac{S_{weight\_hh\_linear}}{S_{update\_gate\_input}}(q_{weight\_hh\_linear} - Z_{weight\_hh\_linear}) + Z_{update\_gate\_input}$$
 
 **定点实现**（使用移位代替除法）：
 
@@ -304,7 +327,7 @@ update_gate = piecewise_linear(update_gate_input, sigmoid_update_gate_lut_,
 
 **量化公式**：与 u 门结构完全相同
 
-$$q_{reset\_gate\_input} = \frac{S_{ih\_linear}}{S_{reset\_gate\_input}}(q_{ih\_linear} - Z_{ih\_linear}) + \frac{S_{hh\_linear}}{S_{reset\_gate\_input}}(q_{hh\_linear} - Z_{hh\_linear}) + Z_{reset\_gate\_input}$$
+$$q_{reset\_gate\_input} = \frac{S_{weight\_ih\_linear}}{S_{reset\_gate\_input}}(q_{weight\_ih\_linear} - Z_{weight\_ih\_linear}) + \frac{S_{weight\_hh\_linear}}{S_{reset\_gate\_input}}(q_{weight\_hh\_linear} - Z_{weight\_hh\_linear}) + Z_{reset\_gate\_input}$$
 
 **定点实现**：
 
@@ -324,34 +347,45 @@ reset_gate = piecewise_linear(reset_gate_input, sigmoid_reset_gate_lut_, ...);
 
 > **注意**：由于 Linear 层已融合 bias，`weight_hh_linear_n` 已包含 $R_n h + br_n$，不再需要单独的 `Rh_add_br` 中间量。
 
-**(1) 计算 mul_reset_hidden = r × weight_hh_linear_n（量化乘法）**
+**优化策略**：消除 `mul_reset_hidden` 中间量化空间，乘法结果直接 rescale 到 `new_gate_input` 空间。
 
-根据量化乘法公式，两个量化值相乘后 rescale 到目标空间：
+**量化公式**：
 
-$$q_{mul\_reset\_hidden} = \frac{S_{reset\_gate} \cdot S_{hh\_linear}}{S_{mul\_reset\_hidden}} (q_{reset\_gate} - Z_{reset\_gate})(q_{hh\_linear} - Z_{hh\_linear}) + Z_{mul\_reset\_hidden}$$
+$$q_{new\_gate\_input} = \frac{S_{weight\_ih\_linear}}{S_{new\_gate\_input}}(q_{weight\_ih\_linear} - Z_{weight\_ih\_linear}) + \frac{S_{reset\_gate\_output} \cdot S_{weight\_hh\_linear}}{S_{new\_gate\_input}} (q_{reset\_gate\_output} - Z_{reset\_gate\_output})(q_{weight\_hh\_linear} - Z_{weight\_hh\_linear}) + Z_{new\_gate\_input}$$
+
+**计算步骤**：
+
+1. **计算 r × weight_hh_linear_n**：乘积 scale = $S_{reset\_gate\_output} \cdot S_{weight\_hh\_linear}$
+   - $q_{reset\_hidden\_mul} = (q_{reset\_gate\_output} - Z_{reset\_gate\_output})(q_{weight\_hh\_linear} - Z_{weight\_hh\_linear})$
+
+2. **直接 rescale 到 new_gate_input 空间**：
+   - $q_{rh\_rescaled} = \frac{S_{reset\_gate\_output} \cdot S_{weight\_hh\_linear}}{S_{new\_gate\_input}} q_{reset\_hidden\_mul}$
+
+3. **weight_ih_linear_n rescale 到 new_gate_input 空间**：
+   - $q_{ih\_rescaled} = \frac{S_{weight\_ih\_linear}}{S_{new\_gate\_input}}(q_{weight\_ih\_linear} - Z_{weight\_ih\_linear})$
+
+4. **相加并应用零点**：
+   - $q_{new\_gate\_input} = q_{ih\_rescaled} + q_{rh\_rescaled} + Z_{new\_gate\_input}$
 
 **定点实现**：
 
 ```cpp
-r_diff = q_reset_gate - zp_reset_gate_output;
+// 计算 r × weight_hh_linear_n，直接 rescale 到 new_gate_input
+r_diff = q_reset_gate_output - zp_reset_gate_output;
 hh_diff = q_weight_hh_linear - zp_weight_hh_linear;
 product = r_diff * hh_diff;
-q_mul_reset_hidden = rshift_round(product, shift_r_hh_to_mul_reset_hidden) + zp_mul_reset_hidden;
-```
+q_rh = rshift_round(product, shift_reset_mul_hh_to_new_gate_input);
 
-**(2) 计算 new_gate_input = weight_ih_linear_n + mul_reset_hidden（量化加法）**
-
-$$q_{new\_gate\_input} = \frac{S_{ih\_linear}}{S_{new\_gate\_input}}(q_{ih\_linear} - Z_{ih\_linear}) + \frac{S_{mul\_reset\_hidden}}{S_{new\_gate\_input}}(q_{mul\_reset\_hidden} - Z_{mul\_reset\_hidden}) + Z_{new\_gate\_input}$$
-
-**定点实现**：
-
-```cpp
+// weight_ih_linear rescale 到 new_gate_input
 ih_shifted = rshift_round(q_weight_ih_linear - zp_weight_ih_linear, shift_ih_to_new_gate_input);
-rh_shifted = rshift_round(q_mul_reset_hidden - zp_mul_reset_hidden, shift_mul_reset_hidden_to_new_gate_input);
-q_new_gate_input = ih_shifted + rh_shifted + zp_new_gate_input;
+
+// 相加
+q_new_gate_input = ih_shifted + q_rh + zp_new_gate_input;
 
 new_gate = piecewise_linear(new_gate_input, tanh_new_gate_lut_, ...);
 ```
+
+> **优化说明**：消除 `mul_reset_hidden` 中间空间，减少一次 rescale 操作，简化参数管理。
 
 ---
 
@@ -359,59 +393,60 @@ new_gate = piecewise_linear(new_gate_input, tanh_new_gate_lut_, ...);
 
 **浮点公式**：`h_new = u × h_old + (1 - u) × n`
 
-该公式分解为四个子计算：
+**优化策略**：统一 scale 空间，先将 `new_gate` 对齐到 `h` scale，使两个乘积的 scale 统一为 $S_{update\_gate\_output} \cdot S_h$，在统一 scale 下直接相加，最后一起 rescale 到 `h` scale。
 
-**(1) 计算 mul_old_contribution = u × h_old（量化乘法）**
+**计算步骤**：
 
-$$q_{old} = \frac{S_{update\_gate} \cdot S_h}{S_{old}} (q_{update\_gate} - Z_{update\_gate})(q_h - Z_h) + Z_{old}$$
+**(1) 对齐 scale：将 new_gate 从 new_gate_output scale 对齐到 h scale**
+
+$$q_{new\_gate\_aligned\_to\_h} = \frac{S_{new\_gate\_output}}{S_h}(q_{new\_gate\_output} - Z_{new\_gate\_output}) + Z_h$$
+
+**(2) 统一 scale 下计算两个乘积**（都在 $S_{update\_gate\_output} \cdot S_h$ scale）
+
+- **old_contribution = u × h_old**：
+  $$q_{old\_contribution\_mul} = (q_{update\_gate\_output} - Z_{update\_gate\_output})(q_h - Z_h)$$
+
+- **new_contribution = (1 - u) × new_gate_aligned**：
+  - 计算 $(1 - u)$：$q_{one\_in\_update\_gate\_output} = \text{round}(1.0 / S_{update\_gate\_output}) + Z_{update\_gate\_output}$
+  - $q_{one\_minus\_u} = q_{one\_in\_update\_gate\_output} - q_{update\_gate\_output}$
+  - $$q_{new\_contribution\_mul} = (q_{one\_minus\_u})(q_{new\_gate\_aligned\_to\_h} - Z_h)$$
+
+**(3) 统一 scale 下相加**
+
+$$q_{combined} = q_{old\_contribution\_mul} + q_{new\_contribution\_mul} \quad \text{(scale = } S_{update\_gate\_output} \cdot S_h \text{)}$$
+
+**(4) 一起 rescale 到 h scale**
+
+$$q_{h\_new} = \frac{S_{update\_gate\_output} \cdot S_h}{S_h} \cdot q_{combined} + Z_h = S_{update\_gate\_output} \cdot q_{combined} + Z_h$$
 
 **定点实现**：
 
 ```cpp
-u_diff = q_update_gate - zp_update_gate_output;
+// 步骤1: 将new_gate对齐到h scale
+n_diff_from_zp = q_new_gate_output - zp_new_gate_output;
+q_new_gate_aligned_to_h = rshift_round(n_diff_from_zp, shift_new_gate_output_to_h) + zp_h;
+
+// 步骤2: 计算old_contribution = u * h_old
+u_diff = q_update_gate_output - zp_update_gate_output;
 h_diff = q_h_old - zp_h;
-product = u_diff * h_diff;
-q_mul_old_contribution = rshift_round(product, shift_u_h_to_old_contribution) + zp_mul_old_contribution;
+q_old_contribution_mul = u_diff * h_diff;  // scale = S_u * S_h
+
+// 步骤3: 计算new_contribution = (1-u) * new_gate_aligned
+one_minus_u = quant_one_in_update_gate_scale_ - q_update_gate_output;
+n_diff_aligned = q_new_gate_aligned_to_h - zp_h;
+q_new_contribution_mul = one_minus_u * n_diff_aligned;  // scale = S_u * S_h
+
+// 步骤4: 统一scale下相加
+q_combined = q_old_contribution_mul + q_new_contribution_mul;
+
+// 步骤5: 一起rescale到h scale
+q_h_new = rshift_round(q_combined, shift_update_gate_output) + zp_h;
 ```
 
-**(2) 计算 (1 - u)（优化技巧）**
-
-将常数 1 预量化到 update_gate_output 的量化空间，使 $(1-u)$ 复用同一 scale：
-
-$$q_{one} = \text{round}(1.0 / S_{update\_gate}) + Z_{update\_gate} = \text{round}(2^{shift}) + Z_{update\_gate}$$
-
-$$q_{one\_minus\_u} = q_{one} - q_{update\_gate} + Z_{update\_gate}$$
-
-**定点实现**：
-
-```cpp
-one_minus_u = quant_one_in_update_gate_scale_ - q_update_gate;
-// (1-u) 复用 update_gate_output 的 scale，无需额外参数
-```
-
-**(3) 计算 mul_new_contribution = (1 - u) × n（量化乘法）**
-
-$$q_{new} = \frac{S_{update\_gate} \cdot S_{new\_gate}}{S_{new}} (q_{one} - q_{update\_gate})(q_{new\_gate} - Z_{new\_gate}) + Z_{new}$$
-
-**定点实现**：
-
-```cpp
-n_diff = q_new_gate - zp_new_gate_output;
-product = one_minus_u * n_diff;
-q_mul_new_contribution = rshift_round(product, shift_u_n_to_new_contribution) + zp_mul_new_contribution;
-```
-
-**(4) 最终合并 h_new = mul_old_contribution + mul_new_contribution（量化加法）**
-
-$$q_{h\_new} = \frac{S_{old}}{S_h}(q_{old} - Z_{old}) + \frac{S_{new}}{S_h}(q_{new} - Z_{new}) + Z_h$$
-
-**定点实现**：
-
-```cpp
-old_shifted = rshift_round(q_mul_old_contribution - zp_mul_old_contribution, shift_old_to_h);
-new_shifted = rshift_round(q_mul_new_contribution - zp_mul_new_contribution, shift_new_to_h);
-q_h_new = old_shifted + new_shifted + zp_h;
-```
+> **优化说明**：
+> - 消除 `mul_old_contribution` 和 `mul_new_contribution` 中间空间
+> - 减少 1 次 rescale（从 3 次减少到 2 次：new_gate 对齐 + 最终 rescale）
+> - 在更大 scale 空间（$S_{update\_gate\_output} \cdot S_h$）中相加，精度损失更小
 
 ---
 
@@ -433,13 +468,12 @@ q_h_new = old_shifted + new_shifted + zp_h;
 | update_gate_output | **UINT** | 非对称 | `shift_update_gate_output_` | `zp_update_gate_output_` | sigmoid(update_gate_input) | h 更新门控 |
 | reset_gate_input | INT | 非对称 | `shift_reset_gate_input_` | `zp_reset_gate_input_` | ih_r + hh_r | sigmoid 输入 |
 | reset_gate_output | **UINT** | 非对称 | `shift_reset_gate_output_` | `zp_reset_gate_output_` | sigmoid(reset_gate_input) | n 门乘法输入 |
-| mul_reset_hidden | INT | 非对称 | `shift_mul_reset_hidden_` | `zp_mul_reset_hidden_` | r × weight_hh_linear_n | n 门中间乘法 |
-| new_gate_input | INT | 非对称 | `shift_new_gate_input_` | `zp_new_gate_input_` | ih_n + mul_reset_hidden | tanh 输入 |
+| new_gate_input | INT | 非对称 | `shift_new_gate_input_` | `zp_new_gate_input_` | ih_n + r×hh_n（直接 rescale） | tanh 输入 |
 | new_gate_output | INT | 对称 | `shift_new_gate_output_` | 0 | tanh(new_gate_input) | h 更新候选值 |
-| mul_old_contribution | INT | 非对称 | `shift_mul_old_contribution_` | `zp_mul_old_contribution_` | u × h_old | h 更新旧状态贡献 |
-| mul_new_contribution | INT | 非对称 | `shift_mul_new_contribution_` | `zp_mul_new_contribution_` | (1 - u) × n | h 更新新状态贡献 |
 
-> **说明**：`update_gate_output` 和 `reset_gate_output` 使用 **UINT**（无符号整数），因为 sigmoid 输出范围为 [0, 1]，使用无符号类型可以充分利用所有 bit 位。其他参数使用 **INT**（有符号整数）。
+> **说明**：
+> - `update_gate_output` 和 `reset_gate_output` 使用 **UINT**（无符号整数），因为 sigmoid 输出范围为 [0, 1]，使用无符号类型可以充分利用所有 bit 位。其他参数使用 **INT**（有符号整数）。
+> - **优化**：已消除 `mul_reset_hidden`、`mul_old_contribution`、`mul_new_contribution` 三个中间量化空间，乘法结果直接 rescale 到目标空间，减少 rescale 操作次数。
 
 ### B. 量化参数详细说明
 
@@ -569,39 +603,25 @@ q_h_new = old_shifted + new_shifted + zp_h;
 - **典型配置**：INT8 对称量化，`shift=7`，scale=1/128
 - **特殊说明**：对称量化，zp=0
 
-#### B.6 中间计算参数
+#### B.6 隐藏状态更新参数
 
-| 参数 | 变量名 | 类型 | 说明 |
-|------|--------|------|------|
-| `shift_mul_reset_hidden_` | int8_t | 标量 | r × weight_hh_linear_n 的缩放因子 |
-| `zp_mul_reset_hidden_` | int32_t | 标量 | r × weight_hh_linear_n 的零点 |
+**优化说明**：已消除 `mul_reset_hidden`、`mul_old_contribution`、`mul_new_contribution` 三个中间量化空间。乘法结果直接 rescale 到目标空间，减少 rescale 操作次数。
 
-**mul_reset_hidden (`op.mul_reset_hidden`)** = `reset_gate × weight_hh_linear_n`
-- **数据流位置**：候选门 n 计算的中间步骤
-- **说明**：由于 Linear 层已融合 bias，不再需要单独的 `Rh_add_br` 中间量
-- **浮点范围**：由于 r∈[0,1]，范围不超过 weight_hh_linear_n
-- **典型配置**：INT8，`shift=8`，scale=1/256
+**隐藏状态更新流程**：
 
-#### B.7 隐藏状态更新参数
+1. **new_gate 对齐到 h scale**：$q_{new\_gate\_aligned\_to\_h} = \frac{S_{new\_gate\_output}}{S_h}(q_{new\_gate\_output} - Z_{new\_gate\_output}) + Z_h$
 
-| 参数 | 变量名 | 类型 | 说明 |
-|------|--------|------|------|
-| `shift_mul_old_contribution_` | int8_t | 标量 | u × h_old 的缩放因子 |
-| `zp_mul_old_contribution_` | int32_t | 标量 | u × h_old 的零点 |
-| `shift_mul_new_contribution_` | int8_t | 标量 | (1-u) × n 的缩放因子 |
-| `zp_mul_new_contribution_` | int32_t | 标量 | (1-u) × n 的零点 |
+2. **统一 scale 下计算**（两个乘积都在 $S_{update\_gate\_output} \cdot S_h$ scale）：
+   - $q_{old\_contribution\_mul} = (q_{update\_gate\_output} - Z_{update\_gate\_output})(q_h - Z_h)$
+   - $q_{new\_contribution\_mul} = (q_{one\_in\_update\_gate\_output} - q_{update\_gate\_output})(q_{new\_gate\_aligned\_to\_h} - Z_h)$
 
-**mul_old_contribution (`op.mul_old_contribution`)** = `update_gate × h_old`
-- **数据流位置**：隐藏状态更新公式的第一项
-- **浮点范围**：`[-1.0, 1.0]`（u∈[0,1]，h∈[-1,1]）
-- **典型配置**：INT8，`shift=8`，scale=1/256
+3. **统一 scale 下相加**：$q_{combined} = q_{old\_contribution\_mul} + q_{new\_contribution\_mul}$
 
-**mul_new_contribution (`op.mul_new_contribution`)** = `(1-update_gate) × new_gate`
-- **数据流位置**：隐藏状态更新公式的第二项
-- **浮点范围**：`[-1.0, 1.0]`（(1-u)∈[0,1]，n∈[-1,1]）
-- **典型配置**：INT8，`shift=7`，scale=1/128
+4. **一起 rescale 到 h**：$q_{h\_new} = S_{update\_gate\_output} \cdot q_{combined} + Z_h$
 
-最终隐藏状态更新：`h_new = mul_old_contribution + mul_new_contribution`
+**关键参数**：
+- `q_{one\_in\_update\_gate\_output}`：常数 1 在 update_gate_output 量化空间的值
+  - 计算公式：$q_{one\_in\_update\_gate\_output} = \text{round}(1.0 / S_{update\_gate\_output}) + Z_{update\_gate\_output}$
 
 #### B.8 重缩放参数（Device 端）
 
@@ -620,15 +640,30 @@ shift_weight_ih_linear_to_update_gate_input_ = shift_weight_ih_linear_ - shift_u
 
 **主要重缩放参数**：
 
+**Linear 层参数**（优化：Bias 先转到 GEMM 空间）：
 | 参数 | 说明 | 计算公式 |
 |------|------|----------|
 | `shift_gemm_x_to_weight_ih_linear_[i]` | W×x GEMM 输出 rescale | `shift_W_[i] + shift_x_ - shift_weight_ih_linear_` |
-| `shift_bw_to_weight_ih_linear_[i]` | bw rescale | `shift_bw_[i] - shift_weight_ih_linear_` |
+| `shift_bw_to_gemm_x_[i]` | bw 转到 GEMM 空间 | `shift_bw_[i] - (shift_W_[i] + shift_x_)` |
 | `shift_gemm_h_to_weight_hh_linear_[i]` | R×h GEMM 输出 rescale | `shift_R_[i] + shift_h_ - shift_weight_hh_linear_` |
-| `shift_br_to_weight_hh_linear_[i]` | br rescale | `shift_br_[i] - shift_weight_hh_linear_` |
+| `shift_br_to_gemm_h_[i]` | br 转到 GEMM 空间 | `shift_br_[i] - (shift_R_[i] + shift_h_)` |
+
+**门控计算参数**：
+| 参数 | 说明 | 计算公式 |
+|------|------|----------|
 | `shift_weight_ih_linear_to_update_gate_input_` | ih 到 update_gate_input | `shift_weight_ih_linear_ - shift_update_gate_input_` |
 | `shift_weight_hh_linear_to_update_gate_input_` | hh 到 update_gate_input | `shift_weight_hh_linear_ - shift_update_gate_input_` |
+| `shift_weight_ih_linear_to_reset_gate_input_` | ih 到 reset_gate_input | `shift_weight_ih_linear_ - shift_reset_gate_input_` |
+| `shift_weight_hh_linear_to_reset_gate_input_` | hh 到 reset_gate_input | `shift_weight_hh_linear_ - shift_reset_gate_input_` |
+| `shift_weight_ih_linear_to_new_gate_input_` | ih 到 new_gate_input | `shift_weight_ih_linear_ - shift_new_gate_input_` |
+| `shift_reset_mul_hh_to_new_gate_input_` | r×hh 到 new_gate_input（直接 rescale） | `(shift_reset_gate_output + shift_weight_hh_linear_) - shift_new_gate_input_` |
 | `quant_one_in_update_gate_scale_` | 常数 1 的量化表示 | `round(1.0 × 2^shift_update_gate_output) + zp_update_gate_output` |
+
+**隐藏状态更新参数**（优化：统一 scale 空间）：
+| 参数 | 说明 | 计算公式 |
+|------|------|----------|
+| `shift_new_gate_output_to_h_` | new_gate_output 对齐到 h | `shift_new_gate_output_ - shift_h_` |
+| `shift_update_gate_output` | 统一 scale 到 h（最终 rescale） | `shift_update_gate_output_` |
 
 #### B.9 分段线性近似 LUT
 
