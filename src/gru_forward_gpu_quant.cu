@@ -810,52 +810,25 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     std::vector<int8_t> shift_bw(channel);
     std::vector<int8_t> shift_br(channel);
 
-    // 辅助函数：根据粒度配置获取 W 的 shift 值
+    // 辅助函数：从 per-channel 数组获取 W 的 shift 值
+    // 注意：无论什么粒度，per-channel 数组都已正确设置（PER_TENSOR 时所有值相同，PER_GATE 时每个门内值相同）
     auto get_W_shift = [&](int idx) -> int8_t {
-        if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            return parms.shift_W_tensor_;
-        } else if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            return parms.shift_W_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            return parms.shift_W_[idx];
-        }
+        return parms.shift_W_[idx];
     };
 
-    // 辅助函数：根据粒度配置获取 R 的 shift 值
+    // 辅助函数：从 per-channel 数组获取 R 的 shift 值
     auto get_R_shift = [&](int idx) -> int8_t {
-        if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            return parms.shift_R_tensor_;
-        } else if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            return parms.shift_R_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            return parms.shift_R_[idx];
-        }
+        return parms.shift_R_[idx];
     };
 
-    // 辅助函数：根据粒度配置获取 bw 的 shift 值
+    // 辅助函数：从 per-channel 数组获取 bw 的 shift 值
     auto get_bw_shift = [&](int idx) -> int8_t {
-        if (cfg.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            return parms.shift_bw_tensor_;
-        } else if (cfg.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            return parms.shift_bw_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            return parms.shift_bw_[idx];
-        }
+        return parms.shift_bw_[idx];
     };
 
-    // 辅助函数：根据粒度配置获取 br 的 shift 值
+    // 辅助函数：从 per-channel 数组获取 br 的 shift 值
     auto get_br_shift = [&](int idx) -> int8_t {
-        if (cfg.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            return parms.shift_br_tensor_;
-        } else if (cfg.br_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            return parms.shift_br_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            return parms.shift_br_[idx];
-        }
+        return parms.shift_br_[idx];
     };
 
     for (int idx = 0; idx < channel; ++idx) {
@@ -987,6 +960,20 @@ void ForwardPassQuant::Run(
     }
 
     cublasSetStream(data_->blas_handle, save_stream);
+}
+
+void ForwardPassQuant::GetIntermediateValues(dev::vector<int32_t>* weight_ih_linear_out,
+                                             dev::vector<int32_t>* weight_hh_linear_out) const {
+    if (weight_ih_linear_out) {
+        weight_ih_linear_out->resize(tmp_weight_ih_linear_.size());
+        cudaMemcpy(weight_ih_linear_out->data(), tmp_weight_ih_linear_.data(),
+                  tmp_weight_ih_linear_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+    }
+    if (weight_hh_linear_out) {
+        weight_hh_linear_out->resize(tmp_weight_hh_linear_.size());
+        cudaMemcpy(weight_hh_linear_out->data(), tmp_weight_hh_linear_.data(),
+                  tmp_weight_hh_linear_.size() * sizeof(int32_t), cudaMemcpyDeviceToDevice);
+    }
 }
 
 }  // namespace gru

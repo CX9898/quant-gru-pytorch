@@ -210,26 +210,34 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
                        const float *W, const float *R, const float *bw, const float *br,
                        const float *x, const GRUQuantParams &quant_params, float *h) {
     ScopeTimer t("QuantInference (GPU-INT):");
-    // 1. 分配输出量化值缓冲区（必须由外部分配）
+    const auto &bw_cfg = quant_params.bitwidth_config_;
+    
+    // 1. 量化权重（W, R, bw, br）
     dev::vector<int32_t> W_q_int32(input_size * hidden_size * 3);
     dev::vector<int32_t> R_q_int32(hidden_size * hidden_size * 3);
     dev::vector<int32_t> bw_q_int32(hidden_size * 3);
     dev::vector<int32_t> br_q_int32(hidden_size * 3);
+    quantitativeWeight<false>(input_size, hidden_size, W, R, bw, br, quant_params,
+                              W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                              nullptr, nullptr, nullptr, nullptr);
+    
+    // 2. 量化输入 x
     const int x_size = time_steps * batch_size * input_size;
     dev::vector<int32_t> x_q_int32(x_size);
+    dev::quantificationBitwidth<false>(x, x_q_int32.data(), nullptr, x_size,
+                                       quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
     
-    // 2. 分配输出缓冲区（int32_t）
+    // 3. 分配输出缓冲区（int32_t）
     dev::vector<int32_t> h_q_int32((time_steps + 1) * batch_size * hidden_size);
     
-    // 3. 调用 quantGRUForwardInt32（内部会进行量化）
+    // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
     quantGRUForwardInt32(false, time_steps, batch_size, input_size, hidden_size,
-                        W, R, bw, br, x, nullptr, quant_params, g_blas_handle,
+                        W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                        x_q_int32.data(), nullptr, quant_params, g_blas_handle,
                         h_q_int32.data(), nullptr,
-                        W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
-                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                         nullptr, nullptr, nullptr, nullptr, nullptr);
     
-    // 4. 反量化输出为浮点（使用通用接口）
+    // 5. 反量化输出为浮点（使用通用接口）
     dev::dequantification(h_q_int32.data(), h, (time_steps + 1) * batch_size * hidden_size,
                           quant_params.shift_h_, quant_params.zp_h_);
 }
@@ -599,11 +607,19 @@ int main(int argc, char *argv[]) {
 
         {
             ScopeTimer t("QuantTraining (GPU-INT) Forward:");
-            quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
-                                x_dev.data(), nullptr, quant_params, g_blas_handle,
+            // 先量化输入
+            const auto &bw_cfg = quant_params.bitwidth_config_;
+            quantitativeWeight<true>(I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(), quant_params,
+                                     W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                                     W_mask.data(), R_mask.data(), bw_mask.data(), br_mask.data());
+            dev::quantificationBitwidth<true>(x_dev.data(), x_q_int32.data(), x_mask.data(), x_size,
+                                              quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
+            
+            // 调用 quantGRUForwardInt32（接受已量化的输入）
+            quantGRUForwardInt32(true, T, B, I, H,
+                                W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                                x_q_int32.data(), nullptr, quant_params, g_blas_handle,
                                 h_q_int32.data(), v_q_int32.data(),
-                                W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
-                                x_mask.data(), h0_mask.data(), W_mask.data(), R_mask.data(), bw_mask.data(), br_mask.data(),
                                 weight_ih_mask.data(), weight_hh_mask.data(),
                                 gate_input_mask.data(), gate_output_mask.data(), h_mask.data());
         }
@@ -780,12 +796,22 @@ int main(int argc, char *argv[]) {
         dev::vector<uint8_t> mask_ih_int(T * B * H * 3), mask_hh_int(T * B * H * 3);
         dev::vector<uint8_t> mask_gate_input_int(T * B * H * 3), mask_gate_output_int(T * B * H * 3), mask_h_int(T * B * H);
         
-        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
-        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
-                            x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+        // 3. 先量化输入
+        const auto &bw_cfg = quant_params.bitwidth_config_;
+        quantitativeWeight<true>(I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(), quant_params,
+                                 W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                                 W_mask_int.data(), R_mask_int.data(), bw_mask_int.data(), br_mask_int.data());
+        dev::quantificationBitwidth<true>(x_dev.data(), x_q_int32.data(), x_mask_int.data(), x_size,
+                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
+        dev::vector<int32_t> h0_q_int32(B * H);
+        dev::quantificationBitwidth<true>(h0_dev.data(), h0_q_int32.data(), h0_mask_int.data(), B * H,
+                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg.h_);
+        
+        // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
+        quantGRUForwardInt32(true, T, B, I, H,
+                            W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
+                            x_q_int32.data(), h0_q_int32.data(), quant_params, g_blas_handle,
                             h_q_int32.data(), v_q_int32.data(),
-                            W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(), x_q_int32.data(),
-                            x_mask_int.data(), h0_mask_int.data(), W_mask_int.data(), R_mask_int.data(), bw_mask_int.data(), br_mask_int.data(),
                             mask_ih_int.data(), mask_hh_int.data(),
                             mask_gate_input_int.data(), mask_gate_output_int.data(), mask_h_int.data());
         
@@ -841,12 +867,24 @@ int main(int argc, char *argv[]) {
         // INT32 版本（推理模式）
         dev::vector<int32_t> W_q_inf_int32(I * H * 3), R_q_inf_int32(H * H * 3), bw_q_inf_int32(H * 3), br_q_inf_int32(H * 3);
         dev::vector<int32_t> x_q_inf_int32(T * B * I);
+        dev::vector<int32_t> h0_q_inf_int32(B * H);
         dev::vector<int32_t> h_q_inf_int32((T + 1) * B * H);
-        quantGRUForwardInt32(false, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
-                            x_dev.data(), h0_dev.data(), quant_params, g_blas_handle,
+        
+        // 先量化输入
+        const auto &bw_cfg_inf = quant_params.bitwidth_config_;
+        quantitativeWeight<false>(I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(), quant_params,
+                                   W_q_inf_int32.data(), R_q_inf_int32.data(), bw_q_inf_int32.data(), br_q_inf_int32.data(),
+                                   nullptr, nullptr, nullptr, nullptr);
+        dev::quantificationBitwidth<false>(x_dev.data(), x_q_inf_int32.data(), nullptr, T * B * I,
+                                           quant_params.shift_x_, quant_params.zp_x_, bw_cfg_inf.x_);
+        dev::quantificationBitwidth<false>(h0_dev.data(), h0_q_inf_int32.data(), nullptr, B * H,
+                                          quant_params.shift_h_, quant_params.zp_h_, bw_cfg_inf.h_);
+        
+        // 调用 quantGRUForwardInt32（接受已量化的输入）
+        quantGRUForwardInt32(false, T, B, I, H,
+                            W_q_inf_int32.data(), R_q_inf_int32.data(), bw_q_inf_int32.data(), br_q_inf_int32.data(),
+                            x_q_inf_int32.data(), h0_q_inf_int32.data(), quant_params, g_blas_handle,
                             h_q_inf_int32.data(), nullptr,
-                            W_q_inf_int32.data(), R_q_inf_int32.data(), bw_q_inf_int32.data(), br_q_inf_int32.data(), x_q_inf_int32.data(),
-                            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                             nullptr, nullptr, nullptr, nullptr, nullptr);
         // 使用通用接口反量化输出
         std::vector<float> h_int_inf_cpu((T + 1) * B * H);
@@ -902,12 +940,22 @@ int main(int argc, char *argv[]) {
         // 计算过程 mask
         dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
         
-        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
-        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
-                            x_dev.data(), h0_zero_dev.data(), quant_params, g_blas_handle,
+        // 3. 先量化输入
+        const auto &bw_cfg_z = quant_params.bitwidth_config_;
+        quantitativeWeight<true>(I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(), quant_params,
+                                 W_q_z_int32.data(), R_q_z_int32.data(), bw_q_z_int32.data(), br_q_z_int32.data(),
+                                 W_mask_z.data(), R_mask_z.data(), bw_mask_z.data(), br_mask_z.data());
+        dev::quantificationBitwidth<true>(x_dev.data(), x_q_z_int32.data(), x_mask_z.data(), x_size,
+                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg_z.x_);
+        dev::vector<int32_t> h0_q_z_int32(B * H);
+        dev::quantificationBitwidth<true>(h0_zero_dev.data(), h0_q_z_int32.data(), h0_mask_z.data(), B * H,
+                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg_z.h_);
+        
+        // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
+        quantGRUForwardInt32(true, T, B, I, H,
+                            W_q_z_int32.data(), R_q_z_int32.data(), bw_q_z_int32.data(), br_q_z_int32.data(),
+                            x_q_z_int32.data(), h0_q_z_int32.data(), quant_params, g_blas_handle,
                             h_q_z_int32.data(), v_q_z_int32.data(),
-                            W_q_z_int32.data(), R_q_z_int32.data(), bw_q_z_int32.data(), br_q_z_int32.data(), x_q_z_int32.data(),
-                            x_mask_z.data(), h0_mask_z.data(), W_mask_z.data(), R_mask_z.data(), bw_mask_z.data(), br_mask_z.data(),
                             m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         
         // 5. 反量化输出为浮点
@@ -994,12 +1042,22 @@ int main(int argc, char *argv[]) {
         // 计算过程 mask
         dev::vector<uint8_t> m1(T * B * H * 3), m2(T * B * H * 3), m3(T * B * H * 3), m4(T * B * H * 3), m5(T * B * H);
         
-        // 3. 调用 quantGRUForwardInt32（内部会进行量化）
-        quantGRUForwardInt32(true, T, B, I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(),
-                            x_dev.data(), h0_ones_dev.data(), quant_params, g_blas_handle,
+        // 3. 先量化输入
+        const auto &bw_cfg_o = quant_params.bitwidth_config_;
+        quantitativeWeight<true>(I, H, W_dev.data(), R_dev.data(), bw_dev.data(), br_dev.data(), quant_params,
+                                 W_q_o_int32.data(), R_q_o_int32.data(), bw_q_o_int32.data(), br_q_o_int32.data(),
+                                 W_mask_o.data(), R_mask_o.data(), bw_mask_o.data(), br_mask_o.data());
+        dev::quantificationBitwidth<true>(x_dev.data(), x_q_o_int32.data(), x_mask_o.data(), x_size,
+                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg_o.x_);
+        dev::vector<int32_t> h0_q_o_int32(B * H);
+        dev::quantificationBitwidth<true>(h0_ones_dev.data(), h0_q_o_int32.data(), h0_mask_o.data(), B * H,
+                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg_o.h_);
+        
+        // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
+        quantGRUForwardInt32(true, T, B, I, H,
+                            W_q_o_int32.data(), R_q_o_int32.data(), bw_q_o_int32.data(), br_q_o_int32.data(),
+                            x_q_o_int32.data(), h0_q_o_int32.data(), quant_params, g_blas_handle,
                             h_q_o_int32.data(), v_q_o_int32.data(),
-                            W_q_o_int32.data(), R_q_o_int32.data(), bw_q_o_int32.data(), br_q_o_int32.data(), x_q_o_int32.data(),
-                            x_mask_o.data(), h0_mask_o.data(), W_mask_o.data(), R_mask_o.data(), bw_mask_o.data(), br_mask_o.data(),
                             m1.data(), m2.data(), m3.data(), m4.data(), m5.data());
         
         // 5. 反量化输出为浮点（使用通用接口）

@@ -47,13 +47,25 @@ GRUQuantParams calculateGRUQuantitativeParameters(
                     quant_params.shift_h_, quant_params.zp_h_);
 
     // 权重 W/R 和偏置 bw/br（根据 granularity 设置）
+    // 修改：无论什么粒度，都更新 per-channel 参数
+    // 如果是 per-tensor，则将 per-channel 的 scale 都设置为相同的
+    // 如果是 per-gate，则将 per-channel 中的分为三个相同的值
     const int channel_size = quant_ranges.hidden_ * 3;
     const int hidden_size = quant_ranges.hidden_;
     
-    // 根据 granularity 设置参数
-    // W
+    // W: 总是先计算 per-channel 参数
+    quant_params.shift_W_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        float aligned_min, aligned_max;
+        int32_t zp_tmp;
+        calibrateQuantParams(quant_ranges.min_W_[c], quant_ranges.max_W_[c], bitwidth_config.W_,
+                             bitwidth_config.W_symmetric_, aligned_min, aligned_max,
+                             quant_params.shift_W_[c], zp_tmp);
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        // Per-tensor: 从 per-channel 数据计算全局 min/max
+        // Per-tensor: 从 per-channel 数据计算全局 min/max，然后将所有 channel 设置为相同值
         float min_W = *std::min_element(quant_ranges.min_W_.begin(), quant_ranges.min_W_.end());
         float max_W = *std::max_element(quant_ranges.max_W_.begin(), quant_ranges.max_W_.end());
         float aligned_min, aligned_max;
@@ -61,8 +73,10 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         calibrateQuantParams(min_W, max_W, bitwidth_config.W_,
                              bitwidth_config.W_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_W_tensor_, zp_tmp);
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_W_.begin(), quant_params.shift_W_.end(), quant_params.shift_W_tensor_);
     } else if (bitwidth_config.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-        // Per-gate: 按 gate 分组计算 min/max
+        // Per-gate: 按 gate 分组计算 min/max，然后将每个 gate 内的所有 channel 设置为相同值
         for (int gate = 0; gate < 3; ++gate) {
             float min_gate = std::numeric_limits<float>::max();
             float max_gate = std::numeric_limits<float>::lowest();
@@ -75,19 +89,25 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             calibrateQuantParams(min_gate, max_gate, bitwidth_config.W_,
                                  bitwidth_config.W_symmetric_, aligned_min, aligned_max,
                                  quant_params.shift_W_gate_[gate], zp_tmp);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_W_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            float aligned_min, aligned_max;
-            int32_t zp_tmp;
-            calibrateQuantParams(quant_ranges.min_W_[c], quant_ranges.max_W_[c], bitwidth_config.W_,
-                                 bitwidth_config.W_symmetric_, aligned_min, aligned_max,
-                                 quant_params.shift_W_[c], zp_tmp);
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_W_[c] = quant_params.shift_W_gate_[gate];
+            }
         }
     }
+    // PER_CHANNEL: 保持每个 channel 独立计算的值（已在上面计算）
     
-    // R
+    // R: 总是先计算 per-channel 参数
+    quant_params.shift_R_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        float aligned_min, aligned_max;
+        int32_t zp_tmp;
+        calibrateQuantParams(quant_ranges.min_R_[c], quant_ranges.max_R_[c], bitwidth_config.R_,
+                             bitwidth_config.R_symmetric_, aligned_min, aligned_max,
+                             quant_params.shift_R_[c], zp_tmp);
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         float min_R = *std::min_element(quant_ranges.min_R_.begin(), quant_ranges.min_R_.end());
         float max_R = *std::max_element(quant_ranges.max_R_.begin(), quant_ranges.max_R_.end());
@@ -96,6 +116,8 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         calibrateQuantParams(min_R, max_R, bitwidth_config.R_,
                              bitwidth_config.R_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_R_tensor_, zp_tmp);
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_R_.begin(), quant_params.shift_R_.end(), quant_params.shift_R_tensor_);
     } else if (bitwidth_config.R_granularity_ == OperatorQuantConfig::PER_GATE) {
         for (int gate = 0; gate < 3; ++gate) {
             float min_gate = std::numeric_limits<float>::max();
@@ -109,19 +131,24 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             calibrateQuantParams(min_gate, max_gate, bitwidth_config.R_,
                                  bitwidth_config.R_symmetric_, aligned_min, aligned_max,
                                  quant_params.shift_R_gate_[gate], zp_tmp);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_R_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            float aligned_min, aligned_max;
-            int32_t zp_tmp;
-            calibrateQuantParams(quant_ranges.min_R_[c], quant_ranges.max_R_[c], bitwidth_config.R_,
-                                 bitwidth_config.R_symmetric_, aligned_min, aligned_max,
-                                 quant_params.shift_R_[c], zp_tmp);
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_R_[c] = quant_params.shift_R_gate_[gate];
+            }
         }
     }
     
-    // bw
+    // bw: 总是先计算 per-channel 参数
+    quant_params.shift_bw_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        float aligned_min, aligned_max;
+        int32_t zp_tmp;
+        calibrateQuantParams(quant_ranges.min_bw_[c], quant_ranges.max_bw_[c], bitwidth_config.bw_,
+                             bitwidth_config.bw_symmetric_, aligned_min, aligned_max,
+                             quant_params.shift_bw_[c], zp_tmp);
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         float min_bw = *std::min_element(quant_ranges.min_bw_.begin(), quant_ranges.min_bw_.end());
         float max_bw = *std::max_element(quant_ranges.max_bw_.begin(), quant_ranges.max_bw_.end());
@@ -130,6 +157,8 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         calibrateQuantParams(min_bw, max_bw, bitwidth_config.bw_,
                              bitwidth_config.bw_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_bw_tensor_, zp_tmp);
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_bw_.begin(), quant_params.shift_bw_.end(), quant_params.shift_bw_tensor_);
     } else if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
         for (int gate = 0; gate < 3; ++gate) {
             float min_gate = std::numeric_limits<float>::max();
@@ -143,19 +172,24 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             calibrateQuantParams(min_gate, max_gate, bitwidth_config.bw_,
                                  bitwidth_config.bw_symmetric_, aligned_min, aligned_max,
                                  quant_params.shift_bw_gate_[gate], zp_tmp);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_bw_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            float aligned_min, aligned_max;
-            int32_t zp_tmp;
-            calibrateQuantParams(quant_ranges.min_bw_[c], quant_ranges.max_bw_[c], bitwidth_config.bw_,
-                                 bitwidth_config.bw_symmetric_, aligned_min, aligned_max,
-                                 quant_params.shift_bw_[c], zp_tmp);
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_bw_[c] = quant_params.shift_bw_gate_[gate];
+            }
         }
     }
     
-    // br
+    // br: 总是先计算 per-channel 参数
+    quant_params.shift_br_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        float aligned_min, aligned_max;
+        int32_t zp_tmp;
+        calibrateQuantParams(quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_,
+                             bitwidth_config.br_symmetric_, aligned_min, aligned_max,
+                             quant_params.shift_br_[c], zp_tmp);
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         float min_br = *std::min_element(quant_ranges.min_br_.begin(), quant_ranges.min_br_.end());
         float max_br = *std::max_element(quant_ranges.max_br_.begin(), quant_ranges.max_br_.end());
@@ -164,6 +198,8 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         calibrateQuantParams(min_br, max_br, bitwidth_config.br_,
                              bitwidth_config.br_symmetric_, aligned_min, aligned_max,
                              quant_params.shift_br_tensor_, zp_tmp);
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_br_.begin(), quant_params.shift_br_.end(), quant_params.shift_br_tensor_);
     } else if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_GATE) {
         for (int gate = 0; gate < 3; ++gate) {
             float min_gate = std::numeric_limits<float>::max();
@@ -177,15 +213,10 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             calibrateQuantParams(min_gate, max_gate, bitwidth_config.br_,
                                  bitwidth_config.br_symmetric_, aligned_min, aligned_max,
                                  quant_params.shift_br_gate_[gate], zp_tmp);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_br_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            float aligned_min, aligned_max;
-            int32_t zp_tmp;
-            calibrateQuantParams(quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_,
-                                 bitwidth_config.br_symmetric_, aligned_min, aligned_max,
-                                 quant_params.shift_br_[c], zp_tmp);
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_br_[c] = quant_params.shift_br_gate_[gate];
+            }
         }
     }
 
@@ -377,10 +408,13 @@ void quantGRUBackward(const int time_steps, const int batch_size, const int inpu
 // 权重量化实现（统一 int32_t 输出）
 // =====================================================================
 
+// GPU 权重量化（统一模板接口，支持训练模式 mask）
+template <bool Training>
 void quantitativeWeight(const int input_size, const int hidden_size, const float *W, const float *R,
                         const float *bw, const float *br,
                         const GRUQuantParams &quant_parms, int32_t *W_quant,
-                        int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant) {
+                        int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant,
+                        uint8_t *W_mask, uint8_t *R_mask, uint8_t *bw_mask, uint8_t *br_mask) {
     // 显式创建dev::vector以避免临时对象问题
     dev::vector<int8_t> shift_W_dev(quant_parms.shift_W_);
     dev::vector<int8_t> shift_R_dev(quant_parms.shift_R_);
@@ -389,14 +423,14 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
 
     // 统一 int32_t 输出，使用 clamp_by_bitwidth 限制到实际位宽
     const auto &bw_cfg = quant_parms.bitwidth_config_;
-    dev::quantificationPerChannelBitwidth<false>(W, W_quant, nullptr, input_size, 3 * hidden_size, 
-                                                  shift_W_dev, bw_cfg.W_);
-    dev::quantificationPerChannelBitwidth<false>(R, R_quant, nullptr, hidden_size, 3 * hidden_size, 
-                                                  shift_R_dev, bw_cfg.R_);
-    dev::quantificationPerChannelBitwidth<false>(bw, bw_quant, nullptr, 1, 3 * hidden_size, 
-                                                  shift_bw_dev, bw_cfg.bw_);
-    dev::quantificationPerChannelBitwidth<false>(br, br_quant, nullptr, 1, 3 * hidden_size, 
-                                                 shift_br_dev, bw_cfg.br_);
+    dev::quantificationPerChannelBitwidth<Training>(W, W_quant, W_mask, input_size, 3 * hidden_size, 
+                                                    shift_W_dev, bw_cfg.W_);
+    dev::quantificationPerChannelBitwidth<Training>(R, R_quant, R_mask, hidden_size, 3 * hidden_size, 
+                                                    shift_R_dev, bw_cfg.R_);
+    dev::quantificationPerChannelBitwidth<Training>(bw, bw_quant, bw_mask, 1, 3 * hidden_size, 
+                                                    shift_bw_dev, bw_cfg.bw_);
+    dev::quantificationPerChannelBitwidth<Training>(br, br_quant, br_mask, 1, 3 * hidden_size, 
+                                                     shift_br_dev, bw_cfg.br_);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
@@ -407,6 +441,46 @@ void quantitativeWeight(const int input_size, const int hidden_size, const float
         const char *err_str = cudaGetErrorString(err);
         fprintf(stderr, "CUDA error in quantitativeWeight: %s\n", err_str);
         throw std::runtime_error(std::string("CUDA error in quantitativeWeight: ") + err_str);
+    }
+}
+
+// 显式实例化模板
+template void quantitativeWeight<false>(const int, const int, const float *, const float *,
+                                         const float *, const float *, const GRUQuantParams &,
+                                         int32_t *, int32_t *, int32_t *, int32_t *,
+                                         uint8_t *, uint8_t *, uint8_t *, uint8_t *);
+template void quantitativeWeight<true>(const int, const int, const float *, const float *,
+                                        const float *, const float *, const GRUQuantParams &,
+                                        int32_t *, int32_t *, int32_t *, int32_t *,
+                                        uint8_t *, uint8_t *, uint8_t *, uint8_t *);
+
+// CPU 权重量化（统一接口）
+void quantitativeWeightCPU(const int input_size, const int hidden_size, const float *W, const float *R,
+                           const float *bw, const float *br,
+                           const GRUQuantParams &quant_parms, int32_t *W_quant,
+                           int32_t *R_quant, int32_t *bw_quant, int32_t *br_quant) {
+    const int hidden3 = hidden_size * 3;
+    const auto &bw_cfg = quant_parms.bitwidth_config_;
+
+    // 量化权重矩阵（per-channel）
+    for (int k = 0; k < input_size; k++) {
+        for (int m = 0; m < hidden3; m++) {
+            int idx = k * hidden3 + m;
+            W_quant[idx] = quantize<false>(W[idx], quant_parms.shift_W_[m], 0, bw_cfg.W_);
+        }
+    }
+
+    for (int k = 0; k < hidden_size; k++) {
+        for (int m = 0; m < hidden3; m++) {
+            int idx = k * hidden3 + m;
+            R_quant[idx] = quantize<false>(R[idx], quant_parms.shift_R_[m], 0, bw_cfg.R_);
+        }
+    }
+
+    // 量化偏置（per-channel）
+    for (int m = 0; m < hidden3; m++) {
+        bw_quant[m] = quantize<false>(bw[m], quant_parms.shift_bw_[m], 0, bw_cfg.bw_);
+        br_quant[m] = quantize<false>(br[m], quant_parms.shift_br_[m], 0, bw_cfg.br_);
     }
 }
 
@@ -545,6 +619,7 @@ void dequantizeGRUWeights(float *W_q, float *R_q, float *bw_q, float *br_q,
 
 // GPU 纯定点 GRU 前向传播（int32 输入/输出）
 // 这是量化 GRU 的核心计算，所有高层接口都调用此函数
+// 输入必须是已量化的 int32_t 值，量化应在外部完成
 void quantGRUForwardInt32(
     bool is_training, int time_steps, int batch_size, int input_size, int hidden_size,
     const int32_t *W_q, const int32_t *R_q, const int32_t *bw_q, const int32_t *br_q,
@@ -552,6 +627,7 @@ void quantGRUForwardInt32(
     const GRUQuantParams &quant_params,
     const cublasHandle_t &g_blas_handle,
     int32_t *h_q, int32_t *v_q,
+    // 计算过程 mask（外部分配，nullptr=不保存）
     uint8_t *weight_ih_linear_mask,
     uint8_t *weight_hh_linear_mask,
     uint8_t *gate_input_mask,
@@ -562,8 +638,10 @@ void quantGRUForwardInt32(
     
     // 初始化 h_q[0]
     if (h0_q != nullptr) {
+        // 从 h0_q 复制到 h_q[0]
         cudaMemcpy(h_q, h0_q, NH * sizeof(int32_t), cudaMemcpyDeviceToDevice);
     } else {
+        // 使用零点值初始化
         dev::fill_n(h_q, NH, quant_params.zp_h_);
     }
     
@@ -600,8 +678,8 @@ void quantGRUForwardInt32(
 // 量化 GRU 前向传播（浮点接口）
 // =====================================================================
 
-// 量化 GRU 前向传播（浮点输入/输出，内部自动量化权重和激活）
-void quantGRUForward(bool is_training, const int time_steps, const int batch_size,
+// 量化 GRU 前向传播（整数版，int32_t 存储，浮点输入/输出，内部自动量化权重和激活）
+void quantGRUForwardInt(bool is_training, const int time_steps, const int batch_size,
                      const int input_size, const int hidden_size, const float *W,
                      const float *R, const float *bw, const float *br, const float *x,
                      const float *h0, const GRUQuantParams &quant_parms,
@@ -622,114 +700,57 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     const int hidden3 = hidden_size * 3;
     const std::size_t x_size = time_steps * batch_size * input_size;
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
-    const std::size_t h0_size = batch_size * hidden_size;
+    const int NH = batch_size * hidden_size;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
-    // 注意：hidden_size 已在函数参数中声明，不需要重新声明
 
-    // 根据粒度配置构建 shift 数组（用于量化 kernel）
-    std::vector<int8_t> shift_W_array(hidden3);
-    std::vector<int8_t> shift_R_array(hidden3);
-    std::vector<int8_t> shift_bw_array(hidden3);
-    std::vector<int8_t> shift_br_array(hidden3);
-
-    for (int idx = 0; idx < hidden3; ++idx) {
-        // W
-        if (bw_cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            shift_W_array[idx] = quant_parms.shift_W_tensor_;
-        } else if (bw_cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            shift_W_array[idx] = quant_parms.shift_W_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            shift_W_array[idx] = quant_parms.shift_W_[idx];
-        }
-        
-        // R
-        if (bw_cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            shift_R_array[idx] = quant_parms.shift_R_tensor_;
-        } else if (bw_cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            shift_R_array[idx] = quant_parms.shift_R_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            shift_R_array[idx] = quant_parms.shift_R_[idx];
-        }
-        
-        // bw
-        if (bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            shift_bw_array[idx] = quant_parms.shift_bw_tensor_;
-        } else if (bw_cfg.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            shift_bw_array[idx] = quant_parms.shift_bw_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            shift_bw_array[idx] = quant_parms.shift_bw_[idx];
-        }
-        
-        // br
-        if (bw_cfg.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-            shift_br_array[idx] = quant_parms.shift_br_tensor_;
-        } else if (bw_cfg.br_granularity_ == OperatorQuantConfig::PER_GATE) {
-            int gate_idx = idx / hidden_size;
-            shift_br_array[idx] = quant_parms.shift_br_gate_[gate_idx];
-        } else {  // PER_CHANNEL
-            shift_br_array[idx] = quant_parms.shift_br_[idx];
-        }
-    }
-
-    // 拷贝 shift 到 device（用于量化）
-    dev::vector<int8_t> shift_W_dev(shift_W_array);
-    dev::vector<int8_t> shift_R_dev(shift_R_array);
-    dev::vector<int8_t> shift_bw_dev(shift_bw_array);
-    dev::vector<int8_t> shift_br_dev(shift_br_array);
-
-    // 1. 量化权重
+    // 1. 量化权重（W, R, bw, br）- 使用统一接口
     dev::vector<int32_t> W_q(input_size * hidden3);
     dev::vector<int32_t> R_q(hidden_size * hidden3);
     dev::vector<int32_t> bw_q(hidden3);
     dev::vector<int32_t> br_q(hidden3);
-
-    // 量化权重（使用模板参数区分训练/推理）
     if (is_training) {
-        dev::quantificationPerChannelBitwidth<true>(W, W_q.data(), W_mask, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelBitwidth<true>(R, R_q.data(), R_mask, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelBitwidth<true>(bw, bw_q.data(), bw_mask, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelBitwidth<true>(br, br_q.data(), br_mask, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        quantitativeWeight<true>(input_size, hidden_size, W, R, bw, br, quant_parms,
+                                 W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                 W_mask, R_mask, bw_mask, br_mask);
     } else {
-        dev::quantificationPerChannelBitwidth<false>(W, W_q.data(), nullptr, input_size, hidden3, shift_W_dev, bw_cfg.W_);
-        dev::quantificationPerChannelBitwidth<false>(R, R_q.data(), nullptr, hidden_size, hidden3, shift_R_dev, bw_cfg.R_);
-        dev::quantificationPerChannelBitwidth<false>(bw, bw_q.data(), nullptr, 1, hidden3, shift_bw_dev, bw_cfg.bw_);
-        dev::quantificationPerChannelBitwidth<false>(br, br_q.data(), nullptr, 1, hidden3, shift_br_dev, bw_cfg.br_);
+        quantitativeWeight<false>(input_size, hidden_size, W, R, bw, br, quant_parms,
+                                  W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                  nullptr, nullptr, nullptr, nullptr);
     }
 
-    // 2. 量化输入 x
+    // 2. 量化输入 x（使用统一接口）
     dev::vector<int32_t> x_quant(x_size);
     if (is_training) {
-        dev::quantificationBitwidth<true>(x, x_quant.data(), x_mask, x_size, 
+        dev::quantificationBitwidth<true>(x, x_quant.data(), x_mask, x_size,
                                           quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
     } else {
-        dev::quantificationBitwidth<false>(x, x_quant.data(), nullptr, x_size, 
+        dev::quantificationBitwidth<false>(x, x_quant.data(), nullptr, x_size,
                                            quant_parms.shift_x_, quant_parms.zp_x_, bw_cfg.x_);
     }
 
-    // 3. 量化初始隐藏状态 h0（空 vector 的 .data() 返回 nullptr）
+    // 3. 量化 h0（如提供）
     dev::vector<int32_t> h0_quant;
+    const int32_t *h0_q_ptr = nullptr;
     if (h0 != nullptr) {
-        h0_quant.resize(h0_size);
+        h0_quant.resize(NH);
         if (is_training) {
-            dev::quantificationBitwidth<true>(h0, h0_quant.data(), h0_mask, h0_size, 
-                                              quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+            dev::quantificationBitwidth<true>(h0, h0_quant.data(), h0_mask, NH,
+                                             quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
         } else {
-            dev::quantificationBitwidth<false>(h0, h0_quant.data(), nullptr, h0_size, 
-                                               quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
+            dev::quantificationBitwidth<false>(h0, h0_quant.data(), nullptr, NH,
+                                              quant_parms.shift_h_, quant_parms.zp_h_, bw_cfg.h_);
         }
+        h0_q_ptr = h0_quant.data();
     }
 
     // 4. 分配输出缓冲区
     dev::vector<int32_t> h_quant(h_size);
     dev::vector<int32_t> v_quant(v != nullptr ? time_steps * batch_size * hidden_size * 4 : 0);
 
-    // 5. 调用核心定点计算（传递 mask 指针）
+    // 5. 调用核心定点计算（quantGRUForwardInt32 接受已量化的输入）
     quantGRUForwardInt32(is_training, time_steps, batch_size, input_size, hidden_size,
                          W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
-                         x_quant.data(), h0_quant.data(),
+                         x_quant.data(), h0_q_ptr,
                          quant_parms, g_blas_handle,
                          h_quant.data(), v != nullptr ? v_quant.data() : nullptr,
                          weight_ih_linear_mask, weight_hh_linear_mask, 
@@ -754,8 +775,8 @@ void quantGRUForward(bool is_training, const int time_steps, const int batch_siz
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         const char *err_str = cudaGetErrorString(err);
-        fprintf(stderr, "CUDA error in quantGRUForward: %s\n", err_str);
-        throw std::runtime_error(std::string("CUDA error in quantGRUForward: ") + err_str);
+        fprintf(stderr, "CUDA error in quantGRUForwardInt: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForwardInt: ") + err_str);
     }
 }
 
@@ -842,33 +863,15 @@ void quantGRUForwardCPU(bool is_training, int time_steps, int batch_size, int in
                         const float *br, const float *x, const float *h0,
                         const GRUQuantParams &quant_parms, float *h, float *v) {
     const int hidden3 = hidden_size * 3;
-    const auto &bw_cfg = quant_parms.bitwidth_config_;
 
-    // 量化权重矩阵（per-channel）
+    // 量化权重（使用统一接口）
     std::vector<int32_t> W_quant(input_size * hidden3);
     std::vector<int32_t> R_quant(hidden_size * hidden3);
-
-    for (int k = 0; k < input_size; k++) {
-        for (int m = 0; m < hidden3; m++) {
-            int idx = k * hidden3 + m;
-            W_quant[idx] = quantize(W[idx], quant_parms.shift_W_[m], 0, bw_cfg.W_);
-        }
-    }
-
-    for (int k = 0; k < hidden_size; k++) {
-        for (int m = 0; m < hidden3; m++) {
-            int idx = k * hidden3 + m;
-            R_quant[idx] = quantize(R[idx], quant_parms.shift_R_[m], 0, bw_cfg.R_);
-        }
-    }
-
-    // 量化偏置（per-channel）
     std::vector<int32_t> bw_quant(hidden3);
     std::vector<int32_t> br_quant(hidden3);
-    for (int m = 0; m < hidden3; m++) {
-        bw_quant[m] = quantize(bw[m], quant_parms.shift_bw_[m], 0, bw_cfg.bw_);
-        br_quant[m] = quantize(br[m], quant_parms.shift_br_[m], 0, bw_cfg.br_);
-    }
+    
+    quantitativeWeightCPU(input_size, hidden_size, W, R, bw, br, quant_parms,
+                          W_quant.data(), R_quant.data(), bw_quant.data(), br_quant.data());
 
     // 调用量化权重版本
     quantGRUForwardCPU(is_training, time_steps, batch_size, input_size, hidden_size,
@@ -1083,89 +1086,122 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     };
 
     // 根据 granularity 设置权重参数
-    // W
+    // 修改：无论什么粒度，都更新 per-channel 参数
+    // 如果是 per-tensor，则将 per-channel 的 scale 都设置为相同的
+    // 如果是 per-gate，则将 per-channel 中的分为三个相同的值
+    
+    // W: 总是先计算 per-channel 参数
+    quant_params.shift_W_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        int32_t zp_tmp;
+        histCalibrate(hist_collectors.W_hist[c], bitwidth_config.W_,
+                     bitwidth_config.W_symmetric_, quant_params.shift_W_[c], zp_tmp, "W");
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        // Per-tensor: 直接使用独立的 per-tensor 直方图
+        // Per-tensor: 直接使用独立的 per-tensor 直方图，然后将所有 channel 设置为相同值
         int32_t zp_tmp;
         histCalibrate(hist_collectors.W_tensor_hist, bitwidth_config.W_, bitwidth_config.W_symmetric_,
                      quant_params.shift_W_tensor_, zp_tmp, "W");
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_W_.begin(), quant_params.shift_W_.end(), quant_params.shift_W_tensor_);
     } else if (bitwidth_config.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-        // Per-gate: 直接使用独立的 per-gate 直方图
+        // Per-gate: 直接使用独立的 per-gate 直方图，然后将每个 gate 内的所有 channel 设置为相同值
         int32_t zp_tmp;
         for (int gate = 0; gate < 3; ++gate) {
             const char* gate_names[] = {"W_gate_z", "W_gate_r", "W_gate_g"};
             histCalibrate(hist_collectors.W_gate_hist[gate], bitwidth_config.W_, bitwidth_config.W_symmetric_,
                          quant_params.shift_W_gate_[gate], zp_tmp, gate_names[gate]);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_W_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            histCalibrate(hist_collectors.W_hist[c], bitwidth_config.W_,
-                         bitwidth_config.W_symmetric_, quant_params.shift_W_[c], zp_tmp, "W");
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_W_[c] = quant_params.shift_W_gate_[gate];
+            }
         }
     }
+    // PER_CHANNEL: 保持每个 channel 独立计算的值（已在上面计算）
     
-    // R
+    // R: 总是先计算 per-channel 参数
+    quant_params.shift_R_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        int32_t zp_tmp;
+        histCalibrate(hist_collectors.R_hist[c], bitwidth_config.R_,
+                     bitwidth_config.R_symmetric_, quant_params.shift_R_[c], zp_tmp, "R");
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.R_tensor_hist, bitwidth_config.R_, bitwidth_config.R_symmetric_,
                      quant_params.shift_R_tensor_, zp_tmp, "R");
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_R_.begin(), quant_params.shift_R_.end(), quant_params.shift_R_tensor_);
     } else if (bitwidth_config.R_granularity_ == OperatorQuantConfig::PER_GATE) {
         int32_t zp_tmp;
         for (int gate = 0; gate < 3; ++gate) {
             const char* gate_names[] = {"R_gate_z", "R_gate_r", "R_gate_g"};
             histCalibrate(hist_collectors.R_gate_hist[gate], bitwidth_config.R_, bitwidth_config.R_symmetric_,
                          quant_params.shift_R_gate_[gate], zp_tmp, gate_names[gate]);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_R_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            histCalibrate(hist_collectors.R_hist[c], bitwidth_config.R_,
-                         bitwidth_config.R_symmetric_, quant_params.shift_R_[c], zp_tmp, "R");
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_R_[c] = quant_params.shift_R_gate_[gate];
+            }
         }
     }
     
-    // bw
+    // bw: 总是先计算 per-channel 参数
+    quant_params.shift_bw_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        int32_t zp_tmp;
+        histCalibrate(hist_collectors.bw_hist[c], bitwidth_config.bw_,
+                     bitwidth_config.bw_symmetric_, quant_params.shift_bw_[c], zp_tmp, "bw");
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.bw_tensor_hist, bitwidth_config.bw_, bitwidth_config.bw_symmetric_,
                      quant_params.shift_bw_tensor_, zp_tmp, "bw");
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_bw_.begin(), quant_params.shift_bw_.end(), quant_params.shift_bw_tensor_);
     } else if (bitwidth_config.bw_granularity_ == OperatorQuantConfig::PER_GATE) {
         int32_t zp_tmp;
         for (int gate = 0; gate < 3; ++gate) {
             const char* gate_names[] = {"bw_gate_z", "bw_gate_r", "bw_gate_g"};
             histCalibrate(hist_collectors.bw_gate_hist[gate], bitwidth_config.bw_, bitwidth_config.bw_symmetric_,
                          quant_params.shift_bw_gate_[gate], zp_tmp, gate_names[gate]);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_bw_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            histCalibrate(hist_collectors.bw_hist[c], bitwidth_config.bw_,
-                         bitwidth_config.bw_symmetric_, quant_params.shift_bw_[c], zp_tmp, "bw");
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_bw_[c] = quant_params.shift_bw_gate_[gate];
+            }
         }
     }
     
-    // br
+    // br: 总是先计算 per-channel 参数
+    quant_params.shift_br_.resize(channel_size);
+    for (int c = 0; c < channel_size; ++c) {
+        int32_t zp_tmp;
+        histCalibrate(hist_collectors.br_hist[c], bitwidth_config.br_,
+                     bitwidth_config.br_symmetric_, quant_params.shift_br_[c], zp_tmp, "br");
+    }
+    
+    // 根据粒度设置 per-channel 数组的值
     if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int32_t zp_tmp;
         histCalibrate(hist_collectors.br_tensor_hist, bitwidth_config.br_, bitwidth_config.br_symmetric_,
                      quant_params.shift_br_tensor_, zp_tmp, "br");
+        // 将所有 per-channel 值设置为 tensor 值
+        std::fill(quant_params.shift_br_.begin(), quant_params.shift_br_.end(), quant_params.shift_br_tensor_);
     } else if (bitwidth_config.br_granularity_ == OperatorQuantConfig::PER_GATE) {
         int32_t zp_tmp;
         for (int gate = 0; gate < 3; ++gate) {
             const char* gate_names[] = {"br_gate_z", "br_gate_r", "br_gate_g"};
             histCalibrate(hist_collectors.br_gate_hist[gate], bitwidth_config.br_, bitwidth_config.br_symmetric_,
                          quant_params.shift_br_gate_[gate], zp_tmp, gate_names[gate]);
-        }
-    } else {  // PER_CHANNEL
-        quant_params.shift_br_.resize(channel_size);
-        for (int c = 0; c < channel_size; ++c) {
-            int32_t zp_tmp;
-            histCalibrate(hist_collectors.br_hist[c], bitwidth_config.br_,
-                         bitwidth_config.br_symmetric_, quant_params.shift_br_[c], zp_tmp, "br");
+            // 将该 gate 内的所有 channel 设置为 gate 值
+            for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
+                quant_params.shift_br_[c] = quant_params.shift_br_gate_[gate];
+            }
         }
     }
 
