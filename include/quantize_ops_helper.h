@@ -794,26 +794,38 @@ __host__ __device__ __forceinline__
 int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
                  uint8_t* was_clamped = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
-    // 计算 update_gate * h_old，直接对齐到 h（融合中间层）
+    // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
+    // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
+    const int64_t n_diff_from_zp = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
+    const int32_t new_gate_aligned_to_h = static_cast<int32_t>(
+        rshift_round(n_diff_from_zp, params.shift_new_gate_output_to_h_)) + params.zp_h_;
+
+    // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
+    // u_diff 在 update_gate_output scale，h_diff 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
     const int64_t u_diff = static_cast<int64_t>(update_gate) - params.zp_update_gate_output_;
     const int64_t h_diff = static_cast<int64_t>(h_old) - params.zp_h_;
-    const int64_t old_contribution_mul = u_diff * h_diff;
+    const int64_t old_contribution_mul = u_diff * h_diff;  // scale = S_u * S_h
 
-    // 乘法结果直接 shift 到 h 空间（融合后省略中间 zp）
-    const int32_t old_shifted = static_cast<int32_t>(rshift_round(old_contribution_mul, params.shift_update_old_to_h_));
-
-    // 计算 (1 - update_gate) * new_gate，直接对齐到 h（融合中间层）
+    // ========== 步骤3: 计算 new_contribution = (1 - update_gate) * new_gate_aligned ==========
     // quant_one = 2^shift + zp，是常数 1 在 update_gate_output 量化空间的完整表示
     // one_minus_u = quant_one - update_gate = (2^shift + zp) - update_gate
     const int64_t one_minus_u = static_cast<int64_t>(params.quant_one_in_update_gate_scale_) - update_gate;
-    const int64_t n_diff = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
-    const int64_t new_contribution_mul = one_minus_u * n_diff;
+    const int64_t one_minus_u_diff = one_minus_u - params.zp_update_gate_output_;  // 在 update_gate_output scale
+    const int64_t n_diff_aligned = static_cast<int64_t>(new_gate_aligned_to_h) - params.zp_h_;  // 在 h scale
+    // one_minus_u_diff 在 update_gate_output scale，n_diff_aligned 在 h scale
+    // 乘积 scale = scale_update_gate_output * scale_h
+    const int64_t new_contribution_mul = one_minus_u_diff * n_diff_aligned;  // scale = S_u * S_h
 
-    // 乘法结果直接 shift 到 h 空间（融合后省略中间 zp）
-    const int32_t new_shifted = static_cast<int32_t>(rshift_round(new_contribution_mul, params.shift_update_new_to_h_));
+    // ========== 步骤4: 合并两个贡献并 rescale 到 h scale ==========
+    // old_contribution_mul 和 new_contribution_mul 都在 scale_update_gate_output * scale_h
+    // scale，可以直接相加
+    const int64_t combined = old_contribution_mul + new_contribution_mul;
 
-    // 计算 h_new = old_shifted + new_shifted + zp_h
-    const int32_t h_new = old_shifted + new_shifted + params.zp_h_;
+    // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
+    // shift_update_old_to_h_ = shift_update_gate_output（因为 scale_h / scale_h = 1）
+    const int32_t h_new = static_cast<int32_t>(
+        rshift_round(combined, params.shift_update_old_to_h_)) + params.zp_h_;
 
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {

@@ -157,10 +157,10 @@ struct GateQuantParams {
     int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
     int8_t shift_reset_mul_hh_to_new_gate_input_;          ///< r*weight_hh_linear 直接对齐到 new_gate_input 的移位（融合）
 
-    // -------------------- 隐状态更新参数（乘法scale融合）--------------------
+    // -------------------- 隐状态更新参数（乘法scale融合，统一scale空间优化）--------------------
     int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
-    int8_t shift_update_new_to_h_;               ///< (1-u)*n 直接对齐到 h 的移位（融合）
-    int8_t shift_update_old_to_h_;               ///< u*h 直接对齐到 h 的移位（融合）
+    int8_t shift_new_gate_output_to_h_;          ///< new_gate_output 对齐到 h 的移位（统一scale空间优化）
+    int8_t shift_update_old_to_h_;               ///< u*h 统一scale到 h 的移位（= shift_update_gate_output，统一scale空间优化）
 
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
