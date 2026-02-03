@@ -87,6 +87,32 @@ except ImportError:
 # ============================================================
 #                   模块级常量与配置映射
 # ============================================================
+
+# ============================================================
+#                   梯度缩放配置（TF32 精度优化）
+# ============================================================
+# 用于解决梯度累积时 TF32 精度不足的问题
+# 
+# 使用方式：
+#   - 默认值：GRAD_SCALE_THRESHOLD = 1e-6（适合 grad_accumulate 10-50）
+#   - 自定义：在导入模块后修改此值
+#     >>> import quant_gru
+#     >>> quant_gru.GRAD_SCALE_THRESHOLD = 1e-5  # 更保守，适合 grad_accumulate < 10
+#     >>> quant_gru.GRAD_SCALE_THRESHOLD = 1e-7  # 更激进，适合 grad_accumulate > 50
+#
+# 阈值选择指南：
+#   - 1e-5（保守）：适合 grad_accumulate < 10，确保最高精度
+#   - 1e-6（平衡，推荐）：适合 grad_accumulate 10-50，平衡精度和性能
+#   - 1e-7（激进）：适合 grad_accumulate > 50，最小化性能影响
+#
+# 原理：
+#   - TF32 有效精度约 11 位（3.3 位小数精度）
+#   - 对于 1e-6 的数，相对误差可能达到 1-10%
+#   - 阈值应在精度开始明显下降之前触发（相对误差 < 1%）
+GRAD_SCALE_THRESHOLD = 1e-6  # 梯度缩放阈值（可配置）
+GRAD_TARGET_MAX = 0.5        # 目标最大值（放大后的梯度最大值，确保在 TF32 高精度区间）
+
+# ============================================================
 # 统一算子映射表（唯一数据源）
 # 格式: "算子名" -> {
 #   "bw_attr": 位宽属性名,
@@ -643,6 +669,33 @@ class GRUFunction(torch.autograd.Function):
         if grad_h_n is not None and grad_h_n.numel() > 0:
             dh_new[-1] = dh_new[-1] + grad_h_n[0]
 
+        # ========== 梯度缩放处理（解决 TF32 精度问题）==========
+        # 问题：梯度累积时梯度被除以 grad_accumulate，导致数值过小，TF32 精度包不住
+        # 解决：检测梯度过小时，内部放大梯度进行计算，然后按比例缩小返回
+        # 
+        # 使用模块级配置：GRAD_SCALE_THRESHOLD 和 GRAD_TARGET_MAX
+        # 可在导入后修改：quant_gru.GRAD_SCALE_THRESHOLD = 1e-5
+        # 
+        # 检测梯度最大值
+        grad_max = torch.max(torch.abs(dh_new)).item()
+        use_grad_scale = grad_max > 0 and grad_max < GRAD_SCALE_THRESHOLD
+        
+        if use_grad_scale:
+            # 计算缩放因子：将梯度最大值放大到目标范围（约 0.5）
+            # 使用 2 的幂次，避免浮点误差累积
+            import math
+            # 计算需要的缩放倍数：target / current
+            scale_ratio = GRAD_TARGET_MAX / grad_max
+            # 使用 2 的幂次，向上取整到最近的 2 的幂次（避免浮点误差）
+            # 例如：scale_ratio=1.5e6 -> log2=20.5 -> 2^21=2097152
+            scale_power = math.ceil(math.log2(scale_ratio))
+            scale_factor = float(1 << scale_power)  # 2^scale_power
+            # 放大梯度
+            dh_new_scaled = dh_new * scale_factor
+        else:
+            scale_factor = 1.0
+            dh_new_scaled = dh_new
+
         # 根据 use_quantization 调用不同的反向函数
         if ctx.use_quantization:
             # 量化模式：使用保存的量化值，调用 backward_quant
@@ -664,7 +717,7 @@ class GRUFunction(torch.autograd.Function):
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W_q=W_q, R_q=R_q, bw_q=bw_q, br_q=br_q, x_q=x_q,
-                dh_new=dh_new, h=h, v=v,
+                dh_new=dh_new_scaled, h=h, v=v,
                 quant_params=ctx.quant_params,
                 # QAT masks（C++ 端应用 STE）
                 x_mask=x_mask,
@@ -685,8 +738,20 @@ class GRUFunction(torch.autograd.Function):
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W=W, R=R, bw=bw, br=br, x=input,
-                dh_new=dh_new, h=h, v=v
+                dh_new=dh_new_scaled, h=h, v=v
             )
+
+        # 如果使用了梯度缩放，需要将返回的梯度按比例缩小
+        if use_grad_scale:
+            dx = dx / scale_factor
+            dW = dW / scale_factor
+            dR = dR / scale_factor
+            if dbw is not None:
+                dbw = dbw / scale_factor
+            if dbr is not None:
+                dbr = dbr / scale_factor
+            if dh is not None:
+                dh = dh / scale_factor
 
         # 梯度格式转换: Haste (z,r,n) -> PyTorch (r,z,n)
         dW_pytorch = reorder_weights_haste_to_pytorch(dW.t()).contiguous()
