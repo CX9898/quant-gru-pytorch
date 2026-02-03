@@ -137,10 +137,10 @@ __global__ void quantificationFP(const float *data, float *quant_data, uint8_t *
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    uint8_t was_clamped;
-    quant_data[idx] = quantize_f<Training>(data[idx], exp2_inv, zp, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[idx] = quantize_f<Training>(data[idx], exp2_inv, zp, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[idx] = was_clamped;
+        mask[idx] = keep_gradient;
     }
 }
 
@@ -157,10 +157,10 @@ __global__ void quantificationPerChannelFP(const float *src, float *quant_data, 
     if (channel_idx >= channel_size || input_idx >= input_size) return;
     
     const size_t idx = input_idx * channel_size + channel_idx;
-    uint8_t was_clamped;
-    quant_data[idx] = quantize_f<Training>(src[idx], exp2_invs[channel_idx], 0, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[idx] = quantize_f<Training>(src[idx], exp2_invs[channel_idx], 0, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[idx] = was_clamped;
+        mask[idx] = keep_gradient;
     }
 }
 
@@ -190,10 +190,10 @@ __global__ void quantificationPerGateFP(const float *src, float *quant_data, uin
     }
     
     const size_t idx = input_idx * channel_size + channel_idx;
-    uint8_t was_clamped;
-    quant_data[idx] = quantize_f<Training>(src[idx], exp2_inv, 0, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[idx] = quantize_f<Training>(src[idx], exp2_inv, 0, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[idx] = was_clamped;
+        mask[idx] = keep_gradient;
     }
 }
 
@@ -293,10 +293,10 @@ __global__ void quantificationBitwidth(const T *data, int32_t *quant_data, uint8
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
-    uint8_t was_clamped;
-    quant_data[idx] = ::quantize<Training>(data[idx], exp2_inv, zp, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[idx] = ::quantize<Training>(data[idx], exp2_inv, zp, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[idx] = was_clamped;
+        mask[idx] = keep_gradient;
     }
 }
 
@@ -314,10 +314,10 @@ __global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_da
 
     const int8_t exp2_inv = exp2_invs[channel_idx];
     const size_t idx = input_idx * channel_size + channel_idx;
-    uint8_t was_clamped;
-    quant_data[idx] = ::quantize<Training>(src[idx], exp2_inv, 0, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[idx] = ::quantize<Training>(src[idx], exp2_inv, 0, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[idx] = was_clamped;
+        mask[idx] = keep_gradient;
     }
 }
 
@@ -416,10 +416,10 @@ __global__ void quantificationBiasFP(const float *src, float *quant_data, uint8_
     // 特殊量化: round((bias / scale) / 128) * 128
     float normalized = src[channel_idx] / scale;
     float q = round_f(normalized / 128.0f) * 128.0f;
-    uint8_t was_clamped;
-    quant_data[channel_idx] = clamp_f<Training>(q, bw, Training ? &was_clamped : nullptr);
+    uint8_t keep_gradient;
+    quant_data[channel_idx] = clamp_f<Training>(q, bw, Training ? &keep_gradient : nullptr);
     if constexpr (Training) {
-        mask[channel_idx] = was_clamped;
+        mask[channel_idx] = keep_gradient;
     }
 }
 

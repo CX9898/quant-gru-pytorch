@@ -213,11 +213,13 @@ __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ 
-int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw, uint8_t* was_clamped = nullptr) {
+int32_t clamp_by_bitwidth(int32_t val, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
     int32_t lo = bw.qmin();
     int32_t hi = bw.qmax();
     if constexpr (Training) {
-        *was_clamped = (val < lo || val > hi) ? 1 : 0;
+        // 计算梯度保持标志：被 clamp 时 keep_gradient=0（Backward 时梯度置零），未被 clamp 时 keep_gradient=1（Backward 时梯度保持）
+        // 这样 Backward 时可直接使用 static_cast<T>(keep_gradient)，无需减法操作
+        *keep_gradient = (val < lo || val > hi) ? 0 : 1;
     }
     return max(lo, min(val, hi));
 }
@@ -256,16 +258,19 @@ __host__ __device__ __forceinline__ float dequantize(QuantT q, int8_t exp2_inv, 
  * @tparam Training 是否训练模式（决定是否使用 mask）
  * @param val 输入值
  * @param bw 位宽配置
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  * @return 截断后的值
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ 
-float clamp_f(float val, QuantBitWidth bw, uint8_t* was_clamped = nullptr) {
+float clamp_f(float val, QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
     float lo = static_cast<float>(bw.qmin());
     float hi = static_cast<float>(bw.qmax());
     if constexpr (Training) {
-        *was_clamped = (val < lo || val > hi) ? 1 : 0;
+        // 计算梯度保持标志：被 clamp 时 keep_gradient=0（Backward 时梯度置零），未被 clamp 时 keep_gradient=1（Backward 时梯度保持）
+        // 这样 Backward 时可直接使用 static_cast<T>(keep_gradient)，无需减法操作
+        *keep_gradient = (val < lo || val > hi) ? 0 : 1;
     }
 #ifdef __CUDA_ARCH__
     return fmaxf(lo, fminf(val, hi));
@@ -284,14 +289,15 @@ float clamp_f(float val, QuantBitWidth bw, uint8_t* was_clamped = nullptr) {
  * @param exp2_inv 缩放因子指数
  * @param zp 零点
  * @param bw 位宽配置
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, int32_t zp,
-                                                      QuantBitWidth bw, uint8_t* was_clamped = nullptr) {
+                                                      QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
     float scale = exp2_scale(exp2_inv);
     float q = round_f(src / scale + static_cast<float>(zp));
-    return clamp_f<Training>(q, bw, was_clamped);
+    return clamp_f<Training>(q, bw, keep_gradient);
 }
 
 /**
@@ -301,10 +307,10 @@ __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv,
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ float quantize_f(float src, int8_t exp2_inv, QuantBitWidth bw,
-                                                      uint8_t* was_clamped = nullptr) {
+                                                      uint8_t* keep_gradient = nullptr) {
     float scale = exp2_scale(exp2_inv);
     float q = round_f(src / scale);
-    return clamp_f<Training>(q, bw, was_clamped);
+    return clamp_f<Training>(q, bw, keep_gradient);
 }
 
 
@@ -328,14 +334,15 @@ __host__ __device__ __forceinline__ float dequantize_f(float q, int8_t exp2_inv,
  * @param exp2_inv 缩放因子指数
  * @param zp 零点
  * @param bw 位宽配置
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  * @return 量化值（int32_t 存储）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv, int32_t zp,
-                                                      QuantBitWidth bw, uint8_t* was_clamped = nullptr) {
+                                                      QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
     float q = round_f(src / exp2_scale(exp2_inv)) + static_cast<float>(zp);
-    return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, was_clamped);
+    return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, keep_gradient);
 }
 
 
@@ -429,7 +436,8 @@ __host__ __device__ __forceinline__ int32_t piecewise_linear(int32_t q_x, const 
  *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
@@ -437,11 +445,11 @@ __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
                                                           int8_t shift_y, int32_t zp_y,
                                                           QuantBitWidth pre_bw,
                                                           QuantBitWidth out_bw,
-                                                          uint8_t* was_clamped = nullptr) {
+                                                          uint8_t* keep_gradient = nullptr) {
     int32_t q_x_clamped = clamp_by_bitwidth<false>(q_x, pre_bw);
     float x_float = dequantize(q_x_clamped, shift_x, zp_x);
     float y_float = sigmoid<float>(x_float);
-    return quantize<Training>(y_float, shift_y, zp_y, out_bw, was_clamped);
+    return quantize<Training>(y_float, shift_y, zp_y, out_bw, keep_gradient);
 }
 
 /**
@@ -453,7 +461,8 @@ __host__ __device__ __forceinline__ int32_t real_sigmoid(int32_t q_x,
  *   3. 量化：  q_y = quantize(y_float, shift_y, zp_y, out_bw)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
@@ -461,11 +470,11 @@ __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
                                                        int8_t shift_y, int32_t zp_y,
                                                        QuantBitWidth pre_bw,
                                                        QuantBitWidth out_bw,
-                                                       uint8_t* was_clamped = nullptr) {
+                                                       uint8_t* keep_gradient = nullptr) {
     int32_t q_x_clamped = clamp_by_bitwidth<false>(q_x, pre_bw);
     float x_float = dequantize(q_x_clamped, shift_x, zp_x);
     float y_float = tanh<float>(x_float);
-    return quantize<Training>(y_float, shift_y, zp_y, out_bw, was_clamped);
+    return quantize<Training>(y_float, shift_y, zp_y, out_bw, keep_gradient);
 }
 
 
@@ -485,17 +494,18 @@ __host__ __device__ __forceinline__ int32_t real_tanh(int32_t q_x,
  * @param scale_y 输出量化 scale = 2^(-shift_y)（已预计算）
  * @param zp_y 输出零点
  * @param out_bw 输出位宽配置
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ 
 float real_sigmoid_f(float q_x, float scale_x, float zp_x,
                      float scale_y, float zp_y, QuantBitWidth out_bw,
-                     uint8_t* was_clamped = nullptr) {
+                     uint8_t* keep_gradient = nullptr) {
     float x_fp = (q_x - zp_x) * scale_x;
     float y_fp = sigmoid<float>(x_fp);
     float q_y = round_f(y_fp / scale_y + zp_y);
-    return clamp_f<Training>(q_y, out_bw, was_clamped);
+    return clamp_f<Training>(q_y, out_bw, keep_gradient);
 }
 
 /**
@@ -508,17 +518,18 @@ float real_sigmoid_f(float q_x, float scale_x, float zp_x,
  * @param scale_y 输出量化 scale = 2^(-shift_y)（已预计算）
  * @param zp_y 输出零点
  * @param out_bw 输出位宽配置
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training = false>
 __host__ __device__ __forceinline__ 
 float real_tanh_f(float q_x, float scale_x, float zp_x,
                   float scale_y, float zp_y, QuantBitWidth out_bw,
-                  uint8_t* was_clamped = nullptr) {
+                  uint8_t* keep_gradient = nullptr) {
     float x_fp = (q_x - zp_x) * scale_x;
     float y_fp = tanh<float>(x_fp);
     float q_y = round_f(y_fp / scale_y + zp_y);
-    return clamp_f<Training>(q_y, out_bw, was_clamped);
+    return clamp_f<Training>(q_y, out_bw, keep_gradient);
 }
 
 // ============================================================================
@@ -543,14 +554,16 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) { return tanh<float>(
  * @brief 计算更新门 update_gate = sigmoid(weight_ih_linear + weight_hh_linear)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
- * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
-                 uint8_t* input_was_clamped = nullptr,
-                 uint8_t* output_was_clamped = nullptr,
+                 uint8_t* input_keep_gradient = nullptr,
+                 uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // 重缩放到 update_gate_input 空间
     const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
@@ -564,18 +577,18 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
         // 对门输入进行位宽截断并记录 mask
-        const int32_t clamped_input = clamp_by_bitwidth<true>(update_gate_input, bw_cfg.update_gate_input_, input_was_clamped);
+        const int32_t clamped_input = clamp_by_bitwidth<true>(update_gate_input, bw_cfg.update_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
         // 使用截断后的输入计算激活函数
         float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
         float y_float = sigmoid<float>(x_float);
         const int32_t update_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y, 
-                                                    bw_cfg.update_gate_output_, output_was_clamped);
+                                                    bw_cfg.update_gate_output_, output_keep_gradient);
 #else
         // 非 real activation 时，使用分段线性
         int32_t result = piecewise_linear_raw(clamped_input, lut);
-        const int32_t update_gate = clamp_by_bitwidth<true>(result, bw_cfg.update_gate_output_, output_was_clamped);
+        const int32_t update_gate = clamp_by_bitwidth<true>(result, bw_cfg.update_gate_output_, output_keep_gradient);
 #endif
         return update_gate;
     } else {
@@ -620,14 +633,16 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
  * @brief 计算重置门 reset_gate = sigmoid(weight_ih_linear + weight_hh_linear)
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
- * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
-                 uint8_t* input_was_clamped = nullptr,
-                 uint8_t* output_was_clamped = nullptr,
+                 uint8_t* input_keep_gradient = nullptr,
+                 uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
     const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
@@ -640,16 +655,16 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
         // 对门输入进行位宽截断并记录 mask
-        const int32_t clamped_input = clamp_by_bitwidth<true>(reset_gate_input, bw_cfg.reset_gate_input_, input_was_clamped);
+        const int32_t clamped_input = clamp_by_bitwidth<true>(reset_gate_input, bw_cfg.reset_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
         float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
         float y_float = sigmoid<float>(x_float);
         const int32_t reset_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y,
-                                                   bw_cfg.reset_gate_output_, output_was_clamped);
+                                                   bw_cfg.reset_gate_output_, output_keep_gradient);
 #else
         int32_t result = piecewise_linear_raw(clamped_input, lut);
-        const int32_t reset_gate = clamp_by_bitwidth<true>(result, bw_cfg.reset_gate_output_, output_was_clamped);
+        const int32_t reset_gate = clamp_by_bitwidth<true>(result, bw_cfg.reset_gate_output_, output_keep_gradient);
 #endif
         return reset_gate;
     } else {
@@ -699,15 +714,17 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
  * @param weight_ih_linear    输入 Linear 变换结果
  * @param weight_hh_linear    隐状态 Linear 变换结果（即 R*h + br，用于反向传播时直接保存到 v）
  * @param reset_gate          重置门输出
- * @param input_was_clamped 训练模式时保存输入 clamp mask，推理模式时可为 nullptr
- * @param output_was_clamped 训练模式时保存输出 clamp mask，推理模式时可为 nullptr
+ * @param input_keep_gradient 训练模式时保存输入梯度保持标志，推理模式时可为 nullptr
+ *                            0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
+ * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
+ *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
                  const GateQuantParams &params,
-                 uint8_t* input_was_clamped = nullptr,
-                 uint8_t* output_was_clamped = nullptr,
+                 uint8_t* input_keep_gradient = nullptr,
+                 uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // Linear 融合后，weight_hh_linear 就是 R*h + br
     // 计算 reset_gate * weight_hh_linear，直接对齐到 new_gate_input（融合中间层）
@@ -729,16 +746,16 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
         // 对门输入进行位宽截断并记录 mask
-        const int32_t clamped_input = clamp_by_bitwidth<true>(new_gate_input, bw_cfg.new_gate_input_, input_was_clamped);
+        const int32_t clamped_input = clamp_by_bitwidth<true>(new_gate_input, bw_cfg.new_gate_input_, input_keep_gradient);
         
 #ifdef USE_REAL_ACTIVATION
         float x_float = dequantize(clamped_input, lut.shift_bits_x, lut.zp_x);
         float y_float = tanh<float>(x_float);
         const int32_t new_gate = quantize<true>(y_float, lut.shift_bits_y, lut.zp_y,
-                                                 bw_cfg.new_gate_output_, output_was_clamped);
+                                                 bw_cfg.new_gate_output_, output_keep_gradient);
 #else
         int32_t result = piecewise_linear_raw(clamped_input, lut);
-        const int32_t new_gate = clamp_by_bitwidth<true>(result, bw_cfg.new_gate_output_, output_was_clamped);
+        const int32_t new_gate = clamp_by_bitwidth<true>(result, bw_cfg.new_gate_output_, output_keep_gradient);
 #endif
         return new_gate;
     } else {
@@ -787,12 +804,13 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
  * 乘法scale融合：u*h 和 (1-u)*n 的结果直接对齐到 h，省略中间层
  * 
  * @tparam Training 是否训练模式（决定是否使用 mask）
- * @param was_clamped 训练模式时保存 clamp mask，推理模式时可为 nullptr
+ * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
+ *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
 template <bool Training>
 __host__ __device__ __forceinline__ 
 int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
-                 uint8_t* was_clamped = nullptr,
+                 uint8_t* keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
     // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
@@ -829,7 +847,7 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
-        return clamp_by_bitwidth<true>(h_new, params.bitwidth_config_.h_, was_clamped);
+        return clamp_by_bitwidth<true>(h_new, params.bitwidth_config_.h_, keep_gradient);
     } else {
         const int32_t h = clamp_by_bitwidth(h_new, params.bitwidth_config_.h_);
 
@@ -872,8 +890,8 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 // ============================================================================
 // 
 // 分离输入和输出的 clamp mask：
-//   - input_was_clamped: 门输入被截断时为 1
-//   - output_was_clamped: 门输出被截断时为 1
+//   - input_keep_gradient: 门输入梯度保持标志（0=被clamp，1=未被clamp）
+//   - output_keep_gradient: 门输出梯度保持标志（0=被clamp，1=未被clamp）
 //
 // 反向传播时：
 //   - gate_input_mask 影响传回 linear 输出的梯度 (dp, dq)

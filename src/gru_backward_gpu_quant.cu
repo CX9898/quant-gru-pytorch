@@ -30,8 +30,9 @@
 //   - h_mask [T*N, H] → 隐状态梯度
 //
 // STE (Straight-Through Estimator) 实现：
-//   - mask=1（被 clamp）: 梯度置零
-//   - mask=0（未被 clamp）: 梯度正常传播
+//   - mask=0（被 clamp）: 梯度置零
+//   - mask=1（未被 clamp）: 梯度正常传播
+//   注意：mask 在 Forward 生成时已反转，Backward 可直接使用 static_cast<T>(mask)
 //
 // ==============================================================================
 
@@ -47,15 +48,17 @@ namespace kernel {
 
 /**
  * @brief 通用 mask 应用 kernel（STE）
- * 对 data 中 mask=1 的位置置零
+ * 对 data 中 mask=0 的位置置零（mask=0 表示被 clamp）
+ * 使用乘法替代分支以避免 warp divergence
+ * 注意：mask 在 Forward 生成时已反转，可直接使用 static_cast<T>(mask)
  */
 template <typename T>
 __global__ void ApplyMaskKernel(T *data, const uint8_t *mask, size_t size) {
     const size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
-    if (mask[idx] != 0) {
-        data[idx] = static_cast<T>(0.0);
-    }
+    // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+    // mask 在 Forward 生成时已反转，可直接使用
+    data[idx] *= static_cast<T>(mask[idx]);
 }
 
 /**
@@ -110,8 +113,11 @@ __global__ void PointwiseOperationsQuant(
     T dh_total = dh_new[base_idx] + dh_inout[base_idx];
 
     // 应用 h_mask（STE：隐状态被 clamp 时梯度置零）
-    if (h_mask != nullptr && h_mask[base_idx] != 0) {
-        dh_total = static_cast<T>(0.0);
+    // 使用乘法替代分支以避免 warp divergence
+    // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+    // mask 在 Forward 生成时已反转，可直接使用
+    if (h_mask != nullptr) {
+        dh_total *= static_cast<T>(h_mask[base_idx]);
     }
 
     const int stride4_base_idx = col * (hidden_dim * 4) + row;
@@ -156,55 +162,60 @@ __global__ void PointwiseOperationsQuant(
     T final_dq_g = dq_g;
 
     // 应用 gate_output_mask（STE：门输出被 clamp 时梯度置零）
+    // 使用乘法替代分支以避免 warp divergence
     if (gate_output_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
         const int g_mask_idx = idx + 2 * hidden_dim;
 
-        if (gate_output_mask[z_mask_idx] != 0) {
-            final_dp_z = static_cast<T>(0.0);
-            final_dq_z = static_cast<T>(0.0);
-        }
-        if (gate_output_mask[r_mask_idx] != 0) {
-            final_dp_r = static_cast<T>(0.0);
-            final_dq_r = static_cast<T>(0.0);
-        }
-        if (gate_output_mask[g_mask_idx] != 0) {
-            final_dp_g = static_cast<T>(0.0);
-            final_dq_g = static_cast<T>(0.0);
-        }
+        // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+        // mask 在 Forward 生成时已反转，可直接使用
+        const T z_mask_mult = static_cast<T>(gate_output_mask[z_mask_idx]);
+        const T r_mask_mult = static_cast<T>(gate_output_mask[r_mask_idx]);
+        const T g_mask_mult = static_cast<T>(gate_output_mask[g_mask_idx]);
+        
+        final_dp_z *= z_mask_mult;
+        final_dq_z *= z_mask_mult;
+        final_dp_r *= r_mask_mult;
+        final_dq_r *= r_mask_mult;
+        final_dp_g *= g_mask_mult;
+        final_dq_g *= g_mask_mult;
     }
 
     // 应用 gate_input_mask（STE：门输入被 clamp 时梯度置零）
     // 门输入截断影响的是传回 linear 输出的梯度
+    // 使用乘法替代分支以避免 warp divergence
     if (gate_input_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
         const int g_mask_idx = idx + 2 * hidden_dim;
 
-        if (gate_input_mask[z_mask_idx] != 0) {
-            final_dp_z = static_cast<T>(0.0);
-            final_dq_z = static_cast<T>(0.0);
-        }
-        if (gate_input_mask[r_mask_idx] != 0) {
-            final_dp_r = static_cast<T>(0.0);
-            final_dq_r = static_cast<T>(0.0);
-        }
-        if (gate_input_mask[g_mask_idx] != 0) {
-            final_dp_g = static_cast<T>(0.0);
-            final_dq_g = static_cast<T>(0.0);
-        }
+        // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+        // mask 在 Forward 生成时已反转，可直接使用
+        const T z_mask_mult = static_cast<T>(gate_input_mask[z_mask_idx]);
+        const T r_mask_mult = static_cast<T>(gate_input_mask[r_mask_idx]);
+        const T g_mask_mult = static_cast<T>(gate_input_mask[g_mask_idx]);
+        
+        final_dp_z *= z_mask_mult;
+        final_dq_z *= z_mask_mult;
+        final_dp_r *= r_mask_mult;
+        final_dq_r *= r_mask_mult;
+        final_dp_g *= g_mask_mult;
+        final_dq_g *= g_mask_mult;
     }
 
     // 应用 weight_hh_linear_mask（STE：R*h+br 输出被 clamp 时 dq 梯度置零）
+    // 使用乘法替代分支以避免 warp divergence
     if (weight_hh_linear_mask != nullptr) {
         const int z_mask_idx = idx + 0 * hidden_dim;
         const int r_mask_idx = idx + 1 * hidden_dim;
         const int g_mask_idx = idx + 2 * hidden_dim;
 
-        if (weight_hh_linear_mask[z_mask_idx] != 0) final_dq_z = static_cast<T>(0.0);
-        if (weight_hh_linear_mask[r_mask_idx] != 0) final_dq_r = static_cast<T>(0.0);
-        if (weight_hh_linear_mask[g_mask_idx] != 0) final_dq_g = static_cast<T>(0.0);
+        // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+        // mask 在 Forward 生成时已反转，可直接使用
+        final_dq_z *= static_cast<T>(weight_hh_linear_mask[z_mask_idx]);
+        final_dq_r *= static_cast<T>(weight_hh_linear_mask[r_mask_idx]);
+        final_dq_g *= static_cast<T>(weight_hh_linear_mask[g_mask_idx]);
     }
 
     // 写出 dp 和 dq（相对于 gate_input 的梯度）
@@ -224,15 +235,18 @@ __global__ void PointwiseOperationsQuant(
     T dbr_r = final_dq_r;
     T dbr_g = final_dq_g;
 
+    // 使用乘法替代分支以避免 warp divergence
+    // mask=0 表示被 clamp（置零），mask=1 表示未被 clamp（保持原值）
+    // mask 在 Forward 生成时已反转，可直接使用
     if (bw_mask != nullptr) {
-        if (bw_mask[row + 0 * hidden_dim] != 0) dbw_z = static_cast<T>(0.0);
-        if (bw_mask[row + 1 * hidden_dim] != 0) dbw_r = static_cast<T>(0.0);
-        if (bw_mask[row + 2 * hidden_dim] != 0) dbw_g = static_cast<T>(0.0);
+        dbw_z *= static_cast<T>(bw_mask[row + 0 * hidden_dim]);
+        dbw_r *= static_cast<T>(bw_mask[row + 1 * hidden_dim]);
+        dbw_g *= static_cast<T>(bw_mask[row + 2 * hidden_dim]);
     }
     if (br_mask != nullptr) {
-        if (br_mask[row + 0 * hidden_dim] != 0) dbr_z = static_cast<T>(0.0);
-        if (br_mask[row + 1 * hidden_dim] != 0) dbr_r = static_cast<T>(0.0);
-        if (br_mask[row + 2 * hidden_dim] != 0) dbr_g = static_cast<T>(0.0);
+        dbr_z *= static_cast<T>(br_mask[row + 0 * hidden_dim]);
+        dbr_r *= static_cast<T>(br_mask[row + 1 * hidden_dim]);
+        dbr_g *= static_cast<T>(br_mask[row + 2 * hidden_dim]);
     }
 
     atomicAdd(&dbw_out[row + 0 * hidden_dim], dbw_z);
