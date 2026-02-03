@@ -3232,6 +3232,8 @@ def _load_quant_params_impl(
         print(f"  - 模型配置: input_size={gru.input_size}, hidden_size={gru.hidden_size}")
         print(f"  - 双向: {gru.bidirectional}")
         print(f"  - is_calibrated(): {gru.is_calibrated()}")
+        # 打印详细的量化配置信息
+        print_quant_config(gru)
 
 
 def _adjust_quant_config_impl(
