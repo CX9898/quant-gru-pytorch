@@ -209,11 +209,13 @@ __global__ void quantizedGemmBiasFused(
         const int64_t result = gemm_result + zp_out;
 
         // 根据位宽配置 clamp 并输出（列主序：C[n*M + m]）
-        uint8_t was_clamped;
+        uint8_t keep_gradient;
         C[col * M + row] = clamp_by_bitwidth<Training>(static_cast<int32_t>(result), output_bw, 
-                                                        Training ? &was_clamped : nullptr);
+                                                        Training ? &keep_gradient : nullptr);
         if constexpr (Training) {
-            C_mask[col * M + row] = was_clamped;
+            // 保存梯度保持标志：用于 Backward 时的梯度计算
+            // keep_gradient=0 表示被 clamp（Backward 时梯度置零），keep_gradient=1 表示未被 clamp（Backward 时梯度保持）
+            C_mask[col * M + row] = keep_gradient;
         }
     }
 }
