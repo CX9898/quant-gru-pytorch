@@ -2245,113 +2245,265 @@ class QuantGRU(nn.Module):
 
 def print_quant_params(gru: 'QuantGRU'):
     """
-    打印 QuantGRU 的量化参数（scale/zero_point）
+    打印 QuantGRU 的量化参数和配置（合并版本）
     
-    命名与 C++ quantize_ops_helper.h 对齐
+    显示内容：bitwidth、is_symmetric、shift、scale、zp
+    格式与 C++ quantize_ops_helper.h 对齐
     
     Args:
-        gru: 已完成校准的 QuantGRU 实例
+        gru: QuantGRU 实例（如果未校准，只显示配置信息，不显示参数）
     """
-    if not gru.is_calibrated():
-        raise RuntimeError("请先调用 finalize_calibration()")
-
-    params = gru.quant_params
-    print("=" * 60)
-    print("GRUQuantParams (量化参数)")
-    print("=" * 60)
-    print(f"  hidden_ = {params.hidden_}")
-    print(f"  [x]                       shift={params.shift_x_:3d}, zp={params.zp_x_}")
-    print(f"  [h]                       shift={params.shift_h_:3d}, zp={params.zp_h_}")
-    print(f"  [weight_ih_linear]        shift={params.shift_weight_ih_linear_:3d}, zp={params.zp_weight_ih_linear_}")
-    print(f"  [weight_hh_linear]        shift={params.shift_weight_hh_linear_:3d}, zp={params.zp_weight_hh_linear_}")
-    print("-" * 60)
-    print(f"  [update_gate_input]       shift={params.shift_update_gate_input_:3d}, zp={params.zp_update_gate_input_}")
-    print(f"  [update_gate_output]      shift={params.shift_update_gate_output_:3d}, zp={params.zp_update_gate_output_}")
-    print(f"  [reset_gate_input]        shift={params.shift_reset_gate_input_:3d}, zp={params.zp_reset_gate_input_}")
-    print(f"  [reset_gate_output]       shift={params.shift_reset_gate_output_:3d}, zp={params.zp_reset_gate_output_}")
-    print(f"  [new_gate_input]          shift={params.shift_new_gate_input_:3d}, zp={params.zp_new_gate_input_}")
-    print(f"  [new_gate_output]         shift={params.shift_new_gate_output_:3d}, zp={params.zp_new_gate_output_}")
-    print("-" * 60)
-    print(f"  [mul_reset_hidden]        shift={params.shift_mul_reset_hidden_:3d}, zp={params.zp_mul_reset_hidden_}")
-    print(f"  [mul_new_contribution]    shift={params.shift_mul_new_contribution_:3d}, zp={params.zp_mul_new_contribution_}")
-    print(f"  [mul_old_contribution]    shift={params.shift_mul_old_contribution_:3d}, zp={params.zp_mul_old_contribution_}")
-    print("-" * 60)
-    
-    # 权重和 bias 量化参数（根据 granularity 打印）
-    # 优先使用 gru._bitwidth_config（当前配置），如果不可用则使用 params.bitwidth_config_
-    # 这样可以确保打印的粒度信息与当前配置一致
+    # 获取 bitwidth_config（总是存在）
     if hasattr(gru, '_bitwidth_config') and gru._bitwidth_config is not None:
         bitwidth_config = gru._bitwidth_config
+    elif gru.is_calibrated() and gru.quant_params is not None:
+        bitwidth_config = gru.quant_params.bitwidth_config_
     else:
-        bitwidth_config = params.bitwidth_config_
+        bitwidth_config = None
     
-    # W 权重
-    if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
-        print(f"  [W] (per-tensor)         shift={params.shift_W_tensor_:3d}, zp=0")
-    elif bitwidth_config.W_granularity_ == 1:  # PER_GATE
-        print(f"  [W] (per-gate)           shift=[z={params.shift_W_gate_[0]:3d}, r={params.shift_W_gate_[1]:3d}, g={params.shift_W_gate_[2]:3d}], zp=0")
-    elif bitwidth_config.W_granularity_ == 2:  # PER_CHANNEL
-        if params.shift_W_:
-            print(f"  [W] (per-channel)       shift (first 5): {list(params.shift_W_[:5])} ...")
-        else:
-            print(f"  [W] (per-channel)       shift: (empty)")
-    else:
-        # 兼容：如果粒度未设置或值异常，根据 shift_W_ 数组判断
-        if params.shift_W_ and len(params.shift_W_) > 0:
-            print(f"  [W] (per-channel)       shift (first 5): {list(params.shift_W_[:5])} ...")
-        else:
-            print(f"  [W] (unknown)           shift: (empty)")
+    if bitwidth_config is None:
+        raise RuntimeError("无法获取 bitwidth_config，请先设置量化配置")
     
-    # R 权重
-    if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
-        print(f"  [R] (per-tensor)         shift={params.shift_R_tensor_:3d}, zp=0")
-    elif bitwidth_config.R_granularity_ == 1:  # PER_GATE
-        print(f"  [R] (per-gate)           shift=[z={params.shift_R_gate_[0]:3d}, r={params.shift_R_gate_[1]:3d}, g={params.shift_R_gate_[2]:3d}], zp=0")
-    elif bitwidth_config.R_granularity_ == 2:  # PER_CHANNEL
-        if params.shift_R_:
-            print(f"  [R] (per-channel)       shift (first 5): {list(params.shift_R_[:5])} ...")
-        else:
-            print(f"  [R] (per-channel)       shift: (empty)")
-    else:
-        # 兼容：如果粒度未设置或值异常，根据 shift_R_ 数组判断
-        if params.shift_R_ and len(params.shift_R_) > 0:
-            print(f"  [R] (per-channel)       shift (first 5): {list(params.shift_R_[:5])} ...")
-        else:
-            print(f"  [R] (unknown)           shift: (empty)")
+    # 获取 quant_params（可能为 None，如果未校准）
+    params = gru.quant_params if gru.is_calibrated() else None
     
-    # bw 偏置
-    if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
-        print(f"  [bw] (per-tensor)        shift={params.shift_bw_tensor_:3d}, zp=0")
-    elif bitwidth_config.bw_granularity_ == 1:  # PER_GATE
-        print(f"  [bw] (per-gate)          shift=[z={params.shift_bw_gate_[0]:3d}, r={params.shift_bw_gate_[1]:3d}, g={params.shift_bw_gate_[2]:3d}], zp=0")
-    elif bitwidth_config.bw_granularity_ == 2:  # PER_CHANNEL
-        if params.shift_bw_:
-            print(f"  [bw] (per-channel)      shift (first 5): {list(params.shift_bw_[:5])} ...")
-        else:
-            print(f"  [bw] (per-channel)      shift: (empty)")
-    else:
-        # 兼容：如果粒度未设置或值异常，根据 shift_bw_ 数组判断
-        if params.shift_bw_ and len(params.shift_bw_) > 0:
-            print(f"  [bw] (per-channel)      shift (first 5): {list(params.shift_bw_[:5])} ...")
-        else:
-            print(f"  [bw] (unknown)          shift: (empty)")
+    print("=" * 60)
+    print("GRUQuantParams (量化参数和配置)")
+    print("=" * 60)
     
-    # br 偏置
-    if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
-        print(f"  [br] (per-tensor)        shift={params.shift_br_tensor_:3d}, zp=0")
-    elif bitwidth_config.br_granularity_ == 1:  # PER_GATE
-        print(f"  [br] (per-gate)          shift=[z={params.shift_br_gate_[0]:3d}, r={params.shift_br_gate_[1]:3d}, g={params.shift_br_gate_[2]:3d}], zp=0")
-    elif bitwidth_config.br_granularity_ == 2:  # PER_CHANNEL
-        if params.shift_br_:
-            print(f"  [br] (per-channel)      shift (first 5): {list(params.shift_br_[:5])} ...")
-        else:
-            print(f"  [br] (per-channel)      shift: (empty)")
+    if params is not None:
+        print(f"  hidden_ = {params.hidden_}")
     else:
-        # 兼容：如果粒度未设置或值异常，根据 shift_br_ 数组判断
-        if params.shift_br_ and len(params.shift_br_) > 0:
-            print(f"  [br] (per-channel)      shift (first 5): {list(params.shift_br_[:5])} ...")
+        print(f"  hidden_ = {gru.hidden_size} (未校准)")
+    
+    # 辅助函数：格式化单个算子的信息
+    def format_op_info(op_name: str, shift_val, zp_val, bitwidth: int, is_symmetric: bool, is_unsigned: bool = False):
+        """格式化单个算子的打印信息"""
+        sym_str = "对称" if is_symmetric else "非对称"
+        
+        # 根据 is_unsigned 和 bitwidth 生成数据类型字符串
+        dtype_str = f"UINT{bitwidth}" if is_unsigned else f"INT{bitwidth}"
+        
+        if shift_val is not None:
+            if isinstance(shift_val, (list, tuple)):
+                # per-channel 或 per-gate
+                if len(shift_val) == 3 and all(isinstance(x, int) for x in shift_val):
+                    # per-gate (3个整数值)
+                    shift_str = f"[z={shift_val[0]:3d}, r={shift_val[1]:3d}, g={shift_val[2]:3d}]"
+                    scale_str = f"[{_exp2_inv_to_scale(shift_val[0]):.6f}, {_exp2_inv_to_scale(shift_val[1]):.6f}, {_exp2_inv_to_scale(shift_val[2]):.6f}]"
+                else:
+                    # per-channel (多个值，只显示前几个)
+                    if len(shift_val) > 0:
+                        if len(shift_val) >= 2:
+                            shift_str = f"[{shift_val[0]}, {shift_val[1]}, ...] (len={len(shift_val)})"
+                        else:
+                            shift_str = f"[{shift_val[0]}] (len={len(shift_val)})"
+                        scale_str = f"[{_exp2_inv_to_scale(shift_val[0]):.6f}, ...]"
+                    else:
+                        shift_str = "[]"
+                        scale_str = "N/A"
+            else:
+                # per-tensor
+                shift_str = f"{shift_val:3d}"
+                scale_str = f"{_exp2_inv_to_scale(shift_val):.6f}"
         else:
-            print(f"  [br] (unknown)          shift: (empty)")
+            shift_str = "N/A"
+            scale_str = "N/A"
+        
+        zp_str = f"{zp_val}" if zp_val is not None else "N/A"
+        
+        return f"  [{op_name:23s}] {dtype_str:6s}, {sym_str:4s}, shift={shift_str:30s}, scale={scale_str:10s}, zp={zp_str}"
+    
+    # 打印基础算子（x, h, weight_ih_linear, weight_hh_linear）
+    for op_name in ['x', 'h', 'weight_ih_linear', 'weight_hh_linear']:
+        if op_name not in _OPERATOR_SHORT_NAME_MAP:
+            continue
+        attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
+        bitwidth = getattr(bitwidth_config, attrs['bw_attr'])
+        is_symmetric = getattr(bitwidth_config, attrs['sym_attr'])
+        # 获取 unsigned 属性（如果存在）
+        unsigned_attr = attrs.get('unsigned_attr')
+        is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
+        
+        if params is not None:
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs.get('zp_attr')
+            shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
+            zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
+        else:
+            shift_val = None
+            zp_val = None
+        
+        print(format_op_info(op_name, shift_val, zp_val, bitwidth, is_symmetric, is_unsigned))
+    
+    print("-" * 60)
+    
+    # 打印门控算子（input）
+    for op_name in ['update_gate_input', 'reset_gate_input', 'new_gate_input']:
+        if op_name not in _OPERATOR_SHORT_NAME_MAP:
+            continue
+        attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
+        bitwidth = getattr(bitwidth_config, attrs['bw_attr'])
+        is_symmetric = getattr(bitwidth_config, attrs['sym_attr'])
+        # 获取 unsigned 属性（如果存在）
+        unsigned_attr = attrs.get('unsigned_attr')
+        is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
+        
+        if params is not None:
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs.get('zp_attr')
+            shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
+            zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
+        else:
+            shift_val = None
+            zp_val = None
+        
+        print(format_op_info(op_name, shift_val, zp_val, bitwidth, is_symmetric, is_unsigned))
+    
+    # 打印门控算子（output）
+    for op_name in ['update_gate_output', 'reset_gate_output', 'new_gate_output']:
+        if op_name not in _OPERATOR_SHORT_NAME_MAP:
+            continue
+        attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
+        bitwidth = getattr(bitwidth_config, attrs['bw_attr'])
+        is_symmetric = getattr(bitwidth_config, attrs['sym_attr'])
+        # 获取 unsigned 属性（如果存在）
+        unsigned_attr = attrs.get('unsigned_attr')
+        is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
+        
+        if params is not None:
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs.get('zp_attr')
+            shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
+            zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
+        else:
+            shift_val = None
+            zp_val = None
+        
+        print(format_op_info(op_name, shift_val, zp_val, bitwidth, is_symmetric, is_unsigned))
+    
+    print("-" * 60)
+    
+    # 打印中间算子
+    for op_name in ['mul_reset_hidden', 'mul_new_contribution', 'mul_old_contribution']:
+        if op_name not in _OPERATOR_SHORT_NAME_MAP:
+            continue
+        attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
+        bitwidth = getattr(bitwidth_config, attrs['bw_attr'])
+        is_symmetric = getattr(bitwidth_config, attrs['sym_attr'])
+        # 获取 unsigned 属性（如果存在）
+        unsigned_attr = attrs.get('unsigned_attr')
+        is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
+        
+        if params is not None:
+            shift_attr = attrs['shift_attr']
+            zp_attr = attrs.get('zp_attr')
+            shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
+            zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
+        else:
+            shift_val = None
+            zp_val = None
+        
+        print(format_op_info(op_name, shift_val, zp_val, bitwidth, is_symmetric, is_unsigned))
+    
+    print("-" * 60)
+    
+    # 打印权重和偏置（根据 granularity）
+    if params is not None:
+        # W 权重（权重通常是 INT 类型，不是 UINT）
+        is_unsigned_W = getattr(bitwidth_config, 'W_unsigned_', False) if hasattr(bitwidth_config, 'W_unsigned_') else False
+        if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
+            bitwidth = bitwidth_config.W_
+            is_symmetric = bitwidth_config.W_symmetric_
+            shift_val = params.shift_W_tensor_
+            print(format_op_info("W (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
+        elif bitwidth_config.W_granularity_ == 1:  # PER_GATE
+            bitwidth = bitwidth_config.W_
+            is_symmetric = bitwidth_config.W_symmetric_
+            shift_val = [params.shift_W_gate_[0], params.shift_W_gate_[1], params.shift_W_gate_[2]]
+            print(format_op_info("W (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
+        elif bitwidth_config.W_granularity_ == 2:  # PER_CHANNEL
+            bitwidth = bitwidth_config.W_
+            is_symmetric = bitwidth_config.W_symmetric_
+            if params.shift_W_ and len(params.shift_W_) > 0:
+                # 传递完整列表，格式化函数会处理显示
+                shift_val = list(params.shift_W_)
+                print(format_op_info("W (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_W))
+            else:
+                print(format_op_info("W (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_W))
+        
+        # R 权重
+        is_unsigned_R = getattr(bitwidth_config, 'R_unsigned_', False) if hasattr(bitwidth_config, 'R_unsigned_') else False
+        if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
+            bitwidth = bitwidth_config.R_
+            is_symmetric = bitwidth_config.R_symmetric_
+            shift_val = params.shift_R_tensor_
+            print(format_op_info("R (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
+        elif bitwidth_config.R_granularity_ == 1:  # PER_GATE
+            bitwidth = bitwidth_config.R_
+            is_symmetric = bitwidth_config.R_symmetric_
+            shift_val = [params.shift_R_gate_[0], params.shift_R_gate_[1], params.shift_R_gate_[2]]
+            print(format_op_info("R (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
+        elif bitwidth_config.R_granularity_ == 2:  # PER_CHANNEL
+            bitwidth = bitwidth_config.R_
+            is_symmetric = bitwidth_config.R_symmetric_
+            if params.shift_R_ and len(params.shift_R_) > 0:
+                shift_val = list(params.shift_R_)
+                print(format_op_info("R (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_R))
+            else:
+                print(format_op_info("R (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_R))
+        
+        # bw 偏置
+        is_unsigned_bw = getattr(bitwidth_config, 'bw_unsigned_', False) if hasattr(bitwidth_config, 'bw_unsigned_') else False
+        if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
+            bitwidth = bitwidth_config.bw_
+            is_symmetric = bitwidth_config.bw_symmetric_
+            shift_val = params.shift_bw_tensor_
+            print(format_op_info("bw (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
+        elif bitwidth_config.bw_granularity_ == 1:  # PER_GATE
+            bitwidth = bitwidth_config.bw_
+            is_symmetric = bitwidth_config.bw_symmetric_
+            shift_val = [params.shift_bw_gate_[0], params.shift_bw_gate_[1], params.shift_bw_gate_[2]]
+            print(format_op_info("bw (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
+        elif bitwidth_config.bw_granularity_ == 2:  # PER_CHANNEL
+            bitwidth = bitwidth_config.bw_
+            is_symmetric = bitwidth_config.bw_symmetric_
+            if params.shift_bw_ and len(params.shift_bw_) > 0:
+                shift_val = list(params.shift_bw_)
+                print(format_op_info("bw (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_bw))
+            else:
+                print(format_op_info("bw (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_bw))
+        
+        # br 偏置
+        is_unsigned_br = getattr(bitwidth_config, 'br_unsigned_', False) if hasattr(bitwidth_config, 'br_unsigned_') else False
+        if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
+            bitwidth = bitwidth_config.br_
+            is_symmetric = bitwidth_config.br_symmetric_
+            shift_val = params.shift_br_tensor_
+            print(format_op_info("br (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
+        elif bitwidth_config.br_granularity_ == 1:  # PER_GATE
+            bitwidth = bitwidth_config.br_
+            is_symmetric = bitwidth_config.br_symmetric_
+            shift_val = [params.shift_br_gate_[0], params.shift_br_gate_[1], params.shift_br_gate_[2]]
+            print(format_op_info("br (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
+        elif bitwidth_config.br_granularity_ == 2:  # PER_CHANNEL
+            bitwidth = bitwidth_config.br_
+            is_symmetric = bitwidth_config.br_symmetric_
+            if params.shift_br_ and len(params.shift_br_) > 0:
+                shift_val = list(params.shift_br_)
+                print(format_op_info("br (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_br))
+            else:
+                print(format_op_info("br (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_br))
+    else:
+        # 未校准时，只显示配置信息
+        is_unsigned_W = getattr(bitwidth_config, 'W_unsigned_', False) if hasattr(bitwidth_config, 'W_unsigned_') else False
+        is_unsigned_R = getattr(bitwidth_config, 'R_unsigned_', False) if hasattr(bitwidth_config, 'R_unsigned_') else False
+        is_unsigned_bw = getattr(bitwidth_config, 'bw_unsigned_', False) if hasattr(bitwidth_config, 'bw_unsigned_') else False
+        is_unsigned_br = getattr(bitwidth_config, 'br_unsigned_', False) if hasattr(bitwidth_config, 'br_unsigned_') else False
+        print(format_op_info("W", None, None, bitwidth_config.W_, bitwidth_config.W_symmetric_, is_unsigned_W))
+        print(format_op_info("R", None, None, bitwidth_config.R_, bitwidth_config.R_symmetric_, is_unsigned_R))
+        print(format_op_info("bw", None, None, bitwidth_config.bw_, bitwidth_config.bw_symmetric_, is_unsigned_bw))
+        print(format_op_info("br", None, None, bitwidth_config.br_, bitwidth_config.br_symmetric_, is_unsigned_br))
     
     print("=" * 60)
 
@@ -3298,7 +3450,7 @@ def _load_quant_params_impl(
         print(f"  - 双向: {gru.bidirectional}")
         print(f"  - is_calibrated(): {gru.is_calibrated()}")
         # 打印详细的量化配置信息
-        print_quant_config(gru)
+        print_quant_params(gru)
 
 
 def _adjust_quant_config_impl(
@@ -3483,70 +3635,28 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
 
 def print_quant_config(gru: 'QuantGRU', operators: list = None):
     """
-    打印量化配置（便于查看和调整）
+    打印量化配置（已合并到 print_quant_params）
+    
+    为了向后兼容，此函数现在调用 print_quant_params。
+    如果指定了 operators 参数，会给出警告（当前实现不支持选择性打印）。
     
     Args:
         gru: QuantGRU 实例
-        operators: 要打印的算子列表，None 表示全部打印
+        operators: 已废弃，保留以兼容旧代码，当前会忽略此参数
         
     Example:
-        >>> print_quant_config(gru)  # 打印所有
-        >>> print_quant_config(gru, ["x", "h", "z_out"])  # 只打印指定算子
+        >>> print_quant_config(gru)  # 调用 print_quant_params
     """
-    all_config = _get_quant_config_impl(gru)
-    
     if operators is not None:
-        config = {k: v for k, v in all_config.items() if k in operators}
-    else:
-        config = all_config
+        import warnings
+        warnings.warn(
+            "print_quant_config 的 operators 参数已废弃，当前会打印所有算子。"
+            "请使用 print_quant_params 函数。",
+            DeprecationWarning
+        )
     
-    # 分组显示（命名与 C++ quantize_ops_helper.h 对齐）
-    groups = {
-        '输入': ['x'],
-        '输出': ['h'],
-        '权重': ['W', 'R', 'bw', 'br'],
-        'Linear': ['weight_ih_linear', 'weight_hh_linear'],
-        '门控(input)': ['update_gate_input', 'reset_gate_input', 'new_gate_input'],
-        '门控(output)': ['update_gate_output', 'reset_gate_output', 'new_gate_output'],
-        '中间': ['mul_reset_hidden', 'mul_old_contribution', 'mul_new_contribution'],
-    }
-    
-    print("\n" + "=" * 80)
-    print("GRU 量化配置详情")
-    print("=" * 80)
-    
-    for group_name, op_list in groups.items():
-        ops_in_group = [op for op in op_list if op in config]
-        if not ops_in_group:
-            continue
-        
-        print(f"\n[{group_name}]")
-        print("-" * 80)
-        
-        for op in ops_in_group:
-            cfg = config[op]
-            bw = cfg.get('bitwidth', '?')
-            sym = "对称" if cfg.get('is_symmetric', True) else "非对称"
-            
-            if 'shift' in cfg:
-                shift = cfg['shift']
-                if isinstance(shift, list):
-                    # per-channel
-                    shift_str = f"[{shift[0]}, {shift[1]}, ...] (per-channel, len={len(shift)})"
-                    scale_str = f"[{cfg['scale'][0]:.6f}, ...]"
-                else:
-                    shift_str = str(shift)
-                    scale_str = f"{cfg.get('scale', '?'):.6f}"
-            else:
-                shift_str = "N/A"
-                scale_str = "N/A"
-            
-            zp = cfg.get('zero_point', 'N/A')
-            
-            print(f"  {op:15s}: {bw:2}bit, {sym:4s}, shift={shift_str:30s}, scale={scale_str}, zp={zp}")
-    
-    print("=" * 80)
-    print("\n💡 使用 gru.adjust_quant_config('x', bitwidth=16) 可调整配置")
+    # 直接调用合并后的函数
+    print_quant_params(gru)
 
 
 def _format_bitwidth(val: int) -> str:
