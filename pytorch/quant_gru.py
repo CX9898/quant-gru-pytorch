@@ -825,6 +825,9 @@ class QuantGRU(nn.Module):
         self._bitwidth_config = gru_ops.OperatorQuantConfig()  # 位宽配置(直接存储 C++ 对象)
 
         self._cublas_initialized = False  # CUDA 延迟初始化标志
+        
+        # AIMET 分配的名称（用于 ONNX 导出后的名称匹配）
+        self.aimet_onnx_name = None  # AIMET 在 ONNX 中分配的名称
 
         # 校准方法:
         #   - 'minmax': 使用 min/max 范围(快速，无直方图)
@@ -2122,6 +2125,656 @@ class QuantGRU(nn.Module):
         # 调用模块级实现
         _load_quant_params_impl(self, import_path, verbose)
 
+    def _fix_zero_point(self, data: dict) -> dict:
+        """
+        修正 zero_point：如果 scale 是列表，zero_point 也应该是相同长度的列表
+        
+        参考 transfer_params_to_encodings.py 的实现
+        
+        Args:
+            data: 单个参数的编码字典
+            
+        Returns:
+            修正后的编码字典
+        """
+        if isinstance(data, dict) and "scale" in data and "zero_point" in data:
+            scale = data["scale"]
+            zero_point = data["zero_point"]
+            
+            # 如果 scale 是列表但 zero_point 不是，则转换 zero_point 为相同长度的列表
+            if isinstance(scale, list) and not isinstance(zero_point, list):
+                data["zero_point"] = [zero_point] * len(scale)
+        
+        return data
+
+    def _convert_to_encoding_format(self, data: dict) -> dict:
+        """
+        将参数文件格式转换为 encodings 格式
+        
+        参考 transfer_params_to_encodings.py 的实现
+        
+        Args:
+            data: 参数文件中的单个参数字典
+            
+        Returns:
+            转换后的编码字典（添加 bitwidth, is_symmetric 等字段）
+        """
+        import copy
+        if not isinstance(data, dict):
+            return data
+        
+        encoding = copy.deepcopy(data)
+        
+        # 添加 bitwidth（根据 dtype 判断）
+        if "dtype" in encoding:
+            dtype = encoding["dtype"]
+            if "INT8" in dtype or "UINT8" in dtype:
+                encoding["bitwidth"] = 8
+            elif "INT16" in dtype or "UINT16" in dtype:
+                encoding["bitwidth"] = 16
+            elif "INT32" in dtype or "UINT32" in dtype:
+                encoding["bitwidth"] = 32
+        
+        # 转换 symmetric 为 is_symmetric（字符串格式），并删除原 symmetric 字段
+        if "symmetric" in encoding:
+            encoding["is_symmetric"] = "True" if encoding["symmetric"] else "False"
+            del encoding["symmetric"]
+        
+        # 确保 is_symmetric 字段的值是字符串格式（如果已经存在）
+        if "is_symmetric" in encoding and isinstance(encoding["is_symmetric"], bool):
+            encoding["is_symmetric"] = "True" if encoding["is_symmetric"] else "False"
+        
+        return encoding
+
+    def export_quant_params_to_aimet_format(
+        self,
+        encodings_dict: dict,
+        module_name: str = None,
+        verbose: bool = False
+    ) -> dict:
+        """
+        将 QuantGRU 的量化参数导出为 AIMET encodings 格式并合并到 encodings_dict
+        
+        参考 transfer_params_to_encodings.py 的实现
+        
+        Args:
+            encodings_dict: AIMET encodings 字典（会被修改）
+            module_name: AIMET 分配的模块名称（如果为 None，使用 self.aimet_onnx_name）
+            verbose: 是否打印详细信息
+        
+        Returns:
+            更新后的 encodings_dict
+        
+        TODO: 双向 GRU 支持（bidirectional=True）暂未实现
+        """
+        import copy
+        
+        # 检查是否已校准
+        if not self.is_calibrated():
+            if verbose:
+                print(f"  ⚠️ 警告：模块 {module_name or 'unknown'} 未校准，跳过导出")
+            return encodings_dict
+        
+        # 确定模块名称
+        if module_name is None:
+            module_name = self.aimet_onnx_name
+            if not module_name:
+                if verbose:
+                    print(f"  ⚠️ 警告：aimet_onnx_name 未设置，使用默认名称 'gru'")
+                module_name = "gru"
+        
+        # 检查双向 GRU
+        if self.bidirectional:
+            if verbose:
+                print(f"  ⚠️ 警告：双向 GRU 暂未实现，跳过反向参数")
+            # TODO: 实现双向 GRU 支持
+        
+        # 获取量化参数
+        if self.quant_params is None:
+            if verbose:
+                print(f"  ⚠️ 警告：模块 {module_name} 的 quant_params 为空，跳过导出")
+            return encodings_dict
+        
+        # 使用 _build_operators_dict 从 quant_params 构建 operators 字典
+        operators = _build_operators_dict(self._bitwidth_config, self.quant_params)
+        if not operators:
+            if verbose:
+                print(f"  ⚠️ 警告：模块 {module_name} 的 operators 为空，跳过导出")
+            return encodings_dict
+        
+        # 确保 encodings_dict 结构存在
+        # 设置 schema_version（如果不存在）
+        if "schema_version" not in encodings_dict:
+            encodings_dict["schema_version"] = 3
+        
+        if "activation_encodings" not in encodings_dict:
+            encodings_dict["activation_encodings"] = {}
+        if module_name not in encodings_dict["activation_encodings"]:
+            encodings_dict["activation_encodings"][module_name] = {
+                "is_GRU": True,
+                "input": [],
+                "output": [],
+                "internal_ops": {
+                    "add_final_hidden": {"output": []},
+                    "mul_new_contribution": {"output": []},
+                    "mul_old_contribution": {"output": []},
+                    "mul_reset_hidden": {"output": []},
+                    "new_gate_input": {"output": []},
+                    "new_gate_output": {"output": []},
+                    "reset_gate_input": {"output": []},
+                    "reset_gate_output": {"output": []},
+                    "sub_one_minus_update": {"output": []},
+                    "update_gate_input": {"output": []},
+                    "update_gate_output": {"output": []},
+                    "weight_ih_linear": {"output": []},
+                    "weight_hh_linear": {"output": []},
+                },
+            }
+        
+        if "param_encodings" not in encodings_dict:
+            encodings_dict["param_encodings"] = {}
+        
+        if "tensor_encodings" not in encodings_dict:
+            encodings_dict["tensor_encodings"] = {}
+        
+        gru_encodings = encodings_dict["activation_encodings"][module_name]
+        
+        # 1. 填充 activation_encodings 的 input 和 output
+        if verbose:
+            print(f"\n处理 activation_encodings[{module_name}]:")
+        
+        # input (x)
+        if "x" in operators:
+            data = self._fix_zero_point(operators["x"])
+            data = self._convert_to_encoding_format(data)
+            if isinstance(data, dict):
+                gru_encodings["input"] = [data]
+            else:
+                gru_encodings["input"] = data
+            if verbose:
+                print(f"  ✅ input <- x")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'x'")
+        
+        # output (h)
+        if "h" in operators:
+            data = self._fix_zero_point(operators["h"])
+            data = self._convert_to_encoding_format(data)
+            if isinstance(data, dict):
+                gru_encodings["output"] = [data]
+            else:
+                gru_encodings["output"] = data
+            if verbose:
+                print(f"  ✅ output <- h")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'h'")
+        
+        # 2. 填充 param_encodings
+        if verbose:
+            print(f"\n处理 param_encodings:")
+        
+        # 直接使用 ONNX 标准命名规则（不需要推断）：
+        # - {module_name}.weight_ih.weight (对应 W)
+        # - {module_name}.weight_hh.weight (对应 R)
+        # - {module_name}.bias (合并的 bias，对应 bw+br)
+        
+        # weight_ih (W) - ONNX 标准命名：{module_name}.weight_ih.weight
+        param_key = f"{module_name}.weight_ih.weight"
+        if "W" in operators:
+            data = self._fix_zero_point(operators["W"])
+            data = self._convert_to_encoding_format(data)
+            encodings_dict["param_encodings"][param_key] = data
+            if verbose:
+                print(f"  ✅ {param_key} <- W")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'W'")
+        
+        # weight_hh (R) - ONNX 标准命名：{module_name}.weight_hh.weight
+        param_key = f"{module_name}.weight_hh.weight"
+        if "R" in operators:
+            data = self._fix_zero_point(operators["R"])
+            data = self._convert_to_encoding_format(data)
+            encodings_dict["param_encodings"][param_key] = data
+            if verbose:
+                print(f"  ✅ {param_key} <- R")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'R'")
+        
+        # bias - 特殊处理，需要拼接 bw 和 br 两个来源的各个字段
+        # ONNX 标准命名：{module_name}.bias（合并的 bias）
+        # 必须同时有 bw 和 br，否则报错
+        param_key = f"{module_name}.bias"
+        
+        # 检查 bw 和 br 是否都存在
+        if "bw" not in operators:
+            error_msg = f"❌ 错误：未找到参数 'bw'（模块 {module_name} 的 bias 需要同时有 bw 和 br）"
+            if verbose:
+                print(f"  {error_msg}")
+            raise ValueError(error_msg)
+        
+        if "br" not in operators:
+            error_msg = f"❌ 错误：未找到参数 'br'（模块 {module_name} 的 bias 需要同时有 bw 和 br）"
+            if verbose:
+                print(f"  {error_msg}")
+            raise ValueError(error_msg)
+        
+        # 拼接多个来源的数据（bw 在前，br 在后）
+        # 处理 bw（第一个源）
+        bw_data = self._fix_zero_point(operators["bw"])
+        merged_dict = copy.deepcopy(bw_data)
+        if verbose:
+            print(f"  ✅ {param_key} <- bw (初始化)")
+        
+        # 处理 br（第二个源，需要拼接）
+        br_data = self._fix_zero_point(operators["br"])
+        # 需要拼接的字段：scale, zero_point, real_min, real_max, n
+        list_fields = [
+            "scale",
+            "zero_point",
+            "real_min",
+            "real_max",
+            "n",
+        ]
+        for field in list_fields:
+            if field in br_data and field in merged_dict:
+                if isinstance(merged_dict[field], list) and isinstance(br_data[field], list):
+                    merged_dict[field].extend(br_data[field])
+                    if verbose:
+                        print(f"      拼接字段 {field}: {len(merged_dict[field])} 元素")
+                elif isinstance(merged_dict[field], list):
+                    merged_dict[field].append(br_data[field])
+                else:
+                    # 都是标量，转为列表
+                    merged_dict[field] = [
+                        merged_dict[field],
+                        br_data[field],
+                    ]
+        if verbose:
+            print(f"  ✅ {param_key} <- br (拼接)")
+        
+        # 转换格式并保存
+        merged_dict = self._convert_to_encoding_format(merged_dict)
+        encodings_dict["param_encodings"][param_key] = merged_dict
+        
+        # 3. 填充 tensor_encodings
+        if verbose:
+            print(f"\n处理 tensor_encodings:")
+        
+        # X <- x
+        if "x" in operators:
+            data = self._fix_zero_point(operators["x"])
+            data = self._convert_to_encoding_format(data)
+            encodings_dict["tensor_encodings"]["X"] = data
+            if verbose:
+                print(f"  ✅ X <- x")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'x' (用于 tensor_encodings['X'])")
+        
+        # Y <- h
+        if "h" in operators:
+            data = self._fix_zero_point(operators["h"])
+            data = self._convert_to_encoding_format(data)
+            encodings_dict["tensor_encodings"]["Y"] = data
+            if verbose:
+                print(f"  ✅ Y <- h")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'h' (用于 tensor_encodings['Y'])")
+        
+        # /gru/GRU_output_1 <- h
+        if "h" in operators:
+            data = self._fix_zero_point(operators["h"])
+            data = self._convert_to_encoding_format(data)
+            encodings_dict["tensor_encodings"]["/gru/GRU_output_1"] = data
+            if verbose:
+                print(f"  ✅ /gru/GRU_output_1 <- h")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到参数 'h' (用于 tensor_encodings['/gru/GRU_output_1'])")
+        
+        # 4. 填充 internal_ops
+        if verbose:
+            print(f"\n处理 internal_ops:")
+        
+        internal_ops = gru_encodings["internal_ops"]
+        
+        # 定义中间算子列表
+        internal_op_names = [
+            "weight_ih_linear",
+            "weight_hh_linear",
+            "update_gate_input",
+            "update_gate_output",
+            "reset_gate_input",
+            "reset_gate_output",
+            "new_gate_input",
+            "new_gate_output",
+            "mul_reset_hidden",
+            "mul_old_contribution",
+            "mul_new_contribution",
+        ]
+        
+        for op_name in internal_op_names:
+            if op_name in operators:
+                data = self._fix_zero_point(operators[op_name])
+                data = self._convert_to_encoding_format(data)
+                if "output" in internal_ops[op_name]:
+                    internal_ops[op_name]["output"] = [data]
+                else:
+                    internal_ops[op_name] = data
+                if verbose:
+                    print(f"  ✅ {op_name} <- {op_name} (output)")
+            else:
+                if verbose:
+                    print(f"  ⚠️ 警告：未找到参数 '{op_name}'")
+        
+        # 特殊处理：add_final_hidden 使用 h 的参数
+        if "add_final_hidden" in internal_ops:
+            if "h" in operators:
+                data = self._fix_zero_point(operators["h"])
+                data = self._convert_to_encoding_format(data)
+                if "output" in internal_ops["add_final_hidden"]:
+                    internal_ops["add_final_hidden"]["output"] = [data]
+                else:
+                    internal_ops["add_final_hidden"] = data
+                if verbose:
+                    print(f"  ✅ add_final_hidden <- h (使用 h 的量化参数)")
+            else:
+                if verbose:
+                    print(f"  ⚠️ 警告：未找到参数 'h' (用于 add_final_hidden)")
+        
+        # 特殊处理：sub_one_minus_update 复用 update_gate_output 的参数
+        if "sub_one_minus_update" in internal_ops:
+            if "update_gate_output" in operators:
+                data = self._fix_zero_point(operators["update_gate_output"])
+                data = self._convert_to_encoding_format(data)
+                if "output" in internal_ops["sub_one_minus_update"]:
+                    internal_ops["sub_one_minus_update"]["output"] = [data]
+                else:
+                    internal_ops["sub_one_minus_update"] = data
+                if verbose:
+                    print(f"  ✅ sub_one_minus_update <- update_gate_output (复用 update_gate_output)")
+            else:
+                if verbose:
+                    print(f"  ⚠️ 警告：未找到参数 'update_gate_output' (用于 sub_one_minus_update)")
+        
+        return encodings_dict
+
+    def load_quant_params_from_aimet_format(
+        self,
+        encodings_dict: dict,
+        module_name: str = None,
+        verbose: bool = False
+    ) -> bool:
+        """
+        从 AIMET encodings 格式加载量化参数
+        
+        参考 transfer_params_to_encodings.py 的反向映射
+        
+        Args:
+            encodings_dict: AIMET encodings 字典
+            module_name: AIMET 分配的模块名称（如果为 None，使用 self.aimet_onnx_name）
+            verbose: 是否打印详细信息
+        
+        Returns:
+            是否成功加载
+        
+        TODO: 双向 GRU 支持（bidirectional=True）暂未实现
+        """
+        import copy
+        
+        # 确定模块名称
+        if module_name is None:
+            module_name = self.aimet_onnx_name
+            if not module_name:
+                if verbose:
+                    print(f"  ⚠️ 警告：aimet_onnx_name 未设置，使用默认名称 'gru'")
+                module_name = "gru"
+        
+        # 检查双向 GRU
+        if self.bidirectional:
+            if verbose:
+                print(f"  ⚠️ 警告：双向 GRU 暂未实现，跳过反向参数")
+            # TODO: 实现双向 GRU 支持
+        
+        # 检查 encodings_dict 结构
+        if "activation_encodings" not in encodings_dict:
+            if verbose:
+                print(f"  ❌ 错误：encodings_dict 中缺少 'activation_encodings'")
+            return False
+        
+        if module_name not in encodings_dict["activation_encodings"]:
+            if verbose:
+                print(f"  ❌ 错误：未找到模块 '{module_name}' 的 activation_encodings")
+            return False
+        
+        gru_encodings = encodings_dict["activation_encodings"][module_name]
+        
+        # 检查 is_GRU 标记
+        if gru_encodings.get("is_GRU") != True:
+            if verbose:
+                print(f"  ⚠️ 警告：模块 '{module_name}' 的 is_GRU 标记不是 True")
+        
+        # 构建 operators 字典
+        operators = {}
+        
+        # 1. 从 activation_encodings 读取 input (x) 和 output (h)
+        if verbose:
+            print(f"\n从 activation_encodings[{module_name}] 读取:")
+        
+        # input (x)
+        if "input" in gru_encodings:
+            input_data = gru_encodings["input"]
+            if isinstance(input_data, list) and len(input_data) > 0:
+                operators["x"] = input_data[0]
+            elif isinstance(input_data, dict):
+                operators["x"] = input_data
+            if verbose:
+                print(f"  ✅ x <- input")
+        else:
+            if verbose:
+                print(f"  ❌ 错误：未找到 'input'")
+            return False
+        
+        # output (h)
+        if "output" in gru_encodings:
+            output_data = gru_encodings["output"]
+            if isinstance(output_data, list) and len(output_data) > 0:
+                operators["h"] = output_data[0]
+            elif isinstance(output_data, dict):
+                operators["h"] = output_data
+            if verbose:
+                print(f"  ✅ h <- output")
+        else:
+            if verbose:
+                print(f"  ❌ 错误：未找到 'output'")
+            return False
+        
+        # 2. 从 param_encodings 读取权重和偏置
+        if verbose:
+            print(f"\n从 param_encodings 读取:")
+        
+        if "param_encodings" not in encodings_dict:
+            if verbose:
+                print(f"  ⚠️ 警告：encodings_dict 中缺少 'param_encodings'")
+        else:
+            param_encodings = encodings_dict["param_encodings"]
+            
+            # 直接使用 ONNX 标准命名规则（不需要推断）：
+            # - {module_name}.weight_ih.weight (对应 W)
+            # - {module_name}.weight_hh.weight (对应 R)
+            # - {module_name}.bias (合并的 bias，对应 bw+br)
+            
+            # weight_ih (W) - ONNX 标准命名：{module_name}.weight_ih.weight
+            param_key = f"{module_name}.weight_ih.weight"
+            if param_key in param_encodings:
+                operators["W"] = param_encodings[param_key]
+                if verbose:
+                    print(f"  ✅ W <- {param_key}")
+            else:
+                if verbose:
+                    print(f"  ❌ 错误：未找到 '{param_key}'")
+                return False
+            
+            # weight_hh (R) - ONNX 标准命名：{module_name}.weight_hh.weight
+            param_key = f"{module_name}.weight_hh.weight"
+            if param_key in param_encodings:
+                operators["R"] = param_encodings[param_key]
+                if verbose:
+                    print(f"  ✅ R <- {param_key}")
+            else:
+                if verbose:
+                    print(f"  ❌ 错误：未找到 '{param_key}'")
+                return False
+            
+            # bias - ONNX 标准命名：{module_name}.bias（合并的 bias，需要拆分为 bw 和 br）
+            param_key = f"{module_name}.bias"
+            if param_key in param_encodings:
+                merged_data = param_encodings[param_key]
+                
+                # 需要拆分的字段：scale, zero_point, real_min, real_max, n
+                list_fields = ["scale", "zero_point", "real_min", "real_max", "n"]
+                
+                # 计算每个字段应该拆分的长度（假设 bw 和 br 长度相同）
+                split_length = None
+                for field in list_fields:
+                    if field in merged_data and isinstance(merged_data[field], list):
+                        if split_length is None:
+                            split_length = len(merged_data[field]) // 2
+                        break
+                
+                if split_length is None:
+                    # 如果无法确定长度，尝试从其他字段推断
+                    if "scale" in merged_data and isinstance(merged_data["scale"], list):
+                        split_length = len(merged_data["scale"]) // 2
+                    else:
+                        if verbose:
+                            print(f"  ⚠️ 警告：无法确定 split_length，假设 bw 和 br 长度相同")
+                        split_length = None
+                
+                # 拆分 bw（前半部分）
+                bw_data = copy.deepcopy(merged_data)
+                # 拆分 br（后半部分）
+                br_data = copy.deepcopy(merged_data)
+                
+                for field in list_fields:
+                    if field in merged_data:
+                        if isinstance(merged_data[field], list):
+                            if split_length is not None:
+                                bw_data[field] = merged_data[field][:split_length]
+                                br_data[field] = merged_data[field][split_length:]
+                            else:
+                                # 无法确定长度，尝试平均分割
+                                mid = len(merged_data[field]) // 2
+                                bw_data[field] = merged_data[field][:mid]
+                                br_data[field] = merged_data[field][mid:]
+                        else:
+                            # 标量值，两个都使用相同的值
+                            bw_data[field] = merged_data[field]
+                            br_data[field] = merged_data[field]
+                
+                operators["bw"] = bw_data
+                operators["br"] = br_data
+                if verbose:
+                    print(f"  ✅ bw, br <- {param_key} (从合并的 bias 拆分)")
+            else:
+                if verbose:
+                    print(f"  ❌ 错误：未找到 '{param_key}'")
+                return False
+        
+        # 3. 从 internal_ops 读取中间算子
+        if verbose:
+            print(f"\n从 internal_ops 读取:")
+        
+        if "internal_ops" in gru_encodings:
+            internal_ops = gru_encodings["internal_ops"]
+            
+            # 定义中间算子列表
+            internal_op_names = [
+                "weight_ih_linear",
+                "weight_hh_linear",
+                "update_gate_input",
+                "update_gate_output",
+                "reset_gate_input",
+                "reset_gate_output",
+                "new_gate_input",
+                "new_gate_output",
+                "mul_reset_hidden",
+                "mul_old_contribution",
+                "mul_new_contribution",
+            ]
+            
+            for op_name in internal_op_names:
+                if op_name in internal_ops:
+                    op_data = internal_ops[op_name]
+                    if isinstance(op_data, dict) and "output" in op_data:
+                        output_data = op_data["output"]
+                        if isinstance(output_data, list) and len(output_data) > 0:
+                            operators[op_name] = output_data[0]
+                        elif isinstance(output_data, dict):
+                            operators[op_name] = output_data
+                    elif isinstance(op_data, dict):
+                        operators[op_name] = op_data
+                    if verbose:
+                        print(f"  ✅ {op_name} <- internal_ops[{op_name}]")
+                else:
+                    if verbose:
+                        print(f"  ⚠️ 警告：未找到中间算子 '{op_name}'")
+            
+            # 特殊处理：add_final_hidden 和 sub_one_minus_update 可以忽略
+            # （因为它们分别使用 h 和 update_gate_output 的参数）
+            if "add_final_hidden" in internal_ops:
+                if verbose:
+                    print(f"  ⚠️ 警告：忽略 'add_final_hidden'（使用 h 的参数）")
+            if "sub_one_minus_update" in internal_ops:
+                if verbose:
+                    print(f"  ⚠️ 警告：忽略 'sub_one_minus_update'（使用 update_gate_output 的参数）")
+        else:
+            if verbose:
+                print(f"  ⚠️ 警告：未找到 'internal_ops'")
+        
+        # 4. 转换格式（从 AIMET 格式转换为 QuantGRU 格式）
+        # 将 is_symmetric 字符串转换回 symmetric 布尔值
+        for key, value in operators.items():
+            if isinstance(value, dict):
+                if "is_symmetric" in value:
+                    is_symmetric_str = value["is_symmetric"]
+                    if isinstance(is_symmetric_str, str):
+                        value["symmetric"] = is_symmetric_str.lower() == "true"
+                        del value["is_symmetric"]
+                    elif isinstance(is_symmetric_str, bool):
+                        value["symmetric"] = is_symmetric_str
+                        del value["is_symmetric"]
+        
+        # 5. 直接解析 operators 并设置到 quant_params
+        try:
+            # 初始化 bitwidth_config 和 quant_params
+            # gru_ops 已在模块顶部导入
+            self._bitwidth_config = gru_ops.OperatorQuantConfig()
+            self.quant_params = gru_ops.GRUQuantParams()
+            self.quant_params.hidden_ = self.hidden_size
+            
+            # 解析 operators 字典
+            _parse_operators_dict(operators, self._bitwidth_config, self.quant_params)
+            
+            # 设置位宽配置到量化参数中
+            self.quant_params.bitwidth_config_ = self._bitwidth_config
+            
+            # 清除脏标志
+            self._quant_params_dirty = False
+            
+            if verbose:
+                print(f"  ✅ 成功加载量化参数")
+            return True
+        except Exception as e:
+            if verbose:
+                print(f"  ❌ 错误：加载量化参数失败: {e}")
+            return False
+
     def adjust_quant_config(
         self,
         operator: str,
@@ -3025,7 +3678,17 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     
     # 设置 zero_point
     if op_info["zp_attr"] and "zero_point" in op_data:
-        setattr(quant_params, op_info["zp_attr"], int(op_data["zero_point"]))
+        zp_value = op_data["zero_point"]
+        # 支持列表格式（per-tensor 量化可能也是数组格式，取第一个值）
+        if isinstance(zp_value, list):
+            if len(zp_value) > 0:
+                # 取第一个值（所有值应该相同）
+                setattr(quant_params, op_info["zp_attr"], int(zp_value[0]))
+            else:
+                raise ValueError(f"zero_point 列表为空")
+        else:
+            # 标量值
+            setattr(quant_params, op_info["zp_attr"], int(zp_value))
 
 
 def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> None:
