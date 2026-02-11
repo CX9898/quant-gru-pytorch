@@ -901,7 +901,7 @@ class QuantGRU(nn.Module):
         self.calibration_method = 'minmax'
 
         # Percentile 配置(仅 calibration_method='percentile' 时使用)
-        self.percentile_value = 99.99
+        self.percentile_value = 100.0
 
         # 直方图收集器(sqnr/percentile 方法使用)
         self.hist_collectors = None
