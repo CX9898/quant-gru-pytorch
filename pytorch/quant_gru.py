@@ -893,8 +893,9 @@ class QuantGRU(nn.Module):
 
         self._cublas_initialized = False  # CUDA 延迟初始化标志
         
-        # AIMET 分配的名称（用于 ONNX 导出后的名称匹配）
-        self.aimet_onnx_name = None  # AIMET 在 ONNX 中分配的名称
+        # 模块完整路径名称（用于调试信息和 AIMET/ONNX 名称匹配）
+        # 例如 "generator.enc_seqs.0.seq_t" 或 AIMET 在 ONNX 中分配的名称
+        self._module_name = None
 
         # 校准方法:
         #   - 'minmax': 使用 min/max 范围(快速，无直方图)
@@ -1074,8 +1075,9 @@ class QuantGRU(nn.Module):
         # 如果已加载量化参数，跳过此方法
         if self.is_calibrated():
             if verbose:
+                module_name_str = f" [{self._module_name}]" if self._module_name else ""
                 print(
-                    "  ⚠️  [QuantGRU] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
+                    f"  ⚠️  [QuantGRU{module_name_str}] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
                     "如需修改位宽配置，请使用以下方法之一：\n"
                     "  1. adjust_quant_config(gru, 'input', bitwidth=16, auto_scale=True)\n"
                     "  2. 重新校准：gru.reset_calibration() 后再调用 load_bitwidth_config()"
@@ -1285,6 +1287,18 @@ class QuantGRU(nn.Module):
         if self.bidirectional:
             return self.quant_params is not None and self.quant_params_reverse is not None
         return self.quant_params is not None
+    
+    def set_module_name(self, module_name: str) -> None:
+        """
+        设置模块完整路径名称（用于调试信息和 AIMET/ONNX 名称匹配）
+        
+        Args:
+            module_name: 模块完整路径名称，例如 "generator.enc_seqs.0.seq_t"
+        
+        Example:
+            >>> gru.set_module_name("generator.enc_seqs.0.seq_t")
+        """
+        self._module_name = module_name
 
     def finalize_calibration(self, verbose: bool = False):
         """
@@ -2298,7 +2312,7 @@ class QuantGRU(nn.Module):
         
         Args:
             encodings_dict: AIMET encodings 字典（会被修改）
-            module_name: AIMET 分配的模块名称（如果为 None，使用 self.aimet_onnx_name）
+            module_name: AIMET 分配的模块名称（如果为 None，使用 self._module_name）
             verbose: 是否打印详细信息
         
         Returns:
@@ -2316,10 +2330,10 @@ class QuantGRU(nn.Module):
         
         # 确定模块名称
         if module_name is None:
-            module_name = self.aimet_onnx_name
+            module_name = self._module_name
             if not module_name:
                 if verbose:
-                    print(f"  ⚠️ 警告：aimet_onnx_name 未设置，使用默认名称 'gru'")
+                    print(f"  ⚠️ 警告：_module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
         # 检查双向 GRU
@@ -2616,7 +2630,7 @@ class QuantGRU(nn.Module):
         
         Args:
             encodings_dict: AIMET encodings 字典
-            module_name: AIMET 分配的模块名称（如果为 None，使用 self.aimet_onnx_name）
+            module_name: AIMET 分配的模块名称（如果为 None，使用 self._module_name）
             verbose: 是否打印详细信息
         
         Returns:
@@ -2628,11 +2642,14 @@ class QuantGRU(nn.Module):
         
         # 确定模块名称
         if module_name is None:
-            module_name = self.aimet_onnx_name
+            module_name = self._module_name
             if not module_name:
                 if verbose:
-                    print(f"  ⚠️ 警告：aimet_onnx_name 未设置，使用默认名称 'gru'")
+                    print(f"  ⚠️ 警告：_module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
+        
+        # 保存模块名称（用于调试信息和后续使用）
+        self._module_name = module_name
         
         # 检查双向 GRU
         if self.bidirectional:
@@ -2867,11 +2884,13 @@ class QuantGRU(nn.Module):
             self._quant_params_dirty = False
             
             if verbose:
-                print(f"  ✅ 成功加载量化参数")
+                module_name_str = f" [{self._module_name}]" if self._module_name else ""
+                print(f"  ✅ 成功加载量化参数{module_name_str}")
             return True
         except Exception as e:
             if verbose:
-                print(f"  ❌ 错误：加载量化参数失败: {e}")
+                module_name_str = f" [{self._module_name}]" if self._module_name else ""
+                print(f"  ❌ 错误：加载量化参数失败{module_name_str}: {e}")
             return False
 
     def adjust_quant_config(
@@ -4441,3 +4460,24 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     print(
         f"          mul_new_contribution: {_format_bitwidth(config.mul_new_contribution_):6s} ({_format_symmetric(config.mul_new_contribution_symmetric_)})")
     print("=" * 70 + "\n")
+
+
+def set_quant_gru_module_names(model: torch.nn.Module, prefix: str = "") -> None:
+    """
+    为模型中的所有 QuantGRU 模块自动设置模块名称
+    
+    遍历模型的所有子模块，找到 QuantGRU 实例，并设置它们的模块名称。
+    模块名称使用完整的路径（例如 "generator.enc_seqs.0.seq_t"）。
+    
+    Args:
+        model: PyTorch 模型
+        prefix: 模块名称前缀（可选，用于递归调用）
+    
+    Example:
+        >>> model = MyModel()
+        >>> set_quant_gru_module_names(model)
+        >>> # 现在所有 QuantGRU 模块都有了模块名称，调试信息会显示模块名称
+    """
+    for name, module in model.named_modules():
+        if isinstance(module, QuantGRU):
+            module.set_module_name(name)
