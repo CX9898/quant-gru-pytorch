@@ -152,28 +152,28 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
 # 命名与 C++ quantize_ops_helper.h 文档对齐
 _OPERATOR_MAP = {
     # 输入
-    "input.x": _make_op_info("x_"),
+    "input": _make_op_info("x_"),
     # 隐藏状态输出（每时间步的输出，同时作为下一时间步的输入）
-    "output.h": _make_op_info("h_"),
+    "output": _make_op_info("h_"),
     # 权重（per-channel）
-    "weight.W": _make_op_info("W_", is_per_channel=True),
-    "weight.R": _make_op_info("R_", is_per_channel=True),
-    "weight.bw": _make_op_info("bw_", is_per_channel=True),
-    "weight.br": _make_op_info("br_", is_per_channel=True),
+    "weight_ih": _make_op_info("W_", is_per_channel=True),
+    "weight_hh": _make_op_info("R_", is_per_channel=True),
+    "bias_ih": _make_op_info("bw_", is_per_channel=True),
+    "bias_hh": _make_op_info("br_", is_per_channel=True),
     # Linear 输出 (GEMM+bias 融合)
-    "linear.weight_ih_linear": _make_op_info("weight_ih_linear_"),  # W*x + bw
-    "linear.weight_hh_linear": _make_op_info("weight_hh_linear_"),  # R*h + br
+    "weight_ih_linear": _make_op_info("weight_ih_linear_"),  # W*x + bw
+    "weight_hh_linear": _make_op_info("weight_hh_linear_"),  # R*h + br
     # 门控（激活前 input / 激活后 output）
-    "gate.update_gate_input": _make_op_info("update_gate_input_"),
-    "gate.update_gate_output": _make_op_info("update_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.reset_gate_input": _make_op_info("reset_gate_input_"),
-    "gate.reset_gate_output": _make_op_info("reset_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
-    "gate.new_gate_input": _make_op_info("new_gate_input_"),
-    "gate.new_gate_output": _make_op_info("new_gate_output_"),  # Tanh [-1,1]
+    "update_gate_input": _make_op_info("update_gate_input_"),
+    "update_gate_output": _make_op_info("update_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "reset_gate_input": _make_op_info("reset_gate_input_"),
+    "reset_gate_output": _make_op_info("reset_gate_output_", default_unsigned=True),  # Sigmoid [0,1] → UINT
+    "new_gate_input": _make_op_info("new_gate_input_"),
+    "new_gate_output": _make_op_info("new_gate_output_"),  # Tanh [-1,1]
     # 中间操作
-    "op.mul_reset_hidden": _make_op_info("mul_reset_hidden_"),        # r * weight_hh_linear
-    "op.mul_old_contribution": _make_op_info("mul_old_contribution_"),  # u * h
-    "op.mul_new_contribution": _make_op_info("mul_new_contribution_"),  # (1-u) * n
+    "mul_reset_hidden": _make_op_info("mul_reset_hidden_"),        # r * weight_hh_linear
+    "mul_old_contribution": _make_op_info("mul_old_contribution_"),  # u * h
+    "mul_new_contribution": _make_op_info("mul_new_contribution_"),  # (1-u) * n
 }
 
 # 派生常量：从映射表提取的 C++ 属性名集合
@@ -182,9 +182,11 @@ _VALID_SYMMETRIC_ATTRS = {info["sym_attr"] for info in _OPERATOR_MAP.values()}
 _VALID_UNSIGNED_ATTRS = {info["unsigned_attr"] for info in _OPERATOR_MAP.values()}
 
 # JSON key 到属性映射（从 _OPERATOR_MAP 提取，避免重复构建）
-# 例如: "x" -> {"bw_attr": "x_", "sym_attr": "x_symmetric_", ...}
+# 由于所有算子名称都不使用前缀，直接使用键名作为 JSON key
+# 例如: "input" -> {"bw_attr": "x_", "sym_attr": "x_symmetric_", ...}
+# 例如: "weight_ih" -> {"bw_attr": "W_", "sym_attr": "W_symmetric_", ...}
 _OPERATOR_SHORT_NAME_MAP = {
-    op_name.split('.')[-1]: {
+    op_name: {  # 直接使用键名，不再需要 split('.')[-1]
         'bw_attr': info["bw_attr"],
         'sym_attr': info["sym_attr"],
         'unsigned_attr': info.get("unsigned_attr"),
@@ -1075,7 +1077,7 @@ class QuantGRU(nn.Module):
                 print(
                     "  ⚠️  [QuantGRU] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
                     "如需修改位宽配置，请使用以下方法之一：\n"
-                    "  1. adjust_quant_config(gru, 'input.x', bitwidth=16, auto_scale=True)\n"
+                    "  1. adjust_quant_config(gru, 'input', bitwidth=16, auto_scale=True)\n"
                     "  2. 重新校准：gru.reset_calibration() 后再调用 load_bitwidth_config()"
                 )
             return
@@ -1097,11 +1099,11 @@ class QuantGRU(nn.Module):
 
         # ========================================================================
         # JSON key -> _OPERATOR_MAP key 映射
-        # JSON 使用无前缀格式（如 "new_gate_output"）
-        # _OPERATOR_MAP 使用带前缀格式（如 "gate.new_gate_output"）
+        # 所有算子名称统一不使用前缀，JSON key 直接对应 _OPERATOR_MAP 的键名
+        # 例如: JSON 中的 "input" 对应 _OPERATOR_MAP 的 "input"
+        # 例如: JSON 中的 "weight_ih" 对应 _OPERATOR_MAP 的 "weight_ih"
         # ========================================================================
-        json_key_to_map_key = {k.split('.')[-1]: k for k in _OPERATOR_MAP}
-        valid_json_keys = set(json_key_to_map_key.keys())
+        valid_json_keys = set(_OPERATOR_MAP.keys())
         json_op_names = set(op_config.keys())
         unknown_fields = json_op_names - valid_json_keys
         
@@ -1117,8 +1119,8 @@ class QuantGRU(nn.Module):
         missing_fields = []  # [(json_key, default_bitwidth, default_symmetric, default_unsigned), ...]
         missing_attrs = []   # [(json_key, attr_name, default_value), ...] - 算子存在但属性缺失
         
-        for map_key, info in _OPERATOR_MAP.items():
-            json_key = map_key.split('.')[-1]  # "gate.new_gate_output" -> "new_gate_output"
+        for json_key, info in _OPERATOR_MAP.items():
+            # json_key 直接就是 _OPERATOR_MAP 的键名，不需要转换
             bw_attr, sym_attr = info["bw_attr"], info["sym_attr"]
             unsigned_attr = info.get("unsigned_attr")
             default_unsigned = info.get("default_unsigned", False)
@@ -1134,8 +1136,8 @@ class QuantGRU(nn.Module):
                 if unsigned_attr and 'is_unsigned' not in op_cfg:
                     unsigned_default_str = "true (UINT)" if default_unsigned else "false (INT)"
                     missing_attrs.append((json_key, 'is_unsigned', unsigned_default_str))
-                # 检查量化粒度配置（仅对 W, R, bw, br 有效）
-                if json_key in ['W', 'R', 'bw', 'br']:
+                # 检查量化粒度配置（仅对 weight_ih, weight_hh, bias_ih, bias_hh 有效）
+                if json_key in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
                     if 'quantization_granularity' not in op_cfg:
                         missing_attrs.append((json_key, 'quantization_granularity', 'PER_CHANNEL'))
                 
@@ -1152,8 +1154,8 @@ class QuantGRU(nn.Module):
                 if unsigned_attr:
                     setattr(self._bitwidth_config, unsigned_attr, op_cfg.get('is_unsigned', default_unsigned))
                 
-                # 设置量化粒度配置（仅对 W, R, bw, br 有效）
-                if json_key in ['W', 'R', 'bw', 'br']:
+                # 设置量化粒度配置（仅对 weight_ih, weight_hh, bias_ih, bias_hh 有效）
+                if json_key in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
                     granularity_str = op_cfg.get('quantization_granularity', 'PER_CHANNEL')
                     granularity_map = {
                         'PER_TENSOR': 0,
@@ -1345,7 +1347,7 @@ class QuantGRU(nn.Module):
         获取配置属性的通用方法
         
         Args:
-            op_name: 操作名称（如 'x', 'h', 'weight_ih_linear', 'update_gate_output' 等）
+            op_name: 操作名称（如 'input', 'output', 'weight_ih_linear', 'update_gate_output' 等）
             suffix: 属性后缀（'_', '_symmetric_', '_unsigned_'）
             valid_set: 有效属性集合
             default: 默认值
@@ -1367,7 +1369,7 @@ class QuantGRU(nn.Module):
         return getattr(self._bitwidth_config, attr_name, default)
 
     def _get_bitwidth(self, op_name: str) -> int:
-        """获取指定操作的位宽（如 'x', 'h', 'weight_ih_linear' 等），无效返回 8"""
+        """获取指定操作的位宽（如 'input', 'output', 'weight_ih_linear' 等），无效返回 8"""
         return self._get_config_attr(op_name, '_', _VALID_BITWIDTH_ATTRS, 8)
 
     def _get_symmetric(self, op_name: str) -> bool:
@@ -1676,18 +1678,18 @@ class QuantGRU(nn.Module):
         # [与 CUDA 一致] per-channel 量化
         # [ONNX 兼容] 使用 fake_quantize 保持浮点格式
         W_q = fake_quantize_per_channel(W_reordered.t(), shift_W, zp=0,
-                                        bitwidth=self._get_bitwidth('W'),
-                                        symmetric=self._get_symmetric('W')).t()
+                                        bitwidth=self._get_bitwidth('weight_ih'),
+                                        symmetric=self._get_symmetric('weight_ih')).t()
         R_q = fake_quantize_per_channel(R_reordered.t(), shift_R, zp=0,
-                                        bitwidth=self._get_bitwidth('R'),
-                                        symmetric=self._get_symmetric('R')).t()
+                                        bitwidth=self._get_bitwidth('weight_hh'),
+                                        symmetric=self._get_symmetric('weight_hh')).t()
         # 偏置使用配置的位宽(注意：偏置始终使用对称量化)
         bw_q = fake_quantize_per_channel(bw_reordered.unsqueeze(0), shift_bw, zp=0,
-                                         bitwidth=self._get_bitwidth('bw'),
-                                         symmetric=self._get_symmetric('bw')).squeeze(0)
+                                         bitwidth=self._get_bitwidth('bias_ih'),
+                                         symmetric=self._get_symmetric('bias_ih')).squeeze(0)
         br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), shift_br, zp=0,
-                                         bitwidth=self._get_bitwidth('br'),
-                                         symmetric=self._get_symmetric('br')).squeeze(0)
+                                         bitwidth=self._get_bitwidth('bias_hh'),
+                                         symmetric=self._get_symmetric('bias_hh')).squeeze(0)
 
         # ========== 初始化隐藏状态 ==========
         if h0 is None:
@@ -1696,13 +1698,13 @@ class QuantGRU(nn.Module):
             h = h0
 
         # [与 CUDA 一致] 量化初始状态
-        h = fake_quantize(h, shift_h, zp_h, bitwidth=self._get_bitwidth('h'),
-                          symmetric=self._get_symmetric('h'))
+        h = fake_quantize(h, shift_h, zp_h, bitwidth=self._get_bitwidth('output'),
+                          symmetric=self._get_symmetric('output'))
 
         # ========== 输入伪量化 ==========
         # [与 CUDA 一致] 所有时间步一起量化
-        x_q = fake_quantize(input, shift_x, zp_x, bitwidth=self._get_bitwidth('x'),
-                            symmetric=self._get_symmetric('x'))
+        x_q = fake_quantize(input, shift_x, zp_x, bitwidth=self._get_bitwidth('input'),
+                            symmetric=self._get_symmetric('input'))
 
         # ========== weight_ih_linear = W*x + bw（融合 Linear，循环外一次性计算）==========
         # [与 CUDA quantizedGemmBiasFused 一致]
@@ -1838,8 +1840,8 @@ class QuantGRU(nn.Module):
 
             # [与 CUDA 一致] 输出量化
             h_new = fake_quantize(h_new, shift_h, zp_h,
-                                  bitwidth=self._get_bitwidth('h'),
-                                  symmetric=self._get_symmetric('h'))
+                                  bitwidth=self._get_bitwidth('output'),
+                                  symmetric=self._get_symmetric('output'))
 
             h = h_new
 
@@ -2350,94 +2352,94 @@ class QuantGRU(nn.Module):
         if verbose:
             print(f"\n处理 activation_encodings[{module_name}]:")
         
-        # input (x)
-        if "x" in operators:
-            data = self._fix_zero_point(operators["x"])
+        # input
+        if "input" in operators:
+            data = self._fix_zero_point(operators["input"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
                 gru_encodings["input"] = [data]
             else:
                 gru_encodings["input"] = data
             if verbose:
-                print(f"  ✅ input <- x")
+                print(f"  ✅ input <- input")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'x'")
+                print(f"  ⚠️ 警告：未找到参数 'input'")
         
-        # output (h)
-        if "h" in operators:
-            data = self._fix_zero_point(operators["h"])
+        # output
+        if "output" in operators:
+            data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             if isinstance(data, dict):
                 gru_encodings["output"] = [data]
             else:
                 gru_encodings["output"] = data
             if verbose:
-                print(f"  ✅ output <- h")
+                print(f"  ✅ output <- output")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'h'")
+                print(f"  ⚠️ 警告：未找到参数 'output'")
         
         # 2. 填充 param_encodings
         if verbose:
             print(f"\n处理 param_encodings:")
         
         # 直接使用 ONNX 标准命名规则（不需要推断）：
-        # - {module_name}.weight_ih.weight (对应 W)
-        # - {module_name}.weight_hh.weight (对应 R)
-        # - {module_name}.bias (合并的 bias，对应 bw+br)
+        # - {module_name}.weight_ih.weight (对应 weight_ih)
+        # - {module_name}.weight_hh.weight (对应 weight_hh)
+        # - {module_name}.bias (合并的 bias，对应 bias_ih+bias_hh)
         
-        # weight_ih (W) - ONNX 标准命名：{module_name}.weight_ih.weight
+        # weight_ih - ONNX 标准命名：{module_name}.weight_ih.weight
         param_key = f"{module_name}.weight_ih.weight"
-        if "W" in operators:
-            data = self._fix_zero_point(operators["W"])
+        if "weight_ih" in operators:
+            data = self._fix_zero_point(operators["weight_ih"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
             if verbose:
-                print(f"  ✅ {param_key} <- W")
+                print(f"  ✅ {param_key} <- weight_ih")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'W'")
+                print(f"  ⚠️ 警告：未找到参数 'weight_ih'")
         
-        # weight_hh (R) - ONNX 标准命名：{module_name}.weight_hh.weight
+        # weight_hh - ONNX 标准命名：{module_name}.weight_hh.weight
         param_key = f"{module_name}.weight_hh.weight"
-        if "R" in operators:
-            data = self._fix_zero_point(operators["R"])
+        if "weight_hh" in operators:
+            data = self._fix_zero_point(operators["weight_hh"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
             if verbose:
-                print(f"  ✅ {param_key} <- R")
+                print(f"  ✅ {param_key} <- weight_hh")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'R'")
+                print(f"  ⚠️ 警告：未找到参数 'weight_hh'")
         
-        # bias - 特殊处理，需要拼接 bw 和 br 两个来源的各个字段
+        # bias - 特殊处理，需要拼接 bias_ih 和 bias_hh 两个来源的各个字段
         # ONNX 标准命名：{module_name}.bias（合并的 bias）
-        # 必须同时有 bw 和 br，否则报错
+        # 必须同时有 bias_ih 和 bias_hh，否则报错
         param_key = f"{module_name}.bias"
         
-        # 检查 bw 和 br 是否都存在
-        if "bw" not in operators:
-            error_msg = f"❌ 错误：未找到参数 'bw'（模块 {module_name} 的 bias 需要同时有 bw 和 br）"
+        # 检查 bias_ih 和 bias_hh 是否都存在
+        if "bias_ih" not in operators:
+            error_msg = f"❌ 错误：未找到参数 'bias_ih'（模块 {module_name} 的 bias 需要同时有 bias_ih 和 bias_hh）"
             if verbose:
                 print(f"  {error_msg}")
             raise ValueError(error_msg)
         
-        if "br" not in operators:
-            error_msg = f"❌ 错误：未找到参数 'br'（模块 {module_name} 的 bias 需要同时有 bw 和 br）"
+        if "bias_hh" not in operators:
+            error_msg = f"❌ 错误：未找到参数 'bias_hh'（模块 {module_name} 的 bias 需要同时有 bias_ih 和 bias_hh）"
             if verbose:
                 print(f"  {error_msg}")
             raise ValueError(error_msg)
         
-        # 拼接多个来源的数据（bw 在前，br 在后）
-        # 处理 bw（第一个源）
-        bw_data = self._fix_zero_point(operators["bw"])
+        # 拼接多个来源的数据（bias_ih 在前，bias_hh 在后）
+        # 处理 bias_ih（第一个源）
+        bw_data = self._fix_zero_point(operators["bias_ih"])
         merged_dict = copy.deepcopy(bw_data)
         if verbose:
             print(f"  ✅ {param_key} <- bw (初始化)")
         
-        # 处理 br（第二个源，需要拼接）
-        br_data = self._fix_zero_point(operators["br"])
+        # 处理 bias_hh（第二个源，需要拼接）
+        br_data = self._fix_zero_point(operators["bias_hh"])
         # 需要拼接的字段：scale, zero_point, real_min, real_max, n
         list_fields = [
             "scale",
@@ -2471,38 +2473,38 @@ class QuantGRU(nn.Module):
         if verbose:
             print(f"\n处理 tensor_encodings:")
         
-        # X <- x
-        if "x" in operators:
-            data = self._fix_zero_point(operators["x"])
+        # X <- input
+        if "input" in operators:
+            data = self._fix_zero_point(operators["input"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["X"] = data
             if verbose:
-                print(f"  ✅ X <- x")
+                print(f"  ✅ X <- input")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'x' (用于 tensor_encodings['X'])")
+                print(f"  ⚠️ 警告：未找到参数 'input' (用于 tensor_encodings['X'])")
         
-        # Y <- h
-        if "h" in operators:
-            data = self._fix_zero_point(operators["h"])
+        # Y <- output
+        if "output" in operators:
+            data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["Y"] = data
             if verbose:
-                print(f"  ✅ Y <- h")
+                print(f"  ✅ Y <- output")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'h' (用于 tensor_encodings['Y'])")
+                print(f"  ⚠️ 警告：未找到参数 'output' (用于 tensor_encodings['Y'])")
         
-        # /gru/GRU_output_1 <- h
-        if "h" in operators:
-            data = self._fix_zero_point(operators["h"])
+        # /gru/GRU_output_1 <- output
+        if "output" in operators:
+            data = self._fix_zero_point(operators["output"])
             data = self._convert_to_encoding_format(data)
             encodings_dict["tensor_encodings"]["/gru/GRU_output_1"] = data
             if verbose:
-                print(f"  ✅ /gru/GRU_output_1 <- h")
+                print(f"  ✅ /gru/GRU_output_1 <- output")
         else:
             if verbose:
-                print(f"  ⚠️ 警告：未找到参数 'h' (用于 tensor_encodings['/gru/GRU_output_1'])")
+                print(f"  ⚠️ 警告：未找到参数 'output' (用于 tensor_encodings['/gru/GRU_output_1'])")
         
         # 4. 填充 internal_ops
         if verbose:
@@ -2539,20 +2541,20 @@ class QuantGRU(nn.Module):
                 if verbose:
                     print(f"  ⚠️ 警告：未找到参数 '{op_name}'")
         
-        # 特殊处理：add_final_hidden 使用 h 的参数
+        # 特殊处理：add_final_hidden 使用 output 的参数
         if "add_final_hidden" in internal_ops:
-            if "h" in operators:
-                data = self._fix_zero_point(operators["h"])
+            if "output" in operators:
+                data = self._fix_zero_point(operators["output"])
                 data = self._convert_to_encoding_format(data)
                 if "output" in internal_ops["add_final_hidden"]:
                     internal_ops["add_final_hidden"]["output"] = [data]
                 else:
                     internal_ops["add_final_hidden"] = data
                 if verbose:
-                    print(f"  ✅ add_final_hidden <- h (使用 h 的量化参数)")
+                    print(f"  ✅ add_final_hidden <- output (使用 output 的量化参数)")
             else:
                 if verbose:
-                    print(f"  ⚠️ 警告：未找到参数 'h' (用于 add_final_hidden)")
+                    print(f"  ⚠️ 警告：未找到参数 'output' (用于 add_final_hidden)")
         
         # 特殊处理：sub_one_minus_update 复用 update_gate_output 的参数
         if "sub_one_minus_update" in internal_ops:
@@ -2629,33 +2631,33 @@ class QuantGRU(nn.Module):
         # 构建 operators 字典
         operators = {}
         
-        # 1. 从 activation_encodings 读取 input (x) 和 output (h)
+        # 1. 从 activation_encodings 读取 input 和 output
         if verbose:
             print(f"\n从 activation_encodings[{module_name}] 读取:")
         
-        # input (x)
+        # input
         if "input" in gru_encodings:
             input_data = gru_encodings["input"]
             if isinstance(input_data, list) and len(input_data) > 0:
-                operators["x"] = input_data[0]
+                operators["input"] = input_data[0]
             elif isinstance(input_data, dict):
-                operators["x"] = input_data
+                operators["input"] = input_data
             if verbose:
-                print(f"  ✅ x <- input")
+                print(f"  ✅ input <- input")
         else:
             if verbose:
                 print(f"  ❌ 错误：未找到 'input'")
             return False
         
-        # output (h)
+        # output
         if "output" in gru_encodings:
             output_data = gru_encodings["output"]
             if isinstance(output_data, list) and len(output_data) > 0:
-                operators["h"] = output_data[0]
+                operators["output"] = output_data[0]
             elif isinstance(output_data, dict):
-                operators["h"] = output_data
+                operators["output"] = output_data
             if verbose:
-                print(f"  ✅ h <- output")
+                print(f"  ✅ output <- output")
         else:
             if verbose:
                 print(f"  ❌ 错误：未找到 'output'")
@@ -2672,33 +2674,33 @@ class QuantGRU(nn.Module):
             param_encodings = encodings_dict["param_encodings"]
             
             # 直接使用 ONNX 标准命名规则（不需要推断）：
-            # - {module_name}.weight_ih.weight (对应 W)
-            # - {module_name}.weight_hh.weight (对应 R)
-            # - {module_name}.bias (合并的 bias，对应 bw+br)
+            # - {module_name}.weight_ih.weight (对应 weight_ih)
+            # - {module_name}.weight_hh.weight (对应 weight_hh)
+            # - {module_name}.bias (合并的 bias，对应 bias_ih+bias_hh)
             
-            # weight_ih (W) - ONNX 标准命名：{module_name}.weight_ih.weight
+            # weight_ih - ONNX 标准命名：{module_name}.weight_ih.weight
             param_key = f"{module_name}.weight_ih.weight"
             if param_key in param_encodings:
-                operators["W"] = param_encodings[param_key]
+                operators["weight_ih"] = param_encodings[param_key]
                 if verbose:
-                    print(f"  ✅ W <- {param_key}")
+                    print(f"  ✅ weight_ih <- {param_key}")
             else:
                 if verbose:
                     print(f"  ❌ 错误：未找到 '{param_key}'")
                 return False
             
-            # weight_hh (R) - ONNX 标准命名：{module_name}.weight_hh.weight
+            # weight_hh - ONNX 标准命名：{module_name}.weight_hh.weight
             param_key = f"{module_name}.weight_hh.weight"
             if param_key in param_encodings:
-                operators["R"] = param_encodings[param_key]
+                operators["weight_hh"] = param_encodings[param_key]
                 if verbose:
-                    print(f"  ✅ R <- {param_key}")
+                    print(f"  ✅ weight_hh <- {param_key}")
             else:
                 if verbose:
                     print(f"  ❌ 错误：未找到 '{param_key}'")
                 return False
             
-            # bias - ONNX 标准命名：{module_name}.bias（合并的 bias，需要拆分为 bw 和 br）
+            # bias - ONNX 标准命名：{module_name}.bias（合并的 bias，需要拆分为 bias_ih 和 bias_hh）
             param_key = f"{module_name}.bias"
             if param_key in param_encodings:
                 merged_data = param_encodings[param_key]
@@ -2706,7 +2708,7 @@ class QuantGRU(nn.Module):
                 # 需要拆分的字段：scale, zero_point, real_min, real_max, n
                 list_fields = ["scale", "zero_point", "real_min", "real_max", "n"]
                 
-                # 计算每个字段应该拆分的长度（假设 bw 和 br 长度相同）
+                # 计算每个字段应该拆分的长度（假设 bias_ih 和 bias_hh 长度相同）
                 split_length = None
                 for field in list_fields:
                     if field in merged_data and isinstance(merged_data[field], list):
@@ -2720,34 +2722,34 @@ class QuantGRU(nn.Module):
                         split_length = len(merged_data["scale"]) // 2
                     else:
                         if verbose:
-                            print(f"  ⚠️ 警告：无法确定 split_length，假设 bw 和 br 长度相同")
+                            print(f"  ⚠️ 警告：无法确定 split_length，假设 bias_ih 和 bias_hh 长度相同")
                         split_length = None
                 
-                # 拆分 bw（前半部分）
-                bw_data = copy.deepcopy(merged_data)
-                # 拆分 br（后半部分）
-                br_data = copy.deepcopy(merged_data)
+                # 拆分 bias_ih（前半部分）
+                bias_ih_data = copy.deepcopy(merged_data)
+                # 拆分 bias_hh（后半部分）
+                bias_hh_data = copy.deepcopy(merged_data)
                 
                 for field in list_fields:
                     if field in merged_data:
                         if isinstance(merged_data[field], list):
                             if split_length is not None:
-                                bw_data[field] = merged_data[field][:split_length]
-                                br_data[field] = merged_data[field][split_length:]
+                                bias_ih_data[field] = merged_data[field][:split_length]
+                                bias_hh_data[field] = merged_data[field][split_length:]
                             else:
                                 # 无法确定长度，尝试平均分割
                                 mid = len(merged_data[field]) // 2
-                                bw_data[field] = merged_data[field][:mid]
-                                br_data[field] = merged_data[field][mid:]
+                                bias_ih_data[field] = merged_data[field][:mid]
+                                bias_hh_data[field] = merged_data[field][mid:]
                         else:
                             # 标量值，两个都使用相同的值
-                            bw_data[field] = merged_data[field]
-                            br_data[field] = merged_data[field]
+                            bias_ih_data[field] = merged_data[field]
+                            bias_hh_data[field] = merged_data[field]
                 
-                operators["bw"] = bw_data
-                operators["br"] = br_data
+                operators["bias_ih"] = bias_ih_data
+                operators["bias_hh"] = bias_hh_data
                 if verbose:
-                    print(f"  ✅ bw, br <- {param_key} (从合并的 bias 拆分)")
+                    print(f"  ✅ bias_ih, bias_hh <- {param_key} (从合并的 bias 拆分)")
             else:
                 if verbose:
                     print(f"  ❌ 错误：未找到 '{param_key}'")
@@ -2969,8 +2971,8 @@ def print_quant_params(gru: 'QuantGRU'):
         
         return f"  [{op_name:23s}] {dtype_str:6s}, {sym_str:4s}, shift={shift_str:30s}, scale={scale_str:10s}, zp={zp_str}"
     
-    # 打印基础算子（x, h, weight_ih_linear, weight_hh_linear）
-    for op_name in ['x', 'h', 'weight_ih_linear', 'weight_hh_linear']:
+    # 打印基础算子（input, output, weight_ih_linear, weight_hh_linear）
+    for op_name in ['input', 'output', 'weight_ih_linear', 'weight_hh_linear']:
         if op_name not in _OPERATOR_SHORT_NAME_MAP:
             continue
         attrs = _OPERATOR_SHORT_NAME_MAP[op_name]
@@ -3065,100 +3067,100 @@ def print_quant_params(gru: 'QuantGRU'):
     
     # 打印权重和偏置（根据 granularity）
     if params is not None:
-        # W 权重（权重通常是 INT 类型，不是 UINT）
+        # weight_ih 权重（权重通常是 INT 类型，不是 UINT）
         is_unsigned_W = getattr(bitwidth_config, 'W_unsigned_', False) if hasattr(bitwidth_config, 'W_unsigned_') else False
         if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
             shift_val = params.shift_W_tensor_
-            print(format_op_info("W (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
+            print(format_op_info("weight_ih (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
         elif bitwidth_config.W_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
             shift_val = [params.shift_W_gate_[0], params.shift_W_gate_[1], params.shift_W_gate_[2]]
-            print(format_op_info("W (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
+            print(format_op_info("weight_ih (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
         elif bitwidth_config.W_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
             if params.shift_W_ and len(params.shift_W_) > 0:
                 # 传递完整列表，格式化函数会处理显示
                 shift_val = list(params.shift_W_)
-                print(format_op_info("W (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_W))
+                print(format_op_info("weight_ih (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_W))
             else:
-                print(format_op_info("W (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_W))
+                print(format_op_info("weight_ih (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_W))
         
-        # R 权重
+        # weight_hh 权重
         is_unsigned_R = getattr(bitwidth_config, 'R_unsigned_', False) if hasattr(bitwidth_config, 'R_unsigned_') else False
         if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
             shift_val = params.shift_R_tensor_
-            print(format_op_info("R (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
+            print(format_op_info("weight_hh (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
         elif bitwidth_config.R_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
             shift_val = [params.shift_R_gate_[0], params.shift_R_gate_[1], params.shift_R_gate_[2]]
-            print(format_op_info("R (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
+            print(format_op_info("weight_hh (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
         elif bitwidth_config.R_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
             if params.shift_R_ and len(params.shift_R_) > 0:
                 shift_val = list(params.shift_R_)
-                print(format_op_info("R (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_R))
+                print(format_op_info("weight_hh (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_R))
             else:
-                print(format_op_info("R (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_R))
+                print(format_op_info("weight_hh (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_R))
         
-        # bw 偏置
+        # bias_ih 偏置
         is_unsigned_bw = getattr(bitwidth_config, 'bw_unsigned_', False) if hasattr(bitwidth_config, 'bw_unsigned_') else False
         if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
             shift_val = params.shift_bw_tensor_
-            print(format_op_info("bw (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
+            print(format_op_info("bias_ih (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
         elif bitwidth_config.bw_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
             shift_val = [params.shift_bw_gate_[0], params.shift_bw_gate_[1], params.shift_bw_gate_[2]]
-            print(format_op_info("bw (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
+            print(format_op_info("bias_ih (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
         elif bitwidth_config.bw_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
             if params.shift_bw_ and len(params.shift_bw_) > 0:
                 shift_val = list(params.shift_bw_)
-                print(format_op_info("bw (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_bw))
+                print(format_op_info("bias_ih (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_bw))
             else:
-                print(format_op_info("bw (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_bw))
+                print(format_op_info("bias_ih (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_bw))
         
-        # br 偏置
+        # bias_hh 偏置
         is_unsigned_br = getattr(bitwidth_config, 'br_unsigned_', False) if hasattr(bitwidth_config, 'br_unsigned_') else False
         if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
             shift_val = params.shift_br_tensor_
-            print(format_op_info("br (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
+            print(format_op_info("bias_hh (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
         elif bitwidth_config.br_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
             shift_val = [params.shift_br_gate_[0], params.shift_br_gate_[1], params.shift_br_gate_[2]]
-            print(format_op_info("br (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
+            print(format_op_info("bias_hh (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
         elif bitwidth_config.br_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
             if params.shift_br_ and len(params.shift_br_) > 0:
                 shift_val = list(params.shift_br_)
-                print(format_op_info("br (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_br))
+                print(format_op_info("bias_hh (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_br))
             else:
-                print(format_op_info("br (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_br))
+                print(format_op_info("bias_hh (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_br))
     else:
         # 未校准时，只显示配置信息
         is_unsigned_W = getattr(bitwidth_config, 'W_unsigned_', False) if hasattr(bitwidth_config, 'W_unsigned_') else False
         is_unsigned_R = getattr(bitwidth_config, 'R_unsigned_', False) if hasattr(bitwidth_config, 'R_unsigned_') else False
         is_unsigned_bw = getattr(bitwidth_config, 'bw_unsigned_', False) if hasattr(bitwidth_config, 'bw_unsigned_') else False
         is_unsigned_br = getattr(bitwidth_config, 'br_unsigned_', False) if hasattr(bitwidth_config, 'br_unsigned_') else False
-        print(format_op_info("W", None, None, bitwidth_config.W_, bitwidth_config.W_symmetric_, is_unsigned_W))
-        print(format_op_info("R", None, None, bitwidth_config.R_, bitwidth_config.R_symmetric_, is_unsigned_R))
-        print(format_op_info("bw", None, None, bitwidth_config.bw_, bitwidth_config.bw_symmetric_, is_unsigned_bw))
-        print(format_op_info("br", None, None, bitwidth_config.br_, bitwidth_config.br_symmetric_, is_unsigned_br))
+        print(format_op_info("weight_ih", None, None, bitwidth_config.W_, bitwidth_config.W_symmetric_, is_unsigned_W))
+        print(format_op_info("weight_hh", None, None, bitwidth_config.R_, bitwidth_config.R_symmetric_, is_unsigned_R))
+        print(format_op_info("bias_ih", None, None, bitwidth_config.bw_, bitwidth_config.bw_symmetric_, is_unsigned_bw))
+        print(format_op_info("bias_hh", None, None, bitwidth_config.br_, bitwidth_config.br_symmetric_, is_unsigned_br))
     
     print("=" * 60)
 
@@ -3261,7 +3263,7 @@ def _get_weight_granularity(bitwidth_config, json_key: str) -> int:
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
-        json_key: 算子名称 ('W', 'R', 'bw', 'br')
+        json_key: 算子名称 ('weight_ih', 'weight_hh', 'bias_ih', 'bias_hh')
         
     Returns:
         粒度值: 0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL, None=未配置
@@ -3422,18 +3424,18 @@ def _extract_weight_shift_per_channel(shift_list_full: list) -> tuple:
 
 def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str, op_info: dict) -> tuple:
     """
-    提取权重算子（W/R/bw/br）的 shift 值用于导出
+    提取权重算子（weight_ih/weight_hh/bias_ih/bias_hh）的 shift 值用于导出
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
         quant_params: GRUQuantParams 对象
-        op_name: 算子全名（如 'weight.W'）
+        op_name: 算子名称（如 'weight_ih'）
         op_info: 算子信息字典
         
     Returns:
         (n_value, scale_value, enc_type) 或 None（如果无法提取）
     """
-    json_key = op_name.split('.')[-1]  # 'W', 'R', 'bw', 'br'
+    json_key = op_name  # 直接使用算子名称，不再需要 split('.')[-1]
     granularity = _get_weight_granularity(bitwidth_config, json_key)
     shift_attr = op_info["shift_attr"]  # shift_W_, shift_R_, etc.
     
@@ -3521,7 +3523,7 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     Args:
         bitwidth_config: OperatorQuantConfig 对象
         quant_params: GRUQuantParams 对象
-        op_name: 算子全名（如 'weight.W', 'gate.update_gate_output'）
+        op_name: 算子名称（如 'weight_ih', 'update_gate_output'）
         op_info: 算子信息字典
         
     Returns:
@@ -3542,7 +3544,7 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     qmin, qmax = get_quant_range(bitwidth, is_unsigned)
     
     # 提取 shift 值
-    if op_name in ['weight.W', 'weight.R', 'weight.bw', 'weight.br']:
+    if op_name in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
         result = _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name, op_info)
     else:
         result = _extract_non_weight_shift_for_export(quant_params, op_info)
@@ -3605,15 +3607,13 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
         if op_data is None:
             continue
         
-        # 去掉前缀（如 "gate.new_gate_output" -> "new_gate_output"）
-        short_name = op_name.split('.')[-1] if '.' in op_name else op_name
-        
+        # 直接使用算子名称（所有算子名称都不使用前缀）
         # 分类：per-tensor 算子放在前面，per-channel/per-gate 算子放在最后
         enc_type = op_data.get("enc_type")
         if enc_type and enc_type in ["PER_CHANNEL", "PER_GATE"]:
-            per_channel_ops[short_name] = op_data
+            per_channel_ops[op_name] = op_data
         else:
-            operators[short_name] = op_data
+            operators[op_name] = op_data
     
     # 添加 per-channel/per-gate 算子到最后
     operators.update(per_channel_ops)
@@ -3641,12 +3641,12 @@ def _dtype_to_is_unsigned(dtype: str) -> bool:
 
 def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data: dict) -> None:
     """
-    解析权重算子（W/R/bw/br）的量化参数
+    解析权重算子（weight_ih/weight_hh/bias_ih/bias_hh）的量化参数
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象（会被修改）
         quant_params: GRUQuantParams 对象（会被修改）
-        op_name: 算子名称 ('W', 'R', 'bw', 'br')
+        op_name: 算子名称 ('weight_ih', 'weight_hh', 'bias_ih', 'bias_hh')
         op_data: 算子数据字典
     """
     enc_type = op_data.get("enc_type")
@@ -3866,16 +3866,14 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     Args:
         bitwidth_config: OperatorQuantConfig 对象（会被修改）
         quant_params: GRUQuantParams 对象（会被修改）
-        op_name: 算子名称（JSON key，如 'W', 'update_gate_output'）
+        op_name: 算子名称（JSON key，如 'weight_ih', 'update_gate_output'）
         op_data: 算子数据字典
     """
-    # JSON key -> _OPERATOR_MAP key 的映射
-    json_key_to_map_key = {k.split('.')[-1]: k for k in _OPERATOR_MAP}
-    
-    if op_name not in json_key_to_map_key:
+    # 直接使用 op_name 作为 _OPERATOR_MAP 的键（所有算子名称都不使用前缀）
+    if op_name not in _OPERATOR_MAP:
         return
     
-    op_info = _OPERATOR_MAP[json_key_to_map_key[op_name]]
+    op_info = _OPERATOR_MAP[op_name]
     
     # 设置 bitwidth 和 is_unsigned（从 dtype 解析）
     if "dtype" in op_data:
@@ -3890,7 +3888,7 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
         setattr(bitwidth_config, op_info["sym_attr"], op_data["symmetric"])
     
     # 设置 shift 值（根据算子类型选择不同的解析方法）
-    if op_name in ['W', 'R', 'bw', 'br']:
+    if op_name in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
         _parse_weight_operator(bitwidth_config, quant_params, op_name, op_data)
     else:
         _parse_non_weight_operator(bitwidth_config, quant_params, op_info, op_data)
