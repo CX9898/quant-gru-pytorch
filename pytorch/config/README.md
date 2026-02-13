@@ -13,6 +13,7 @@
 | `bitwidth` | int | 8 | 位宽 (1-32) |
 | `is_symmetric` | bool | true | 是否对称量化 (true: zp=0, false: zp≠0) |
 | `is_unsigned` | bool | false | 是否无符号量化 (false: INT, true: UINT) |
+| `quantization_granularity` | string | "PER_CHANNEL" | 量化粒度（仅权重类算子支持：PER_TENSOR/PER_GATE/PER_CHANNEL） |
 
 ### 2. is_unsigned 设计原则
 
@@ -67,8 +68,8 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 
 ```
 步骤1: Linear 层（GEMM+bias 融合）
-├─ weight_ih_linear = W @ x + bw   → weight_ih_linear
-└─ weight_hh_linear = R @ h + br   → weight_hh_linear
+├─ weight_ih_linear = weight_ih @ input + bias_ih   → weight_ih_linear
+└─ weight_hh_linear = weight_hh @ output + bias_hh   → weight_hh_linear
 
 步骤2: 更新门 (update gate)
 ├─ update_gate_input = weight_ih_linear_z + weight_hh_linear_z   → update_gate_input
@@ -85,9 +86,9 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 
 步骤5: 隐状态更新
 ├─ one_minus_u = 1 - update_gate_output            → 复用 update_gate_output 的 scale
-├─ mul_old_contribution = u * h[t-1]               → mul_old_contribution
+├─ mul_old_contribution = u * output[t-1]          → mul_old_contribution
 ├─ mul_new_contribution = (1-u) * new_gate_output  → mul_new_contribution
-└─ h[t] = mul_old_contribution + mul_new_contribution
+└─ output[t] = mul_old_contribution + mul_new_contribution
 ```
 
 ---
@@ -124,12 +125,22 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 
 ```json
 "算子名称": {
-  "bitwidth": 8,            // 位宽（1-32）
-  "is_symmetric": true,     // 是否对称量化
-  "is_unsigned": false,     // 是否无符号量化（可选，默认 false）
-  "comment": "说明"         // 注释（可选）
+  "bitwidth": 8,                    // 位宽（1-32）
+  "is_symmetric": true,              // 是否对称量化
+  "is_unsigned": false,              // 是否无符号量化（可选，默认 false）
+  "quantization_granularity": "PER_CHANNEL",  // 量化粒度（仅权重类算子支持，可选）
+  "comment": "说明"                  // 注释（可选）
 }
 ```
+
+**字段说明**：
+- `bitwidth`：位宽，范围 1-32
+- `is_symmetric`：是否对称量化（true: zp=0, false: zp≠0）
+- `is_unsigned`：是否无符号量化（false: INT, true: UINT，默认 false）
+- `quantization_granularity`：量化粒度（仅 `weight_ih`, `weight_hh`, `bias_ih`, `bias_hh` 支持）
+  - `"PER_TENSOR"`：整个 tensor 一个 scale
+  - `"PER_GATE"`：每个门（z/r/n）一个 scale
+  - `"PER_CHANNEL"`：每个输出通道一个 scale（默认）
 
 ### 3. 算子列表
 
@@ -137,24 +148,29 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `x` | 输入序列 | `is_symmetric: false` |
-| `h` | 隐藏状态输出 | `is_symmetric: false` |
+| `input` | 输入序列 | `is_symmetric: false` |
+| `output` | 隐藏状态输出 | `is_symmetric: false` |
 
 #### 权重类（per-channel 量化）
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `W` | 输入权重 | `is_symmetric: true` |
-| `R` | 循环权重 | `is_symmetric: true` |
-| `bw` | 输入偏置 | `is_symmetric: true` |
-| `br` | 循环偏置 | `is_symmetric: true` |
+| `weight_ih` | 输入权重矩阵 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
+| `weight_hh` | 循环权重矩阵 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
+| `bias_ih` | 输入偏置 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
+| `bias_hh` | 循环偏置 | `is_symmetric: true`, `quantization_granularity: "PER_CHANNEL"` |
+
+**量化粒度说明**（仅权重类算子支持）：
+- `PER_TENSOR`：整个 tensor 使用一个 scale（所有通道共享）
+- `PER_GATE`：每个门（z/r/n）使用一个 scale（3 个不同的 scale）
+- `PER_CHANNEL`：每个输出通道使用一个 scale（默认，精度最高）
 
 #### Linear 层类（GEMM+bias 融合）
 
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
-| `weight_ih_linear` | W*x + bw 输出 | `is_symmetric: false` |
-| `weight_hh_linear` | R*h + br 输出 | `is_symmetric: false` |
+| `weight_ih_linear` | weight_ih*input + bias_ih 输出 | `is_symmetric: false` |
+| `weight_hh_linear` | weight_hh*output + bias_hh 输出 | `is_symmetric: false` |
 
 #### 门控类
 
@@ -172,7 +188,7 @@ h[t] = z[t] * h[t-1] + (1 - z[t]) * g[t]                # 最终输出
 | 算子名 | 说明 | 推荐配置 |
 |--------|------|----------|
 | `mul_reset_hidden` | r * weight_hh_linear 元素乘法 | `is_symmetric: false` |
-| `mul_old_contribution` | u * h 旧状态贡献 | `is_symmetric: false` |
+| `mul_old_contribution` | u * output 旧状态贡献 | `is_symmetric: false` |
 | `mul_new_contribution` | (1-u) * n 新状态贡献 | `is_symmetric: false` |
 
 ---
@@ -251,23 +267,23 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'shift': ..., ...}
   "GRU_config": {
     "default_config": { "disable_quantization": false },
     "operator_config": {
-      "x":                    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "h":                    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "W":                    { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "R":                    { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "bw":                   { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "br":                   { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false },
-      "weight_ih_linear":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "weight_hh_linear":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "update_gate_input":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "update_gate_output":   { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "reset_gate_input":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "reset_gate_output":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      "new_gate_input":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "new_gate_output":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_reset_hidden":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_old_contribution": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "mul_new_contribution": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
+      "input":                 { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "output":                { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "weight_ih":             { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "weight_hh":             { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "bias_ih":               { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "bias_hh":               { "bitwidth": 8, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "weight_ih_linear":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "weight_hh_linear":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "update_gate_input":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "update_gate_output":    { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "reset_gate_input":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "reset_gate_output":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "new_gate_input":        { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "new_gate_output":       { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "mul_reset_hidden":      { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "mul_old_contribution":     { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "mul_new_contribution":   { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false }
     }
   }
 }
@@ -294,8 +310,8 @@ print(config)  # {'bitwidth': 14, 'is_symmetric': False, 'shift': ..., ...}
 {
   "GRU_config": {
     "operator_config": {
-      "W":                  { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
-      "R":                  { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false },
+      "weight_ih":           { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "weight_hh":           { "bitwidth": 16, "is_symmetric": true,  "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
       "weight_ih_linear":   { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
       "weight_hh_linear":   { "bitwidth": 16, "is_symmetric": false, "is_unsigned": false },
       "update_gate_output": { "bitwidth": 8,  "is_symmetric": false, "is_unsigned": true },

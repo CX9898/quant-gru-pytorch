@@ -7,45 +7,45 @@
       "disable_quantization": false
     },
     "operator_config": {
-      "x": {
+      "input": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
-        "comment": "输入序列 x, 每个时间步的输入特征"
+        "comment": "输入序列 input, 每个时间步的输入特征"
       },
-      "h": {
+      "output": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
-        "comment": "隐藏状态 h, 每个时间步的输出，同时作为下一时间步的输入"
+        "comment": "隐藏状态 output, 每个时间步的输出，同时作为下一时间步的输入"
       },
-      "W": {
+      "weight_ih": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "quantization_granularity": "PER_CHANNEL",
-        "comment": "输入权重矩阵 W (weight_ih), 包含 W_z/W_r/W_n 三个门的权重。quantization_granularity: PER_TENSOR(整个tensor一个scale) / PER_GATE(每个门一个scale) / PER_CHANNEL(每个输出通道一个scale, 默认)"
+        "comment": "输入权重矩阵 weight_ih, 包含 weight_ih_z/weight_ih_r/weight_ih_n 三个门的权重。quantization_granularity: PER_TENSOR(整个tensor一个scale) / PER_GATE(每个门一个scale) / PER_CHANNEL(每个输出通道一个scale, 默认)"
       },
-      "R": {
+      "weight_hh": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "quantization_granularity": "PER_CHANNEL",
-        "comment": "循环权重矩阵 R (weight_hh), 包含 R_z/R_r/R_n 三个门的权重。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+        "comment": "循环权重矩阵 weight_hh, 包含 weight_hh_z/weight_hh_r/weight_hh_n 三个门的权重。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
       },
-      "bw": {
+      "bias_ih": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "quantization_granularity": "PER_CHANNEL",
-        "comment": "输入偏置 bw (bias_ih), 包含 bw_z/bw_r/bw_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+        "comment": "输入偏置 bias_ih, 包含 bias_ih_z/bias_ih_r/bias_ih_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
       },
-      "br": {
+      "bias_hh": {
         "bitwidth": 8,
         "is_symmetric": true,
         "is_unsigned": false,
         "quantization_granularity": "PER_CHANNEL",
-        "comment": "循环偏置 br (bias_hh), 包含 br_z/br_r/br_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
+        "comment": "循环偏置 bias_hh, 包含 bias_hh_z/bias_hh_r/bias_hh_n 三个门的偏置。quantization_granularity: PER_TENSOR / PER_GATE / PER_CHANNEL(默认)"
       },
       "weight_ih_linear": {
         "bitwidth": 8,
