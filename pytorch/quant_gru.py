@@ -677,24 +677,24 @@ class GRUFunction(torch.autograd.Function):
         # 可在导入后修改：quant_gru.GRAD_SCALE_THRESHOLD = 1e-5
         # 
         # 检测梯度最大值
-        grad_max = torch.max(torch.abs(dh_new)).item()
-        use_grad_scale = grad_max > 0 and grad_max < GRAD_SCALE_THRESHOLD
-        
-        if use_grad_scale:
-            # 计算缩放因子：将梯度最大值放大到目标范围（约 0.5）
-            # 使用 2 的幂次，避免浮点误差累积
-            import math
-            # 计算需要的缩放倍数：target / current
-            scale_ratio = GRAD_TARGET_MAX / grad_max
-            # 使用 2 的幂次，向上取整到最近的 2 的幂次（避免浮点误差）
-            # 例如：scale_ratio=1.5e6 -> log2=20.5 -> 2^21=2097152
-            scale_power = math.ceil(math.log2(scale_ratio))
-            scale_factor = float(1 << scale_power)  # 2^scale_power
-            # 放大梯度
-            dh_new_scaled = dh_new * scale_factor
-        else:
-            scale_factor = 1.0
-            dh_new_scaled = dh_new
+        # grad_max = torch.max(torch.abs(dh_new)).item()
+        # use_grad_scale = grad_max > 0 and grad_max < GRAD_SCALE_THRESHOLD
+        # 
+        # if use_grad_scale:
+        #     # 计算缩放因子：将梯度最大值放大到目标范围（约 0.5）
+        #     # 使用 2 的幂次，避免浮点误差累积
+        #     import math
+        #     # 计算需要的缩放倍数：target / current
+        #     scale_ratio = GRAD_TARGET_MAX / grad_max
+        #     # 使用 2 的幂次，向上取整到最近的 2 的幂次（避免浮点误差）
+        #     # 例如：scale_ratio=1.5e6 -> log2=20.5 -> 2^21=2097152
+        #     scale_power = math.ceil(math.log2(scale_ratio))
+        #     scale_factor = float(1 << scale_power)  # 2^scale_power
+        #     # 放大梯度
+        #     dh_new_scaled = dh_new * scale_factor
+        # else:
+        #     scale_factor = 1.0
+        #     dh_new_scaled = dh_new
 
         # 根据 use_quantization 调用不同的反向函数
         if ctx.use_quantization:
@@ -717,7 +717,7 @@ class GRUFunction(torch.autograd.Function):
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W_q=W_q, R_q=R_q, bw_q=bw_q, br_q=br_q, x_q=x_q,
-                dh_new=dh_new_scaled, h=h, v=v,
+                dh_new=dh_new, h=h, v=v,
                 quant_params=ctx.quant_params,
                 # QAT masks（C++ 端应用 STE）
                 x_mask=x_mask,
@@ -738,20 +738,20 @@ class GRUFunction(torch.autograd.Function):
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W=W, R=R, bw=bw, br=br, x=input,
-                dh_new=dh_new_scaled, h=h, v=v
+                dh_new=dh_new, h=h, v=v
             )
 
         # 如果使用了梯度缩放，需要将返回的梯度按比例缩小
-        if use_grad_scale:
-            dx = dx / scale_factor
-            dW = dW / scale_factor
-            dR = dR / scale_factor
-            if dbw is not None:
-                dbw = dbw / scale_factor
-            if dbr is not None:
-                dbr = dbr / scale_factor
-            if dh is not None:
-                dh = dh / scale_factor
+        # if use_grad_scale:
+        #     dx = dx / scale_factor
+        #     dW = dW / scale_factor
+        #     dR = dR / scale_factor
+        #     if dbw is not None:
+        #         dbw = dbw / scale_factor
+        #     if dbr is not None:
+        #         dbr = dbr / scale_factor
+        #     if dh is not None:
+        #         dh = dh / scale_factor
 
         # 梯度格式转换: Haste (z,r,n) -> PyTorch (r,z,n)
         dW_pytorch = reorder_weights_haste_to_pytorch(dW.t()).contiguous()
