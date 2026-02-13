@@ -1102,7 +1102,35 @@ class QuantGRU(nn.Module):
         # 所有算子名称统一不使用前缀，JSON key 直接对应 _OPERATOR_MAP 的键名
         # 例如: JSON 中的 "input" 对应 _OPERATOR_MAP 的 "input"
         # 例如: JSON 中的 "weight_ih" 对应 _OPERATOR_MAP 的 "weight_ih"
+        # 
+        # ⚠️ 向后兼容：支持旧的字段名映射
+        # 旧字段名 -> 新字段名
         # ========================================================================
+        # 字段名映射表（向后兼容旧 JSON 配置）
+        FIELD_NAME_MAP = {
+            "W": "weight_ih",
+            "R": "weight_hh",
+            "bw": "bias_ih",
+            "br": "bias_hh",
+            "x": "input",  # 如果 JSON 中使用 "x" 而不是 "input"
+            "h": "output",  # 如果 JSON 中使用 "h" 而不是 "output"
+        }
+        
+        # 应用字段名映射（将旧字段名转换为新字段名）
+        normalized_op_config = {}
+        for json_key, op_cfg in op_config.items():
+            # 如果字段名在映射表中，使用新字段名
+            if json_key in FIELD_NAME_MAP:
+                new_key = FIELD_NAME_MAP[json_key]
+                if verbose:
+                    print(f"  ⚠️  [字段名映射] '{json_key}' -> '{new_key}' (向后兼容)")
+                normalized_op_config[new_key] = op_cfg
+            else:
+                normalized_op_config[json_key] = op_cfg
+        
+        # 使用标准化后的配置
+        op_config = normalized_op_config
+        
         valid_json_keys = set(_OPERATOR_MAP.keys())
         json_op_names = set(op_config.keys())
         unknown_fields = json_op_names - valid_json_keys
@@ -1167,7 +1195,9 @@ class QuantGRU(nn.Module):
                             f"Invalid quantization_granularity '{granularity_str}' for '{json_key}'. "
                             f"Must be one of: PER_TENSOR, PER_GATE, PER_CHANNEL"
                         )
-                    granularity_attr = f"{json_key}_granularity_"
+                    # ⚠️ 关键修复：使用 bw_attr 来构造 granularity_attr
+                    # 例如：weight_ih -> W_ -> W_granularity_
+                    granularity_attr = f"{bw_attr}granularity_"
                     setattr(self._bitwidth_config, granularity_attr, granularity_map[granularity_str])
             else:
                 # 记录缺失字段及其默认值
@@ -3180,8 +3210,8 @@ def print_quant_ranges(gru: 'QuantGRU'):
     print("GRUQuantizationRanges (量化范围)")
     print("=" * 60)
     print(f"  hidden_ = {r.hidden_}")
-    print(f"  [x]  min={r.min_x_:12.6f}, max={r.max_x_:12.6f}")
-    print(f"  [h]  min={r.min_h_:12.6f}, max={r.max_h_:12.6f}")
+    print(f"  [input]  min={r.min_x_:12.6f}, max={r.max_x_:12.6f}")
+    print(f"  [output]  min={r.min_h_:12.6f}, max={r.max_h_:12.6f}")
     print(f"  [Wx] min={r.min_Wx_:12.6f}, max={r.max_Wx_:12.6f}")
     print(f"  [Rh] min={r.min_Rh_:12.6f}, max={r.max_Rh_:12.6f}")
     print("-" * 60)
@@ -4391,12 +4421,12 @@ def print_bitwidth_config(config: gru_ops.OperatorQuantConfig,
     if config_file:
         print(f"📄 配置来源: {config_file}")
     print("-" * 70)
-    print(f"  [输入]  x: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
-    print(f"  [输出]  h: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
-    print(f"  [权重]  W: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
-    print(f"          R: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
-    print(f"          bw: {_format_bitwidth(config.bw_):6s} ({_format_symmetric(config.bw_symmetric_)})")
-    print(f"          br: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
+    print(f"  [输入]  input: {_format_bitwidth(config.x_):6s} ({_format_symmetric(config.x_symmetric_)})")
+    print(f"  [输出]  output: {_format_bitwidth(config.h_):6s} ({_format_symmetric(config.h_symmetric_)})")
+    print(f"  [权重]  weight_ih: {_format_bitwidth(config.W_):6s} ({_format_symmetric(config.W_symmetric_)})")
+    print(f"          weight_hh: {_format_bitwidth(config.R_):6s} ({_format_symmetric(config.R_symmetric_)})")
+    print(f"          bias_ih: {_format_bitwidth(config.bw_):6s} ({_format_symmetric(config.bw_symmetric_)})")
+    print(f"          bias_hh: {_format_bitwidth(config.br_):6s} ({_format_symmetric(config.br_symmetric_)})")
     print(f"  [矩阵]  weight_ih_linear: {_format_bitwidth(config.weight_ih_linear_):6s} ({_format_symmetric(config.weight_ih_linear_symmetric_)})")
     print(f"          weight_hh_linear: {_format_bitwidth(config.weight_hh_linear_):6s} ({_format_symmetric(config.weight_hh_linear_symmetric_)})")
     print(f"  [门控]  update_gate_input: {_format_bitwidth(config.update_gate_input_):6s} ({_format_symmetric(config.update_gate_input_symmetric_)})")
