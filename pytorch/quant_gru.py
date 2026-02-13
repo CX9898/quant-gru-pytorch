@@ -3951,17 +3951,15 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     
     op_info = _OPERATOR_MAP[op_name]
     
-    # 调试信息：打印关键信息
-    if "weight_ih" in op_name:
-        print(f"\n[DEBUG _parse_single_operator] 处理算子: {op_name}")
+    # 错误检查：如果属性不存在，打印详细信息（仅在出错时）
+    if not hasattr(quant_params, op_info['shift_attr']):
+        print(f"\n[DEBUG _parse_single_operator] ❌ 错误：处理算子 '{op_name}' 时发现属性缺失")
         print(f"  op_info['shift_attr']: {op_info['shift_attr']}")
         print(f"  op_info['zp_attr']: {op_info.get('zp_attr')}")
-        if not hasattr(quant_params, op_info['shift_attr']):
-            print(f"  ❌ quant_params 没有属性 '{op_info['shift_attr']}'")
-            print(f"  quant_params 的所有相关属性 (包含 'weight_ih'):")
-            for attr in dir(quant_params):
-                if not attr.startswith('_') and 'weight_ih' in attr:
-                    print(f"    - {attr}")
+        print(f"  quant_params 的所有相关属性 (包含 '{op_name.split('_')[0]}'):")
+        for attr in dir(quant_params):
+            if not attr.startswith('_') and op_name.split('_')[0] in attr:
+                print(f"    - {attr}")
     
     # 设置 bitwidth 和 is_unsigned（从 dtype 解析）
     if "dtype" in op_data:
