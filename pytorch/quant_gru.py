@@ -3649,6 +3649,18 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
         op_name: 算子名称 ('weight_ih', 'weight_hh', 'bias_ih', 'bias_hh')
         op_data: 算子数据字典
     """
+    # ⚠️ 关键修复：从 _OPERATOR_MAP 获取正确的字段名
+    # 例如：weight_ih -> shift_W_ (不是 shift_weight_ih_)
+    if op_name not in _OPERATOR_MAP:
+        raise ValueError(f"未知的权重算子名称: {op_name}")
+    
+    op_info = _OPERATOR_MAP[op_name]
+    shift_attr_base = op_info["shift_attr"]  # 例如: "shift_W_", "shift_R_", "shift_bw_", "shift_br_"
+    
+    # 提取基础名称（去掉 "shift_" 前缀和 "_" 后缀）
+    # 例如: "shift_W_" -> "W_", "shift_R_" -> "R_"
+    base_name = shift_attr_base.replace("shift_", "").rstrip("_") + "_"
+    
     enc_type = op_data.get("enc_type")
     if enc_type is None:
         import warnings
@@ -3671,9 +3683,9 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                     # 验证所有值是否相同
                     first_val = int(value[0])
                     if all(int(v) == first_val for v in value):
-                        setattr(quant_params, f"shift_{op_name}_tensor_", first_val)
+                        setattr(quant_params, f"shift_{base_name}tensor_", first_val)
                         # 同时填充 per-channel 数组（所有值相同）
-                        setattr(quant_params, f"shift_{op_name}_", list(value))
+                        setattr(quant_params, shift_attr_base, list(value))
                     else:
                         import warnings
                         warnings.warn(
@@ -3682,29 +3694,29 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                             UserWarning,
                             stacklevel=3
                         )
-                        setattr(quant_params, f"shift_{op_name}_tensor_", first_val)
-                        setattr(quant_params, f"shift_{op_name}_", [int(v) for v in value])
+                        setattr(quant_params, f"shift_{base_name}tensor_", first_val)
+                        setattr(quant_params, shift_attr_base, [int(v) for v in value])
                 else:
                     raise ValueError(f"PER_TENSOR granularity for '{op_name}' requires non-empty array")
             else:
                 # 兼容旧格式：标量值
-                setattr(quant_params, f"shift_{op_name}_tensor_", int(value))
-            setattr(bitwidth_config, f"{op_name}_granularity_", 0)
+                setattr(quant_params, f"shift_{base_name}tensor_", int(value))
+            setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
         elif enc_type == "PER_GATE":
             if isinstance(value, list):
                 # 支持完整数组格式（每个 gate 的值重复 hidden_size 次）
                 # 或 3 元素格式（每个 gate 一个值）
                 if len(value) == 3:
                     # 3 元素格式：每个 gate 一个值
-                    setattr(quant_params, f"shift_{op_name}_gate_", [int(v) for v in value])
-                    setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                    setattr(quant_params, f"shift_{base_name}gate_", [int(v) for v in value])
+                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
                 elif len(value) > 3:
                     # 完整数组格式：提取每个 gate 的第一个值
                     hidden_size = len(value) // 3
                     gate_values = [int(value[gate * hidden_size]) for gate in range(3)]
-                    setattr(quant_params, f"shift_{op_name}_gate_", gate_values)
-                    setattr(quant_params, f"shift_{op_name}_", [int(v) for v in value])
-                    setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                    setattr(quant_params, f"shift_{base_name}gate_", gate_values)
+                    setattr(quant_params, shift_attr_base, [int(v) for v in value])
+                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
                 else:
                     raise ValueError(
                         f"PER_GATE granularity for '{op_name}' requires at least 3 elements, "
@@ -3717,8 +3729,8 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                 )
         else:  # PER_CHANNEL
             if isinstance(value, list):
-                setattr(quant_params, f"shift_{op_name}_", [int(v) for v in value])
-                setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                setattr(quant_params, shift_attr_base, [int(v) for v in value])
+                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
             else:
                 # 兼容旧格式：标量被当作per-channel（只有一个元素）
                 import warnings
@@ -3729,8 +3741,8 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                     UserWarning,
                     stacklevel=3
                 )
-                setattr(quant_params, f"shift_{op_name}_", [int(value)])
-                setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                setattr(quant_params, shift_attr_base, [int(value)])
+                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
     elif "scale" in op_data:
         value = op_data["scale"]
         if enc_type == "PER_TENSOR":
@@ -3741,10 +3753,10 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                     first_scale = value[0]
                     first_shift = _scale_to_exp2_inv(first_scale)
                     if all(_scale_to_exp2_inv(v) == first_shift for v in value):
-                        setattr(quant_params, f"shift_{op_name}_tensor_", int(first_shift))
+                        setattr(quant_params, f"shift_{base_name}tensor_", int(first_shift))
                         # 同时填充 per-channel 数组（所有值相同）
                         shift_list = [_scale_to_exp2_inv(v) for v in value]
-                        setattr(quant_params, f"shift_{op_name}_", shift_list)
+                        setattr(quant_params, shift_attr_base, shift_list)
                     else:
                         import warnings
                         warnings.warn(
@@ -3753,16 +3765,16 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                             UserWarning,
                             stacklevel=3
                         )
-                        setattr(quant_params, f"shift_{op_name}_tensor_", int(first_shift))
+                        setattr(quant_params, f"shift_{base_name}tensor_", int(first_shift))
                         shift_list = [_scale_to_exp2_inv(v) for v in value]
-                        setattr(quant_params, f"shift_{op_name}_", shift_list)
+                        setattr(quant_params, shift_attr_base, shift_list)
                 else:
                     raise ValueError(f"PER_TENSOR granularity for '{op_name}' requires non-empty array")
             else:
                 # 兼容旧格式：标量值
                 shift_val = _scale_to_exp2_inv(value)
-                setattr(quant_params, f"shift_{op_name}_tensor_", int(shift_val))
-            setattr(bitwidth_config, f"{op_name}_granularity_", 0)
+                setattr(quant_params, f"shift_{base_name}tensor_", int(shift_val))
+            setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
         elif enc_type == "PER_GATE":
             if isinstance(value, list):
                 # 支持完整数组格式（每个 gate 的值重复 hidden_size 次）
@@ -3770,17 +3782,17 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                 if len(value) == 3:
                     # 3 元素格式：每个 gate 一个值
                     shift_list = [_scale_to_exp2_inv(v) for v in value]
-                    setattr(quant_params, f"shift_{op_name}_gate_", shift_list)
-                    setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                    setattr(quant_params, f"shift_{base_name}gate_", shift_list)
+                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
                 elif len(value) > 3:
                     # 完整数组格式：提取每个 gate 的第一个值
                     hidden_size = len(value) // 3
                     gate_scales = [value[gate * hidden_size] for gate in range(3)]
                     gate_shifts = [_scale_to_exp2_inv(s) for s in gate_scales]
-                    setattr(quant_params, f"shift_{op_name}_gate_", gate_shifts)
+                    setattr(quant_params, f"shift_{base_name}gate_", gate_shifts)
                     shift_list = [_scale_to_exp2_inv(v) for v in value]
-                    setattr(quant_params, f"shift_{op_name}_", shift_list)
-                    setattr(bitwidth_config, f"{op_name}_granularity_", 1)
+                    setattr(quant_params, shift_attr_base, shift_list)
+                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
                 else:
                     raise ValueError(
                         f"PER_GATE granularity for '{op_name}' requires at least 3 scale values, "
@@ -3794,8 +3806,8 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
         else:  # PER_CHANNEL
             if isinstance(value, list):
                 shift_list = [_scale_to_exp2_inv(v) for v in value]
-                setattr(quant_params, f"shift_{op_name}_", shift_list)
-                setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                setattr(quant_params, shift_attr_base, shift_list)
+                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
             else:
                 # 兼容旧格式：标量被当作per-channel（只有一个元素）
                 import warnings
@@ -3807,8 +3819,8 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                     stacklevel=3
                 )
                 shift_val = _scale_to_exp2_inv(value)
-                setattr(quant_params, f"shift_{op_name}_", [int(shift_val)])
-                setattr(bitwidth_config, f"{op_name}_granularity_", 2)
+                setattr(quant_params, shift_attr_base, [int(shift_val)])
+                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
 
 
 def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_data: dict) -> None:
@@ -3823,40 +3835,54 @@ def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_
         op_info: 算子信息字典
         op_data: 算子数据字典
     """
+    shift_attr = op_info["shift_attr"]
+    
+    # 调试信息：检查属性是否存在
+    if not hasattr(quant_params, shift_attr):
+        print(f"\n[DEBUG _parse_non_weight_operator] ❌ 错误：quant_params 没有属性 '{shift_attr}'")
+        print(f"  op_info: {op_info}")
+        print(f"  quant_params 的所有相关属性 (包含 'weight_ih'):")
+        for attr in dir(quant_params):
+            if not attr.startswith('_') and 'weight_ih' in attr:
+                print(f"    - {attr}")
+        raise AttributeError(f"'gru_interface_binding.GRUQuantParams' object has no attribute '{shift_attr}'")
+    
     if "n" in op_data:
         value = op_data["n"]
         if op_info["is_per_channel"]:
-            setattr(quant_params, op_info["shift_attr"], [int(v) for v in value] if isinstance(value, list) else [int(value)])
+            setattr(quant_params, shift_attr, [int(v) for v in value] if isinstance(value, list) else [int(value)])
         else:
             # PER_TENSOR: 支持数组格式（取第一个值或所有值相同）
             if isinstance(value, list):
                 if len(value) > 0:
                     # 取第一个值（所有值应该相同）
-                    setattr(quant_params, op_info["shift_attr"], int(value[0]))
+                    setattr(quant_params, shift_attr, int(value[0]))
                 else:
                     raise ValueError(f"PER_TENSOR granularity requires non-empty array")
             else:
                 # 兼容旧格式：标量值
-                setattr(quant_params, op_info["shift_attr"], int(value))
+                setattr(quant_params, shift_attr, int(value))
     elif "scale" in op_data:
         value = op_data["scale"]
+        shift_attr = op_info["shift_attr"]  # 重用上面定义的 shift_attr
+        
         if op_info["is_per_channel"]:
             if isinstance(value, list):
-                setattr(quant_params, op_info["shift_attr"], 
+                setattr(quant_params, shift_attr, 
                         [_scale_to_exp2_inv(v) for v in value])
             else:
-                setattr(quant_params, op_info["shift_attr"], [_scale_to_exp2_inv(value)])
+                setattr(quant_params, shift_attr, [_scale_to_exp2_inv(value)])
         else:
             # PER_TENSOR: 支持数组格式（取第一个值或所有值相同）
             if isinstance(value, list):
                 if len(value) > 0:
                     # 取第一个值（所有值应该相同）
-                    setattr(quant_params, op_info["shift_attr"], _scale_to_exp2_inv(value[0]))
+                    setattr(quant_params, shift_attr, _scale_to_exp2_inv(value[0]))
                 else:
                     raise ValueError(f"PER_TENSOR granularity requires non-empty array")
             else:
                 # 兼容旧格式：标量值
-                setattr(quant_params, op_info["shift_attr"], _scale_to_exp2_inv(value))
+                setattr(quant_params, shift_attr, _scale_to_exp2_inv(value))
 
 
 def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data: dict) -> None:
@@ -3871,9 +3897,22 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     """
     # 直接使用 op_name 作为 _OPERATOR_MAP 的键（所有算子名称都不使用前缀）
     if op_name not in _OPERATOR_MAP:
+        print(f"[DEBUG _parse_single_operator] ⚠️  op_name '{op_name}' 不在 _OPERATOR_MAP 中")
         return
     
     op_info = _OPERATOR_MAP[op_name]
+    
+    # 调试信息：打印关键信息
+    if "weight_ih" in op_name:
+        print(f"\n[DEBUG _parse_single_operator] 处理算子: {op_name}")
+        print(f"  op_info['shift_attr']: {op_info['shift_attr']}")
+        print(f"  op_info['zp_attr']: {op_info.get('zp_attr')}")
+        if not hasattr(quant_params, op_info['shift_attr']):
+            print(f"  ❌ quant_params 没有属性 '{op_info['shift_attr']}'")
+            print(f"  quant_params 的所有相关属性 (包含 'weight_ih'):")
+            for attr in dir(quant_params):
+                if not attr.startswith('_') and 'weight_ih' in attr:
+                    print(f"    - {attr}")
     
     # 设置 bitwidth 和 is_unsigned（从 dtype 解析）
     if "dtype" in op_data:
