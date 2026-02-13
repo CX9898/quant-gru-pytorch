@@ -1077,10 +1077,7 @@ class QuantGRU(nn.Module):
             if verbose:
                 module_name_str = f" [{self._module_name}]" if self._module_name else ""
                 print(
-                    f"  ⚠️  [QuantGRU{module_name_str}] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
-                    "如需修改位宽配置，请使用以下方法之一：\n"
-                    "  1. adjust_quant_config(gru, 'input', bitwidth=16, auto_scale=True)\n"
-                    "  2. 重新校准：gru.reset_calibration() 后再调用 load_bitwidth_config()"
+                    f" [QuantGRU{module_name_str}] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
                 )
             return
 
