@@ -42,13 +42,16 @@ make -j$(nproc)
 - `pytorch/lib/libgru_quant_shared.so` - 动态库
 - `gru_example` - C++ 示例程序
 
-### 2. 编译 Python 扩展
+### 2. 安装 Python 扩展
 
 ```bash
 cd pytorch
 
-# 安装 Python 扩展（开发模式）
-pip install -e .
+# 开发模式安装（推荐，修改代码后立即生效）
+pip install -e . --no-deps --no-build-isolation
+
+# 或普通安装（修改代码后需重新安装）
+# pip install . --no-deps --no-build-isolation
 ```
 
 ### 3. 验证安装
