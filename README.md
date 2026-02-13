@@ -8,7 +8,7 @@
 
 - **浮点和量化两种模式**：可在训练和推理时自由切换
 - **灵活的量化配置**：支持任意位宽 (1-32 bit) 量化，可配置对称/非对称量化
-- **三种校准方法**：SQNR（默认，高精度）、Percentile（百分位裁剪）和 MinMax（快速）
+- **三种校准方法**：MinMax（默认，快速）、SQNR（高精度，推荐生产部署）和 Percentile（百分位裁剪）
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
 - **ONNX 导出**：支持 QDQ 格式导出，便于部署到各类推理引擎
@@ -158,15 +158,15 @@ for epoch in range(num_epochs):
 ### 校准方法选择
 
 ```python
-# SQNR 优化校准（默认，高精度，推荐用于生产部署）
+# MinMax 校准（默认，速度快，适合快速原型验证）
+gru.calibration_method = 'minmax'
+
+# SQNR 优化校准（高精度，推荐用于生产部署）
 gru.calibration_method = 'sqnr'
 
 # 百分位裁剪校准（基于直方图，可配置裁剪比例）
 gru.calibration_method = 'percentile'
-gru.percentile_value = 99.99  # 默认 99.99%
-
-# MinMax 校准（速度快，适合快速原型验证）
-gru.calibration_method = 'minmax'
+gru.percentile_value = 100.0  # 默认 100.0%（即不裁剪）
 ```
 
 ### 量化参数导入导出
@@ -182,6 +182,22 @@ gru2 = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
 gru2.load_state_dict(gru.state_dict(), strict=False)  # 加载权重
 gru2.load_quant_params("quant_params.json", verbose=True)  # 加载量化参数（含位宽配置）
 gru2.use_quantization = True  # 直接启用量化，无需再校准
+```
+
+### 调整和查询量化配置
+
+```python
+# 调整单个算子的量化配置（修改位宽会自动调整 scale）
+gru.adjust_quant_config("update_gate_output", bitwidth=16, verbose=True)
+
+# 获取单个算子的量化配置
+config = gru.get_quant_config("update_gate_output")
+print(config)  # {'bitwidth': 16, 'is_symmetric': False, 'shift': ..., 'scale': ..., ...}
+
+# 获取所有算子的量化配置
+all_configs = gru.get_quant_config()
+for op_name, config in all_configs.items():
+    print(f"{op_name}: {config['bitwidth']}bit")
 ```
 
 ### ONNX 导出
@@ -290,11 +306,13 @@ gru.export_mode = False  # 恢复 CUDA 模式
       "disable_quantization": false
     },
     "operator_config": {
-      "input.x": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "input.h": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "weight.W": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
-      "weight.R": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
-      "gate.z_out": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
+      "input": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "weight_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "weight_hh": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "bias_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "bias_hh": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
+      "update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
       ...
     }
   }
@@ -305,16 +323,19 @@ gru.export_mode = False  # 恢复 CUDA 模式
 > - `bitwidth`: 量化位宽 (1-32 bit)
 > - `is_symmetric`: 是否对称量化 (true: zero_point=0)
 > - `is_unsigned`: 是否无符号量化 (false: INT, true: UINT)，Sigmoid 输出建议用 UINT
+> - `quantization_granularity`: 量化粒度（仅权重类算子支持：`PER_TENSOR`/`PER_GATE`/`PER_CHANNEL`）
 
 ### 可配置的算子
 
 | 类别 | 算子名 | 说明 |
 |------|--------|------|
-| 输入 | `input.x`, `output.h` | 输入序列和隐藏状态 |
-| 权重 | `weight.W`, `weight.R`, `weight.bw`, `weight.br` | 权重矩阵和偏置 |
-| 矩阵乘法 | `matmul.Wx`, `matmul.Rh` | 矩阵乘法中间结果 |
-| 门控 | `gate.z_pre/out`, `gate.r_pre/out`, `gate.g_pre/out` | 门控激活前后 |
-| 运算 | `op.Rh_add_br`, `op.rRh`, `op.old_contrib`, `op.new_contrib` | 中间运算 |
+| 输入/输出 | `input`, `output` | 输入序列和隐藏状态输出 |
+| 权重 | `weight_ih`, `weight_hh`, `bias_ih`, `bias_hh` | 输入权重、循环权重、输入偏置、循环偏置（支持 per-channel 量化） |
+| Linear 层 | `weight_ih_linear`, `weight_hh_linear` | GEMM+bias 融合后的输出 |
+| 门控 | `update_gate_input`, `update_gate_output`, `reset_gate_input`, `reset_gate_output`, `new_gate_input`, `new_gate_output` | 更新门、重置门、候选门的激活前后 |
+| 运算 | `mul_reset_hidden`, `mul_old_contribution`, `mul_new_contribution` | 中间运算结果 |
+
+> 📖 **详细配置说明**：请参考 `pytorch/config/README.md` 查看完整的算子列表和配置示例
 
 ### 快速设置所有位宽
 
@@ -345,9 +366,9 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 | 方法 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
-| **SQNR** ⭐ 默认 | 精度最高，自动搜索最优 scale | 计算开销稍大 | 生产部署 |
+| **MinMax** ⭐ 默认 | 速度快，实现简单 | 对异常值敏感 | 快速原型验证 |
+| **SQNR** | 精度最高，自动搜索最优 scale | 计算开销稍大 | 生产部署（推荐） |
 | **Percentile** | 可配置裁剪比例，抗异常值 | 需调参 | 数据有异常值时 |
-| **MinMax** | 速度快，实现简单 | 对异常值敏感 | 快速原型验证 |
 
 ## 📦 ONNX 导出
 
@@ -413,8 +434,8 @@ class QuantGRU(nn.Module):
 |------|------|--------|------|
 | `use_quantization` | bool | False | 量化开关 |
 | `calibrating` | bool | False | 校准模式开关，True 时 forward 会收集校准数据 |
-| `calibration_method` | str | 'sqnr' | 校准方法：'sqnr'（高精度）/ 'percentile'（百分位）/ 'minmax'（快速） |
-| `percentile_value` | float | 99.99 | 百分位值，仅 'percentile' 方法使用 |
+| `calibration_method` | str | 'minmax' | 校准方法：'minmax'（快速，默认）/ 'sqnr'（高精度）/ 'percentile'（百分位） |
+| `percentile_value` | float | 100.0 | 百分位值，仅 'percentile' 方法使用（100.0 表示不裁剪） |
 | `export_mode` | bool | False | ONNX 导出模式，True 时使用纯 PyTorch 实现 |
 | `export_format` | str | 'float' | 导出格式：'float'（浮点）/ 'qdq'（伪量化，需先校准） |
 
@@ -426,10 +447,14 @@ class QuantGRU(nn.Module):
 | `finalize_calibration(verbose=False)` | 完成校准，计算量化参数（通常无需手动调用，`use_quantization=True` 时自动处理） |
 | `reset_calibration()` | 重置校准状态，清除所有累积的校准数据 |
 | `load_bitwidth_config(path, verbose=False)` | 从 JSON 文件加载位宽配置 |
-| `set_all_bitwidth(bitwidth, is_symmetric=True)` | 设置所有算子统一位宽 |
+| `set_all_bitwidth(bitwidth, is_symmetric=True, verbose=False)` | 设置所有算子统一位宽 |
 | `is_calibrated()` | 检查是否已完成校准 |
 | `export_quant_params(path, include_weights=False, verbose=False)` | 导出量化参数到 JSON 文件 |
 | `load_quant_params(path, verbose=False)` | 从 JSON 文件加载量化参数 |
+| `adjust_quant_config(operator, bitwidth=None, is_symmetric=None, exp2_inv=None, zero_point=None, verbose=False)` | 手动调整指定算子的量化配置 |
+| `get_quant_config(operator=None)` | 获取量化配置信息（单个算子或所有算子） |
+| `export_quant_params_to_aimet_format(encodings_dict, module_name=None, verbose=False)` | 将量化参数导出为 AIMET encodings 格式 |
+| `load_quant_params_from_aimet_format(encodings_dict, module_name=None, verbose=False)` | 从 AIMET encodings 格式加载量化参数 |
 
 ## 🏗️ 项目结构
 
