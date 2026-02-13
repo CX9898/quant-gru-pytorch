@@ -1069,14 +1069,16 @@ class QuantGRU(nn.Module):
         """
         import warnings
         
-        # 问题 3 修复：如果已加载量化参数，禁止使用此方法
+        # 如果已加载量化参数，跳过此方法
         if self.is_calibrated():
-            raise RuntimeError(
-                "已完成校准或已加载量化参数，不能使用 load_bitwidth_config()。\n"
-                "如需修改位宽配置，请使用以下方法之一：\n"
-                "  1. adjust_quant_config(gru, 'input.x', bitwidth=16, auto_scale=True)\n"
-                "  2. 重新校准：gru.reset_calibration() 后再调用 load_bitwidth_config()"
-            )
+            if verbose:
+                print(
+                    "  ⚠️  [QuantGRU] 已完成校准或已加载量化参数，跳过 load_bitwidth_config()。\n"
+                    "如需修改位宽配置，请使用以下方法之一：\n"
+                    "  1. adjust_quant_config(gru, 'input.x', bitwidth=16, auto_scale=True)\n"
+                    "  2. 重新校准：gru.reset_calibration() 后再调用 load_bitwidth_config()"
+                )
+            return
 
         # 解析 JSON 文件
         with open(config_file, 'r', encoding='utf-8') as f:
