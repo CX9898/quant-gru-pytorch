@@ -63,7 +63,7 @@ def example_quantization_with_json():
     
     推荐方式：通过 JSON 文件配置量化参数
     
-    注意：在 JSON 配置文件中，可以为权重(W, R)和偏置(bw, br)设置量化粒度：
+    注意：在 JSON 配置文件中，可以为权重(weight_ih, weight_hh)和偏置(bias_ih, bias_hh)设置量化粒度：
     - "quantization_granularity": "PER_TENSOR" - 整个tensor一个scale
     - "quantization_granularity": "PER_GATE" - 每个门一个scale（3个门）
     - "quantization_granularity": "PER_CHANNEL" - 每个输出通道一个scale（默认）
@@ -810,7 +810,7 @@ def example_adjust_quant_config():
     
     # 查看所有配置（使用调试工具）
     print("\n📊 所有量化配置:")
-    print_quant_config(gru, ["x", "h", "update_gate_output", "reset_gate_output", "new_gate_output"])
+    print_quant_config(gru)  # 打印所有算子的量化配置
     
     # ========== 调整配置 ==========
     print("\n🔧 调整 update_gate_output 位宽: 8bit -> 16bit")
@@ -902,12 +902,12 @@ def example_weight_bias_granularity():
     """
     示例 13: 权重和偏置的量化粒度设置
     
-    演示如何为权重(W, R)和偏置(bw, br)设置不同的量化粒度：
+    演示如何为权重(weight_ih, weight_hh)和偏置(bias_ih, bias_hh)设置不同的量化粒度：
     - PER_TENSOR: 整个tensor使用一个scale（最简单，精度可能较低）
     - PER_GATE: 每个门使用一个scale（3个门：update, reset, new）
     - PER_CHANNEL: 每个输出通道使用一个scale（默认，精度最高）
     
-    注意：量化粒度仅对 W, R, bw, br 四个算子有效
+    注意：量化粒度仅对 weight_ih, weight_hh, bias_ih, bias_hh 四个算子有效
     """
     print("\n" + "=" * 60)
     print("示例 13: 权重和偏置的量化粒度设置")
@@ -967,7 +967,7 @@ def example_weight_bias_granularity():
         # 设置位宽
         quant_gru.set_all_bitwidth(8)
         
-        # 设置量化粒度（仅对 W, R, bw, br 有效）
+        # 设置量化粒度（仅对 weight_ih, weight_hh, bias_ih, bias_hh 有效）
         granularity_map = {
             'PER_TENSOR': 0,
             'PER_GATE': 1,
@@ -981,10 +981,10 @@ def example_weight_bias_granularity():
         quant_gru._bitwidth_config.bw_granularity_ = granularity_value
         quant_gru._bitwidth_config.br_granularity_ = granularity_value
         
-        print(f"   ✅ W_granularity = {granularity_value} ({granularity_name})")
-        print(f"   ✅ R_granularity = {granularity_value} ({granularity_name})")
-        print(f"   ✅ bw_granularity = {granularity_value} ({granularity_name})")
-        print(f"   ✅ br_granularity = {granularity_value} ({granularity_name})")
+        print(f"   ✅ W_granularity (weight_ih) = {granularity_value} ({granularity_name})")
+        print(f"   ✅ R_granularity (weight_hh) = {granularity_value} ({granularity_name})")
+        print(f"   ✅ bw_granularity (bias_ih) = {granularity_value} ({granularity_name})")
+        print(f"   ✅ br_granularity (bias_hh) = {granularity_value} ({granularity_name})")
         
         # 校准
         quant_gru.calibration_method = 'minmax'
