@@ -2612,6 +2612,15 @@ class QuantGRU(nn.Module):
                 if verbose:
                     print(f"  ⚠️ 警告：未找到参数 'update_gate_output' (用于 sub_one_minus_update)")
         
+        # 删除 tensor_encodings（避免旧版本 load_quantizer_encodings 报错）
+        # tensor_encodings 主要用于 ONNX 导出，不影响量化器加载
+        # 旧版本的 load_quantizer_encodings 会遍历顶层键，当遍历到 tensor_encodings 时会报 KeyError
+        if "tensor_encodings" in encodings_dict:
+            del encodings_dict["tensor_encodings"]
+            if verbose:
+                print(f"\n⚠️  已移除 tensor_encodings（避免与旧版本 load_quantizer_encodings 不兼容）")
+                print(f"   tensor_encodings 主要用于 ONNX 导出，不影响量化器加载")
+        
         return encodings_dict
 
     def load_quant_params_from_aimet_format(
