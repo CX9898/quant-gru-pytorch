@@ -1070,8 +1070,6 @@ class QuantGRU(nn.Module):
         Raises:
             RuntimeError: 如果已加载量化参数（应使用 adjust_quant_config 替代）
         """
-        import warnings
-        
         # 如果已加载量化参数，跳过此方法
         if self.is_calibrated():
             if verbose:
@@ -1213,11 +1211,9 @@ class QuantGRU(nn.Module):
                     f"       → 将使用默认值: bitwidth={bw}, {sym_str}, {unsigned_str}"
                 )
             
-            warnings.warn(
-                f"\nJSON 配置文件 '{config_file}' 缺少以下算子配置:\n"
-                + "\n".join(missing_details) + "\n",
-                UserWarning
-            )
+            if verbose:
+                print(f"\n  ⚠️ 警告：JSON 配置文件 '{config_file}' 缺少以下算子配置:\n"
+                      + "\n".join(missing_details) + "\n")
         
         # 报告缺失的属性（算子存在但属性缺失）
         if missing_attrs:
@@ -1235,11 +1231,9 @@ class QuantGRU(nn.Module):
                     attr_lines.append(f"       → 缺少 '{attr_name}'，将使用默认值: {default_val}")
                 attr_details.append(f"    ⚠️ 算子 '{op_name}':\n" + "\n".join(attr_lines))
             
-            warnings.warn(
-                f"\nJSON 配置文件 '{config_file}' 以下算子缺少部分属性:\n"
-                + "\n".join(attr_details) + "\n",
-                UserWarning
-            )
+            if verbose:
+                print(f"\n  ⚠️ 警告：JSON 配置文件 '{config_file}' 以下算子缺少部分属性:\n"
+                      + "\n".join(attr_details) + "\n")
 
         # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
         self._quant_params_dirty = True
@@ -2346,7 +2340,7 @@ class QuantGRU(nn.Module):
             return encodings_dict
         
         # 使用 _build_operators_dict 从 quant_params 构建 operators 字典
-        operators = _build_operators_dict(self._bitwidth_config, self.quant_params)
+        operators = _build_operators_dict(self._bitwidth_config, self.quant_params, verbose)
         if not operators:
             if verbose:
                 print(f"  ⚠️ 警告：模块 {module_name} 的 operators 为空，跳过导出")
@@ -2881,7 +2875,7 @@ class QuantGRU(nn.Module):
             self.quant_params.hidden_ = self.hidden_size
             
             # 解析 operators 字典
-            _parse_operators_dict(operators, self._bitwidth_config, self.quant_params)
+            _parse_operators_dict(operators, self._bitwidth_config, self.quant_params, verbose)
             
             # 设置位宽配置到量化参数中
             self.quant_params.bitwidth_config_ = self._bitwidth_config
@@ -3329,12 +3323,18 @@ def _get_weight_granularity(bitwidth_config, json_key: str) -> int:
     return None
 
 
-def _extract_weight_shift_per_tensor(quant_params, json_key: str, shift_list_full: list) -> tuple:
+def _extract_weight_shift_per_tensor(quant_params, json_key: str, shift_list_full: list, verbose: bool = False) -> tuple:
     """
     从量化参数中提取 PER_TENSOR 粒度的 shift 值
     
     注意：即使 enc_type 是 PER_TENSOR，也返回数组格式（所有值相同），
     因为实际存储的 shift_W_ 等是 per-channel 数组，只是所有值都相同。
+    
+    Args:
+        quant_params: GRUQuantParams 对象
+        json_key: 算子名称
+        shift_list_full: per-channel 数组
+        verbose: 是否输出详细信息
     
     Returns:
         (n_value, scale_value, enc_type) 或 None（如果无法提取）
@@ -3351,13 +3351,9 @@ def _extract_weight_shift_per_tensor(quant_params, json_key: str, shift_list_ful
             return n_list, scale_list, "PER_TENSOR"
         else:
             # 值不一致，发出警告但继续使用数组
-            import warnings
-            warnings.warn(
-                f"算子 '{json_key}' 配置为 PER_TENSOR，但 per-channel 数组中的值不一致。"
-                f"将使用数组格式导出，但请注意值不一致的问题。",
-                UserWarning,
-                stacklevel=4
-            )
+            if verbose:
+                print(f"  ⚠️ 警告：算子 '{json_key}' 配置为 PER_TENSOR，但 per-channel 数组中的值不一致。"
+                      f"将使用数组格式导出，但请注意值不一致的问题。")
             n_list = shift_list_full
             scale_list = [_exp2_inv_to_scale(e) for e in n_list]
             return n_list, scale_list, "PER_TENSOR"
@@ -3378,22 +3374,25 @@ def _extract_weight_shift_per_tensor(quant_params, json_key: str, shift_list_ful
         return n_list, scale_list, "PER_TENSOR"
     else:
         # 配置了 PER_TENSOR 但没有对应的 tensor 属性，这是配置错误
-        import warnings
-        warnings.warn(
-            f"算子 '{json_key}' 配置了 PER_TENSOR 粒度，但在 quant_params 中未找到 'shift_{json_key}_tensor_' 属性。"
-            f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。",
-            UserWarning,
-            stacklevel=4
-        )
+        if verbose:
+            print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_TENSOR 粒度，但在 quant_params 中未找到 'shift_{json_key}_tensor_' 属性。"
+                  f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。")
         return None
 
 
-def _extract_weight_shift_per_gate(quant_params, json_key: str, shift_list_full: list, hidden_size: int) -> tuple:
+def _extract_weight_shift_per_gate(quant_params, json_key: str, shift_list_full: list, hidden_size: int, verbose: bool = False) -> tuple:
     """
     从量化参数中提取 PER_GATE 粒度的 shift 值
     
     注意：即使 enc_type 是 PER_GATE，也返回完整数组格式（每个 gate 的值重复 hidden_size 次），
     因为实际存储的 shift_W_ 等是 per-channel 数组，只是每个 gate 内的值相同。
+    
+    Args:
+        quant_params: GRUQuantParams 对象
+        json_key: 算子名称
+        shift_list_full: per-channel 数组
+        hidden_size: 隐藏层大小
+        verbose: 是否输出详细信息
     
     Returns:
         (n_value, scale_value, enc_type) 或 None（如果无法提取）
@@ -3414,13 +3413,9 @@ def _extract_weight_shift_per_gate(quant_params, json_key: str, shift_list_full:
                     gate_values.append(gate_shift)
                 else:
                     # gate 内值不一致，发出警告但继续使用数组
-                    import warnings
-                    warnings.warn(
-                        f"算子 '{json_key}' 配置为 PER_GATE，但 gate {gate} 内的值不一致。"
-                        f"将使用数组格式导出，但请注意值不一致的问题。",
-                        UserWarning,
-                        stacklevel=4
-                    )
+                    if verbose:
+                        print(f"  ⚠️ 警告：算子 '{json_key}' 配置为 PER_GATE，但 gate {gate} 内的值不一致。"
+                              f"将使用数组格式导出，但请注意值不一致的问题。")
                     gate_values.append(shift_list_full[gate_start])
             
             # 返回完整数组格式
@@ -3447,22 +3442,14 @@ def _extract_weight_shift_per_gate(quant_params, json_key: str, shift_list_full:
             return n_list, scale_list, "PER_GATE"
         else:
             # gate 属性存在但长度不对
-            import warnings
-            warnings.warn(
-                f"算子 '{json_key}' 配置了 PER_GATE 粒度，但 'shift_{json_key}_gate_' 的长度不正确 "
-                f"（实际长度: {len(shift_list)}，期望长度: 3）。这可能表明校准错误。",
-                UserWarning,
-                stacklevel=4
-            )
+            if verbose:
+                print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_GATE 粒度，但 'shift_{json_key}_gate_' 的长度不正确 "
+                      f"（实际长度: {len(shift_list)}，期望长度: 3）。这可能表明校准错误。")
     
     # 配置了 PER_GATE 但没有对应的 gate 属性，这是配置错误
-    import warnings
-    warnings.warn(
-        f"算子 '{json_key}' 配置了 PER_GATE 粒度，但在 quant_params 中未找到 'shift_{json_key}_gate_' 属性。"
-        f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。",
-        UserWarning,
-        stacklevel=4
-    )
+    if verbose:
+        print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_GATE 粒度，但在 quant_params 中未找到 'shift_{json_key}_gate_' 属性。"
+              f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。")
     return None
 
 
@@ -3477,7 +3464,7 @@ def _extract_weight_shift_per_channel(shift_list_full: list) -> tuple:
     return shift_list_full, scale_list, "PER_CHANNEL"
 
 
-def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str, op_info: dict) -> tuple:
+def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str, op_info: dict, verbose: bool = False) -> tuple:
     """
     提取权重算子（weight_ih/weight_hh/bias_ih/bias_hh）的 shift 值用于导出
     
@@ -3486,6 +3473,7 @@ def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str
         quant_params: GRUQuantParams 对象
         op_name: 算子名称（如 'weight_ih'）
         op_info: 算子信息字典
+        verbose: 是否输出详细信息
         
     Returns:
         (n_value, scale_value, enc_type) 或 None（如果无法提取）
@@ -3501,26 +3489,22 @@ def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str
     hidden_size = quant_params.hidden_
     
     if granularity == 0:  # PER_TENSOR
-        return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full)
+        return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full, verbose)
     elif granularity == 1:  # PER_GATE
-        return _extract_weight_shift_per_gate(quant_params, json_key, shift_list_full, hidden_size)
+        return _extract_weight_shift_per_gate(quant_params, json_key, shift_list_full, hidden_size, verbose)
     elif granularity == 2:  # PER_CHANNEL
         return _extract_weight_shift_per_channel(shift_list_full)
     else:
         # 兼容：没有粒度配置，使用默认逻辑
-        import warnings
-        warnings.warn(
-            f"算子 '{json_key}' 未配置 quantization_granularity。"
-            f"将基于 is_per_channel 标志使用默认值。"
-            f"请显式设置 quantization_granularity (PER_TENSOR/PER_GATE/PER_CHANNEL)。",
-            UserWarning,
-            stacklevel=3
-        )
+        if verbose:
+            print(f"  ⚠️ 警告：算子 '{json_key}' 未配置 quantization_granularity。"
+                  f"将基于 is_per_channel 标志使用默认值。"
+                  f"请显式设置 quantization_granularity (PER_TENSOR/PER_GATE/PER_CHANNEL)。")
         is_per_channel = op_info["is_per_channel"]
         if is_per_channel:
             return _extract_weight_shift_per_channel(shift_list_full)
         else:
-            return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full)
+            return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full, verbose)
 
 
 def _extract_non_weight_shift_for_export(quant_params, op_info: dict) -> tuple:
@@ -3571,7 +3555,7 @@ def _extract_non_weight_shift_for_export(quant_params, op_info: dict) -> tuple:
 #                   导出函数：构建 operators 字典
 # ============================================================
 
-def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_info: dict) -> dict:
+def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_info: dict, verbose: bool = False) -> dict:
     """
     构建单个算子的导出数据
     
@@ -3580,6 +3564,7 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
         quant_params: GRUQuantParams 对象
         op_name: 算子名称（如 'weight_ih', 'update_gate_output'）
         op_info: 算子信息字典
+        verbose: 是否输出详细信息
         
     Returns:
         算子数据字典，如果无法提取数据则返回 None
@@ -3600,7 +3585,7 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     
     # 提取 shift 值
     if op_name in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
-        result = _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name, op_info)
+        result = _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name, op_info, verbose)
     else:
         result = _extract_non_weight_shift_for_export(quant_params, op_info)
     
@@ -3632,13 +3617,14 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     return op_data
 
 
-def _build_operators_dict(bitwidth_config, quant_params) -> dict:
+def _build_operators_dict(bitwidth_config, quant_params, verbose: bool = False) -> dict:
     """
     构建统一的 operators 字典（AIMET 兼容格式）
     
     Args:
         bitwidth_config: OperatorQuantConfig 对象
         quant_params: GRUQuantParams 对象
+        verbose: 是否输出详细信息
         
     Returns:
         operators 字典（per-channel/per-gate 算子放在最后）
@@ -3658,7 +3644,7 @@ def _build_operators_dict(bitwidth_config, quant_params) -> dict:
     
     for op_name, op_info in _OPERATOR_MAP.items():
         # 构建单个算子的数据
-        op_data = _build_single_operator_data(bitwidth_config, quant_params, op_name, op_info)
+        op_data = _build_single_operator_data(bitwidth_config, quant_params, op_name, op_info, verbose)
         if op_data is None:
             continue
         
@@ -3694,7 +3680,7 @@ def _dtype_to_is_unsigned(dtype: str) -> bool:
 #                   导入函数：解析 operators 字典
 # ============================================================
 
-def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data: dict) -> None:
+def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data: dict, verbose: bool = False) -> None:
     """
     解析权重算子（weight_ih/weight_hh/bias_ih/bias_hh）的量化参数
     
@@ -3703,6 +3689,7 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
         quant_params: GRUQuantParams 对象（会被修改）
         op_name: 算子名称 ('weight_ih', 'weight_hh', 'bias_ih', 'bias_hh')
         op_data: 算子数据字典
+        verbose: 是否输出详细信息
     """
     # ⚠️ 关键修复：从 _OPERATOR_MAP 获取正确的字段名
     # 例如：weight_ih -> shift_W_ (不是 shift_weight_ih_)
@@ -3718,14 +3705,10 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
     
     enc_type = op_data.get("enc_type")
     if enc_type is None:
-        import warnings
-        warnings.warn(
-            f"算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段。"
-            f"为向后兼容，默认使用 PER_CHANNEL。"
-            f"请显式添加 'enc_type' 字段 (PER_TENSOR/PER_GATE/PER_CHANNEL)。",
-            UserWarning,
-            stacklevel=3
-        )
+        if verbose:
+            print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段。"
+                  f"为向后兼容，默认使用 PER_CHANNEL。"
+                  f"请显式添加 'enc_type' 字段 (PER_TENSOR/PER_GATE/PER_CHANNEL)。")
         enc_type = "PER_CHANNEL"
     
     # 解析 n 或 scale
@@ -3742,13 +3725,9 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                         # 同时填充 per-channel 数组（所有值相同）
                         setattr(quant_params, shift_attr_base, list(value))
                     else:
-                        import warnings
-                        warnings.warn(
-                            f"算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
-                            f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。",
-                            UserWarning,
-                            stacklevel=3
-                        )
+                        if verbose:
+                            print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
+                                  f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。")
                         setattr(quant_params, f"shift_{base_name}tensor_", first_val)
                         setattr(quant_params, shift_attr_base, [int(v) for v in value])
                 else:
@@ -3788,14 +3767,10 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                 setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
             else:
                 # 兼容旧格式：标量被当作per-channel（只有一个元素）
-                import warnings
-                warnings.warn(
-                    f"算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'n' 值为标量。"
-                    f"为向后兼容，将转换为单元素数组。"
-                    f"请使用数组格式: [n_value]。",
-                    UserWarning,
-                    stacklevel=3
-                )
+                if verbose:
+                    print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'n' 值为标量。"
+                          f"为向后兼容，将转换为单元素数组。"
+                          f"请使用数组格式: [n_value]。")
                 setattr(quant_params, shift_attr_base, [int(value)])
                 setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
     elif "scale" in op_data:
@@ -3813,13 +3788,9 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                         shift_list = [_scale_to_exp2_inv(v) for v in value]
                         setattr(quant_params, shift_attr_base, shift_list)
                     else:
-                        import warnings
-                        warnings.warn(
-                            f"算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
-                            f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。",
-                            UserWarning,
-                            stacklevel=3
-                        )
+                        if verbose:
+                            print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
+                                  f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。")
                         setattr(quant_params, f"shift_{base_name}tensor_", int(first_shift))
                         shift_list = [_scale_to_exp2_inv(v) for v in value]
                         setattr(quant_params, shift_attr_base, shift_list)
@@ -3865,14 +3836,10 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
                 setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
             else:
                 # 兼容旧格式：标量被当作per-channel（只有一个元素）
-                import warnings
-                warnings.warn(
-                    f"算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'scale' 值为标量。"
-                    f"为向后兼容，将转换为单元素数组。"
-                    f"请使用数组格式: [scale_value]。",
-                    UserWarning,
-                    stacklevel=3
-                )
+                if verbose:
+                    print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'scale' 值为标量。"
+                          f"为向后兼容，将转换为单元素数组。"
+                          f"请使用数组格式: [scale_value]。")
                 shift_val = _scale_to_exp2_inv(value)
                 setattr(quant_params, shift_attr_base, [int(shift_val)])
                 setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
@@ -3940,7 +3907,7 @@ def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_
                 setattr(quant_params, shift_attr, _scale_to_exp2_inv(value))
 
 
-def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data: dict) -> None:
+def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data: dict, verbose: bool = False) -> None:
     """
     解析单个算子的量化参数
     
@@ -3949,6 +3916,7 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
         quant_params: GRUQuantParams 对象（会被修改）
         op_name: 算子名称（JSON key，如 'weight_ih', 'update_gate_output'）
         op_data: 算子数据字典
+        verbose: 是否输出详细信息
     """
     # 直接使用 op_name 作为 _OPERATOR_MAP 的键（所有算子名称都不使用前缀）
     if op_name not in _OPERATOR_MAP:
@@ -3981,7 +3949,7 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     
     # 设置 shift 值（根据算子类型选择不同的解析方法）
     if op_name in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
-        _parse_weight_operator(bitwidth_config, quant_params, op_name, op_data)
+        _parse_weight_operator(bitwidth_config, quant_params, op_name, op_data, verbose)
     else:
         _parse_non_weight_operator(bitwidth_config, quant_params, op_info, op_data)
     
@@ -4000,7 +3968,7 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
             setattr(quant_params, op_info["zp_attr"], int(zp_value))
 
 
-def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> None:
+def _parse_operators_dict(operators: dict, bitwidth_config, quant_params, verbose: bool = False) -> None:
     """
     从 operators 字典解析并设置 bitwidth_config 和 quant_params
     
@@ -4016,9 +3984,10 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params) -> Non
         operators: operators 字典
         bitwidth_config: OperatorQuantConfig 对象（会被修改）
         quant_params: GRUQuantParams 对象（会被修改）
+        verbose: 是否输出详细信息
     """
     for op_name, op_data in operators.items():
-        _parse_single_operator(bitwidth_config, quant_params, op_name, op_data)
+        _parse_single_operator(bitwidth_config, quant_params, op_name, op_data, verbose)
 
 
 def _export_quant_params_impl(
@@ -4046,13 +4015,13 @@ def _export_quant_params_impl(
             "batch_first": gru.batch_first,
             "bidirectional": gru.bidirectional,
         },
-        "operators": _build_operators_dict(gru._bitwidth_config, gru.quant_params),
+        "operators": _build_operators_dict(gru._bitwidth_config, gru.quant_params, verbose),
     }
     
     # 双向 GRU 导出反向参数
     if gru.bidirectional and gru.quant_params_reverse is not None:
         export_data["operators_reverse"] = _build_operators_dict(
-            gru._bitwidth_config, gru.quant_params_reverse
+            gru._bitwidth_config, gru.quant_params_reverse, verbose
         )
     
     # 可选：导出量化后的权重
@@ -4156,12 +4125,9 @@ def _load_quant_params_impl(
         )
     # batch_first 不影响量化参数，但不一致可能导致用户困惑，给出警告
     if model_info.get("batch_first", False) != gru.batch_first:
-        import warnings
-        warnings.warn(
-            f"batch_first 不匹配: 文件中为 {model_info.get('batch_first')}, "
-            f"模型为 {gru.batch_first}。这不影响量化参数，但请确保输入数据格式正确。",
-            UserWarning
-        )
+        if verbose:
+            print(f"  ⚠️ 警告：batch_first 不匹配: 文件中为 {model_info.get('batch_first')}, "
+                  f"模型为 {gru.batch_first}。这不影响量化参数，但请确保输入数据格式正确。")
     
     # 验证版本和格式
     if "operators" not in data:
@@ -4175,7 +4141,7 @@ def _load_quant_params_impl(
     gru.quant_params = gru_ops.GRUQuantParams()
     gru.quant_params.hidden_ = gru.hidden_size
     
-    _parse_operators_dict(data["operators"], gru._bitwidth_config, gru.quant_params)
+    _parse_operators_dict(data["operators"], gru._bitwidth_config, gru.quant_params, verbose)
     
     # 设置位宽配置到量化参数中（pybind11 值复制语义，这里是复制而非引用）
     gru.quant_params.bitwidth_config_ = gru._bitwidth_config
@@ -4193,7 +4159,7 @@ def _load_quant_params_impl(
         gru.quant_params_reverse.hidden_ = gru.hidden_size
         
         # 从 operators_reverse 解析 exp2_inv/zp，bitwidth 与正向相同（共用 _bitwidth_config）
-        _parse_operators_dict(data["operators_reverse"], gru._bitwidth_config, gru.quant_params_reverse)
+        _parse_operators_dict(data["operators_reverse"], gru._bitwidth_config, gru.quant_params_reverse, verbose)
         gru.quant_params_reverse.bitwidth_config_ = gru._bitwidth_config
     
     # 清除脏标志
