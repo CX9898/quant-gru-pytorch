@@ -451,6 +451,7 @@ class QuantGRU(nn.Module):
 | `is_calibrated()` | 检查是否已完成校准 |
 | `export_quant_params(path, include_weights=False, verbose=False)` | 导出量化参数到 JSON 文件 |
 | `load_quant_params(path, verbose=False)` | 从 JSON 文件加载量化参数 |
+| `set_quant_params_locked(locked)` | 锁定/解锁 quant_params，控制后续校准是否允许覆盖 |
 | `adjust_quant_config(operator, bitwidth=None, is_symmetric=None, exp2_inv=None, zero_point=None, verbose=False)` | 手动调整指定算子的量化配置 |
 | `get_quant_config(operator=None)` | 获取量化配置信息（单个算子或所有算子） |
 | `export_quant_params_to_aimet_format(encodings_dict, module_name=None, verbose=False)` | 将量化参数导出为 AIMET encodings 格式 |

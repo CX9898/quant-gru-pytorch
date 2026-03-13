@@ -887,6 +887,9 @@ class QuantGRU(nn.Module):
 
         # 统一脏标志：标记量化参数是否需要更新（校准数据变化或配置修改都会设置）
         self._quant_params_dirty = False
+        # quant_params 锁：
+        # True: 锁定，禁止后续校准重算覆盖；False: 允许覆盖。
+        self._quant_params_locked = False
 
         # 位宽配置对象（直接初始化，避免延迟创建的线程安全问题）
         self._bitwidth_config = gru_ops.OperatorQuantConfig()  # 位宽配置(直接存储 C++ 对象)
@@ -974,6 +977,12 @@ class QuantGRU(nn.Module):
         elif bitwidth_dict is None:
             # 创建默认配置
             state['_bitwidth_config'] = gru_ops.OperatorQuantConfig()
+        if '_quant_params_locked' not in state:
+            if '_quant_params_allow_overwrite' in state:
+                state['_quant_params_locked'] = not bool(state['_quant_params_allow_overwrite'])
+            else:
+                state['_quant_params_locked'] = False
+        state.pop('_quant_params_allow_overwrite', None)
         
         self.__dict__.update(state)
 
@@ -1291,6 +1300,15 @@ class QuantGRU(nn.Module):
         """
         self._module_name = module_name
 
+    def set_quant_params_locked(self, locked: bool) -> None:
+        """
+        设置 quant_params 是否锁定。
+
+        Args:
+            locked: True 锁定（禁止覆盖）；False 解锁（允许覆盖）
+        """
+        self._quant_params_locked = bool(locked)
+
     def finalize_calibration(self, verbose: bool = False):
         """
         完成校准，计算量化参数并初始化 LUT
@@ -1301,6 +1319,12 @@ class QuantGRU(nn.Module):
         Raises:
             RuntimeError: 未收集校准数据
         """
+        if self._quant_params_locked and self.is_calibrated():
+            self._quant_params_dirty = False
+            if verbose:
+                print("\n[QuantGRU] quant_params 已锁定，跳过 finalize_calibration 覆盖")
+            return
+
         use_histogram = self._use_histogram_collection()
         use_percentile = (self.calibration_method == 'percentile')
 
@@ -2074,7 +2098,8 @@ class QuantGRU(nn.Module):
             output_reverse, h_n_reverse = None, None
 
         # 标记量化参数需要更新
-        self._quant_params_dirty = True
+        if (not self._quant_params_locked) or self.quant_params is None:
+            self._quant_params_dirty = True
 
         return self._combine_bidirectional_outputs(
             output_forward, h_n_forward, output_reverse, h_n_reverse
@@ -2137,9 +2162,17 @@ class QuantGRU(nn.Module):
         """
         # 量化模式下检查校准状态
         if self.use_quantization:
+            if self._quant_params_locked and not self.is_calibrated():
+                raise RuntimeError(
+                    "quant_params 已锁定但当前量化参数不完整。\n"
+                    "请先完成完整校准/加载后再锁定，或先调用 set_quant_params_locked(False) 解锁。"
+                )
             if self._quant_params_dirty:
                 # 校准数据已更新或配置已修改，需要重新计算量化参数
-                self.finalize_calibration()
+                if self._quant_params_locked and self.quant_params is not None:
+                    self._quant_params_dirty = False
+                else:
+                    self.finalize_calibration()
             elif not self.is_calibrated():
                 # 检查是否有未完成的校准数据(支持 minmax/histogram/percentile)
                 if self.quant_ranges is not None or self.hist_collectors is not None:
@@ -2211,7 +2244,11 @@ class QuantGRU(nn.Module):
         # 调用模块级实现
         _export_quant_params_impl(self, export_path, include_weights, verbose)
 
-    def load_quant_params(self, import_path: str, verbose: bool = False) -> None:
+    def load_quant_params(
+        self,
+        import_path: str,
+        verbose: bool = False
+    ) -> None:
         """
         从 JSON 文件加载量化参数
         
