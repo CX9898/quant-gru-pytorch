@@ -2301,6 +2301,9 @@ class QuantGRU(nn.Module):
             转换后的编码字典（添加 bitwidth, is_symmetric 等字段）
         """
         import copy
+
+        # 双向：收集反向方向算子（权重/偏置拆分 + internal_ops_reverse）
+        operators_reverse = {} if self.bidirectional else None
         if not isinstance(data, dict):
             return data
         
@@ -2346,9 +2349,42 @@ class QuantGRU(nn.Module):
         Returns:
             更新后的 encodings_dict
         
-        TODO: 双向 GRU 支持（bidirectional=True）暂未实现
         """
         import copy
+
+        def _concat_operator_fields(dst: dict, src: dict, *, list_fields: list, verbose_prefix: str = "") -> dict:
+            """
+            将 src 的 list_fields 追加到 dst 对应字段末尾（用于双向：正向在前、反向在后）。
+            """
+            if dst is None:
+                return copy.deepcopy(src)
+            if src is None:
+                return dst
+
+            for field in list_fields:
+                if field not in src:
+                    continue
+                if field not in dst:
+                    dst[field] = copy.deepcopy(src[field])
+                    continue
+
+                a = dst[field]
+                b = src[field]
+                if isinstance(a, list) and isinstance(b, list):
+                    a.extend(b)
+                elif isinstance(a, list):
+                    a.append(b)
+                elif isinstance(b, list):
+                    dst[field] = [a] + b
+                else:
+                    dst[field] = [a, b]
+
+            if verbose and verbose_prefix:
+                for k in ["dtype", "symmetric", "enc_type", "zero_point"]:
+                    if k in dst and k in src and dst[k] != src[k]:
+                        print(f"  ⚠️ 警告：{verbose_prefix} 字段 '{k}' 正反向不一致："
+                              f"forward={dst[k]}, reverse={src[k]}。将保留 forward 值。")
+            return dst
         
         # 检查是否已校准
         if not self.is_calibrated():
@@ -2364,12 +2400,6 @@ class QuantGRU(nn.Module):
                     print(f"  ⚠️ 警告：_module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
-        # 检查双向 GRU
-        if self.bidirectional:
-            if verbose:
-                print(f"  ⚠️ 警告：双向 GRU 暂未实现，跳过反向参数")
-            # TODO: 实现双向 GRU 支持
-        
         # 获取量化参数
         if self.quant_params is None:
             if verbose:
@@ -2382,6 +2412,15 @@ class QuantGRU(nn.Module):
             if verbose:
                 print(f"  ⚠️ 警告：模块 {module_name} 的 operators 为空，跳过导出")
             return encodings_dict
+
+        # 双向：构建反向 operators（用于权重/偏置拼接 + internal_ops_reverse）
+        operators_reverse = None
+        if self.bidirectional:
+            if self.quant_params_reverse is None:
+                if verbose:
+                    print(f"  ⚠️ 警告：模块 {module_name} 为双向，但 quant_params_reverse 为空。将仅导出正向参数。")
+            else:
+                operators_reverse = _build_operators_dict(self._bitwidth_config, self.quant_params_reverse, verbose)
         
         # 确保 encodings_dict 结构存在
         # 设置 schema_version（如果不存在）
@@ -2411,6 +2450,23 @@ class QuantGRU(nn.Module):
                     "weight_hh_linear": {"output": []},
                 },
             }
+            # 双向：新增 internal_ops_reverse（结构与 internal_ops 相同）
+            if self.bidirectional:
+                encodings_dict["activation_encodings"][module_name]["internal_ops_reverse"] = {
+                    "add_final_hidden": {"output": []},
+                    "mul_new_contribution": {"output": []},
+                    "mul_old_contribution": {"output": []},
+                    "mul_reset_hidden": {"output": []},
+                    "new_gate_input": {"output": []},
+                    "new_gate_output": {"output": []},
+                    "reset_gate_input": {"output": []},
+                    "reset_gate_output": {"output": []},
+                    "sub_one_minus_update": {"output": []},
+                    "update_gate_input": {"output": []},
+                    "update_gate_output": {"output": []},
+                    "weight_ih_linear": {"output": []},
+                    "weight_hh_linear": {"output": []},
+                }
         
         if "param_encodings" not in encodings_dict:
             encodings_dict["param_encodings"] = {}
@@ -2419,6 +2475,24 @@ class QuantGRU(nn.Module):
             encodings_dict["tensor_encodings"] = {}
         
         gru_encodings = encodings_dict["activation_encodings"][module_name]
+
+        # 双向：如果 module 已存在但缺少 internal_ops_reverse，则补齐结构
+        if self.bidirectional and "internal_ops_reverse" not in gru_encodings:
+            gru_encodings["internal_ops_reverse"] = {
+                "add_final_hidden": {"output": []},
+                "mul_new_contribution": {"output": []},
+                "mul_old_contribution": {"output": []},
+                "mul_reset_hidden": {"output": []},
+                "new_gate_input": {"output": []},
+                "new_gate_output": {"output": []},
+                "reset_gate_input": {"output": []},
+                "reset_gate_output": {"output": []},
+                "sub_one_minus_update": {"output": []},
+                "update_gate_input": {"output": []},
+                "update_gate_output": {"output": []},
+                "weight_ih_linear": {"output": []},
+                "weight_hh_linear": {"output": []},
+            }
         
         # 1. 填充 activation_encodings 的 input 和 output
         if verbose:
@@ -2465,6 +2539,13 @@ class QuantGRU(nn.Module):
         param_key = f"{module_name}.weight_ih.weight"
         if "weight_ih" in operators:
             data = self._fix_zero_point(operators["weight_ih"])
+            if operators_reverse is not None and "weight_ih" in operators_reverse:
+                data = _concat_operator_fields(
+                    data,
+                    self._fix_zero_point(operators_reverse["weight_ih"]),
+                    list_fields=["scale", "n", "real_min", "real_max"],
+                    verbose_prefix=f"{param_key}/weight_ih"
+                )
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
             if verbose:
@@ -2477,6 +2558,13 @@ class QuantGRU(nn.Module):
         param_key = f"{module_name}.weight_hh.weight"
         if "weight_hh" in operators:
             data = self._fix_zero_point(operators["weight_hh"])
+            if operators_reverse is not None and "weight_hh" in operators_reverse:
+                data = _concat_operator_fields(
+                    data,
+                    self._fix_zero_point(operators_reverse["weight_hh"]),
+                    list_fields=["scale", "n", "real_min", "real_max"],
+                    verbose_prefix=f"{param_key}/weight_hh"
+                )
             data = self._convert_to_encoding_format(data)
             encodings_dict["param_encodings"][param_key] = data
             if verbose:
@@ -2503,7 +2591,7 @@ class QuantGRU(nn.Module):
                 print(f"  {error_msg}")
             raise ValueError(error_msg)
         
-        # 拼接多个来源的数据（bias_ih 在前，bias_hh 在后）
+        # 拼接多个来源的数据（bias_ih 在前，bias_hh 在后；双向时在末尾追加反向）
         # 处理 bias_ih（第一个源）
         bw_data = self._fix_zero_point(operators["bias_ih"])
         merged_dict = copy.deepcopy(bw_data)
@@ -2536,6 +2624,27 @@ class QuantGRU(nn.Module):
                     ]
         if verbose:
             print(f"  ✅ {param_key} <- br (拼接)")
+
+        # 双向：把反向 bias_ih/bias_hh 继续拼接到末尾
+        if operators_reverse is not None:
+            if "bias_ih" in operators_reverse and "bias_hh" in operators_reverse:
+                merged_dict = _concat_operator_fields(
+                    merged_dict,
+                    self._fix_zero_point(operators_reverse["bias_ih"]),
+                    list_fields=list_fields,
+                    verbose_prefix=f"{param_key}/bias_ih_reverse"
+                )
+                merged_dict = _concat_operator_fields(
+                    merged_dict,
+                    self._fix_zero_point(operators_reverse["bias_hh"]),
+                    list_fields=list_fields,
+                    verbose_prefix=f"{param_key}/bias_hh_reverse"
+                )
+                if verbose:
+                    print(f"  ✅ {param_key} <- (追加反向 bw/br)")
+            else:
+                if verbose:
+                    print(f"  ⚠️ 警告：未找到反向 bias_ih/bias_hh，跳过反向 bias 拼接")
         
         # 转换格式并保存
         merged_dict = self._convert_to_encoding_format(merged_dict)
@@ -2642,6 +2751,56 @@ class QuantGRU(nn.Module):
             else:
                 if verbose:
                     print(f"  ⚠️ 警告：未找到参数 'update_gate_output' (用于 sub_one_minus_update)")
+
+        # 双向：填充 internal_ops_reverse（与 internal_ops 相同逻辑，但读取 operators_reverse）
+        if self.bidirectional and operators_reverse is not None and "internal_ops_reverse" in gru_encodings:
+            if verbose:
+                print(f"\n处理 internal_ops_reverse:")
+            internal_ops_rev = gru_encodings["internal_ops_reverse"]
+
+            for op_name in internal_op_names:
+                if op_name in operators_reverse:
+                    data = self._fix_zero_point(operators_reverse[op_name])
+                    data = self._convert_to_encoding_format(data)
+                    if "output" in internal_ops_rev[op_name]:
+                        internal_ops_rev[op_name]["output"] = [data]
+                    else:
+                        internal_ops_rev[op_name] = data
+                    if verbose:
+                        print(f"  ✅ {op_name} <- {op_name} (reverse/output)")
+                else:
+                    if verbose:
+                        print(f"  ⚠️ 警告：未找到反向参数 '{op_name}'")
+
+            # add_final_hidden: 使用 reverse 的 output
+            if "add_final_hidden" in internal_ops_rev:
+                if "output" in operators_reverse:
+                    data = self._fix_zero_point(operators_reverse["output"])
+                    data = self._convert_to_encoding_format(data)
+                    if "output" in internal_ops_rev["add_final_hidden"]:
+                        internal_ops_rev["add_final_hidden"]["output"] = [data]
+                    else:
+                        internal_ops_rev["add_final_hidden"] = data
+                    if verbose:
+                        print(f"  ✅ add_final_hidden <- output (reverse)")
+                else:
+                    if verbose:
+                        print(f"  ⚠️ 警告：未找到反向参数 'output' (用于 add_final_hidden/reverse)")
+
+            # sub_one_minus_update: 复用 reverse 的 update_gate_output
+            if "sub_one_minus_update" in internal_ops_rev:
+                if "update_gate_output" in operators_reverse:
+                    data = self._fix_zero_point(operators_reverse["update_gate_output"])
+                    data = self._convert_to_encoding_format(data)
+                    if "output" in internal_ops_rev["sub_one_minus_update"]:
+                        internal_ops_rev["sub_one_minus_update"]["output"] = [data]
+                    else:
+                        internal_ops_rev["sub_one_minus_update"] = data
+                    if verbose:
+                        print(f"  ✅ sub_one_minus_update <- update_gate_output (reverse)")
+                else:
+                    if verbose:
+                        print(f"  ⚠️ 警告：未找到反向参数 'update_gate_output' (用于 sub_one_minus_update/reverse)")
         
         # 删除 tensor_encodings（避免旧版本 load_quantizer_encodings 报错）
         # tensor_encodings 主要用于 ONNX 导出，不影响量化器加载
@@ -2673,9 +2832,40 @@ class QuantGRU(nn.Module):
         Returns:
             是否成功加载
         
-        TODO: 双向 GRU 支持（bidirectional=True）暂未实现
         """
         import copy
+
+        # 双向：收集反向方向算子（由导出时的“追加拼接”拆分得到）
+        operators_reverse = {} if self.bidirectional else None
+
+        def _split_list_in_half(x):
+            if not isinstance(x, list):
+                return x, x
+            mid = len(x) // 2
+            return x[:mid], x[mid:]
+
+        def _split_operator_for_bidirectional(op_data: dict) -> tuple:
+            """
+            将导出时拼接的权重算子数据拆回 (forward, reverse) 两份。
+            仅拆分数组字段：scale/n/real_min/real_max（以及可能为列表的 zero_point）。
+            """
+            if op_data is None or not isinstance(op_data, dict):
+                return op_data, None
+
+            out_f = copy.deepcopy(op_data)
+            out_r = copy.deepcopy(op_data)
+            for field in ["scale", "n", "real_min", "real_max"]:
+                if field in op_data and isinstance(op_data[field], list):
+                    a, b = _split_list_in_half(op_data[field])
+                    out_f[field] = a
+                    out_r[field] = b
+
+            if "zero_point" in op_data and isinstance(op_data["zero_point"], list):
+                a, b = _split_list_in_half(op_data["zero_point"])
+                out_f["zero_point"] = a
+                out_r["zero_point"] = b
+
+            return out_f, out_r
         
         # 确定模块名称
         if module_name is None:
@@ -2687,12 +2877,6 @@ class QuantGRU(nn.Module):
         
         # 保存模块名称（用于调试信息和后续使用）
         self._module_name = module_name
-        
-        # 检查双向 GRU
-        if self.bidirectional:
-            if verbose:
-                print(f"  ⚠️ 警告：双向 GRU 暂未实现，跳过反向参数")
-            # TODO: 实现双向 GRU 支持
         
         # 检查 encodings_dict 结构
         if "activation_encodings" not in encodings_dict:
@@ -2765,7 +2949,13 @@ class QuantGRU(nn.Module):
             # weight_ih - ONNX 标准命名：{module_name}.weight_ih.weight
             param_key = f"{module_name}.weight_ih.weight"
             if param_key in param_encodings:
-                operators["weight_ih"] = param_encodings[param_key]
+                if self.bidirectional:
+                    fwd, rev = _split_operator_for_bidirectional(param_encodings[param_key])
+                    operators["weight_ih"] = fwd
+                    if rev is not None:
+                        operators_reverse["weight_ih"] = rev
+                else:
+                    operators["weight_ih"] = param_encodings[param_key]
                 if verbose:
                     print(f"  ✅ weight_ih <- {param_key}")
             else:
@@ -2776,7 +2966,13 @@ class QuantGRU(nn.Module):
             # weight_hh - ONNX 标准命名：{module_name}.weight_hh.weight
             param_key = f"{module_name}.weight_hh.weight"
             if param_key in param_encodings:
-                operators["weight_hh"] = param_encodings[param_key]
+                if self.bidirectional:
+                    fwd, rev = _split_operator_for_bidirectional(param_encodings[param_key])
+                    operators["weight_hh"] = fwd
+                    if rev is not None:
+                        operators_reverse["weight_hh"] = rev
+                else:
+                    operators["weight_hh"] = param_encodings[param_key]
                 if verbose:
                     print(f"  ✅ weight_hh <- {param_key}")
             else:
@@ -2809,29 +3005,67 @@ class QuantGRU(nn.Module):
                             print(f"  ⚠️ 警告：无法确定 split_length，假设 bias_ih 和 bias_hh 长度相同")
                         split_length = None
                 
-                # 拆分 bias_ih（前半部分）
-                bias_ih_data = copy.deepcopy(merged_data)
-                # 拆分 bias_hh（后半部分）
-                bias_hh_data = copy.deepcopy(merged_data)
-                
-                for field in list_fields:
-                    if field in merged_data:
-                        if isinstance(merged_data[field], list):
-                            if split_length is not None:
-                                bias_ih_data[field] = merged_data[field][:split_length]
-                                bias_hh_data[field] = merged_data[field][split_length:]
+                if not self.bidirectional:
+                    # 拆分 bias_ih（前半部分）
+                    bias_ih_data = copy.deepcopy(merged_data)
+                    # 拆分 bias_hh（后半部分）
+                    bias_hh_data = copy.deepcopy(merged_data)
+                    
+                    for field in list_fields:
+                        if field in merged_data:
+                            if isinstance(merged_data[field], list):
+                                if split_length is not None:
+                                    bias_ih_data[field] = merged_data[field][:split_length]
+                                    bias_hh_data[field] = merged_data[field][split_length:]
+                                else:
+                                    # 无法确定长度，尝试平均分割
+                                    mid = len(merged_data[field]) // 2
+                                    bias_ih_data[field] = merged_data[field][:mid]
+                                    bias_hh_data[field] = merged_data[field][mid:]
                             else:
-                                # 无法确定长度，尝试平均分割
-                                mid = len(merged_data[field]) // 2
-                                bias_ih_data[field] = merged_data[field][:mid]
-                                bias_hh_data[field] = merged_data[field][mid:]
+                                # 标量值，两个都使用相同的值
+                                bias_ih_data[field] = merged_data[field]
+                                bias_hh_data[field] = merged_data[field]
+                    
+                    operators["bias_ih"] = bias_ih_data
+                    operators["bias_hh"] = bias_hh_data
+                else:
+                    # 双向：merged = [bw_fwd, br_fwd, bw_rev, br_rev]（按导出拼接规则）
+                    # 先按方向拆半，再在方向内拆 bw/br
+                    dir_len = None
+                    for field in list_fields:
+                        if field in merged_data and isinstance(merged_data[field], list):
+                            dir_len = len(merged_data[field]) // 2
+                            break
+                    if dir_len is None or dir_len % 2 != 0:
+                        if verbose:
+                            print(f"  ❌ 错误：无法从 bias 推断双向拆分长度（dir_len={dir_len}）")
+                        return False
+                    ih_len = dir_len // 2
+
+                    bias_ih_fwd = copy.deepcopy(merged_data)
+                    bias_hh_fwd = copy.deepcopy(merged_data)
+                    bias_ih_rev = copy.deepcopy(merged_data)
+                    bias_hh_rev = copy.deepcopy(merged_data)
+
+                    for field in list_fields:
+                        if field in merged_data and isinstance(merged_data[field], list):
+                            v = merged_data[field]
+                            bias_ih_fwd[field] = v[:ih_len]
+                            bias_hh_fwd[field] = v[ih_len:dir_len]
+                            bias_ih_rev[field] = v[dir_len:dir_len + ih_len]
+                            bias_hh_rev[field] = v[dir_len + ih_len:dir_len * 2]
                         else:
-                            # 标量值，两个都使用相同的值
-                            bias_ih_data[field] = merged_data[field]
-                            bias_hh_data[field] = merged_data[field]
-                
-                operators["bias_ih"] = bias_ih_data
-                operators["bias_hh"] = bias_hh_data
+                            bias_ih_fwd[field] = merged_data.get(field)
+                            bias_hh_fwd[field] = merged_data.get(field)
+                            bias_ih_rev[field] = merged_data.get(field)
+                            bias_hh_rev[field] = merged_data.get(field)
+
+                    operators["bias_ih"] = bias_ih_fwd
+                    operators["bias_hh"] = bias_hh_fwd
+
+                    operators_reverse["bias_ih"] = bias_ih_rev
+                    operators_reverse["bias_hh"] = bias_hh_rev
                 if verbose:
                     print(f"  ✅ bias_ih, bias_hh <- {param_key} (从合并的 bias 拆分)")
             else:
@@ -2889,6 +3123,43 @@ class QuantGRU(nn.Module):
         else:
             if verbose:
                 print(f"  ⚠️ 警告：未找到 'internal_ops'")
+
+        # 双向：从 internal_ops_reverse 读取反向中间算子
+        if self.bidirectional and operators_reverse is not None and "internal_ops_reverse" in gru_encodings:
+            internal_ops_reverse = gru_encodings["internal_ops_reverse"]
+            if verbose:
+                print(f"\n从 internal_ops_reverse 读取:")
+            for op_name in internal_op_names:
+                if op_name in internal_ops_reverse:
+                    op_data = internal_ops_reverse[op_name]
+                    if isinstance(op_data, dict) and "output" in op_data:
+                        output_data = op_data["output"]
+                        if isinstance(output_data, list) and len(output_data) > 0:
+                            operators_reverse[op_name] = output_data[0]
+                        elif isinstance(output_data, dict):
+                            operators_reverse[op_name] = output_data
+                    elif isinstance(op_data, dict):
+                        operators_reverse[op_name] = op_data
+                    if verbose:
+                        print(f"  ✅ {op_name} <- internal_ops_reverse[{op_name}]")
+                else:
+                    if verbose:
+                        print(f"  ⚠️ 警告：未找到反向中间算子 '{op_name}'")
+            # add_final_hidden 在导出时使用的是 reverse 的 output 参数，加载时需回填 operators_reverse["output"]
+            if "add_final_hidden" in internal_ops_reverse:
+                op_data = internal_ops_reverse["add_final_hidden"]
+                if isinstance(op_data, dict) and "output" in op_data:
+                    output_data = op_data["output"]
+                    if isinstance(output_data, list) and len(output_data) > 0:
+                        operators_reverse["output"] = output_data[0]
+                    elif isinstance(output_data, dict):
+                        operators_reverse["output"] = output_data
+                elif isinstance(op_data, dict):
+                    operators_reverse["output"] = op_data
+                if verbose:
+                    print(f"  ✅ output <- internal_ops_reverse[add_final_hidden] (reverse 输出)")
+        elif self.bidirectional and verbose:
+            print(f"  ⚠️ 警告：未找到 'internal_ops_reverse'（反向中间算子将无法加载）")
         
         # 4. 转换格式（从 AIMET 格式转换为 QuantGRU 格式）
         # 将 is_symmetric 字符串转换回 symmetric 布尔值
@@ -2903,7 +3174,7 @@ class QuantGRU(nn.Module):
                         value["symmetric"] = is_symmetric_str
                         del value["is_symmetric"]
         
-        # 5. 直接解析 operators 并设置到 quant_params
+        # 5. 直接解析 operators 并设置到 quant_params（双向则额外解析 operators_reverse）
         try:
             # 初始化 bitwidth_config 和 quant_params
             # gru_ops 已在模块顶部导入
@@ -2916,6 +3187,17 @@ class QuantGRU(nn.Module):
             
             # 设置位宽配置到量化参数中
             self.quant_params.bitwidth_config_ = self._bitwidth_config
+
+            if self.bidirectional:
+                if operators_reverse is not None and len(operators_reverse) > 0:
+                    self.quant_params_reverse = gru_ops.GRUQuantParams()
+                    self.quant_params_reverse.hidden_ = self.hidden_size
+                    _parse_operators_dict(operators_reverse, self._bitwidth_config, self.quant_params_reverse, verbose)
+                    self.quant_params_reverse.bitwidth_config_ = self._bitwidth_config
+                else:
+                    self.quant_params_reverse = None
+                    if verbose:
+                        print("  ⚠️ 警告：双向模型未找到反向 operators，quant_params_reverse 将保持为空")
             
             # 清除脏标志
             self._quant_params_dirty = False

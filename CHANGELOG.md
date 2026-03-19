@@ -4,6 +4,19 @@
 
 ---
 
+## [2026-03-19]
+
+### 版本更新
+1. **版本号更新**: 将版本号从 1.0.2 更新至 1.0.3
+
+### 新功能
+1. **双向 GRU 的 AIMET encodings 导出/导入支持**:
+   - 导出侧：`param_encodings` 中的权重/偏置量化参数按 **正向在前、反向追加在后** 的规则拼接（例如原本单向 128 个参数 -> 双向 256 个）
+   - 导出侧：新增 `activation_encodings[module].internal_ops_reverse` 字段，用于承载反向方向的中间算子量化参数
+   - 导入侧：支持从上述 AIMET encodings 结构回读并解析 `quant_params_reverse`
+
+---
+
 ## [2026-03-13]
 
 ### 版本更新
