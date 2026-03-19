@@ -75,7 +75,7 @@ class DevelopWithLib(develop):
 
 setup(
     name='quant_gru',
-    version='1.0.2',
+    version='1.0.3',
     description='Quantized GRU implementation with C++ backend',
     py_modules=['quant_gru'],
     ext_modules=[
