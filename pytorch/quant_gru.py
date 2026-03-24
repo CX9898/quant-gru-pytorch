@@ -2912,6 +2912,12 @@ class QuantGRU(nn.Module):
                 operators["input"] = input_data
             if verbose:
                 print(f"  ✅ input <- input")
+            # 双向 GRU 的反向分支与正向分支使用同一个输入张量，
+            # 若不显式同步，operators_reverse["input"] 会落回默认量化参数。
+            if self.bidirectional and operators_reverse is not None:
+                operators_reverse["input"] = copy.deepcopy(operators["input"])
+                if verbose:
+                    print(f"  ✅ input <- input (reverse 同步)")
         else:
             if verbose:
                 print(f"  ❌ 错误：未找到 'input'")
