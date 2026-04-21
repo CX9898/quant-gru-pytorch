@@ -1,87 +1,105 @@
-# CUDA 12.8 + PyTorch + Python3 环境
-# 支持 RTX 5090 (sm_120 Blackwell 架构)
+# Reusable CUDA + PyTorch build environment for Linux projects.
+# Default values target the current project's validated toolchain, but can be
+# overridden at build time with --build-arg.
 
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+ARG BASE_IMAGE=nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
 
-# 设置环境变量
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Asia/Shanghai
-ENV PYTHONUNBUFFERED=1
-ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=${CUDA_HOME}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# 配置清华 Ubuntu APT 源
-RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
-    sed -i 's|http://security.ubuntu.com|https://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+ARG TZ=UTC
+ARG APT_MIRROR=
+ARG PIP_INDEX_URL=
+ARG PIP_TRUSTED_HOST=
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/nightly/cu128
+ARG TORCH_PACKAGES="torch torchvision torchaudio"
+ARG INSTALL_TORCHCODEC=1
+ARG EXTRA_PYTHON_PACKAGES="numpy scipy pandas matplotlib tqdm tensorboard pyyaml soundfile librosa onnxscript safetensors pybind11"
+ARG TORCH_CUDA_ARCH_LIST="6.0;7.0;7.5;8.0;8.6;8.9;9.0;12.0"
 
-# 安装系统依赖
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=${TZ} \
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# Optional Ubuntu mirror override for regions where the default archive is slow.
+RUN if [[ -n "${APT_MIRROR}" ]]; then \
+      sed -i "s|http://archive.ubuntu.com|${APT_MIRROR}|g" /etc/apt/sources.list && \
+      sed -i "s|http://security.ubuntu.com|${APT_MIRROR}|g" /etc/apt/sources.list; \
+    fi
+
+# Common native build and multimedia dependencies. The FFmpeg-related packages
+# keep this image usable for torchcodec-based projects, while still remaining
+# broadly useful as a CUDA/PyTorch build environment.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     python3 \
     python3-pip \
     python3-dev \
     build-essential \
     cmake \
     ninja-build \
+    clang \
+    gdb \
     git \
     wget \
     curl \
+    unzip \
+    zip \
+    pkg-config \
+    file \
+    less \
+    jq \
+    rsync \
+    tree \
+    tmux \
+    htop \
+    ripgrep \
     vim \
-    # FFmpeg 及开发库 (torchcodec 依赖)
     ffmpeg \
     libavcodec-dev \
     libavformat-dev \
     libavutil-dev \
     libswresample-dev \
     libswscale-dev \
-    # 音频处理依赖
     libsndfile1 \
     libsox-dev \
     sox \
     && rm -rf /var/lib/apt/lists/*
 
-# 创建 python 软链接
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-# 配置清华 PyPI 源
-RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip3 config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+RUN if [[ -n "${PIP_INDEX_URL}" ]]; then \
+      python3 -m pip config set global.index-url "${PIP_INDEX_URL}"; \
+    fi && \
+    if [[ -n "${PIP_TRUSTED_HOST}" ]]; then \
+      python3 -m pip config set global.trusted-host "${PIP_TRUSTED_HOST}"; \
+    fi
 
-# 升级 pip
-RUN python3 -m pip install --upgrade pip setuptools wheel
+RUN python3 -m pip install --upgrade pip setuptools wheel build && \
+    python3 -m pip install --no-cache-dir --pre ${TORCH_PACKAGES} --index-url ${PYTORCH_INDEX_URL} && \
+    if [[ "${INSTALL_TORCHCODEC}" == "1" ]]; then \
+        python3 -m pip install --no-cache-dir --pre torchcodec --index-url ${PYTORCH_INDEX_URL}; \
+    fi && \
+    python3 -m pip install --no-cache-dir ${EXTRA_PYTHON_PACKAGES}
 
-# 安装 PyTorch nightly (支持 CUDA 12.8 和 sm_120)
-RUN pip3 install --pre torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/nightly/cu128
-
-# 安装 torchcodec (必须使用 PyTorch 官方源)
-RUN pip3 install --pre torchcodec \
-    --index-url https://download.pytorch.org/whl/nightly/cu128
-
-# 安装其他常用 Python 包 (使用清华源)
-RUN pip3 install --no-cache-dir \
-    numpy \
-    scipy \
-    pandas \
-    matplotlib \
-    tqdm \
-    tensorboard \
-    pyyaml \
-    soundfile \
-    librosa \
-    onnxscript \
-    safetensors \
-    pybind11
-
-# 设置工作目录
 WORKDIR /workspace
 
-# 设置 TORCH_CUDA_ARCH_LIST 以支持编译
-ENV TORCH_CUDA_ARCH_LIST="6.0;7.0;7.5;8.0;8.6;8.9;9.0;12.0"
+RUN python3 - <<'PY'
+import torch
+print(f"PyTorch: {torch.__version__}")
+try:
+    import torchaudio
+    print(f"torchaudio: {torchaudio.__version__}")
+except Exception as exc:
+    print(f"torchaudio import skipped: {exc}")
+PY
 
-# 验证安装
-RUN python3 -c "import torch; print(f'PyTorch: {torch.__version__}')" && \
-    python3 -c "import torchaudio; print(f'torchaudio: {torchaudio.__version__}')" && \
-    python3 -c "from torchcodec.decoders import AudioDecoder; print('torchcodec: OK')"
+RUN if [[ "${INSTALL_TORCHCODEC}" == "1" ]]; then \
+      python3 -c "from torchcodec.decoders import AudioDecoder; print('torchcodec: OK')"; \
+    fi
 
 CMD ["bash"]
