@@ -38,9 +38,8 @@ make -j$(nproc)
 ```
 
 编译完成后会生成：
-- `pytorch/lib/libgru_quant_static.a` - 静态库
 - `pytorch/lib/libgru_quant_shared.so` - 动态库
-- `gru_example` - C++ 示例程序
+- `build/gru_example` - C++ 示例程序
 
 ### 2. 安装 Python 扩展
 
@@ -61,8 +60,7 @@ pip install -e . --no-deps --no-build-isolation
 ./build/gru_example
 
 # Python 测试
-cd pytorch
-python test_quant_gru.py
+python pytorch/test_quant_gru.py
 ```
 
 ---
@@ -200,99 +198,6 @@ for op_name, config in all_configs.items():
     print(f"{op_name}: {config['bitwidth']}bit")
 ```
 
-### ONNX 导出
-
-`QuantGRU` 通过 `export_mode` 属性切换到纯 PyTorch 实现，使模型可被 ONNX 追踪导出。
-
-#### 导出模式工作原理
-
-```
-forward()
-  ├─ export_mode=False (默认) → CUDA C++ 实现（高性能推理）
-  └─ export_mode=True         → 纯 PyTorch 实现（可 ONNX 追踪）
-                                   ├─ export_format='float' → 浮点计算
-                                   └─ export_format='qdq'   → QDQ 伪量化
-```
-
-#### 浮点模型导出（默认）
-
-```python
-from quant_gru import QuantGRU
-import torch
-
-gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
-gru.eval()
-
-# 启用导出模式（默认使用浮点格式）
-gru.export_mode = True
-
-# 导出 ONNX
-dummy_input = torch.randn(1, 50, 64).cuda()
-torch.onnx.export(
-    gru, dummy_input, "gru_float.onnx",
-    input_names=['input'],
-    output_names=['output', 'hidden'],
-    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
-                  'output': {0: 'batch', 1: 'seq_len'}},
-    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
-)
-
-gru.export_mode = False  # 恢复 CUDA 模式
-```
-
-#### 量化模型导出（QDQ 格式）
-
-QDQ（Quantize-Dequantize）格式在关键计算点插入伪量化操作，推理引擎（如 TensorRT、ONNX Runtime）会自动识别并优化为真正的量化算子。
-
-```python
-from quant_gru import QuantGRU
-import torch
-
-# 1. 创建并校准模型
-gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
-gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
-
-gru.calibrating = True
-for batch in calibration_loader:
-    gru(batch.cuda())
-gru.calibrating = False
-gru.finalize_calibration()  # 可选，导出时会自动调用
-
-# 2. 启用导出模式，指定 QDQ 格式
-gru.export_mode = True
-gru.export_format = 'qdq'  # 使用 QDQ 伪量化格式
-gru.eval()
-
-# 3. 导出 ONNX
-dummy_input = torch.randn(1, 50, 64).cuda()
-torch.onnx.export(
-    gru, dummy_input, "gru_quantized.onnx",
-    input_names=['input'],
-    output_names=['output', 'hidden'],
-    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
-                  'output': {0: 'batch', 1: 'seq_len'}},
-    dynamo=False
-)
-
-gru.export_mode = False  # 恢复 CUDA 模式
-```
-
-#### 导出格式对比
-
-| `export_format` | 说明 | 适用场景 | 量化参数要求 |
-|-----------------|------|----------|--------------|
-| `'float'` | 浮点格式（默认） | 非量化模型、通用部署 | 无 |
-| `'qdq'` | QDQ 伪量化格式 | 量化模型部署（TensorRT、ONNX Runtime） | 需先校准 |
-
-#### 注意事项
-
-1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
-2. **QDQ 格式需要先完成校准**：先设置 `calibrating=True` 并调用 `forward()`，再调用 `finalize_calibration()`
-3. **导出后恢复 CUDA 模式**：设置 `export_mode = False` 以恢复高性能推理
-4. **PyTorch 2.x 兼容**：使用 `dynamo=False` 参数以使用传统 TorchScript 导出
-
-> 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
-
 ## ⚙️ 量化配置
 
 ### 量化位宽配置文件格式
@@ -306,8 +211,8 @@ gru.export_mode = False  # 恢复 CUDA 模式
       "disable_quantization": false
     },
     "operator_config": {
-      "input": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
-      "output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": false },
+      "input": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
+      "output": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
       "weight_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
       "weight_hh": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
       "bias_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
@@ -372,9 +277,19 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 ## 📦 ONNX 导出
 
-### 导出模式
+`QuantGRU` 通过 `export_mode` 切换到纯 PyTorch 实现，使模型可被 ONNX 追踪；通过 `export_format` 选择浮点或 QDQ 伪量化路径。
 
-`QuantGRU` 通过 `export_mode` 属性切换到纯 PyTorch 实现，使模型可被 ONNX 追踪：
+### 导出模式工作原理
+
+```
+forward()
+  ├─ export_mode=False (默认) → CUDA C++ 实现（高性能推理）
+  └─ export_mode=True         → 纯 PyTorch 实现（可 ONNX 追踪）
+                                   ├─ export_format='float' → 浮点计算
+                                   └─ export_format='qdq'   → QDQ 伪量化
+```
+
+### 导出模式
 
 | 属性 | 说明 |
 |------|------|
@@ -383,7 +298,7 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 ### 导出格式选择
 
-通过 `export_format` 属性设置具体的导出格式：
+通过 `export_format` 设置具体导出格式：
 
 | 格式 | 说明 | 适用场景 | 量化参数要求 |
 |------|------|----------|--------------|
@@ -391,17 +306,83 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 | `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） | 需先校准 |
 
 ```python
-# 设置导出格式
+gru.export_mode = True           # ONNX 导出前必须开启
 gru.export_format = 'float'      # 默认，浮点
 gru.export_format = 'qdq'        # 量化模型推荐（需先校准）
 ```
 
 ### QDQ 格式说明
 
-QDQ 格式通过在关键计算点插入伪量化（Fake Quantize）操作实现：
+QDQ 在关键计算点插入伪量化（Fake Quantize）操作：
+
 - **与 CUDA 一致**：量化参数（scale/zero_point）与 CUDA 端完全一致
 - **ONNX 兼容**：使用标准 PyTorch 算子，推理引擎会自动识别并优化
 - **Per-channel 量化**：权重支持 per-channel 量化以保持精度
+
+### 浮点模型导出（默认）
+
+```python
+from quant_gru import QuantGRU
+import torch
+
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru.eval()
+
+gru.export_mode = True
+
+dummy_input = torch.randn(1, 50, 64).cuda()
+torch.onnx.export(
+    gru, dummy_input, "gru_float.onnx",
+    input_names=['input'],
+    output_names=['output', 'hidden'],
+    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
+                  'output': {0: 'batch', 1: 'seq_len'}},
+    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
+)
+
+gru.export_mode = False
+```
+
+### 量化模型导出（QDQ 格式）
+
+```python
+from quant_gru import QuantGRU
+import torch
+
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
+
+gru.calibrating = True
+for batch in calibration_loader:
+    gru(batch.cuda())
+gru.calibrating = False
+gru.finalize_calibration()  # 可选，导出时会自动调用
+
+gru.export_mode = True
+gru.export_format = 'qdq'
+gru.eval()
+
+dummy_input = torch.randn(1, 50, 64).cuda()
+torch.onnx.export(
+    gru, dummy_input, "gru_quantized.onnx",
+    input_names=['input'],
+    output_names=['output', 'hidden'],
+    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
+                  'output': {0: 'batch', 1: 'seq_len'}},
+    dynamo=False
+)
+
+gru.export_mode = False
+```
+
+### 注意事项
+
+1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
+2. **QDQ 格式需要先完成校准**：先设置 `calibrating=True` 并调用 `forward()`，再调用 `finalize_calibration()`
+3. **导出后恢复 CUDA 模式**：设置 `export_mode = False` 以恢复高性能推理
+4. **PyTorch 2.x 兼容**：使用 `dynamo=False` 以使用传统 TorchScript 导出
+
+> 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
 ## 📝 API 参考
 
@@ -421,11 +402,11 @@ class QuantGRU(nn.Module):
         use_quantization: bool = False # 是否启用量化
     )
     
-    # 重要属性（可在创建后设置）
-    gru.calibrating = True           # 校准模式（forward 时收集校准数据）
-    gru.use_quantization = True      # 是否启用量化
-    gru.calibration_method = 'sqnr'  # 校准方法（默认）
-    gru.export_mode = True           # ONNX 导出模式
+    # 重要属性默认值（可在创建后修改）
+    gru.calibrating = False            # 默认关闭；True 时 forward 收集校准数据
+    gru.use_quantization = False       # 默认关闭量化推理
+    gru.calibration_method = 'minmax' # 默认 MinMax；可选 'sqnr' / 'percentile'
+    gru.export_mode = False            # 默认 CUDA 路径；导出 ONNX 时设为 True
 ```
 
 ### 主要属性
@@ -464,17 +445,17 @@ quant-gru-pytorch/
 ├── include/                    # C++/CUDA 头文件
 │   ├── gru.h                   # 浮点 GRU 前向/反向传播类
 │   ├── gru_quant.h             # 量化 GRU 前向传播类
-│   ├── gru_interface.hpp       # 统一接口层（校准、量化、前向传播）
-│   ├── quantize_bitwidth_config.hpp  # 量化位宽配置
+│   ├── gru_interface.h         # 统一接口层（校准、量化、前向传播）
+│   ├── quantize_bitwidth_config.h    # 量化位宽配置
 │   ├── quantize_ops_helper.h   # 量化操作（CPU/GPU 共用）
-│   ├── histogram_collector.hpp # 直方图收集器（AIMET 风格校准）
-│   ├── pot_sqnr_calibrator.hpp # SQNR 校准器
+│   ├── histogram_collector.h   # 直方图收集器（AIMET 风格校准）
+│   ├── pot_sqnr_calibrator.h   # SQNR 校准器
 │   └── ...
 ├── src/                        # C++/CUDA 源文件
 │   ├── gru_forward_gpu.cu      # 浮点前向传播 GPU 实现
 │   ├── gru_forward_gpu_quant.cu # 量化前向传播 GPU 实现
 │   ├── gru_backward_gpu.cu     # 反向传播 GPU 实现
-│   ├── gru_interface.cpp       # 接口实现
+│   ├── gru_interface.cc        # 接口实现
 │   └── quantize_ops.cu         # 量化操作实现
 ├── pytorch/                    # PyTorch 绑定和 Python 接口
 │   ├── quant_gru.py            # 量化 GRU 类（含 CUDA 和纯 PyTorch 双实现）
