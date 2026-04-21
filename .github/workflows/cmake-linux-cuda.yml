@@ -31,12 +31,15 @@ jobs:
     permissions:
       contents: read
       packages: read
-    env:
-      CI_IMAGE: ghcr.io/${{ github.repository_owner }}/cuda-pytorch-ci:py310-cu128-nightly
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Normalize GHCR image name
+        id: image
+        run: |
+          echo "repo=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/cuda-pytorch-ci" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -46,14 +49,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull prebuilt CI image
-        run: docker pull "$CI_IMAGE"
+        run: docker pull "${{ steps.image.outputs.repo }}:py310-cu128-nightly"
 
       - name: Configure and build native library
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            "$CI_IMAGE" \
+            "${{ steps.image.outputs.repo }}:py310-cu128-nightly" \
             bash -lc '
               set -euxo pipefail
               rm -rf build
@@ -69,7 +72,7 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace/pytorch \
-            "$CI_IMAGE" \
+            "${{ steps.image.outputs.repo }}:py310-cu128-nightly" \
             bash -lc '
               set -euxo pipefail
               rm -rf build dist *.egg-info
