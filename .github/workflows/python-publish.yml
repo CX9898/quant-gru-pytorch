@@ -1,0 +1,106 @@
+name: Python Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_to_pypi:
+        description: "Publish built distributions to PyPI"
+        required: false
+        default: false
+        type: boolean
+  release:
+    types:
+      - published
+
+jobs:
+  build-distributions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Normalize GHCR image name
+        id: image
+        run: |
+          echo "repo=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/cuda-pytorch-ci" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull prebuilt CI image
+        run: docker pull "${{ steps.image.outputs.repo }}:py310-cu128-nightly"
+
+      - name: Build native library and Python distributions
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            "${{ steps.image.outputs.repo }}:py310-cu128-nightly" \
+            bash -lc '
+              set -euxo pipefail
+              rm -rf build
+              mkdir -p build
+              cd build
+              cmake ..
+              cmake --build . --parallel
+              test -f ../pytorch/lib/libgru_quant_shared.so
+
+              cd ../pytorch
+              python -m pip install --upgrade build twine
+              rm -rf dist build *.egg-info
+              python -m build --sdist --wheel
+              python -m twine check dist/*
+            '
+
+      - name: Validate wheel installation in isolated target directory
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            "${{ steps.image.outputs.repo }}:py310-cu128-nightly" \
+            bash -lc '
+              set -euxo pipefail
+              rm -rf /tmp/quant_gru_wheel_test
+              mkdir -p /tmp/quant_gru_wheel_test
+              python -m pip install --no-deps --target /tmp/quant_gru_wheel_test pytorch/dist/*.whl
+              cd /tmp
+              PYTHONPATH=/tmp/quant_gru_wheel_test python -c "import quant_gru; print(\"Imported wheel package:\", quant_gru.__name__)"
+            '
+
+      - name: Upload Python distributions
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-dist-linux-cu128
+          path: pytorch/dist/*
+          if-no-files-found: error
+
+  publish-to-pypi:
+    needs: build-distributions
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'release' || github.event.inputs.publish_to_pypi == 'true') &&
+      secrets.PYPI_API_TOKEN != ''
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download built distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: python-dist-linux-cu128
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
