@@ -47,6 +47,8 @@ jobs:
             "${{ steps.image.outputs.repo }}:py310-cu128-nightly" \
             bash -lc '
               set -euxo pipefail
+              python --version
+              python -c "import torch; print(f\"PyTorch: {torch.__version__}\"); print(f\"torch.version.cuda: {torch.version.cuda}\")"
               rm -rf build
               mkdir -p build
               cd build
@@ -79,7 +81,7 @@ jobs:
       - name: Upload Python distributions
         uses: actions/upload-artifact@v6
         with:
-          name: python-dist-linux-cu128
+          name: python-dist-linux-py310-cu128
           path: pytorch/dist/*
           if-no-files-found: error
 
@@ -87,20 +89,27 @@ jobs:
     needs: build-distributions
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'release' || github.event.inputs.publish_to_pypi == 'true') &&
-      secrets.PYPI_API_TOKEN != ''
+      github.event_name == 'release' || github.event.inputs.publish_to_pypi == 'true'
     permissions:
       id-token: write
+    env:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
 
     steps:
+      - name: Ensure PyPI token is configured
+        if: ${{ env.PYPI_API_TOKEN == '' }}
+        run: |
+          echo "PYPI_API_TOKEN is not configured for this repository."
+          exit 1
+
       - name: Download built distributions
         uses: actions/download-artifact@v7
         with:
-          name: python-dist-linux-cu128
+          name: python-dist-linux-py310-cu128
           path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          password: ${{ env.PYPI_API_TOKEN }}
           packages-dir: dist
