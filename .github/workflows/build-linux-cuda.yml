@@ -1,4 +1,4 @@
-name: CMake Linux CUDA
+name: Build Linux CUDA
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
       - "example/**"
       - "pytorch/**"
       - "docker/Dockerfile"
-      - ".github/workflows/cmake-linux-cuda.yml"
+      - ".github/workflows/build-linux-cuda.yml"
   pull_request:
     paths:
       - "CMakeLists.txt"
@@ -21,7 +21,7 @@ on:
       - "example/**"
       - "pytorch/**"
       - "docker/Dockerfile"
-      - ".github/workflows/cmake-linux-cuda.yml"
+      - ".github/workflows/build-linux-cuda.yml"
   workflow_dispatch:
 
 jobs:
@@ -78,7 +78,7 @@ jobs:
               rm -rf build dist *.egg-info
               rm -f ./*.so
               python -m pip install -e . --no-deps --no-build-isolation
-              python -c "import quant_gru; print('Imported:', quant_gru.__name__)"
+              python -c "import quant_gru; print('"'"'Imported:'"'"', quant_gru.__name__)"
             '
 
       - name: Upload native build artifacts
