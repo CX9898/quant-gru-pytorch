@@ -1,0 +1,91 @@
+name: CMake Linux CUDA
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "example/**"
+      - "pytorch/**"
+      - "docker/Dockerfile"
+      - ".github/workflows/cmake-linux-cuda.yml"
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "example/**"
+      - "pytorch/**"
+      - "docker/Dockerfile"
+      - ".github/workflows/cmake-linux-cuda.yml"
+  workflow_dispatch:
+
+jobs:
+  build-linux-cuda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CI_IMAGE: ghcr.io/${{ github.repository_owner }}/cuda-pytorch-ci:py310-cu128-nightly
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull prebuilt CI image
+        run: docker pull "$CI_IMAGE"
+
+      - name: Configure and build native library
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            "$CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+              rm -rf build
+              mkdir -p build
+              cd build
+              cmake ..
+              cmake --build . --parallel
+              test -f ../pytorch/lib/libgru_quant_shared.so
+            '
+
+      - name: Build Python extension against prebuilt shared library
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace/pytorch \
+            "$CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+              rm -rf build dist *.egg-info
+              rm -f ./*.so
+              python -m pip install -e . --no-deps --no-build-isolation
+              python - <<'"'"'PY'"'"'
+import quant_gru
+print("Imported:", quant_gru.__name__)
+PY
+            '
+
+      - name: Upload native build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-cuda-artifacts
+          path: |
+            build/gru_example
+            pytorch/lib/libgru_quant_shared.so
+          if-no-files-found: error
