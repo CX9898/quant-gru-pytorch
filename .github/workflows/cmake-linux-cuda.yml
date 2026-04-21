@@ -75,10 +75,7 @@ jobs:
               rm -rf build dist *.egg-info
               rm -f ./*.so
               python -m pip install -e . --no-deps --no-build-isolation
-              python - <<'"'"'PY'"'"'
-import quant_gru
-print("Imported:", quant_gru.__name__)
-PY
+              python -c "import quant_gru; print('Imported:', quant_gru.__name__)"
             '
 
       - name: Upload native build artifacts
