@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 
+#include <cmath>
 #include <iostream>
 
 #include "gru_interface.h"
@@ -102,6 +103,7 @@ struct OperatorQuantConfigPy {
     int R_granularity_ = 2;
     int bw_granularity_ = 2;
     int br_granularity_ = 2;
+    bool usePOT2_ = true;
 
     // 方法声明（实现在文件末尾）
     OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
@@ -132,53 +134,53 @@ struct GRUQuantizationRangesPy {
 struct GRUQuantParamsPy {
     int hidden_;
     // 基础参数
-    int8_t shift_x_;
+    float scale_x_;
     int32_t zp_x_;
-    int8_t shift_h_;
+    float scale_h_;
     int32_t zp_h_;
     // 权重参数（per-channel）
-    std::vector<int8_t> shift_W_;
-    std::vector<int8_t> shift_R_;
-    std::vector<int8_t> shift_bw_;
-    std::vector<int8_t> shift_br_;
+    std::vector<float> scale_W_;
+    std::vector<float> scale_R_;
+    std::vector<float> scale_bw_;
+    std::vector<float> scale_br_;
     
     // Per-Tensor 参数（Python 绑定需要访问）
-    int8_t shift_W_tensor_ = 0;
-    int8_t shift_R_tensor_ = 0;
-    int8_t shift_bw_tensor_ = 0;
-    int8_t shift_br_tensor_ = 0;
+    float scale_W_tensor_ = 0.0f;
+    float scale_R_tensor_ = 0.0f;
+    float scale_bw_tensor_ = 0.0f;
+    float scale_br_tensor_ = 0.0f;
     
     // Per-Gate 参数（Python 绑定需要访问）
-    std::array<int8_t, 3> shift_W_gate_ = {0, 0, 0};
-    std::array<int8_t, 3> shift_R_gate_ = {0, 0, 0};
-    std::array<int8_t, 3> shift_bw_gate_ = {0, 0, 0};
-    std::array<int8_t, 3> shift_br_gate_ = {0, 0, 0};
+    std::array<float, 3> scale_W_gate_ = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> scale_R_gate_ = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> scale_bw_gate_ = {0.0f, 0.0f, 0.0f};
+    std::array<float, 3> scale_br_gate_ = {0.0f, 0.0f, 0.0f};
     // Linear 输出参数 (GEMM+bias)
-    int8_t shift_weight_ih_linear_;
+    float scale_weight_ih_linear_;
     int32_t zp_weight_ih_linear_;
-    int8_t shift_weight_hh_linear_;
+    float scale_weight_hh_linear_;
     int32_t zp_weight_hh_linear_;
     // 门激活函数输入参数（pre-activation）
-    int8_t shift_update_gate_input_;
+    float scale_update_gate_input_;
     int32_t zp_update_gate_input_;
-    int8_t shift_reset_gate_input_;
+    float scale_reset_gate_input_;
     int32_t zp_reset_gate_input_;
-    int8_t shift_new_gate_input_;
+    float scale_new_gate_input_;
     int32_t zp_new_gate_input_;
     // 门激活函数输出参数（post-activation）
-    int8_t shift_update_gate_output_;
+    float scale_update_gate_output_;
     int32_t zp_update_gate_output_;
-    int8_t shift_reset_gate_output_;
+    float scale_reset_gate_output_;
     int32_t zp_reset_gate_output_;
-    int8_t shift_new_gate_output_;
+    float scale_new_gate_output_;
     int32_t zp_new_gate_output_;
     // 中间计算参数
-    int8_t shift_mul_reset_hidden_;
+    float scale_mul_reset_hidden_;
     int32_t zp_mul_reset_hidden_;
     // 隐状态更新参数
-    int8_t shift_mul_new_contribution_;
+    float scale_mul_new_contribution_;
     int32_t zp_mul_new_contribution_;
-    int8_t shift_mul_old_contribution_;
+    float scale_mul_old_contribution_;
     int32_t zp_mul_old_contribution_;
 
     // ⚠️ 关键字段：位宽配置必须在 Python 和 C++ 之间正确传递
@@ -833,6 +835,7 @@ OperatorQuantConfig OperatorQuantConfigPy::to_cpp() const {
     cfg.R_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(R_granularity_);
     cfg.bw_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(bw_granularity_);
     cfg.br_granularity_ = static_cast<OperatorQuantConfig::QuantizationGranularity>(br_granularity_);
+    cfg.usePOT2_ = usePOT2_;
     return cfg;
 }
 
@@ -897,63 +900,91 @@ void OperatorQuantConfigPy::from_cpp(const OperatorQuantConfig &cfg) {
     R_granularity_ = static_cast<int>(cfg.R_granularity_);
     bw_granularity_ = static_cast<int>(cfg.bw_granularity_);
     br_granularity_ = static_cast<int>(cfg.br_granularity_);
+    usePOT2_ = cfg.usePOT2_;
 }
 
 // ============================================================================
 //                    GRUQuantParamsPy 方法实现
 // ============================================================================
 
+namespace {
+inline float decode_scale_for_python(const FixedPointScale &fixed, int8_t shift) {
+    if (fixed.multiplier != 0) return decode_scale(fixed);
+    return exp2_scale(shift);
+}
+
+inline int8_t encode_shift_from_scale(float scale) {
+    if (!(scale > 0.0f)) {
+        throw std::invalid_argument("scale must be > 0");
+    }
+    return static_cast<int8_t>(round_f(-std::log2(scale)));
+}
+
+inline FixedPointScale encode_fixed_from_scale(float scale, bool usePOT2) {
+    if (usePOT2) {
+        return FixedPointScale{1, encode_shift_from_scale(scale)};
+    }
+    return encodeMShift(scale);
+}
+}  // namespace
+
 // 从 C++ 结构体转换
 void GRUQuantParamsPy::from_cpp(const GRUQuantParams &cpp_params) {
     hidden_ = cpp_params.hidden_;
     // 基础参数
-    shift_x_ = cpp_params.shift_x_;
+    scale_x_ = decode_scale_for_python(cpp_params.fixed_scale_x_, cpp_params.shift_x_);
     zp_x_ = cpp_params.zp_x_;
-    shift_h_ = cpp_params.shift_h_;
+    scale_h_ = decode_scale_for_python(cpp_params.fixed_scale_h_, cpp_params.shift_h_);
     zp_h_ = cpp_params.zp_h_;
     // 权重参数
-    shift_W_ = cpp_params.shift_W_;
-    shift_R_ = cpp_params.shift_R_;
-    shift_bw_ = cpp_params.shift_bw_;
-    shift_br_ = cpp_params.shift_br_;
+    scale_W_.resize(cpp_params.shift_W_.size());
+    scale_R_.resize(cpp_params.shift_R_.size());
+    scale_bw_.resize(cpp_params.shift_bw_.size());
+    scale_br_.resize(cpp_params.shift_br_.size());
+    for (size_t i = 0; i < scale_W_.size(); ++i) scale_W_[i] = decode_scale_for_python(cpp_params.fixed_scale_W_[i], cpp_params.shift_W_[i]);
+    for (size_t i = 0; i < scale_R_.size(); ++i) scale_R_[i] = decode_scale_for_python(cpp_params.fixed_scale_R_[i], cpp_params.shift_R_[i]);
+    for (size_t i = 0; i < scale_bw_.size(); ++i) scale_bw_[i] = decode_scale_for_python(cpp_params.fixed_scale_bw_[i], cpp_params.shift_bw_[i]);
+    for (size_t i = 0; i < scale_br_.size(); ++i) scale_br_[i] = decode_scale_for_python(cpp_params.fixed_scale_br_[i], cpp_params.shift_br_[i]);
     
     // Per-Tensor 参数
-    shift_W_tensor_ = cpp_params.shift_W_tensor_;
-    shift_R_tensor_ = cpp_params.shift_R_tensor_;
-    shift_bw_tensor_ = cpp_params.shift_bw_tensor_;
-    shift_br_tensor_ = cpp_params.shift_br_tensor_;
+    scale_W_tensor_ = exp2_scale(cpp_params.shift_W_tensor_);
+    scale_R_tensor_ = exp2_scale(cpp_params.shift_R_tensor_);
+    scale_bw_tensor_ = exp2_scale(cpp_params.shift_bw_tensor_);
+    scale_br_tensor_ = exp2_scale(cpp_params.shift_br_tensor_);
     
     // Per-Gate 参数
-    shift_W_gate_ = cpp_params.shift_W_gate_;
-    shift_R_gate_ = cpp_params.shift_R_gate_;
-    shift_bw_gate_ = cpp_params.shift_bw_gate_;
-    shift_br_gate_ = cpp_params.shift_br_gate_;
+    for (int i = 0; i < 3; ++i) {
+        scale_W_gate_[i] = exp2_scale(cpp_params.shift_W_gate_[i]);
+        scale_R_gate_[i] = exp2_scale(cpp_params.shift_R_gate_[i]);
+        scale_bw_gate_[i] = exp2_scale(cpp_params.shift_bw_gate_[i]);
+        scale_br_gate_[i] = exp2_scale(cpp_params.shift_br_gate_[i]);
+    }
     // Linear 输出参数
-    shift_weight_ih_linear_ = cpp_params.shift_weight_ih_linear_;
+    scale_weight_ih_linear_ = decode_scale_for_python(cpp_params.fixed_scale_weight_ih_linear_, cpp_params.shift_weight_ih_linear_);
     zp_weight_ih_linear_ = cpp_params.zp_weight_ih_linear_;
-    shift_weight_hh_linear_ = cpp_params.shift_weight_hh_linear_;
+    scale_weight_hh_linear_ = decode_scale_for_python(cpp_params.fixed_scale_weight_hh_linear_, cpp_params.shift_weight_hh_linear_);
     zp_weight_hh_linear_ = cpp_params.zp_weight_hh_linear_;
     // 门激活函数输入参数
-    shift_update_gate_input_ = cpp_params.shift_update_gate_input_;
+    scale_update_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_update_gate_input_, cpp_params.shift_update_gate_input_);
     zp_update_gate_input_ = cpp_params.zp_update_gate_input_;
-    shift_reset_gate_input_ = cpp_params.shift_reset_gate_input_;
+    scale_reset_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_reset_gate_input_, cpp_params.shift_reset_gate_input_);
     zp_reset_gate_input_ = cpp_params.zp_reset_gate_input_;
-    shift_new_gate_input_ = cpp_params.shift_new_gate_input_;
+    scale_new_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_new_gate_input_, cpp_params.shift_new_gate_input_);
     zp_new_gate_input_ = cpp_params.zp_new_gate_input_;
     // 门激活函数输出参数
-    shift_update_gate_output_ = cpp_params.shift_update_gate_output_;
+    scale_update_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_update_gate_output_, cpp_params.shift_update_gate_output_);
     zp_update_gate_output_ = cpp_params.zp_update_gate_output_;
-    shift_reset_gate_output_ = cpp_params.shift_reset_gate_output_;
+    scale_reset_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_reset_gate_output_, cpp_params.shift_reset_gate_output_);
     zp_reset_gate_output_ = cpp_params.zp_reset_gate_output_;
-    shift_new_gate_output_ = cpp_params.shift_new_gate_output_;
+    scale_new_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_new_gate_output_, cpp_params.shift_new_gate_output_);
     zp_new_gate_output_ = cpp_params.zp_new_gate_output_;
     // 中间计算参数
-    shift_mul_reset_hidden_ = cpp_params.shift_mul_reset_hidden_;
+    scale_mul_reset_hidden_ = decode_scale_for_python(cpp_params.fixed_scale_mul_reset_hidden_, cpp_params.shift_mul_reset_hidden_);
     zp_mul_reset_hidden_ = cpp_params.zp_mul_reset_hidden_;
     // 隐状态更新参数
-    shift_mul_new_contribution_ = cpp_params.shift_mul_new_contribution_;
+    scale_mul_new_contribution_ = decode_scale_for_python(cpp_params.fixed_scale_mul_new_contribution_, cpp_params.shift_mul_new_contribution_);
     zp_mul_new_contribution_ = cpp_params.zp_mul_new_contribution_;
-    shift_mul_old_contribution_ = cpp_params.shift_mul_old_contribution_;
+    scale_mul_old_contribution_ = decode_scale_for_python(cpp_params.fixed_scale_mul_old_contribution_, cpp_params.shift_mul_old_contribution_);
     zp_mul_old_contribution_ = cpp_params.zp_mul_old_contribution_;
 
     // ⚠️ 关键：复制位宽配置
@@ -965,53 +996,88 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     GRUQuantParams cpp_params;
     cpp_params.hidden_ = hidden_;
     // 基础参数
-    cpp_params.shift_x_ = shift_x_;
+    cpp_params.shift_x_ = encode_shift_from_scale(scale_x_);
+    cpp_params.fixed_scale_x_ = encode_fixed_from_scale(scale_x_, bitwidth_config_.usePOT2_);
     cpp_params.zp_x_ = zp_x_;
-    cpp_params.shift_h_ = shift_h_;
+    cpp_params.shift_h_ = encode_shift_from_scale(scale_h_);
+    cpp_params.fixed_scale_h_ = encode_fixed_from_scale(scale_h_, bitwidth_config_.usePOT2_);
     cpp_params.zp_h_ = zp_h_;
     // 权重参数
-    cpp_params.shift_W_ = shift_W_;
-    cpp_params.shift_R_ = shift_R_;
-    cpp_params.shift_bw_ = shift_bw_;
-    cpp_params.shift_br_ = shift_br_;
+    cpp_params.shift_W_.resize(scale_W_.size());
+    cpp_params.shift_R_.resize(scale_R_.size());
+    cpp_params.shift_bw_.resize(scale_bw_.size());
+    cpp_params.shift_br_.resize(scale_br_.size());
+    cpp_params.fixed_scale_W_.resize(scale_W_.size());
+    cpp_params.fixed_scale_R_.resize(scale_R_.size());
+    cpp_params.fixed_scale_bw_.resize(scale_bw_.size());
+    cpp_params.fixed_scale_br_.resize(scale_br_.size());
+    for (size_t i = 0; i < scale_W_.size(); ++i) {
+        cpp_params.shift_W_[i] = encode_shift_from_scale(scale_W_[i]);
+        cpp_params.fixed_scale_W_[i] = encode_fixed_from_scale(scale_W_[i], bitwidth_config_.usePOT2_);
+    }
+    for (size_t i = 0; i < scale_R_.size(); ++i) {
+        cpp_params.shift_R_[i] = encode_shift_from_scale(scale_R_[i]);
+        cpp_params.fixed_scale_R_[i] = encode_fixed_from_scale(scale_R_[i], bitwidth_config_.usePOT2_);
+    }
+    for (size_t i = 0; i < scale_bw_.size(); ++i) {
+        cpp_params.shift_bw_[i] = encode_shift_from_scale(scale_bw_[i]);
+        cpp_params.fixed_scale_bw_[i] = encode_fixed_from_scale(scale_bw_[i], bitwidth_config_.usePOT2_);
+    }
+    for (size_t i = 0; i < scale_br_.size(); ++i) {
+        cpp_params.shift_br_[i] = encode_shift_from_scale(scale_br_[i]);
+        cpp_params.fixed_scale_br_[i] = encode_fixed_from_scale(scale_br_[i], bitwidth_config_.usePOT2_);
+    }
     
     // Per-Tensor 参数
-    cpp_params.shift_W_tensor_ = shift_W_tensor_;
-    cpp_params.shift_R_tensor_ = shift_R_tensor_;
-    cpp_params.shift_bw_tensor_ = shift_bw_tensor_;
-    cpp_params.shift_br_tensor_ = shift_br_tensor_;
+    cpp_params.shift_W_tensor_ = encode_shift_from_scale(scale_W_tensor_);
+    cpp_params.shift_R_tensor_ = encode_shift_from_scale(scale_R_tensor_);
+    cpp_params.shift_bw_tensor_ = encode_shift_from_scale(scale_bw_tensor_);
+    cpp_params.shift_br_tensor_ = encode_shift_from_scale(scale_br_tensor_);
     
     // Per-Gate 参数
-    cpp_params.shift_W_gate_ = shift_W_gate_;
-    cpp_params.shift_R_gate_ = shift_R_gate_;
-    cpp_params.shift_bw_gate_ = shift_bw_gate_;
-    cpp_params.shift_br_gate_ = shift_br_gate_;
+    for (int i = 0; i < 3; ++i) {
+        cpp_params.shift_W_gate_[i] = encode_shift_from_scale(scale_W_gate_[i]);
+        cpp_params.shift_R_gate_[i] = encode_shift_from_scale(scale_R_gate_[i]);
+        cpp_params.shift_bw_gate_[i] = encode_shift_from_scale(scale_bw_gate_[i]);
+        cpp_params.shift_br_gate_[i] = encode_shift_from_scale(scale_br_gate_[i]);
+    }
     // Linear 输出参数
-    cpp_params.shift_weight_ih_linear_ = shift_weight_ih_linear_;
+    cpp_params.shift_weight_ih_linear_ = encode_shift_from_scale(scale_weight_ih_linear_);
+    cpp_params.fixed_scale_weight_ih_linear_ = encode_fixed_from_scale(scale_weight_ih_linear_, bitwidth_config_.usePOT2_);
     cpp_params.zp_weight_ih_linear_ = zp_weight_ih_linear_;
-    cpp_params.shift_weight_hh_linear_ = shift_weight_hh_linear_;
+    cpp_params.shift_weight_hh_linear_ = encode_shift_from_scale(scale_weight_hh_linear_);
+    cpp_params.fixed_scale_weight_hh_linear_ = encode_fixed_from_scale(scale_weight_hh_linear_, bitwidth_config_.usePOT2_);
     cpp_params.zp_weight_hh_linear_ = zp_weight_hh_linear_;
     // 门激活函数输入参数
-    cpp_params.shift_update_gate_input_ = shift_update_gate_input_;
+    cpp_params.shift_update_gate_input_ = encode_shift_from_scale(scale_update_gate_input_);
+    cpp_params.fixed_scale_update_gate_input_ = encode_fixed_from_scale(scale_update_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_update_gate_input_ = zp_update_gate_input_;
-    cpp_params.shift_reset_gate_input_ = shift_reset_gate_input_;
+    cpp_params.shift_reset_gate_input_ = encode_shift_from_scale(scale_reset_gate_input_);
+    cpp_params.fixed_scale_reset_gate_input_ = encode_fixed_from_scale(scale_reset_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_reset_gate_input_ = zp_reset_gate_input_;
-    cpp_params.shift_new_gate_input_ = shift_new_gate_input_;
+    cpp_params.shift_new_gate_input_ = encode_shift_from_scale(scale_new_gate_input_);
+    cpp_params.fixed_scale_new_gate_input_ = encode_fixed_from_scale(scale_new_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_new_gate_input_ = zp_new_gate_input_;
     // 门激活函数输出参数
-    cpp_params.shift_update_gate_output_ = shift_update_gate_output_;
+    cpp_params.shift_update_gate_output_ = encode_shift_from_scale(scale_update_gate_output_);
+    cpp_params.fixed_scale_update_gate_output_ = encode_fixed_from_scale(scale_update_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_update_gate_output_ = zp_update_gate_output_;
-    cpp_params.shift_reset_gate_output_ = shift_reset_gate_output_;
+    cpp_params.shift_reset_gate_output_ = encode_shift_from_scale(scale_reset_gate_output_);
+    cpp_params.fixed_scale_reset_gate_output_ = encode_fixed_from_scale(scale_reset_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_reset_gate_output_ = zp_reset_gate_output_;
-    cpp_params.shift_new_gate_output_ = shift_new_gate_output_;
+    cpp_params.shift_new_gate_output_ = encode_shift_from_scale(scale_new_gate_output_);
+    cpp_params.fixed_scale_new_gate_output_ = encode_fixed_from_scale(scale_new_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_new_gate_output_ = zp_new_gate_output_;
     // 中间计算参数
-    cpp_params.shift_mul_reset_hidden_ = shift_mul_reset_hidden_;
+    cpp_params.shift_mul_reset_hidden_ = encode_shift_from_scale(scale_mul_reset_hidden_);
+    cpp_params.fixed_scale_mul_reset_hidden_ = encode_fixed_from_scale(scale_mul_reset_hidden_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_reset_hidden_ = zp_mul_reset_hidden_;
     // 隐状态更新参数
-    cpp_params.shift_mul_new_contribution_ = shift_mul_new_contribution_;
+    cpp_params.shift_mul_new_contribution_ = encode_shift_from_scale(scale_mul_new_contribution_);
+    cpp_params.fixed_scale_mul_new_contribution_ = encode_fixed_from_scale(scale_mul_new_contribution_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_new_contribution_ = zp_mul_new_contribution_;
-    cpp_params.shift_mul_old_contribution_ = shift_mul_old_contribution_;
+    cpp_params.shift_mul_old_contribution_ = encode_shift_from_scale(scale_mul_old_contribution_);
+    cpp_params.fixed_scale_mul_old_contribution_ = encode_fixed_from_scale(scale_mul_old_contribution_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_old_contribution_ = zp_mul_old_contribution_;
 
     // ⚠️ 关键：复制位宽配置
@@ -1145,58 +1211,59 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("W_granularity_", &OperatorQuantConfigPy::W_granularity_)
         .def_readwrite("R_granularity_", &OperatorQuantConfigPy::R_granularity_)
         .def_readwrite("bw_granularity_", &OperatorQuantConfigPy::bw_granularity_)
-        .def_readwrite("br_granularity_", &OperatorQuantConfigPy::br_granularity_);
+        .def_readwrite("br_granularity_", &OperatorQuantConfigPy::br_granularity_)
+        .def_readwrite("usePOT2_", &OperatorQuantConfigPy::usePOT2_);
 
     // GRUQuantParams 绑定
     py::class_<GRUQuantParamsPy>(m, "GRUQuantParams")
         .def(py::init<>())
         .def_readwrite("hidden_", &GRUQuantParamsPy::hidden_)
         // 基础参数
-        .def_readwrite("shift_x_", &GRUQuantParamsPy::shift_x_)
+        .def_readwrite("scale_x_", &GRUQuantParamsPy::scale_x_)
         .def_readwrite("zp_x_", &GRUQuantParamsPy::zp_x_)
-        .def_readwrite("shift_h_", &GRUQuantParamsPy::shift_h_)
+        .def_readwrite("scale_h_", &GRUQuantParamsPy::scale_h_)
         .def_readwrite("zp_h_", &GRUQuantParamsPy::zp_h_)
     // 权重参数（per-channel）
-    .def_readwrite("shift_W_", &GRUQuantParamsPy::shift_W_)
-    .def_readwrite("shift_R_", &GRUQuantParamsPy::shift_R_)
-    .def_readwrite("shift_bw_", &GRUQuantParamsPy::shift_bw_)
-    .def_readwrite("shift_br_", &GRUQuantParamsPy::shift_br_)
+    .def_readwrite("scale_W_", &GRUQuantParamsPy::scale_W_)
+    .def_readwrite("scale_R_", &GRUQuantParamsPy::scale_R_)
+    .def_readwrite("scale_bw_", &GRUQuantParamsPy::scale_bw_)
+    .def_readwrite("scale_br_", &GRUQuantParamsPy::scale_br_)
     // Per-Tensor 参数
-    .def_readwrite("shift_W_tensor_", &GRUQuantParamsPy::shift_W_tensor_)
-    .def_readwrite("shift_R_tensor_", &GRUQuantParamsPy::shift_R_tensor_)
-    .def_readwrite("shift_bw_tensor_", &GRUQuantParamsPy::shift_bw_tensor_)
-    .def_readwrite("shift_br_tensor_", &GRUQuantParamsPy::shift_br_tensor_)
+    .def_readwrite("scale_W_tensor_", &GRUQuantParamsPy::scale_W_tensor_)
+    .def_readwrite("scale_R_tensor_", &GRUQuantParamsPy::scale_R_tensor_)
+    .def_readwrite("scale_bw_tensor_", &GRUQuantParamsPy::scale_bw_tensor_)
+    .def_readwrite("scale_br_tensor_", &GRUQuantParamsPy::scale_br_tensor_)
     // Per-Gate 参数
-    .def_readwrite("shift_W_gate_", &GRUQuantParamsPy::shift_W_gate_)
-    .def_readwrite("shift_R_gate_", &GRUQuantParamsPy::shift_R_gate_)
-    .def_readwrite("shift_bw_gate_", &GRUQuantParamsPy::shift_bw_gate_)
-    .def_readwrite("shift_br_gate_", &GRUQuantParamsPy::shift_br_gate_)
+    .def_readwrite("scale_W_gate_", &GRUQuantParamsPy::scale_W_gate_)
+    .def_readwrite("scale_R_gate_", &GRUQuantParamsPy::scale_R_gate_)
+    .def_readwrite("scale_bw_gate_", &GRUQuantParamsPy::scale_bw_gate_)
+    .def_readwrite("scale_br_gate_", &GRUQuantParamsPy::scale_br_gate_)
         // Linear 输出参数 (GEMM+bias)
-        .def_readwrite("shift_weight_ih_linear_", &GRUQuantParamsPy::shift_weight_ih_linear_)
+        .def_readwrite("scale_weight_ih_linear_", &GRUQuantParamsPy::scale_weight_ih_linear_)
         .def_readwrite("zp_weight_ih_linear_", &GRUQuantParamsPy::zp_weight_ih_linear_)
-        .def_readwrite("shift_weight_hh_linear_", &GRUQuantParamsPy::shift_weight_hh_linear_)
+        .def_readwrite("scale_weight_hh_linear_", &GRUQuantParamsPy::scale_weight_hh_linear_)
         .def_readwrite("zp_weight_hh_linear_", &GRUQuantParamsPy::zp_weight_hh_linear_)
         // 门激活函数输入参数（pre-activation）
-        .def_readwrite("shift_update_gate_input_", &GRUQuantParamsPy::shift_update_gate_input_)
+        .def_readwrite("scale_update_gate_input_", &GRUQuantParamsPy::scale_update_gate_input_)
         .def_readwrite("zp_update_gate_input_", &GRUQuantParamsPy::zp_update_gate_input_)
-        .def_readwrite("shift_reset_gate_input_", &GRUQuantParamsPy::shift_reset_gate_input_)
+        .def_readwrite("scale_reset_gate_input_", &GRUQuantParamsPy::scale_reset_gate_input_)
         .def_readwrite("zp_reset_gate_input_", &GRUQuantParamsPy::zp_reset_gate_input_)
-        .def_readwrite("shift_new_gate_input_", &GRUQuantParamsPy::shift_new_gate_input_)
+        .def_readwrite("scale_new_gate_input_", &GRUQuantParamsPy::scale_new_gate_input_)
         .def_readwrite("zp_new_gate_input_", &GRUQuantParamsPy::zp_new_gate_input_)
         // 门激活函数输出参数（post-activation）
-        .def_readwrite("shift_update_gate_output_", &GRUQuantParamsPy::shift_update_gate_output_)
+        .def_readwrite("scale_update_gate_output_", &GRUQuantParamsPy::scale_update_gate_output_)
         .def_readwrite("zp_update_gate_output_", &GRUQuantParamsPy::zp_update_gate_output_)
-        .def_readwrite("shift_reset_gate_output_", &GRUQuantParamsPy::shift_reset_gate_output_)
+        .def_readwrite("scale_reset_gate_output_", &GRUQuantParamsPy::scale_reset_gate_output_)
         .def_readwrite("zp_reset_gate_output_", &GRUQuantParamsPy::zp_reset_gate_output_)
-        .def_readwrite("shift_new_gate_output_", &GRUQuantParamsPy::shift_new_gate_output_)
+        .def_readwrite("scale_new_gate_output_", &GRUQuantParamsPy::scale_new_gate_output_)
         .def_readwrite("zp_new_gate_output_", &GRUQuantParamsPy::zp_new_gate_output_)
         // 中间计算参数
-        .def_readwrite("shift_mul_reset_hidden_", &GRUQuantParamsPy::shift_mul_reset_hidden_)
+        .def_readwrite("scale_mul_reset_hidden_", &GRUQuantParamsPy::scale_mul_reset_hidden_)
         .def_readwrite("zp_mul_reset_hidden_", &GRUQuantParamsPy::zp_mul_reset_hidden_)
         // 隐状态更新参数
-        .def_readwrite("shift_mul_new_contribution_", &GRUQuantParamsPy::shift_mul_new_contribution_)
+        .def_readwrite("scale_mul_new_contribution_", &GRUQuantParamsPy::scale_mul_new_contribution_)
         .def_readwrite("zp_mul_new_contribution_", &GRUQuantParamsPy::zp_mul_new_contribution_)
-        .def_readwrite("shift_mul_old_contribution_", &GRUQuantParamsPy::shift_mul_old_contribution_)
+        .def_readwrite("scale_mul_old_contribution_", &GRUQuantParamsPy::scale_mul_old_contribution_)
         .def_readwrite("zp_mul_old_contribution_", &GRUQuantParamsPy::zp_mul_old_contribution_)
         // ⚠️ 关键字段：位宽配置，决定量化函数使用 int8 还是 int16
         .def_readwrite("bitwidth_config_", &GRUQuantParamsPy::bitwidth_config_);

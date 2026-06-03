@@ -30,6 +30,11 @@
 #include "quantize_bitwidth_config.h"
 #include "quantize_lut_types.h"
 
+struct FixedPointScale {
+    uint16_t multiplier = 1;
+    int8_t shift = 0;
+};
+
 // ============================================================================
 // GRU 完整量化参数结构体（Host 端）
 // ============================================================================
@@ -49,14 +54,20 @@ struct GRUQuantParams {
     int32_t zp_x_;     ///< 输入 x 的零点
     int8_t shift_h_;   ///< 隐状态 h 的移位量
     int32_t zp_h_;     ///< 隐状态 h 的零点
+    FixedPointScale fixed_scale_x_;
+    FixedPointScale fixed_scale_h_;
 
     // -------------------- 权重参数（per-channel）--------------------
     std::vector<int8_t> shift_W_;   ///< 输入权重 W 的移位量，size = hidden * 3
     std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
+    std::vector<FixedPointScale> fixed_scale_W_;
+    std::vector<FixedPointScale> fixed_scale_R_;
 
     // -------------------- 偏置参数（per-channel）--------------------
     std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
     std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
+    std::vector<FixedPointScale> fixed_scale_bw_;
+    std::vector<FixedPointScale> fixed_scale_br_;
 
     // -------------------- Linear 输出参数 (GEMM+bias) --------------------
     int8_t shift_weight_ih_linear_;    ///< W*x + bw 的移位量

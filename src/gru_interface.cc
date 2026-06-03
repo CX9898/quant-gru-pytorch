@@ -21,6 +21,43 @@
 #include "pot_sqnr_calibrator.h"
 #include "quantize_ops_helper.h"
 
+namespace {
+
+FixedPointScale makeExecutionScale(bool usePOT2, int8_t shift) {
+    if (usePOT2) {
+        return FixedPointScale{1, shift};
+    }
+    return encodeMShift(exp2_scale(shift));
+}
+
+void populateFixedScalesFromShifts(GRUQuantParams &p) {
+    const bool usePOT2 = p.bitwidth_config_.usePOT2_;
+    p.fixed_scale_x_ = makeExecutionScale(usePOT2, p.shift_x_);
+    p.fixed_scale_h_ = makeExecutionScale(usePOT2, p.shift_h_);
+    p.fixed_scale_weight_ih_linear_ = makeExecutionScale(usePOT2, p.shift_weight_ih_linear_);
+    p.fixed_scale_weight_hh_linear_ = makeExecutionScale(usePOT2, p.shift_weight_hh_linear_);
+    p.fixed_scale_update_gate_input_ = makeExecutionScale(usePOT2, p.shift_update_gate_input_);
+    p.fixed_scale_reset_gate_input_ = makeExecutionScale(usePOT2, p.shift_reset_gate_input_);
+    p.fixed_scale_new_gate_input_ = makeExecutionScale(usePOT2, p.shift_new_gate_input_);
+    p.fixed_scale_update_gate_output_ = makeExecutionScale(usePOT2, p.shift_update_gate_output_);
+    p.fixed_scale_reset_gate_output_ = makeExecutionScale(usePOT2, p.shift_reset_gate_output_);
+    p.fixed_scale_new_gate_output_ = makeExecutionScale(usePOT2, p.shift_new_gate_output_);
+    p.fixed_scale_mul_reset_hidden_ = makeExecutionScale(usePOT2, p.shift_mul_reset_hidden_);
+    p.fixed_scale_mul_old_contribution_ = makeExecutionScale(usePOT2, p.shift_mul_old_contribution_);
+    p.fixed_scale_mul_new_contribution_ = makeExecutionScale(usePOT2, p.shift_mul_new_contribution_);
+
+    p.fixed_scale_W_.resize(p.shift_W_.size());
+    p.fixed_scale_R_.resize(p.shift_R_.size());
+    p.fixed_scale_bw_.resize(p.shift_bw_.size());
+    p.fixed_scale_br_.resize(p.shift_br_.size());
+    for (size_t i = 0; i < p.shift_W_.size(); ++i) p.fixed_scale_W_[i] = makeExecutionScale(usePOT2, p.shift_W_[i]);
+    for (size_t i = 0; i < p.shift_R_.size(); ++i) p.fixed_scale_R_[i] = makeExecutionScale(usePOT2, p.shift_R_[i]);
+    for (size_t i = 0; i < p.shift_bw_.size(); ++i) p.fixed_scale_bw_[i] = makeExecutionScale(usePOT2, p.shift_bw_[i]);
+    for (size_t i = 0; i < p.shift_br_.size(); ++i) p.fixed_scale_br_[i] = makeExecutionScale(usePOT2, p.shift_br_[i]);
+}
+
+}  // namespace
+
 // =====================================================================
 // 量化参数计算
 // =====================================================================
@@ -272,6 +309,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
     // 生成 LUT 并存储到参数中
     generate_piecewise_linear_lut_to_params(quant_params);
 
+    populateFixedScalesFromShifts(quant_params);
     return quant_params;
 }
 
@@ -1239,6 +1277,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
                   quant_params.shift_mul_old_contribution_, quant_params.zp_mul_old_contribution_, "scale_mul_old_contribution");
 
     generate_piecewise_linear_lut_to_params(quant_params);
+    populateFixedScalesFromShifts(quant_params);
     return quant_params;
 }
 
@@ -1454,6 +1493,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         throw std::runtime_error(std::string("CUDA error: ") + err_str);
     }
     
+    populateFixedScalesFromShifts(quant_params);
     return quant_params;
 }
 

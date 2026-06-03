@@ -20,23 +20,41 @@
 // 在 finalize_calibration 时调用一次，然后在每次 forward 时从参数复制到 QuantGRUReScale
 void generate_piecewise_linear_lut_to_params(GRUQuantParams &params) {
     const auto &config = params.bitwidth_config_;
+    const float update_in_scale = (params.fixed_scale_update_gate_input_.multiplier != 0)
+                                      ? decode_scale(params.fixed_scale_update_gate_input_)
+                                      : exp2_scale(params.shift_update_gate_input_);
+    const float update_out_scale = (params.fixed_scale_update_gate_output_.multiplier != 0)
+                                       ? decode_scale(params.fixed_scale_update_gate_output_)
+                                       : exp2_scale(params.shift_update_gate_output_);
+    const float reset_in_scale = (params.fixed_scale_reset_gate_input_.multiplier != 0)
+                                     ? decode_scale(params.fixed_scale_reset_gate_input_)
+                                     : exp2_scale(params.shift_reset_gate_input_);
+    const float reset_out_scale = (params.fixed_scale_reset_gate_output_.multiplier != 0)
+                                      ? decode_scale(params.fixed_scale_reset_gate_output_)
+                                      : exp2_scale(params.shift_reset_gate_output_);
+    const float new_in_scale = (params.fixed_scale_new_gate_input_.multiplier != 0)
+                                   ? decode_scale(params.fixed_scale_new_gate_input_)
+                                   : exp2_scale(params.shift_new_gate_input_);
+    const float new_out_scale = (params.fixed_scale_new_gate_output_.multiplier != 0)
+                                    ? decode_scale(params.fixed_scale_new_gate_output_)
+                                    : exp2_scale(params.shift_new_gate_output_);
 
     // update gate Sigmoid
     params.sigmoid_update_gate_lut_ = generate_sigmoid_lut(
-        params.shift_update_gate_input_, params.zp_update_gate_input_,
-        params.shift_update_gate_output_, params.zp_update_gate_output_,
+        update_in_scale, params.zp_update_gate_input_,
+        update_out_scale, params.zp_update_gate_output_,
         config.update_gate_input_, config.update_gate_output_);
 
     // reset gate Sigmoid
     params.sigmoid_reset_gate_lut_ = generate_sigmoid_lut(
-        params.shift_reset_gate_input_, params.zp_reset_gate_input_,
-        params.shift_reset_gate_output_, params.zp_reset_gate_output_,
+        reset_in_scale, params.zp_reset_gate_input_,
+        reset_out_scale, params.zp_reset_gate_output_,
         config.reset_gate_input_, config.reset_gate_output_);
 
     // new gate Tanh
     params.tanh_new_gate_lut_ = generate_tanh_lut(
-        params.shift_new_gate_input_, params.zp_new_gate_input_,
-        params.shift_new_gate_output_, params.zp_new_gate_output_,
+        new_in_scale, params.zp_new_gate_input_,
+        new_out_scale, params.zp_new_gate_output_,
         config.new_gate_input_, config.new_gate_output_);
 
 #ifdef DEBUG
@@ -1127,13 +1145,24 @@ std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int n
  * @param input_bw 输入位宽（决定输入范围）
  * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
-SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+static inline std::pair<int32_t, int8_t> quantize_multiplier_signed(float value, QuantBitWidth output_bw) {
+    if (std::abs(value) < 1e-12f) {
+        return {0, 0};
+    }
+    const int32_t max_q = output_bw.qmax();
+    int8_t n = static_cast<int8_t>(std::floor(std::log2(static_cast<double>(max_q) / std::abs(value))));
+    int64_t q = round_to_int64(static_cast<double>(value) * std::ldexp(1.0, n));
+    q = std::max<int64_t>(-max_q, std::min<int64_t>(max_q, q));
+    return {static_cast<int32_t>(q), n};
+}
+
+SigmoidLUT generate_sigmoid_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
                                  int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围（任意位宽支持）
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = exp2_scale(shift_bits_x);
+    float scale_x = effective_scale_x;
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -1143,15 +1172,17 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
-           static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
+    printf("[DEBUG] generate_sigmoid_lut: input_bw=%d, eff_scale_x=%.8f, zp_x=%d, x_range=[%.4f, %.4f]\n",
+           static_cast<int>(input_bw), scale_x, zp_x, x_min, x_max);
 #endif
 
-    SigmoidLUT lut;
-    lut.shift_bits_x = shift_bits_x;
+    SigmoidLUT lut{};
+    lut.shift_bits_x = 0;
     lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_bits_y;
+    lut.shift_bits_y = 0;
     lut.zp_y = zp_y;
+    lut.effective_scale_x = effective_scale_x;
+    lut.effective_scale_y = effective_scale_y;
 
     // 生成分段点
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
@@ -1178,41 +1209,14 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
         all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    // 第二遍扫描：统一量化参数
-    float scale_y = exp2_scale(shift_bits_y);
-    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
-
-    float b_abs_max = 0.0f, c_abs_max = 0.0f;
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
-        float c_adjusted = all_coeffs[i].c + zp_y_offset;
-        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
-    }
-
-    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
-    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
-
-    // 根据输出位宽自动确定 shift_bits
-    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
-    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
-
-#ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: output_bw.bits_=%d, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, shift_bits_b, shift_bits_c);
-#endif
+    const float scale_y = effective_scale_y;
 
     // 第三遍扫描：量化每段
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         const auto &coeff = all_coeffs[i];
-        float c_adjusted = coeff.c + zp_y_offset;
-
-        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
-        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
-
-        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
-        int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
+        const float m_real = coeff.b * (scale_x / scale_y);
+        auto [q_b, n_BX_total] = quantize_multiplier_signed(m_real, output_bw);
+        int32_t term_c_precomputed = round_to_int(coeff.c / scale_y + static_cast<float>(zp_y));
 
         // threshold 量化（任意位宽支持，存储为 int32_t）
         int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
@@ -1227,6 +1231,11 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     return lut;
 }
 
+SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                                int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    return generate_sigmoid_lut(exp2_scale(shift_bits_x), zp_x, exp2_scale(shift_bits_y), zp_y, input_bw, output_bw);
+}
+
 /**
  * @brief 统一的 Tanh LUT 生成函数
  * @param shift_bits_x 输入量化 shift bits
@@ -1236,13 +1245,13 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
  * @param input_bw 输入位宽（决定输入范围）
  * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
-SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+SigmoidLUT generate_tanh_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
                               int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围（任意位宽支持）
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = exp2_scale(shift_bits_x);
+    float scale_x = effective_scale_x;
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -1252,15 +1261,17 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
-           static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
+    printf("[DEBUG] generate_tanh_lut: input_bw=%d, eff_scale_x=%.8f, zp_x=%d, x_range=[%.4f, %.4f]\n",
+           static_cast<int>(input_bw), scale_x, zp_x, x_min, x_max);
 #endif
 
-    SigmoidLUT lut;
-    lut.shift_bits_x = shift_bits_x;
+    SigmoidLUT lut{};
+    lut.shift_bits_x = 0;
     lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_bits_y;
+    lut.shift_bits_y = 0;
     lut.zp_y = zp_y;
+    lut.effective_scale_x = effective_scale_x;
+    lut.effective_scale_y = effective_scale_y;
 
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
 
@@ -1285,39 +1296,13 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
         all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    float scale_y = exp2_scale(shift_bits_y);
-    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
-
-    float b_abs_max = 0.0f, c_abs_max = 0.0f;
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
-        float c_adjusted = all_coeffs[i].c + zp_y_offset;
-        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
-    }
-
-    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
-    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
-
-    // 根据输出位宽自动确定 shift_bits
-    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
-    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
-
-#ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: output_bw.bits_=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, b_abs_max, shift_bits_b, shift_bits_c);
-#endif
+    const float scale_y = effective_scale_y;
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         const auto &coeff = all_coeffs[i];
-        float c_adjusted = coeff.c + zp_y_offset;
-
-        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
-        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
-
-        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
-        int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
+        const float m_real = coeff.b * (scale_x / scale_y);
+        auto [q_b, n_BX_total] = quantize_multiplier_signed(m_real, output_bw);
+        int32_t term_c_precomputed = round_to_int(coeff.c / scale_y + static_cast<float>(zp_y));
         
         // threshold 量化（任意位宽支持，存储为 int32_t）
         int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
@@ -1330,4 +1315,9 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     }
 
     return lut;
+}
+
+SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                             int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    return generate_tanh_lut(exp2_scale(shift_bits_x), zp_x, exp2_scale(shift_bits_y), zp_y, input_bw, output_bw);
 }

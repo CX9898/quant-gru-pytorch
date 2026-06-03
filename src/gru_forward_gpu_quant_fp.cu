@@ -820,6 +820,19 @@ ForwardPassQuantFP::~ForwardPassQuantFP() {
 
 void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     const int channel = src.hidden_ * 3;
+    auto decode_or_shift = [](const FixedPointScale &s, int8_t fallback_shift) {
+        if (s.multiplier != 0) return decode_scale(s);
+        return exp2_scale(fallback_shift);
+    };
+    auto inv_rescale_from_shift_or_fixed = [&](const FixedPointScale &s, int8_t fallback_shift) {
+        // rshift_round(x, n) 等价于 x / 2^n；Affine 下是 x * M / 2^n
+        if (src.bitwidth_config_.usePOT2_) {
+            return 1.0f / exp2_scale(-fallback_shift);
+        }
+        const float m = (s.multiplier == 0) ? 1.0f : static_cast<float>(s.multiplier);
+        const float denom = exp2_scale(-fallback_shift);
+        return m / denom;
+    };
 
     // ========== 转换 GateQuantParamsFP ==========
     auto &g = gate_params_;
@@ -835,20 +848,20 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     int8_t shift_ih_u = src.shift_weight_ih_linear_ - src.shift_update_gate_input_;
     int8_t shift_hh_u = src.shift_weight_hh_linear_ - src.shift_update_gate_input_;
     // 直接计算倒数（优化：乘法替代除法）
-    float div_ih_u = exp2_scale(-shift_ih_u);
-    float div_hh_u = exp2_scale(-shift_hh_u);
-    g.inv_div_weight_ih_linear_to_update_gate_input_ = 1.0f / div_ih_u;
-    g.inv_div_weight_hh_linear_to_update_gate_input_ = 1.0f / div_hh_u;
+    g.inv_div_weight_ih_linear_to_update_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_ih_u}, shift_ih_u);
+    g.inv_div_weight_hh_linear_to_update_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_hh_u}, shift_hh_u);
 
     // Reset gate
     g.zp_reset_gate_input_ = static_cast<float>(src.zp_reset_gate_input_);
     g.zp_reset_gate_output_ = static_cast<float>(src.zp_reset_gate_output_);
     int8_t shift_ih_r = src.shift_weight_ih_linear_ - src.shift_reset_gate_input_;
     int8_t shift_hh_r = src.shift_weight_hh_linear_ - src.shift_reset_gate_input_;
-    float div_ih_r = exp2_scale(-shift_ih_r);
-    float div_hh_r = exp2_scale(-shift_hh_r);
-    g.inv_div_weight_ih_linear_to_reset_gate_input_ = 1.0f / div_ih_r;
-    g.inv_div_weight_hh_linear_to_reset_gate_input_ = 1.0f / div_hh_r;
+    g.inv_div_weight_ih_linear_to_reset_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_ih_r}, shift_ih_r);
+    g.inv_div_weight_hh_linear_to_reset_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_hh_r}, shift_hh_r);
 
     // New gate
     g.zp_new_gate_input_ = static_cast<float>(src.zp_new_gate_input_);
@@ -856,10 +869,10 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     int8_t shift_ih_n = src.shift_weight_ih_linear_ - src.shift_new_gate_input_;
     int8_t shift_rh_n =
         (src.shift_reset_gate_output_ + src.shift_weight_hh_linear_) - src.shift_new_gate_input_;
-    float div_ih_n = exp2_scale(-shift_ih_n);
-    float div_rh_n = exp2_scale(-shift_rh_n);
-    g.inv_div_weight_ih_linear_to_new_gate_input_ = 1.0f / div_ih_n;
-    g.inv_div_reset_mul_hh_to_new_gate_input_ = 1.0f / div_rh_n;
+    g.inv_div_weight_ih_linear_to_new_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_ih_n}, shift_ih_n);
+    g.inv_div_reset_mul_hh_to_new_gate_input_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_rh_n}, shift_rh_n);
 
     // ========== Hidden state 更新参数 ==========
     // quant_one = rshift_round(1, -shift) + zp = (1 << shift) + zp = 2^shift + zp
@@ -881,19 +894,18 @@ void ForwardPassQuantFP::setRescaleParam(const GRUQuantParams &src) {
     // 用于先将 new_gate 对齐到 h scale，使 old_contribution 和 new_contribution 的 scale 统一
     int8_t shift_nh = src.shift_new_gate_output_ - src.shift_h_;
 
-    float div_uh = exp2_scale(-shift_uh);
-    float div_nh = exp2_scale(-shift_nh);
-    g.inv_div_update_old_to_h_ = 1.0f / div_uh;  // u * h_old 到 h 的倒数（用于最终 rescale）
+    g.inv_div_update_old_to_h_ =
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_uh}, shift_uh);
     g.inv_div_new_gate_output_to_h_ =
-        1.0f / div_nh;  // new_gate_output 到 h 的倒数（用于先将 new_gate 对齐到 h scale）
+        inv_rescale_from_shift_or_fixed(FixedPointScale{1, shift_nh}, shift_nh);
 
     // 激活函数 scale = 2^(-shift)
-    g.scale_update_gate_input_ = exp2_scale(src.shift_update_gate_input_);
-    g.scale_update_gate_output_ = exp2_scale(src.shift_update_gate_output_);
-    g.scale_reset_gate_input_ = exp2_scale(src.shift_reset_gate_input_);
-    g.scale_reset_gate_output_ = exp2_scale(src.shift_reset_gate_output_);
-    g.scale_new_gate_input_ = exp2_scale(src.shift_new_gate_input_);
-    g.scale_new_gate_output_ = exp2_scale(src.shift_new_gate_output_);
+    g.scale_update_gate_input_ = decode_or_shift(src.fixed_scale_update_gate_input_, src.shift_update_gate_input_);
+    g.scale_update_gate_output_ = decode_or_shift(src.fixed_scale_update_gate_output_, src.shift_update_gate_output_);
+    g.scale_reset_gate_input_ = decode_or_shift(src.fixed_scale_reset_gate_input_, src.shift_reset_gate_input_);
+    g.scale_reset_gate_output_ = decode_or_shift(src.fixed_scale_reset_gate_output_, src.shift_reset_gate_output_);
+    g.scale_new_gate_input_ = decode_or_shift(src.fixed_scale_new_gate_input_, src.shift_new_gate_input_);
+    g.scale_new_gate_output_ = decode_or_shift(src.fixed_scale_new_gate_output_, src.shift_new_gate_output_);
 
     // 存储位宽配置（单独存储，作为 kernel 参数传递）
     bitwidth_config_ = src.bitwidth_config_;

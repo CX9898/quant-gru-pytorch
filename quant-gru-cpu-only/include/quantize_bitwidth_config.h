@@ -40,6 +40,7 @@ struct OperatorQuantConfig {
     QuantBitWidth new_gate_input_{8, false}, new_gate_output_{8, false};
     QuantBitWidth mul_reset_hidden_{8, false};  // r * weight_hh_linear (new gate中)
     QuantBitWidth mul_old_contribution_{8, false}, mul_new_contribution_{8, false};
+    bool usePOT2_ = true;
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
         QuantBitWidth* signed_members[] = {
@@ -53,6 +54,11 @@ struct OperatorQuantConfig {
         }
         update_gate_output_ = {bits, true};   // UINT
         reset_gate_output_ = {bits, true};    // UINT
+        return *this;
+    }
+
+    OperatorQuantConfig& setUsePOT2(bool usePOT2) {
+        usePOT2_ = usePOT2;
         return *this;
     }
 };

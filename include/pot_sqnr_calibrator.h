@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "histogram_collector.h"
+#include "quantize_param_types.h"
 #include "quantize_bitwidth_config.h"  // for QuantBitWidth
 #include "quantize_ops_helper.h"       // for round_f, round_to_int
 
@@ -47,6 +48,12 @@ struct PotScaleResult {
     int8_t exp2_inv;   // POT 指数 (scale = 2^(-exp2_inv))
     float po2_scale;   // POT scale 值
     int32_t zero_point; // 零点
+};
+
+struct AffineScaleResult {
+    FixedPointScale fixed_scale;
+    float effective_scale;
+    int32_t zero_point;
 };
 
 // ============================================================================
@@ -388,6 +395,31 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
     return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
 }
 
+inline FixedPointScale encodeMShift(float scale) {
+    if (!(scale > 0.0f)) {
+        throw std::runtime_error("Invalid scale <= 0 in encodeMShift");
+    }
+    int exp2 = 0;
+    double mant = std::frexp(static_cast<double>(scale), &exp2);  // scale = mant * 2^exp2
+    uint32_t m = static_cast<uint32_t>(std::llround(mant * 65536.0));
+    if (m == 65536u) {
+        m = 32768u;
+        exp2 += 1;
+    }
+    if (m < 32768u) {
+        m = 32768u;
+    }
+    const int shift = -exp2;
+    if (shift < std::numeric_limits<int8_t>::min() || shift > std::numeric_limits<int8_t>::max()) {
+        throw std::runtime_error("encodeMShift shift out of int8 range");
+    }
+    return FixedPointScale{static_cast<uint16_t>(m), static_cast<int8_t>(shift)};
+}
+
+inline float decodeMShift(const FixedPointScale &s) {
+    return static_cast<float>(s.multiplier) * std::ldexp(1.0f, -static_cast<int>(s.shift));
+}
+
 /**
  * 计算 zero-point
  * 
@@ -441,6 +473,55 @@ inline PotScaleResult convertToPot(
     return PotScaleResult{n, po2_scale, zp};
 }
 
+inline AffineScaleResult convertToAffineScale(
+    float continuous_scale,
+    float continuous_min,
+    QuantBitWidth bw,
+    bool is_symmetric) {
+    FixedPointScale fs = encodeMShift(continuous_scale);
+    float effective = decodeMShift(fs);
+    int32_t zp = computeZeroPoint(continuous_min, effective, bw.qmin(), is_symmetric);
+    return AffineScaleResult{fs, effective, zp};
+}
+
+inline ContinuousScaleResult calibrateContinuousScaleFromHistogram(
+    const Histogram &hist,
+    QuantBitWidth bw,
+    bool is_symmetric,
+    bool use_percentile = false,
+    float percentile = 99.99f) {
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibrateContinuousScaleFromHistogram");
+    }
+    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
+    const bool is_unsigned = bw.is_unsigned_;
+    if (use_percentile) {
+        PercentileConfig config;
+        config.percentile = percentile;
+        return calibratePercentile(hist, num_steps, is_symmetric, config, is_unsigned);
+    }
+    SqnrConfig config;
+    return calibrateSqnr(hist, num_steps, is_symmetric, config, is_unsigned);
+}
+
+inline ContinuousScaleResult calibrateContinuousScaleFromRange(
+    float min_val,
+    float max_val,
+    QuantBitWidth bw,
+    bool is_symmetric) {
+    int8_t shift = 0;
+    int32_t zp = 0;
+    float aligned_min = min_val;
+    float aligned_max = max_val;
+    calibrateQuantParams(min_val, max_val, bw, is_symmetric, aligned_min, aligned_max, shift, zp);
+    ContinuousScaleResult out;
+    out.scale = exp2_scale(shift);
+    out.min = aligned_min;
+    out.max = aligned_max;
+    out.noise = 0.0f;
+    return out;
+}
+
 // ============================================================================
 // 统一入口函数
 // ============================================================================
@@ -473,21 +554,9 @@ inline void calibrateQuantParamsFromHistogram(
         throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
     }
     
-    // 使用 auto scale 版本计算 num_steps（用于 SQNR/Percentile 校准）
-    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
-    const bool is_unsigned = bw.is_unsigned_;
-    
     // 步骤 1: 使用对应的校准方法计算连续 scale
-    ContinuousScaleResult continuous_result;
-    
-    if (use_percentile) {
-        PercentileConfig config;
-        config.percentile = percentile;
-        continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config, is_unsigned);
-    } else {
-        SqnrConfig config;
-        continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config, is_unsigned);
-    }
+    ContinuousScaleResult continuous_result = calibrateContinuousScaleFromHistogram(
+        hist, bw, is_symmetric, use_percentile, percentile);
     
     // 步骤 2: 转换为 POT（与 AIMET 一致，无位宽约束）
     PotScaleResult pot_result = convertToPot(

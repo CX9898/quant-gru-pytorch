@@ -92,6 +92,10 @@ __host__ __device__ __forceinline__ float exp2_scale(int8_t exp2_inv) {
     return ldexpf(1.0f, -static_cast<int>(exp2_inv));
 }
 
+__host__ __device__ __forceinline__ float decode_scale(FixedPointScale s) {
+    return static_cast<float>(s.multiplier) * exp2_scale(s.shift);
+}
+
 // ============================================================================
 // 通用舍入函数（银行家舍入，与 rint / PyTorch round 一致）
 // ============================================================================
@@ -196,6 +200,15 @@ __host__ __device__ __forceinline__ int64_t rshift_round(int64_t x, int8_t n) {
     }
     
     return neg ? -result : result;
+}
+
+template <bool UsePOT2>
+__host__ __device__ __forceinline__ int64_t rescale_round(int64_t x, FixedPointScale p) {
+    if constexpr (UsePOT2) {
+        return rshift_round(x, p.shift);
+    } else {
+        return rshift_round(x * static_cast<int64_t>(p.multiplier), p.shift);
+    }
 }
 
 // ============================================================================
@@ -566,8 +579,16 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
                  uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // 重缩放到 update_gate_input 空间
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_update_gate_input_);
-    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_update_gate_input_);
+    const int64_t ih_diff = static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
+    const int32_t ih_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(ih_diff, params.fixed_rescale_weight_ih_linear_to_update_gate_input_)
+            : rescale_round<false>(ih_diff, params.fixed_rescale_weight_ih_linear_to_update_gate_input_));
+    const int32_t hh_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(hh_diff, params.fixed_rescale_weight_hh_linear_to_update_gate_input_)
+            : rescale_round<false>(hh_diff, params.fixed_rescale_weight_hh_linear_to_update_gate_input_));
 
     const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
@@ -644,8 +665,16 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
                  uint8_t* input_keep_gradient = nullptr,
                  uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_reset_gate_input_);
-    const int32_t hh_shifted = rshift_round(weight_hh_linear - params.zp_weight_hh_linear_, params.shift_weight_hh_linear_to_reset_gate_input_);
+    const int64_t ih_diff = static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_;
+    const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
+    const int32_t ih_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(ih_diff, params.fixed_rescale_weight_ih_linear_to_reset_gate_input_)
+            : rescale_round<false>(ih_diff, params.fixed_rescale_weight_ih_linear_to_reset_gate_input_));
+    const int32_t hh_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(hh_diff, params.fixed_rescale_weight_hh_linear_to_reset_gate_input_)
+            : rescale_round<false>(hh_diff, params.fixed_rescale_weight_hh_linear_to_reset_gate_input_));
 
     const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
 
@@ -733,10 +762,18 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
     const int64_t reset_hidden_mul = r_diff * hh_diff;
 
     // 乘法结果直接 shift 到 new_gate_input 空间（融合后省略中间 zp）
-    const int32_t rh_shifted = static_cast<int32_t>(rshift_round(reset_hidden_mul, params.shift_reset_mul_hh_to_new_gate_input_));
+    const int32_t rh_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(reset_hidden_mul, params.fixed_rescale_reset_mul_hh_to_new_gate_input_)
+            : rescale_round<false>(reset_hidden_mul, params.fixed_rescale_reset_mul_hh_to_new_gate_input_));
 
     // weight_ih_linear shift 到 new_gate_input 空间
-    const int32_t ih_shifted = rshift_round(weight_ih_linear - params.zp_weight_ih_linear_, params.shift_weight_ih_linear_to_new_gate_input_);
+    const int32_t ih_shifted = static_cast<int32_t>(
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_,
+                                  params.fixed_rescale_weight_ih_linear_to_new_gate_input_)
+            : rescale_round<false>(static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_,
+                                   params.fixed_rescale_weight_ih_linear_to_new_gate_input_));
 
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
@@ -816,7 +853,9 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
     // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
     const int64_t n_diff_from_zp = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
     const int32_t new_gate_aligned_to_h = static_cast<int32_t>(
-        rshift_round(n_diff_from_zp, params.shift_new_gate_output_to_h_)) + params.zp_h_;
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(n_diff_from_zp, params.fixed_rescale_new_gate_output_to_h_)
+            : rescale_round<false>(n_diff_from_zp, params.fixed_rescale_new_gate_output_to_h_)) + params.zp_h_;
 
     // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
     // u_diff 在 update_gate_output scale，h_diff 在 h scale
@@ -843,7 +882,9 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
     // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
     // shift_update_old_to_h_ = shift_update_gate_output（因为 scale_h / scale_h = 1）
     const int32_t h_new = static_cast<int32_t>(
-        rshift_round(combined, params.shift_update_old_to_h_)) + params.zp_h_;
+        params.bitwidth_config_.usePOT2_
+            ? rescale_round<true>(combined, params.fixed_rescale_update_old_to_h_)
+            : rescale_round<false>(combined, params.fixed_rescale_update_old_to_h_)) + params.zp_h_;
 
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
