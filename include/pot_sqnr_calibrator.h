@@ -409,7 +409,7 @@ inline FixedPointScale encodeMShift(float scale) {
     if (m < 32768u) {
         m = 32768u;
     }
-    const int shift = -exp2;
+    const int shift = 16 - exp2;
     if (shift < std::numeric_limits<int8_t>::min() || shift > std::numeric_limits<int8_t>::max()) {
         throw std::runtime_error("encodeMShift shift out of int8 range");
     }
