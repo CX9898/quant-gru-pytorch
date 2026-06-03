@@ -763,6 +763,11 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
     const int hidden_size = parms.hidden_;
     const auto& cfg = parms.bitwidth_config_;
+    const bool usePOT2 = parms.bitwidth_config_.usePOT2_;
+    auto to_fixed_rescale = [usePOT2](int8_t shift) {
+        if (usePOT2) return FixedPointScale{1, shift};
+        return FixedPointScale{32768, static_cast<int8_t>(shift + 15)};
+    };
 
     // ==================== Linear 层参数 =====================
     linear_params_.zp_x_ = parms.zp_x_;
@@ -853,6 +858,17 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     linear_params_.shift_bw_to_weight_ih_linear_ = dev::vector<int8_t>(shift_bw);
     linear_params_.shift_gemm_h_to_weight_hh_linear_ = dev::vector<int8_t>(shift_gemm_h);
     linear_params_.shift_br_to_weight_hh_linear_ = dev::vector<int8_t>(shift_br);
+    std::vector<FixedPointScale> fixed_shift_gemm_x(channel), fixed_shift_bw(channel), fixed_shift_gemm_h(channel), fixed_shift_br(channel);
+    for (int idx = 0; idx < channel; ++idx) {
+        fixed_shift_gemm_x[idx] = to_fixed_rescale(shift_gemm_x[idx]);
+        fixed_shift_bw[idx] = to_fixed_rescale(shift_bw[idx]);
+        fixed_shift_gemm_h[idx] = to_fixed_rescale(shift_gemm_h[idx]);
+        fixed_shift_br[idx] = to_fixed_rescale(shift_br[idx]);
+    }
+    linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_ = dev::vector<FixedPointScale>(fixed_shift_gemm_x);
+    linear_params_.fixed_rescale_bw_to_weight_ih_linear_ = dev::vector<FixedPointScale>(fixed_shift_bw);
+    linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_ = dev::vector<FixedPointScale>(fixed_shift_gemm_h);
+    linear_params_.fixed_rescale_br_to_weight_hh_linear_ = dev::vector<FixedPointScale>(fixed_shift_br);
 
 #ifdef DEBUG
     linear_params_.shift_bw_ = dev::vector<int8_t>(parms.shift_bw_);
@@ -869,12 +885,20 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.zp_update_gate_output_ = parms.zp_update_gate_output_;
     gate_params_.shift_weight_ih_linear_to_update_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_update_gate_input_;
     gate_params_.shift_weight_hh_linear_to_update_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_update_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_update_gate_input_);
+    gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_update_gate_input_);
 
     // reset gate
     gate_params_.zp_reset_gate_input_ = parms.zp_reset_gate_input_;
     gate_params_.zp_reset_gate_output_ = parms.zp_reset_gate_output_;
     gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
     gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_reset_gate_input_);
+    gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_reset_gate_input_);
 
     // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
     gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
@@ -882,6 +906,10 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
     gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
         (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_new_gate_input_);
+    gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_reset_mul_hh_to_new_gate_input_);
 
     // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
     gate_params_.quant_one_in_update_gate_scale_ = rshift_round(1, -parms.shift_update_gate_output_) + parms.zp_update_gate_output_;
@@ -889,6 +917,8 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
     // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
     gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
+    gate_params_.fixed_rescale_new_gate_output_to_h_ = to_fixed_rescale(gate_params_.shift_new_gate_output_to_h_);
+    gate_params_.fixed_rescale_update_old_to_h_ = to_fixed_rescale(gate_params_.shift_update_old_to_h_);
 
     // 位宽配置和 LUT
     gate_params_.bitwidth_config_ = parms.bitwidth_config_;

@@ -48,6 +48,8 @@ struct SigmoidLUT {
     int8_t shift_bits_x;                   ///< 输入缩放因子指数
     int8_t shift_bits_y;                   ///< 输出缩放因子指数
     int32_t zp_y;                          ///< 输出零点
+    float effective_scale_x = 0.0f;
+    float effective_scale_y = 0.0f;
 };
 
 // ============================================================================
@@ -75,3 +77,7 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
  */
 SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y, int32_t zp_y,
                              QuantBitWidth input_bw, QuantBitWidth output_bw);
+SigmoidLUT generate_sigmoid_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
+                                int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
+SigmoidLUT generate_tanh_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
+                             int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw);
