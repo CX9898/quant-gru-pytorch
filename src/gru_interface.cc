@@ -306,10 +306,11 @@ GRUQuantParams calculateGRUQuantitativeParameters(
                     quant_ranges.min_mul_old_contribution_, quant_ranges.max_mul_old_contribution_,
                     quant_params.shift_mul_old_contribution_, quant_params.zp_mul_old_contribution_);
 
+    // 先填充 fixed_scale，再生成 LUT（LUT 需基于 effective scale 烘焙）
+    populateFixedScalesFromShifts(quant_params);
+
     // 生成 LUT 并存储到参数中
     generate_piecewise_linear_lut_to_params(quant_params);
-
-    populateFixedScalesFromShifts(quant_params);
     return quant_params;
 }
 
@@ -1276,8 +1277,8 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
     histCalibrate(hist_collectors.mul_old_contribution_hist, bitwidth_config.mul_old_contribution_, bitwidth_config.mul_old_contribution_symmetric_,
                   quant_params.shift_mul_old_contribution_, quant_params.zp_mul_old_contribution_, "scale_mul_old_contribution");
 
-    generate_piecewise_linear_lut_to_params(quant_params);
     populateFixedScalesFromShifts(quant_params);
+    generate_piecewise_linear_lut_to_params(quant_params);
     return quant_params;
 }
 
@@ -1482,6 +1483,9 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
     // 同步 CUDA 操作
     cudaDeviceSynchronize();
 
+    // 先填充 fixed_scale，再生成 LUT（LUT 需基于 effective scale 烘焙）
+    populateFixedScalesFromShifts(quant_params);
+
     // 生成 LUT 并存储到参数中
     generate_piecewise_linear_lut_to_params(quant_params);
     
@@ -1492,8 +1496,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         fprintf(stderr, "CUDA error in calculateGRUQuantitativeParametersFromGPUHistograms: %s\n", err_str);
         throw std::runtime_error(std::string("CUDA error: ") + err_str);
     }
-    
-    populateFixedScalesFromShifts(quant_params);
+
     return quant_params;
 }
 
