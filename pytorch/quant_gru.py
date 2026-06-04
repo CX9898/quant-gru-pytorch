@@ -1889,13 +1889,26 @@ class QuantGRU(nn.Module):
         Returns:
             修正后的编码字典
         """
-        if isinstance(data, dict) and "scale" in data and "zero_point" in data:
+        if isinstance(data, dict) and "scale" in data:
             scale = data["scale"]
-            zero_point = data["zero_point"]
             
-            # 如果 scale 是列表但 zero_point 不是，则转换 zero_point 为相同长度的列表
-            if isinstance(scale, list) and not isinstance(zero_point, list):
-                data["zero_point"] = [zero_point] * len(scale)
+            # AIMET encodings 要求 per-channel/per-gate 的 zero_point 与 scale 等长。
+            # 对称量化权重通常没有独立 zp 属性，导出时需要显式补 0。
+            if isinstance(scale, list):
+                zero_point = data.get("zero_point", 0)
+                if isinstance(zero_point, list):
+                    if len(zero_point) == len(scale):
+                        return data
+                    if len(zero_point) == 1:
+                        data["zero_point"] = zero_point * len(scale)
+                    elif len(zero_point) == 0:
+                        data["zero_point"] = [0] * len(scale)
+                    else:
+                        raise ValueError(
+                            f"zero_point 长度不匹配: 期望 {len(scale)}，实际 {len(zero_point)}"
+                        )
+                else:
+                    data["zero_point"] = [zero_point] * len(scale)
         
         return data
 
