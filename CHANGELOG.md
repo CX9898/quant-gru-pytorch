@@ -43,6 +43,7 @@
 1. 修复 affine 模式下边界量化导致的精度回退问题。
 2. 修复 LUT 表使用错误 scale 的问题。
 3. 修复 `encodeMShift` 中 Q mantissa 缺少 16-bit offset 的问题。
+4. 修复双向 GRU 导出 AIMET encodings 时，`weight_ih.weight` 和 `weight_hh.weight` 的 `zero_point` 未随反向分支拼接的问题；对称量化权重现在会输出与拼接后 `scale` 等长的全 0 `zero_point` 列表。
 
 ---
 
