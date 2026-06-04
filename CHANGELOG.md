@@ -11,6 +11,33 @@
 
 ### 新功能
 1. **普通 scale 支持**: 量化 scale 从原先仅支持 POT2（2 的幂次）形式扩展为支持普通 scale，可使用任意 `M + shift` 组合表示量化缩放参数，提升量化参数配置的灵活性。
+2. **量化参数导入/导出格式更新**: 为适配普通 scale，量化参数 JSON 不再仅依赖旧 POT2 的 `n`/`exp2_inv` 编码；导出时会在 `model_info` 中记录 `use_pot2_scale`，并为各算子写入 `scale`、`multiplier`、`shift` 和 `scale_encoding`，其中普通 scale 按 `scale ≈ multiplier * 2^(-shift)` 表示。导入时优先解析新格式，并保留对旧 POT2 格式的兼容。
+   ```json
+   {
+     "model_info": {
+       "input_size": 4,
+       "hidden_size": 3,
+       "bias": true,
+       "batch_first": true,
+       "bidirectional": false,
+       "use_pot2_scale": false
+     },
+     "operators": {
+       "input": {
+         "dtype": "INT8",
+         "symmetric": false,
+         "scale": [0.010382890701293945],
+         "multiplier": [43549],
+         "shift": [22],
+         "zero_point": [-5],
+         "scale_encoding": "affine",
+         "enc_type": "PER_TENSOR",
+         "real_min": [-1.2770955562591553],
+         "real_max": [1.3705415725708008]
+       }
+     }
+   }
+   ```
 
 ### Bug 修复
 1. 修复 affine 模式下边界量化导致的精度回退问题。
