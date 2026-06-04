@@ -225,7 +225,7 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
     const int x_size = time_steps * batch_size * input_size;
     dev::vector<int32_t> x_q_int32(x_size);
     dev::quantificationBitwidth<false>(x, x_q_int32.data(), nullptr, x_size,
-                                       quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
+                                       quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg.x_);
     
     // 3. 分配输出缓冲区（int32_t）
     dev::vector<int32_t> h_q_int32((time_steps + 1) * batch_size * hidden_size);
@@ -239,7 +239,7 @@ void runQuantInference(int time_steps, int batch_size, int input_size, int hidde
     
     // 5. 反量化输出为浮点（使用通用接口）
     dev::dequantification(h_q_int32.data(), h, (time_steps + 1) * batch_size * hidden_size,
-                          quant_params.shift_h_, quant_params.zp_h_);
+                          quant_params.fixed_scale_h_, quant_params.zp_h_);
 }
 
 // ==================== CPU 量化推理 ====================
@@ -448,6 +448,7 @@ int main(int argc, char *argv[]) {
     // 校准
     printf("\n========== Calibration ==========\n");
     OperatorQuantConfig bitwidth_config;
+    bitwidth_config.usePOT2_ = false;
     GRUQuantParams quant_params;
     
     {
@@ -613,7 +614,7 @@ int main(int argc, char *argv[]) {
                                      W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
                                      W_mask.data(), R_mask.data(), bw_mask.data(), br_mask.data());
             dev::quantificationBitwidth<true>(x_dev.data(), x_q_int32.data(), x_mask.data(), x_size,
-                                              quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
+                                              quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg.x_);
             
             // 调用 quantGRUForwardInt32（接受已量化的输入）
             quantGRUForwardInt32(true, T, B, I, H,
@@ -628,12 +629,12 @@ int main(int argc, char *argv[]) {
         dev::vector<float> h_train((T + 1) * B * H);
         dev::vector<float> v_train(T * B * H * 4);
         dev::dequantification(h_q_int32.data(), h_train.data(), (T + 1) * B * H,
-                              quant_params.shift_h_, quant_params.zp_h_);
+                              quant_params.fixed_scale_h_, quant_params.zp_h_);
         dev::dequantificationV(v_q_int32.data(), v_train.data(), T, B, H,
-                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
-                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
-                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
-                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
+                               quant_params.fixed_scale_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.fixed_scale_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.fixed_scale_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.fixed_scale_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
 
         dev::vector<float> dx_dev(T * B * I);
         dev::vector<float> dW_dev(I * H * 3);
@@ -802,10 +803,10 @@ int main(int argc, char *argv[]) {
                                  W_q_int32.data(), R_q_int32.data(), bw_q_int32.data(), br_q_int32.data(),
                                  W_mask_int.data(), R_mask_int.data(), bw_mask_int.data(), br_mask_int.data());
         dev::quantificationBitwidth<true>(x_dev.data(), x_q_int32.data(), x_mask_int.data(), x_size,
-                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg.x_);
+                                          quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg.x_);
         dev::vector<int32_t> h0_q_int32(B * H);
         dev::quantificationBitwidth<true>(h0_dev.data(), h0_q_int32.data(), h0_mask_int.data(), B * H,
-                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg.h_);
+                                         quant_params.fixed_scale_h_, quant_params.zp_h_, bw_cfg.h_);
         
         // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
         quantGRUForwardInt32(true, T, B, I, H,
@@ -819,12 +820,12 @@ int main(int argc, char *argv[]) {
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
         dev::dequantification(h_q_int32.data(), h_int.data(), (T + 1) * B * H,
-                              quant_params.shift_h_, quant_params.zp_h_);
+                              quant_params.fixed_scale_h_, quant_params.zp_h_);
         dev::dequantificationV(v_q_int32.data(), v_int.data(), T, B, H,
-                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
-                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
-                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
-                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
+                               quant_params.fixed_scale_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.fixed_scale_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.fixed_scale_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.fixed_scale_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
         
         // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);
@@ -876,9 +877,9 @@ int main(int argc, char *argv[]) {
                                    W_q_inf_int32.data(), R_q_inf_int32.data(), bw_q_inf_int32.data(), br_q_inf_int32.data(),
                                    nullptr, nullptr, nullptr, nullptr);
         dev::quantificationBitwidth<false>(x_dev.data(), x_q_inf_int32.data(), nullptr, T * B * I,
-                                           quant_params.shift_x_, quant_params.zp_x_, bw_cfg_inf.x_);
+                                           quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg_inf.x_);
         dev::quantificationBitwidth<false>(h0_dev.data(), h0_q_inf_int32.data(), nullptr, B * H,
-                                          quant_params.shift_h_, quant_params.zp_h_, bw_cfg_inf.h_);
+                                          quant_params.fixed_scale_h_, quant_params.zp_h_, bw_cfg_inf.h_);
         
         // 调用 quantGRUForwardInt32（接受已量化的输入）
         quantGRUForwardInt32(false, T, B, I, H,
@@ -889,7 +890,7 @@ int main(int argc, char *argv[]) {
         // 使用通用接口反量化输出
         std::vector<float> h_int_inf_cpu((T + 1) * B * H);
         dev::dequantification(h_q_inf_int32.data(), h_int_inf_cpu.data(), (T + 1) * B * H,
-                              quant_params.shift_h_, quant_params.zp_h_);
+                              quant_params.fixed_scale_h_, quant_params.zp_h_);
         
         // FP 版本（推理模式）
         dev::vector<float> h_fp_inf((T + 1) * B * H);
@@ -946,10 +947,10 @@ int main(int argc, char *argv[]) {
                                  W_q_z_int32.data(), R_q_z_int32.data(), bw_q_z_int32.data(), br_q_z_int32.data(),
                                  W_mask_z.data(), R_mask_z.data(), bw_mask_z.data(), br_mask_z.data());
         dev::quantificationBitwidth<true>(x_dev.data(), x_q_z_int32.data(), x_mask_z.data(), x_size,
-                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg_z.x_);
+                                          quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg_z.x_);
         dev::vector<int32_t> h0_q_z_int32(B * H);
         dev::quantificationBitwidth<true>(h0_zero_dev.data(), h0_q_z_int32.data(), h0_mask_z.data(), B * H,
-                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg_z.h_);
+                                         quant_params.fixed_scale_h_, quant_params.zp_h_, bw_cfg_z.h_);
         
         // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
         quantGRUForwardInt32(true, T, B, I, H,
@@ -966,14 +967,14 @@ int main(int argc, char *argv[]) {
         std::vector<float> h_int_cpu((T + 1) * B * H);
         std::vector<float> v_int_cpu(T * B * H * 4);
         for (int i = 0; i < (T + 1) * B * H; i++) {
-            h_int_cpu[i] = dequantize(h_q_z_int32_cpu[i], quant_params.shift_h_, quant_params.zp_h_);
+            h_int_cpu[i] = dequantize(h_q_z_int32_cpu[i], quant_params.fixed_scale_h_, quant_params.zp_h_);
         }
         for (int i = 0; i < T * B * H * 4; i++) {
             int gate_idx = (i / (B * H)) % 4;
-            int8_t shift = (gate_idx == 0) ? quant_params.shift_update_gate_output_ :
-                          (gate_idx == 1) ? quant_params.shift_reset_gate_output_ :
-                          (gate_idx == 2) ? quant_params.shift_new_gate_output_ :
-                          quant_params.shift_weight_hh_linear_;
+            FixedPointScale shift = (gate_idx == 0) ? quant_params.fixed_scale_update_gate_output_ :
+                          (gate_idx == 1) ? quant_params.fixed_scale_reset_gate_output_ :
+                          (gate_idx == 2) ? quant_params.fixed_scale_new_gate_output_ :
+                          quant_params.fixed_scale_weight_hh_linear_;
             int32_t zp = (gate_idx == 0) ? quant_params.zp_update_gate_output_ :
                         (gate_idx == 1) ? quant_params.zp_reset_gate_output_ :
                         (gate_idx == 2) ? quant_params.zp_new_gate_output_ :
@@ -1048,10 +1049,10 @@ int main(int argc, char *argv[]) {
                                  W_q_o_int32.data(), R_q_o_int32.data(), bw_q_o_int32.data(), br_q_o_int32.data(),
                                  W_mask_o.data(), R_mask_o.data(), bw_mask_o.data(), br_mask_o.data());
         dev::quantificationBitwidth<true>(x_dev.data(), x_q_o_int32.data(), x_mask_o.data(), x_size,
-                                          quant_params.shift_x_, quant_params.zp_x_, bw_cfg_o.x_);
+                                          quant_params.fixed_scale_x_, quant_params.zp_x_, bw_cfg_o.x_);
         dev::vector<int32_t> h0_q_o_int32(B * H);
         dev::quantificationBitwidth<true>(h0_ones_dev.data(), h0_q_o_int32.data(), h0_mask_o.data(), B * H,
-                                         quant_params.shift_h_, quant_params.zp_h_, bw_cfg_o.h_);
+                                         quant_params.fixed_scale_h_, quant_params.zp_h_, bw_cfg_o.h_);
         
         // 4. 调用 quantGRUForwardInt32（接受已量化的输入）
         quantGRUForwardInt32(true, T, B, I, H,
@@ -1064,12 +1065,12 @@ int main(int argc, char *argv[]) {
         dev::vector<float> h_int((T + 1) * B * H);
         dev::vector<float> v_int(T * B * H * 4);
         dev::dequantification(h_q_o_int32.data(), h_int.data(), (T + 1) * B * H,
-                              quant_params.shift_h_, quant_params.zp_h_);
+                              quant_params.fixed_scale_h_, quant_params.zp_h_);
         dev::dequantificationV(v_q_o_int32.data(), v_int.data(), T, B, H,
-                               quant_params.shift_update_gate_output_, quant_params.zp_update_gate_output_,
-                               quant_params.shift_reset_gate_output_, quant_params.zp_reset_gate_output_,
-                               quant_params.shift_new_gate_output_, quant_params.zp_new_gate_output_,
-                               quant_params.shift_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
+                               quant_params.fixed_scale_update_gate_output_, quant_params.zp_update_gate_output_,
+                               quant_params.fixed_scale_reset_gate_output_, quant_params.zp_reset_gate_output_,
+                               quant_params.fixed_scale_new_gate_output_, quant_params.zp_new_gate_output_,
+                               quant_params.fixed_scale_weight_hh_linear_, quant_params.zp_weight_hh_linear_);
         
         // FP 版本 (训练模式) - 需要分配 mask
         dev::vector<float> h_fp((T + 1) * B * H);

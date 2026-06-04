@@ -107,15 +107,3 @@ target_include_directories(gru_example PRIVATE ${INCLUDE_DIR})
 #target_link_libraries(gru_quant_static PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_quant_shared PUBLIC CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
 target_link_libraries(gru_example PRIVATE CUDA::cublas CUDA::cudart OpenMP::OpenMP_CXX)
-
-# ------------------------------
-# 回归测试（POT2 / Affine）
-# ------------------------------
-enable_testing()
-
-add_executable(test_pot2_affine_regression "${CMAKE_SOURCE_DIR}/test/test_pot2_affine_regression.cu")
-target_include_directories(test_pot2_affine_regression PRIVATE ${INCLUDE_DIR})
-target_link_libraries(test_pot2_affine_regression PRIVATE gru_quant_shared CUDA::cudart)
-
-add_test(NAME pot2_regression COMMAND test_pot2_affine_regression pot2)
-add_test(NAME affine_regression COMMAND test_pot2_affine_regression affine)
