@@ -77,6 +77,7 @@ import math
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+from _version import __version__
 
 try:
     import gru_interface_binding as gru_ops
