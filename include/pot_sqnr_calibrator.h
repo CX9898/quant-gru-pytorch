@@ -56,6 +56,13 @@ struct AffineScaleResult {
     int32_t zero_point;
 };
 
+struct EncodedScaleResult {
+    FixedPointScale fixed_scale;
+    float effective_scale;
+    int8_t pot_shift;
+    int32_t zero_point;
+};
+
 // ============================================================================
 // 模块 2: Percentile 校准
 // ============================================================================
@@ -460,16 +467,34 @@ inline PotScaleResult convertToPot(
     float continuous_scale,
     float continuous_min,
     QuantBitWidth bw,
-    bool is_symmetric) {
-    
+    bool is_symmetric,
+    bool coverage_round = false) {
+
     const int64_t quant_min = bw.qmin();
-    
-    // 步骤 1: 转换到 POT（AIMET find_closest_power_of_2_scale）
-    auto [po2_scale, n] = roundScaleToPowerOfTwo(continuous_scale);
-    
-    // 步骤 2: 计算 zero-point
-    int32_t zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
-    
+
+    int8_t n;
+    float po2_scale;
+    if (coverage_round) {
+        // MINMAX 路径：与 main calibrateQuantParams 一致，向上取 scale（floor(log2(1/scale))）
+        // 保证 POT scale >= 连续 scale，避免范围被截断（覆盖优先）。
+        n = static_cast<int8_t>(std::floor(std::log2(1.0f / continuous_scale)));
+        po2_scale = std::pow(2.0f, -static_cast<float>(n));
+    } else {
+        // 直方图(SQNR/Percentile)路径：四舍五入到最近 2^n（AIMET find_closest_power_of_2_scale）
+        std::tie(po2_scale, n) = roundScaleToPowerOfTwo(continuous_scale);
+    }
+
+    int32_t zp;
+    if (is_symmetric) {
+        zp = 0;
+    } else if (coverage_round) {
+        // 与 main calibrateQuantParams 一致：将 min 对齐到 POT 网格后再算 zp
+        const float aligned_min = std::floor(continuous_min / po2_scale) * po2_scale;
+        zp = round_to_int(static_cast<float>(quant_min) - aligned_min / po2_scale);
+    } else {
+        zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
+    }
+
     return PotScaleResult{n, po2_scale, zp};
 }
 
@@ -482,6 +507,33 @@ inline AffineScaleResult convertToAffineScale(
     float effective = decodeMShift(fs);
     int32_t zp = computeZeroPoint(continuous_min, effective, bw.qmin(), is_symmetric);
     return AffineScaleResult{fs, effective, zp};
+}
+
+inline EncodedScaleResult encodeScaleResult(
+    float continuous_scale,
+    float continuous_min,
+    QuantBitWidth bw,
+    bool is_symmetric,
+    bool use_pot2,
+    bool coverage_round = false) {
+    if (use_pot2) {
+        PotScaleResult pot = convertToPot(continuous_scale, continuous_min, bw, is_symmetric, coverage_round);
+        return EncodedScaleResult{
+            FixedPointScale{1u, pot.exp2_inv},
+            pot.po2_scale,
+            pot.exp2_inv,
+            pot.zero_point
+        };
+    }
+
+    AffineScaleResult affine = convertToAffineScale(continuous_scale, continuous_min, bw, is_symmetric);
+    int8_t compat_shift = static_cast<int8_t>(round_f(-std::log2(affine.effective_scale)));
+    return EncodedScaleResult{
+        affine.fixed_scale,
+        affine.effective_scale,
+        compat_shift,
+        affine.zero_point
+    };
 }
 
 inline ContinuousScaleResult calibrateContinuousScaleFromHistogram(
@@ -509,13 +561,64 @@ inline ContinuousScaleResult calibrateContinuousScaleFromRange(
     float max_val,
     QuantBitWidth bw,
     bool is_symmetric) {
-    int8_t shift = 0;
-    int32_t zp = 0;
-    float aligned_min = min_val;
-    float aligned_max = max_val;
-    calibrateQuantParams(min_val, max_val, bw, is_symmetric, aligned_min, aligned_max, shift, zp);
+    const int32_t quant_min = bw.qmin_auto_scale();
+    const int32_t quant_max = bw.qmax_auto_scale();
+    const int64_t num_steps = static_cast<int64_t>(quant_max) - static_cast<int64_t>(quant_min);
+    if (num_steps <= 0) {
+        throw std::runtime_error("num_steps must be > 0 in calibrateContinuousScaleFromRange");
+    }
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+
+    float min_with_zero = std::min(min_val, 0.0f);
+    float max_with_zero = std::max(max_val, 0.0f);
+    const float tensor_diff = (max_with_zero - min_with_zero) / static_cast<float>(num_steps);
+    const float adjustment_step = (tensor_diff < minimum_scale) ? minimum_scale : 0.0f;
+
+    float updated_min = min_with_zero;
+    float updated_max = max_with_zero;
+    if (is_symmetric) {
+        if (bw.is_unsigned_) {
+            updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
+            updated_min = 0.0f;
+        } else {
+            updated_max = max_with_zero + std::floor(static_cast<float>(num_steps) / 2.0f) * adjustment_step;
+            updated_min = min_with_zero - std::ceil(static_cast<float>(num_steps) / 2.0f) * adjustment_step;
+        }
+    } else {
+        updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
+    }
+
+    float continuous_scale = minimum_scale;
+    float aligned_min = updated_min;
+    float aligned_max = updated_max;
+    if (is_symmetric) {
+        if (bw.is_unsigned_) {
+            const float data_max = std::max(updated_max, minimum_scale);
+            continuous_scale = std::max(data_max / static_cast<float>(quant_max), minimum_scale);
+            aligned_min = 0.0f;
+            aligned_max = continuous_scale * static_cast<float>(quant_max);
+        } else {
+            const int64_t num_pos_steps = num_steps / 2;
+            const int64_t num_neg_steps = (num_steps + 1) / 2;
+            const int additional_step = (num_steps == 3) ? 1 : 0;
+            const float delta_from_max = (num_pos_steps + additional_step > 0)
+                                             ? updated_max / static_cast<float>(num_pos_steps + additional_step)
+                                             : 0.0f;
+            const float delta_from_min =
+                (num_neg_steps > 0) ? -updated_min / static_cast<float>(num_neg_steps) : 0.0f;
+            continuous_scale = std::max(std::max(delta_from_max, delta_from_min), minimum_scale);
+            aligned_min = -static_cast<float>(num_neg_steps) * continuous_scale;
+            aligned_max = static_cast<float>(num_pos_steps) * continuous_scale;
+        }
+    } else {
+        const float range = std::max(updated_max - updated_min, minimum_scale * static_cast<float>(num_steps));
+        continuous_scale = std::max(range / static_cast<float>(num_steps), minimum_scale);
+        aligned_min = updated_min;
+        aligned_max = updated_min + continuous_scale * static_cast<float>(num_steps);
+    }
+
     ContinuousScaleResult out;
-    out.scale = exp2_scale(shift);
+    out.scale = continuous_scale;
     out.min = aligned_min;
     out.max = aligned_max;
     out.noise = 0.0f;

@@ -637,7 +637,7 @@ backward_quant_wrapper(
     
     const std::size_t x_size = time_steps * batch_size * input_size;
     dev::dequantificationFPInplace(x_q.data_ptr<float>(), x_size,
-                                   cpp_params.shift_x_, cpp_params.zp_x_);
+                                   cpp_params.fixed_scale_x_, cpp_params.zp_x_);
 
     // 同步 CUDA 操作
     cudaDeviceSynchronize();

@@ -30,6 +30,10 @@ INPUT_HIGH = 0.8
 INPUT_DEVICE = 'cuda'
 INPUT_DTYPE = torch.float32
 
+# 量化 scale 编码模式
+# True: 原 POT2(scale=2^-shift)；False: 新 affine/M+shift(scale=M*2^-shift)
+USE_POT2_SCALE = False
+
 # ============================================================================
 # 测试阈值配置
 # 当余弦相似度低于下限或MSE/MAE高于上限时，测试将立即报错
@@ -67,6 +71,13 @@ def record_failure(test_name: str, message: str):
         'message': message
     })
     print(f"❌ 测试失败: {message}")
+
+def configure_quant_scale_mode(quant_gru: QuantGRU, verbose: bool = True):
+    """应用测试脚本级别的 POT2/Affine scale 编码开关。"""
+    quant_gru.use_pot2_scale = bool(USE_POT2_SCALE)
+    if verbose:
+        mode = "POT2" if USE_POT2_SCALE else "Affine/M+shift"
+        print(f"量化 scale 编码模式: {mode} (use_pot2_scale={quant_gru.use_pot2_scale})")
 
 def check_threshold(value, threshold, comparison: str, test_name: str, metric_name: str) -> bool:
     """
@@ -361,6 +372,7 @@ def test_non_quantized():
         bias=BIAS,
         use_quantization=False
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -411,6 +423,7 @@ def test_quantized_int8():
         bias=BIAS,
         use_quantization=False  # 先不启用量化
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重（确保两个模型使用相同的权重）
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -476,6 +489,7 @@ def test_quantized_int16():
         bias=BIAS,
         use_quantization=False  # 先不启用量化
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重（确保两个模型使用相同的权重）
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -551,6 +565,7 @@ def test_batch_first():
         bias=BIAS,
         use_quantization=False  # 先不启用量化
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重（确保两个模型使用相同的权重）
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -754,6 +769,7 @@ def test_training_non_quantized():
         bias=BIAS,
         use_quantization=False
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -807,6 +823,7 @@ def test_training_quantized_int8():
         bias=BIAS,
         use_quantization=False
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -869,6 +886,7 @@ def test_training_multiple_steps():
         bias=BIAS,
         use_quantization=False
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -986,6 +1004,7 @@ def test_training_long_run(num_steps=100, use_quantization=False, bitwidth=8, pr
         bias=BIAS,
         use_quantization=False  # 先不启用
     ).cuda()
+    configure_quant_scale_mode(quant_gru)
 
     # 复制权重
     quant_gru.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)
@@ -1137,6 +1156,7 @@ def test_quantized_vs_non_quantized(bitwidth=8):
         bias=BIAS,
         use_quantization=False
     ).cuda()
+    configure_quant_scale_mode(quant_gru_non_quant)
 
     # 创建 QuantGRU 量化版本
     quant_gru_quant = QuantGRU(
@@ -1147,6 +1167,7 @@ def test_quantized_vs_non_quantized(bitwidth=8):
         bias=BIAS,
         use_quantization=False  # 先不启用量化
     ).cuda()
+    configure_quant_scale_mode(quant_gru_quant)
 
     # 复制权重（确保两个模型使用相同的权重）
     quant_gru_non_quant.weight_ih_l0.data.copy_(pytorch_gru.weight_ih_l0.data)

@@ -73,6 +73,7 @@ ONNX 导出:
 """
 
 import json
+import math
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -740,6 +741,7 @@ class QuantGRU(nn.Module):
             dropout: float = 0.0,
             bidirectional: bool = False,
             use_quantization: bool = False,
+            use_pot2_scale: bool = True,
     ):
         super(QuantGRU, self).__init__()
 
@@ -757,6 +759,7 @@ class QuantGRU(nn.Module):
         self.dropout = dropout
         self.bidirectional = bidirectional
         self.use_quantization = use_quantization
+        self._use_pot2_scale = bool(use_pot2_scale)
         self.num_directions = 2 if bidirectional else 1
 
         # ONNX 导出开关：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
@@ -803,6 +806,7 @@ class QuantGRU(nn.Module):
 
         # 位宽配置对象（直接初始化，避免延迟创建的线程安全问题）
         self._bitwidth_config = gru_ops.OperatorQuantConfig()  # 位宽配置(直接存储 C++ 对象)
+        self._bitwidth_config.usePOT2_ = self._use_pot2_scale
 
         self._cublas_initialized = False  # CUDA 延迟初始化标志
         
@@ -850,6 +854,7 @@ class QuantGRU(nn.Module):
                 bitwidth_dict[sym_attr] = getattr(self._bitwidth_config, sym_attr)
                 if unsigned_attr:
                     bitwidth_dict[unsigned_attr] = getattr(self._bitwidth_config, unsigned_attr)
+            bitwidth_dict['usePOT2_'] = getattr(self._bitwidth_config, 'usePOT2_', self._use_pot2_scale)
             state['_bitwidth_config'] = bitwidth_dict
         
         # C++ 对象无法序列化，设为 None（反序列化后需重新校准）
@@ -895,6 +900,7 @@ class QuantGRU(nn.Module):
         state.pop('_quant_params_allow_overwrite', None)
         
         self.__dict__.update(state)
+        self._use_pot2_scale = bool(getattr(self._bitwidth_config, 'usePOT2_', getattr(self, '_use_pot2_scale', True)))
 
     def reset_parameters(self):
         """权重初始化(与 nn.GRU 相同的均匀分布)"""
@@ -1010,7 +1016,7 @@ class QuantGRU(nn.Module):
         if 'disable_quantization' in default_config:
             self.use_quantization = not default_config['disable_quantization']
         if 'use_pot2_scale' in default_config:
-            self._bitwidth_config.usePOT2_ = bool(default_config['use_pot2_scale'])
+            self.use_pot2_scale = bool(default_config['use_pot2_scale'])
 
         # 直接将配置写入 C++ 对象
         op_config = gru_config.get('operator_config', {})
@@ -1350,6 +1356,19 @@ class QuantGRU(nn.Module):
     def _get_unsigned(self, op_name: str) -> bool:
         """获取指定操作是否无符号量化（False=INT, True=UINT），无效返回 False"""
         return self._get_config_attr(op_name, '_unsigned_', _VALID_UNSIGNED_ATTRS, False)
+
+    @property
+    def use_pot2_scale(self) -> bool:
+        """是否使用 POT2 scale 编码；False 时使用 affine/M+shift 编码。"""
+        if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
+            return bool(self._bitwidth_config.usePOT2_)
+        return bool(getattr(self, '_use_pot2_scale', True))
+
+    @use_pot2_scale.setter
+    def use_pot2_scale(self, value: bool):
+        self._use_pot2_scale = bool(value)
+        if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
+            self._bitwidth_config.usePOT2_ = self._use_pot2_scale
 
     @property
     def export_format(self) -> str:
@@ -2134,7 +2153,7 @@ class QuantGRU(nn.Module):
                 data = _concat_operator_fields(
                     data,
                     self._fix_zero_point(operators_reverse["weight_ih"]),
-                    list_fields=["scale", "real_min", "real_max"],
+                    list_fields=["scale", "zero_point", "multiplier", "shift", "real_min", "real_max"],
                     verbose_prefix=f"{param_key}/weight_ih"
                 )
             data = self._convert_to_encoding_format(data)
@@ -2153,7 +2172,7 @@ class QuantGRU(nn.Module):
                 data = _concat_operator_fields(
                     data,
                     self._fix_zero_point(operators_reverse["weight_hh"]),
-                    list_fields=["scale", "real_min", "real_max"],
+                    list_fields=["scale", "zero_point", "multiplier", "shift", "real_min", "real_max"],
                     verbose_prefix=f"{param_key}/weight_hh"
                 )
             data = self._convert_to_encoding_format(data)
@@ -2195,6 +2214,8 @@ class QuantGRU(nn.Module):
         list_fields = [
             "scale",
             "zero_point",
+            "multiplier",
+            "shift",
             "real_min",
             "real_max",
         ]
@@ -2444,7 +2465,7 @@ class QuantGRU(nn.Module):
 
             out_f = copy.deepcopy(op_data)
             out_r = copy.deepcopy(op_data)
-            for field in ["scale", "real_min", "real_max"]:
+            for field in ["scale", "multiplier", "shift", "real_min", "real_max"]:
                 if field in op_data and isinstance(op_data[field], list):
                     a, b = _split_list_in_half(op_data[field])
                     out_f[field] = a
@@ -3245,6 +3266,45 @@ def _extract_non_weight_scale_for_export(quant_params, op_info: dict) -> tuple:
     return [float(raw_value)], "PER_TENSOR"
 
 
+def _encode_mshift_py(scale: float) -> tuple:
+    if not (scale > 0.0):
+        raise ValueError(f"scale 必须 > 0，当前值: {scale}")
+    mant, exp2 = math.frexp(float(scale))
+    m = int(round(mant * 65536.0))
+    if m == 65536:
+        m = 32768
+        exp2 += 1
+    if m < 32768:
+        m = 32768
+    shift = 16 - exp2
+    if shift < -128 or shift > 127:
+        raise ValueError(f"encodeMShift shift 超范围: shift={shift}, scale={scale}")
+    return int(m), int(shift)
+
+
+def _decode_fixed_py(multiplier: int, shift: int) -> float:
+    return float(multiplier) * math.ldexp(1.0, -int(shift))
+
+
+def _encode_effective_scale_list(scale_list: list, use_pot2_scale: bool) -> tuple:
+    multipliers = []
+    shifts = []
+    effective_scales = []
+    for s in scale_list:
+        s = float(s)
+        if use_pot2_scale:
+            sh = int(round(-math.log2(s)))
+            m = 1
+            eff = math.ldexp(1.0, -sh)
+        else:
+            m, sh = _encode_mshift_py(s)
+            eff = _decode_fixed_py(m, sh)
+        multipliers.append(int(m))
+        shifts.append(int(sh))
+        effective_scales.append(float(eff))
+    return effective_scales, multipliers, shifts
+
+
 # ============================================================
 #                   导出函数：构建 operators 字典
 # ============================================================
@@ -3287,25 +3347,27 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
         return None
     
     scale_value, enc_type = result
+    scale_value, multiplier_value, shift_value = _encode_effective_scale_list(
+        scale_value, bool(getattr(bitwidth_config, "usePOT2_", True)))
     
     # 构建算子数据（按 AIMET 字段顺序）
     zp_value = int(getattr(quant_params, op_info["zp_attr"])) if op_info["zp_attr"] and hasattr(quant_params, op_info["zp_attr"]) else 0
+    zp_list = [zp_value for _ in scale_value]
     
     op_data = {
         "dtype": _bitwidth_to_dtype(bitwidth, is_unsigned=is_unsigned),
         "symmetric": is_symmetric,
         "scale": scale_value,
-        "zero_point": zp_value,
+        "multiplier": multiplier_value,
+        "shift": shift_value,
+        "zero_point": zp_list,
+        "scale_encoding": "pot2" if bool(getattr(bitwidth_config, "usePOT2_", True)) else "affine",
         "enc_type": enc_type,
     }
     
     # 计算 real_min 和 real_max
-    if isinstance(scale_value, list):
-        op_data["real_min"] = [s * (qmin - zp_value) for s in scale_value]
-        op_data["real_max"] = [s * (qmax - zp_value) for s in scale_value]
-    else:
-        op_data["real_min"] = scale_value * (qmin - zp_value)
-        op_data["real_max"] = scale_value * (qmax - zp_value)
+    op_data["real_min"] = [s * (qmin - zp) for s, zp in zip(scale_value, zp_list)]
+    op_data["real_max"] = [s * (qmax - zp) for s, zp in zip(scale_value, zp_list)]
     
     return op_data
 
@@ -3369,6 +3431,48 @@ def _dtype_to_is_unsigned(dtype: str) -> bool:
     return dtype.upper().startswith("UINT")
 
 
+def _parse_runtime_scale_lists(op_name: str, op_data: dict) -> tuple:
+    """解析新旧格式并返回 effective scale 列表。"""
+    if "multiplier" in op_data and "shift" in op_data:
+        multiplier = op_data["multiplier"]
+        shift = op_data["shift"]
+        if not isinstance(multiplier, list):
+            multiplier = [multiplier]
+        if not isinstance(shift, list):
+            shift = [shift]
+        if len(multiplier) != len(shift):
+            raise ValueError(f"算子 '{op_name}' 的 multiplier/shift 长度不一致")
+        scales = [_decode_fixed_py(int(m), int(s)) for m, s in zip(multiplier, shift)]
+        if "scale" in op_data:
+            exported_scale = op_data["scale"]
+            if not isinstance(exported_scale, list):
+                exported_scale = [exported_scale]
+            if len(exported_scale) == len(scales):
+                for i, (es, ds) in enumerate(zip(exported_scale, scales)):
+                    if abs(float(es) - float(ds)) > max(1e-6, abs(float(ds)) * 1e-3):
+                        print(f"  ⚠️ 警告：算子 '{op_name}' scale[{i}] 与 decode(multiplier,shift) 不一致: "
+                              f"scale={es}, decoded={ds}")
+        return scales, "new"
+
+    # 旧 POT2 fallback
+    if "n" in op_data or "exp2_inv" in op_data or "shift" in op_data:
+        old_shift = op_data.get("n", op_data.get("exp2_inv", op_data.get("shift")))
+        if isinstance(old_shift, list):
+            shifts = [int(v) for v in old_shift]
+        else:
+            shifts = [int(old_shift)]
+        scales = [math.ldexp(1.0, -s) for s in shifts]
+        return scales, "legacy_pot2"
+
+    # scale-only 明确拒绝
+    if "scale" in op_data:
+        raise ValueError(
+            f"算子 '{op_name}' 仅提供 scale，缺少 runtime 编码字段。"
+            f"必须提供 multiplier/shift 或旧 n/exp2_inv。")
+
+    raise ValueError(f"算子 '{op_name}' 缺少 scale/runtime 编码字段")
+
+
 # ============================================================
 #                   导入函数：解析 operators 字典
 # ============================================================
@@ -3394,14 +3498,7 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
         if verbose:
             print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，默认 PER_CHANNEL")
         enc_type = "PER_CHANNEL"
-    if "scale" not in op_data:
-        raise ValueError(f"算子 '{op_name}' 缺少必需字段 'scale'")
-
-    value = op_data["scale"]
-    if isinstance(value, list):
-        scale_list = [float(v) for v in value]
-    else:
-        scale_list = [float(value)]
+    scale_list, _ = _parse_runtime_scale_lists(op_name, op_data)
     setattr(quant_params, scale_attr, scale_list)
 
     if enc_type == "PER_TENSOR":
@@ -3436,19 +3533,13 @@ def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_
                 print(f"    - {attr}")
         raise AttributeError(f"'gru_interface_binding.GRUQuantParams' object has no attribute '{scale_attr}'")
 
-    if "scale" not in op_data:
-        raise ValueError("非权重算子缺少必需字段 'scale'")
-
-    value = op_data["scale"]
+    scale_list, _ = _parse_runtime_scale_lists(op_info["bw_attr"].rstrip("_"), op_data)
     if op_info["is_per_channel"]:
-        setattr(quant_params, scale_attr, [float(v) for v in value] if isinstance(value, list) else [float(value)])
+        setattr(quant_params, scale_attr, [float(v) for v in scale_list])
     else:
-        if isinstance(value, list):
-            if len(value) == 0:
-                raise ValueError("PER_TENSOR granularity requires non-empty scale list")
-            setattr(quant_params, scale_attr, float(value[0]))
-        else:
-            setattr(quant_params, scale_attr, float(value))
+        if len(scale_list) == 0:
+            raise ValueError("PER_TENSOR granularity requires non-empty scale list")
+        setattr(quant_params, scale_attr, float(scale_list[0]))
 
 
 def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data: dict, verbose: bool = False) -> None:
@@ -3558,6 +3649,7 @@ def _export_quant_params_impl(
             "bias": gru.bias,
             "batch_first": gru.batch_first,
             "bidirectional": gru.bidirectional,
+            "use_pot2_scale": bool(gru.use_pot2_scale),
         },
         "operators": _build_operators_dict(gru._bitwidth_config, gru.quant_params, verbose),
     }
@@ -3677,6 +3769,8 @@ def _load_quant_params_impl(
     
     # 解析 operators 字典
     gru._bitwidth_config = gru_ops.OperatorQuantConfig()
+    gru.use_pot2_scale = bool(model_info.get("use_pot2_scale", True))
+    gru._bitwidth_config.usePOT2_ = gru.use_pot2_scale
     gru.quant_params = gru_ops.GRUQuantParams()
     gru.quant_params.hidden_ = gru.hidden_size
     
@@ -3693,6 +3787,9 @@ def _load_quant_params_impl(
     #   2. 模型对称性：双向 GRU 的正反向是对称结构，应使用对称的量化配置
     #   3. 导出时 operators 和 operators_reverse 的 bitwidth 来自同一 _bitwidth_config，
     #      所以导入时解析两次 bitwidth 是等价的（值相同）
+    if gru.bidirectional and "operators_reverse" not in data:
+        raise ValueError("bidirectional=True 时导入文件必须包含 operators_reverse")
+
     if gru.bidirectional and "operators_reverse" in data:
         gru.quant_params_reverse = gru_ops.GRUQuantParams()
         gru.quant_params_reverse.hidden_ = gru.hidden_size
@@ -3700,6 +3797,13 @@ def _load_quant_params_impl(
         # 从 operators_reverse 解析 scale/zp，bitwidth 与正向相同（共用 _bitwidth_config）
         _parse_operators_dict(data["operators_reverse"], gru._bitwidth_config, gru.quant_params_reverse, verbose)
         gru.quant_params_reverse.bitwidth_config_ = gru._bitwidth_config
+        # 输入量化参数在双向中必须一致
+        fwd_input = data["operators"].get("input", {})
+        rev_input = data["operators_reverse"].get("input", {})
+        for field in ("multiplier", "shift", "zero_point"):
+            if field in fwd_input or field in rev_input:
+                if fwd_input.get(field) != rev_input.get(field):
+                    raise ValueError(f"双向导入失败：operators.input 与 operators_reverse.input 的 {field} 不一致")
     
     # 清除脏标志
     gru._quant_params_dirty = False
@@ -3762,16 +3866,25 @@ def _adjust_quant_config_impl(
             old_scale = getattr(gru.quant_params, scale_attr)
             old_values['scale'] = list(old_scale) if hasattr(old_scale, '__iter__') and not isinstance(old_scale, str) else float(old_scale)
             if scale is not None:
-                if scale <= 0:
-                    raise ValueError(f"scale 必须 > 0，当前值: {scale}")
                 if is_per_channel:
                     old_scale_list = list(old_scale)
-                    new_scale = [float(scale)] * len(old_scale_list)
-                    setattr(gru.quant_params, scale_attr, new_scale)
-                    new_values['scale'] = f"[{scale}, ...] (len={len(new_scale)})"
+                    if not isinstance(scale, (list, tuple)):
+                        raise ValueError("per-channel/per-gate 算子调整 scale 必须传 list，禁止 scalar 广播")
+                    if len(scale) != len(old_scale_list):
+                        raise ValueError(f"scale 长度不匹配: 期望 {len(old_scale_list)}，实际 {len(scale)}")
+                    requested = [float(v) for v in scale]
+                    if any(v <= 0 for v in requested):
+                        raise ValueError("scale 列表中的所有元素必须 > 0")
+                    effective, _, _ = _encode_effective_scale_list(requested, bool(gru.use_pot2_scale))
+                    setattr(gru.quant_params, scale_attr, effective)
+                    new_values['scale'] = effective
                 else:
-                    setattr(gru.quant_params, scale_attr, float(scale))
-                    new_values['scale'] = float(scale)
+                    scalar_scale = float(scale[0]) if isinstance(scale, (list, tuple)) else float(scale)
+                    if scalar_scale <= 0:
+                        raise ValueError(f"scale 必须 > 0，当前值: {scalar_scale}")
+                    effective, _, _ = _encode_effective_scale_list([scalar_scale], bool(gru.use_pot2_scale))
+                    setattr(gru.quant_params, scale_attr, float(effective[0]))
+                    new_values['scale'] = float(effective[0])
             
             if zp_attr and hasattr(gru.quant_params, zp_attr):
                 old_values['zero_point'] = int(getattr(gru.quant_params, zp_attr))
@@ -3808,10 +3921,22 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
             
             if is_per_channel:
                 if hasattr(gru.quant_params, scale_attr):
-                    config['scale'] = [float(v) for v in list(getattr(gru.quant_params, scale_attr))]
+                    scales = [float(v) for v in list(getattr(gru.quant_params, scale_attr))]
+                    eff, mul, sh = _encode_effective_scale_list(scales, bool(gru.use_pot2_scale))
+                    config['scale'] = eff
+                    config['multiplier'] = mul
+                    config['shift'] = sh
+                    config['scale_encoding'] = "pot2" if bool(gru.use_pot2_scale) else "affine"
+                    if zp_attr and hasattr(gru.quant_params, zp_attr):
+                        config['zero_point'] = [int(getattr(gru.quant_params, zp_attr)) for _ in eff]
             else:
                 if hasattr(gru.quant_params, scale_attr):
-                    config['scale'] = float(getattr(gru.quant_params, scale_attr))
+                    eff, mul, sh = _encode_effective_scale_list(
+                        [float(getattr(gru.quant_params, scale_attr))], bool(gru.use_pot2_scale))
+                    config['scale'] = float(eff[0])
+                    config['multiplier'] = int(mul[0])
+                    config['shift'] = int(sh[0])
+                    config['scale_encoding'] = "pot2" if bool(gru.use_pot2_scale) else "affine"
                 if zp_attr and hasattr(gru.quant_params, zp_attr):
                     config['zero_point'] = int(getattr(gru.quant_params, zp_attr))
         

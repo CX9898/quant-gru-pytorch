@@ -358,6 +358,42 @@ __host__ __device__ __forceinline__ int32_t quantize(float src, int8_t exp2_inv,
     return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, keep_gradient);
 }
 
+// ============================================================================
+// FixedPointScale（affine: scale = multiplier * 2^-shift）版量化/反量化
+// POT2 模式下 fixed_scale = {1, shift}，decode_scale 即 2^-shift，行为与上面一致。
+// 统一以 fixed_scale 作为唯一标度来源，使边界量化与 runtime rescale 保持一致。
+// ============================================================================
+template <typename QuantT>
+__host__ __device__ __forceinline__ float dequantize(QuantT q, FixedPointScale fs, int32_t zp) {
+    int32_t v = static_cast<int32_t>(q) - zp;
+    return static_cast<float>(v) * decode_scale(fs);
+}
+
+__host__ __device__ __forceinline__ float dequantize_f(float q, FixedPointScale fs, int32_t zp) {
+    return (q - static_cast<float>(zp)) * decode_scale(fs);
+}
+
+template <bool Training = false>
+__host__ __device__ __forceinline__ float quantize_f(float src, FixedPointScale fs, int32_t zp,
+                                                      QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
+    float q = round_f(src / decode_scale(fs) + static_cast<float>(zp));
+    return clamp_f<Training>(q, bw, keep_gradient);
+}
+
+template <bool Training = false>
+__host__ __device__ __forceinline__ float quantize_f(float src, FixedPointScale fs, QuantBitWidth bw,
+                                                      uint8_t* keep_gradient = nullptr) {
+    float q = round_f(src / decode_scale(fs));
+    return clamp_f<Training>(q, bw, keep_gradient);
+}
+
+template <bool Training = false>
+__host__ __device__ __forceinline__ int32_t quantize(float src, FixedPointScale fs, int32_t zp,
+                                                      QuantBitWidth bw, uint8_t* keep_gradient = nullptr) {
+    float q = round_f(src / decode_scale(fs)) + static_cast<float>(zp);
+    return clamp_by_bitwidth<Training>(static_cast<int32_t>(q), bw, keep_gradient);
+}
+
 
 // ============================================================================
 // 分段线性近似函数（CPU/GPU 共用）
@@ -1135,25 +1171,26 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
 #endif
 }
 
-/// @brief 批量量化（任意位宽版本，输出 int32_t）
-inline void quantification(const float *data, int32_t *quant_data, size_t size, 
-                           int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+/// @brief 批量量化（任意位宽版本，输出 int32_t，使用 fixed_scale）
+inline void quantification(const float *data, int32_t *quant_data, size_t size,
+                           FixedPointScale fs, int32_t zp, QuantBitWidth bw) {
 #pragma omp parallel for
     for (size_t i = 0; i < size; ++i) {
-        quant_data[i] = quantize(data[i], exp2_inv, zp, bw);
+        quant_data[i] = quantize(data[i], fs, zp, bw);
     }
 }
 
-/// @brief Per-channel 批量量化（Host 端，统一 int32_t 输出，使用位宽配置）
+/// @brief Per-channel 批量量化（Host 端，统一 int32_t 输出，使用 fixed_scale）
 inline void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, size_t input_size,
-                                              size_t channel_size, const std::vector<int8_t> &exp2_invs,
+                                              size_t channel_size,
+                                              const std::vector<FixedPointScale> &fixed_scales,
                                               QuantBitWidth bw) {
 #pragma omp parallel for
     for (size_t i = 0; i < channel_size; ++i) {
-        const int8_t exp2_inv = exp2_invs[i];
+        const FixedPointScale fs = fixed_scales[i];
         for (size_t j = 0; j < input_size; ++j) {
             const size_t idx = j * channel_size + i;
-            quant_data[idx] = quantize(src[idx], exp2_inv, 0, bw);
+            quant_data[idx] = quantize(src[idx], fs, 0, bw);
         }
     }
 }
@@ -1166,15 +1203,15 @@ namespace dev {
 
 /// @brief GPU 批量反量化
 template <typename T, typename QuantT>
-void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp);
+void dequantification(const QuantT *quant_data, T *data, size_t size, FixedPointScale exp2_inv, int32_t zp);
 
 /// @brief GPU 反量化 V 向量（各部分使用不同量化参数）
 /// V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
-                       int hidden_size, int8_t shift_update_gate, int32_t zp_update_gate, int8_t shift_reset_gate,
-                       int32_t zp_reset_gate, int8_t shift_new_gate, int32_t zp_new_gate, 
-                       int8_t shift_weight_hh_linear, int32_t zp_weight_hh_linear);
+                       int hidden_size, FixedPointScale shift_update_gate, int32_t zp_update_gate, FixedPointScale shift_reset_gate,
+                       int32_t zp_reset_gate, FixedPointScale shift_new_gate, int32_t zp_new_gate, 
+                       FixedPointScale shift_weight_hh_linear, int32_t zp_weight_hh_linear);
 
 
 
@@ -1186,24 +1223,24 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
 
 /// @brief GPU 反量化（float 输入的量化值）
 void dequantificationFP(const float *quant_data, float *data, size_t size,
-                        int8_t exp2_inv, int32_t zp);
+                        FixedPointScale exp2_inv, int32_t zp);
 
 /// @brief GPU 反量化 V 向量（float 输入的量化值）
 /// V 布局: [time_steps, batch_size, hidden_size * 4]
 /// 4个部分使用不同量化参数: [z_out, r_out, g_out, weight_hh_linear_g]
 void dequantificationVFP(const float *quant_data, float *data, int time_steps, int batch_size,
-                         int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                         int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                         int8_t shift_hh, int32_t zp_hh);
+                         int hidden_size, FixedPointScale shift_z, int32_t zp_z, FixedPointScale shift_r,
+                         int32_t zp_r, FixedPointScale shift_g, int32_t zp_g,
+                         FixedPointScale shift_hh, int32_t zp_hh);
 
 /// @brief GPU 原地反量化 V 向量（float 输入的量化值）
 /// V 布局: [time_steps, batch_size, hidden_size * 4]
 /// 4个部分使用不同量化参数: [z_out, r_out, g_out, weight_hh_linear_g]
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
 void dequantificationVFPInplace(float *data, int time_steps, int batch_size,
-                                int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                                int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                                int8_t shift_hh, int32_t zp_hh);
+                                int hidden_size, FixedPointScale shift_z, int32_t zp_z, FixedPointScale shift_r,
+                                int32_t zp_r, FixedPointScale shift_g, int32_t zp_g,
+                                FixedPointScale shift_hh, int32_t zp_hh);
 
 /// @brief GPU Per-channel 反量化（float 输入的量化值）
 /// @param quant_data 量化后的数据（float 存储，实际是定点整数）
@@ -1213,7 +1250,7 @@ void dequantificationVFPInplace(float *data, int time_steps, int batch_size,
 /// @param exp2_invs per-channel 的缩放因子指数向量
 void dequantificationPerChannelFP(const float *quant_data, float *data,
                                   size_t input_size, size_t channel_size,
-                                  const dev::vector<int8_t> &exp2_invs);
+                                  const dev::vector<FixedPointScale> &exp2_invs);
 
 /// @brief GPU Per-channel 原地反量化（float 输入的量化值）
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
@@ -1222,7 +1259,7 @@ void dequantificationPerChannelFP(const float *quant_data, float *data,
 /// @param exp2_invs per-channel 的缩放因子指数向量
 void dequantificationPerChannelFPInplace(float *data,
                                          size_t input_size, size_t channel_size,
-                                         const dev::vector<int8_t> &exp2_invs);
+                                         const dev::vector<FixedPointScale> &exp2_invs);
 
 /// @brief GPU per-gate 原地反量化（用于 GRU 权重）
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
@@ -1233,7 +1270,7 @@ void dequantificationPerChannelFPInplace(float *data,
 /// @param exp2_inv_g g gate 的缩放因子指数
 void dequantificationPerGateFPInplace(float *data,
                                       size_t input_size, size_t hidden_size,
-                                      int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g);
+                                      FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g);
 
 /// @brief GPU 原地反量化（float 输入的量化值）
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
@@ -1241,7 +1278,7 @@ void dequantificationPerGateFPInplace(float *data,
 /// @param exp2_inv 缩放因子指数
 /// @param zp 零点
 void dequantificationFPInplace(float *data, size_t size,
-                               int8_t exp2_inv, int32_t zp);
+                               FixedPointScale exp2_inv, int32_t zp);
 
 // ============================================================================
 // 带 mask 版本的量化函数（用于 QAT）
@@ -1256,14 +1293,14 @@ void dequantificationFPInplace(float *data, size_t size,
 /// @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
 template <bool Training = false>
 void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
-                      size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                      size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 
 /// @brief GPU 量化（int32 输出）
 /// @tparam Training 是否训练模式（决定是否使用 mask）
 /// @param mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
 template <bool Training = false>
 void quantificationBitwidth(const float *data, int32_t *quant_data, uint8_t *mask,
-                            size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                            size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 
 /// @brief GPU Per-channel 量化（float 输出）
 /// @tparam Training 是否训练模式（决定是否使用 mask）
@@ -1271,7 +1308,7 @@ void quantificationBitwidth(const float *data, int32_t *quant_data, uint8_t *mas
 template <bool Training = false>
 void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *mask,
                                 size_t input_size, size_t channel_size,
-                                const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 /// @brief GPU Per-gate 量化（float 输出，用于 GRU 权重）
 /// @tparam Training 是否训练模式（决定是否使用 mask）
@@ -1282,7 +1319,7 @@ void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *ma
 template <bool Training = false>
 void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
                              size_t input_size, size_t hidden_size,
-                             int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                             FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g,
                              QuantBitWidth bw);
 
 /// @brief GPU Per-channel 量化（int32 输出）
@@ -1291,7 +1328,7 @@ void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
 template <bool Training = false>
 void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, uint8_t *mask,
                                       size_t input_size, size_t channel_size,
-                                      const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                      const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 // ============================================================================
 // Bias 特殊量化函数（使用 round(bias / scale / 128) * 128）
@@ -1304,7 +1341,7 @@ void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, uin
 template <bool Training = false>
 void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
                           size_t channel_size,
-                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                          const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 // ============================================================================
 // 通用权重量化函数（根据 granularity 自动选择）
@@ -1326,15 +1363,15 @@ template <bool Training = false>
 void quantificationWeightFP(const float *src, float *quant_data, uint8_t *mask,
                              size_t input_size, size_t hidden_size,
                              OperatorQuantConfig::QuantizationGranularity granularity,
-                             int8_t shift_tensor,
-                             const std::array<int8_t, 3> &shift_gate,
-                             const dev::vector<int8_t> &shift_channel,
+                             FixedPointScale shift_tensor,
+                             const std::array<FixedPointScale, 3> &shift_gate,
+                             const dev::vector<FixedPointScale> &shift_channel,
                              QuantBitWidth bw);
 
 /// @brief GPU Per-channel 反量化
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
-                                size_t channel_size, const dev::vector<int8_t> &exp2_invs);
+                                size_t channel_size, const dev::vector<FixedPointScale> &exp2_invs);
 
 /// @brief 统一的反量化接口：根据 granularity 自动选择 per-tensor、per-gate 或 per-channel 反量化
 /// @param data 量化后的数据（输入），反量化后的数据（输出），原地修改
@@ -1347,9 +1384,9 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_
 void dequantificationWeightFPInplace(float *data,
                                      size_t input_size, size_t hidden_size,
                                      OperatorQuantConfig::QuantizationGranularity granularity,
-                                     int8_t shift_tensor,
-                                     const std::array<int8_t, 3> &shift_gate,
-                                     const dev::vector<int8_t> &shift_channel);
+                                     FixedPointScale shift_tensor,
+                                     const std::array<FixedPointScale, 3> &shift_gate,
+                                     const dev::vector<FixedPointScale> &shift_channel);
 
 }  // namespace dev
 
