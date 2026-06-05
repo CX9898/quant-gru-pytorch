@@ -6,7 +6,7 @@ QuantGRU 量化库使用示例
 - 量化感知训练（QAT）
 - 校准方法选择（MinMax / SQNR / Percentile）
 - 双向 GRU
-- ONNX 导出（float 浮点 / qdq 伪量化）
+- ONNX 导出（标准 GRU 单节点）
 - 量化参数导出/导入
 - 量化配置调整与查看
 """
@@ -19,7 +19,12 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from quant_gru import QuantGRU, print_quant_config, print_quant_params
+from quant_gru import (
+    QuantGRU,
+    ensure_quant_gru_onnx_registered,
+    print_quant_config,
+    print_quant_params,
+)
 
 
 def example_basic_usage():
@@ -457,20 +462,14 @@ def example_onnx_export():
     """
     示例 8: ONNX 导出
     
-    QuantGRU 支持导出为 ONNX 格式，便于部署到各类推理引擎。
-    
-    导出模式 (export_mode):
-    - False (默认): 使用 CUDA C++ 实现（高性能推理）
-    - True: 使用纯 PyTorch 实现（可被 ONNX 追踪）
-    
-    导出格式 (export_format):
-    - 'float': 浮点格式（默认）
-    - 'qdq': QDQ 伪量化格式（量化模型推荐，需先校准）
-    
+    QuantGRU 导出为 ONNX 标准 GRU 节点。
+
     注意事项:
     - 导出前必须设置 export_mode = True
-    - QDQ 格式需要先校准
-    - 导出后应恢复 export_mode = False 以使用 CUDA 推理
+    - 必须调用 ensure_quant_gru_onnx_registered(opset=18)
+    - 导出需要使用 legacy exporter（dynamo=False）
+    - custom_opsets 需要包含 {"quant_gru_onnx": 1}
+    - 导出后应恢复 export_mode = False
     """
     print("\n" + "=" * 60)
     print("示例 8: ONNX 导出")
@@ -482,39 +481,23 @@ def example_onnx_export():
     batch_size = 1
     seq_len = 20
     
-    # 1. 创建并配置模型
+    # 1. 创建模型
     gru = QuantGRU(
         input_size=input_size,
         hidden_size=hidden_size,
         batch_first=True
-    ).cuda()
-    
-    print("\n📦 步骤 1: 配置量化参数")
-    gru.set_all_bitwidth(16)  # 16bit 量化
-    print("   ✅ 设置 16bit 量化")
-    
-    # 2. 校准
-    print("\n📊 步骤 2: 校准模型")
-    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
-    
-    gru.calibrating = True
-    _ = gru(calibration_data)
-    gru.calibrating = False
-    gru.finalize_calibration()
-    
-    gru.use_quantization = True
-    print("   ✅ 校准完成")
-    
-    # 3. 切换到导出模式
-    print("\n🔄 步骤 3: 切换到导出模式")
+    ).cpu()
+
+    # 2. 切换到导出模式并注册 symbolic
+    print("\n🔄 步骤 2: 切换导出模式并注册 custom symbolic")
     gru.export_mode = True
+    ensure_quant_gru_onnx_registered(opset=18)
     gru.eval()
     print(f"   export_mode = {gru.export_mode}")
-    print(f"   导出格式: {gru.export_format}")
-    
-    # 4. 导出 ONNX
-    print("\n📤 步骤 4: 导出 ONNX 模型")
-    dummy_input = torch.randn(batch_size, seq_len, input_size).cuda()
+
+    # 3. 导出 ONNX
+    print("\n📤 步骤 3: 导出 ONNX 模型")
+    dummy_input = torch.randn(batch_size, seq_len, input_size).cpu()
     onnx_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "quant_gru_example.onnx"
@@ -530,21 +513,23 @@ def example_onnx_export():
             'input': {0: 'batch', 1: 'seq_len'},
             'output': {0: 'batch', 1: 'seq_len'}
         },
-        opset_version=14,
-        dynamo=False,  # 使用传统 TorchScript 导出，避免 torch.export 兼容性问题
+        opset_version=18,
+        dynamo=False,
+        custom_opsets={"quant_gru_onnx": 1},
         verbose=False
     )
     print(f"   ✅ 导出成功: {onnx_path}")
-    
-    # 5. 验证导出的模型
-    print("\n🔍 步骤 5: 验证 ONNX 模型")
+
+    # 4. 验证导出的模型
+    print("\n🔍 步骤 4: 验证 ONNX 模型")
     try:
         import onnx
         model = onnx.load(onnx_path)
         onnx.checker.check_model(model)
         print("   ✅ ONNX 模型验证通过")
-        
-        # 打印模型信息
+        gru_nodes = [n for n in model.graph.node if n.op_type == "GRU"]
+        print(f"   - GRU 节点数: {len(gru_nodes)}")
+
         print(f"\n   模型信息:")
         print(f"   - IR 版本: {model.ir_version}")
         print(f"   - Opset 版本: {model.opset_import[0].version}")
@@ -554,98 +539,17 @@ def example_onnx_export():
         print("   ⚠️ 未安装 onnx 库，跳过验证")
     except Exception as e:
         print(f"   ⚠️ 验证失败: {e}")
-    
-    # 6. 恢复 CUDA 模式
+
+    # 5. 恢复运行模式
     gru.export_mode = False
-    print(f"\n🔄 恢复 CUDA 模式: export_mode = {gru.export_mode}")
-    
+    print(f"\n🔄 恢复运行模式: export_mode = {gru.export_mode}")
+
     print("\n✅ ONNX 导出示例完成！")
-    
+
     # 清理临时文件
     if os.path.exists(onnx_path):
         os.remove(onnx_path)
         print(f"   已清理临时文件: {onnx_path}")
-
-
-def example_onnx_export_modes():
-    """
-    示例 9: ONNX 导出格式对比
-    
-    演示两种 ONNX 导出格式的区别和使用场景:
-    - 'float': 浮点格式（默认）
-    - 'qdq': QDQ 伪量化格式（量化模型推荐，需先校准）
-    """
-    print("\n" + "=" * 60)
-    print("示例 9: ONNX 导出格式对比")
-    print("=" * 60)
-    
-    # 模型参数
-    input_size = 64
-    hidden_size = 128
-    batch_size = 4
-    seq_len = 20
-    
-    # 创建基准模型
-    gru_base = QuantGRU(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        batch_first=True
-    ).cuda()
-    
-    # 校准
-    calibration_data = torch.randn(batch_size, seq_len, input_size).cuda()
-    gru_base.set_all_bitwidth(16)
-    
-    gru_base.calibrating = True
-    _ = gru_base(calibration_data)
-    gru_base.calibrating = False
-    gru_base.finalize_calibration()
-    
-    gru_base.use_quantization = True
-    
-    # 获取 CUDA 参考输出
-    gru_base.eval()
-    test_input = torch.randn(batch_size, seq_len, input_size).cuda()
-    with torch.no_grad():
-        cuda_output, _ = gru_base(test_input)
-    
-    print("\n📊 对比两种 ONNX 导出格式:")
-    print("-" * 50)
-    
-    modes = [
-        ('float', '浮点格式（默认）'),
-        ('qdq', 'QDQ 伪量化格式（量化推荐，需先校准）')
-    ]
-    
-    gru_base.export_mode = True
-    
-    for mode, desc in modes:
-        gru_base.export_format = mode
-        
-        with torch.no_grad():
-            export_output, _ = gru_base(test_input)
-        
-        # 计算与 CUDA 输出的相似度
-        cos_sim = torch.nn.functional.cosine_similarity(
-            cuda_output.flatten().unsqueeze(0),
-            export_output.flatten().unsqueeze(0)
-        ).item()
-        
-        mse = torch.mean((cuda_output - export_output) ** 2).item()
-        
-        print(f"\n   模式: {mode}")
-        print(f"   描述: {desc}")
-        print(f"   余弦相似度: {cos_sim:.6f}")
-        print(f"   MSE: {mse:.8f}")
-    
-    gru_base.export_mode = False
-    
-    print("\n" + "-" * 50)
-    print("\n💡 导出格式选择建议:")
-    print("   • 'float': 非量化模型、通用部署（默认）")
-    print("   • 'qdq':   量化模型部署，推理引擎自动优化（需先校准）")
-    
-    print("\n✅ 导出格式对比完成！")
 
 
 def example_quant_params_export_import():
@@ -1061,19 +965,16 @@ def main():
         # 示例 8: ONNX 导出
         example_onnx_export()
         
-        # 示例 9: ONNX 导出格式对比
-        example_onnx_export_modes()
-        
-        # 示例 10: 量化参数导出/导入
+        # 示例 9: 量化参数导出/导入
         example_quant_params_export_import()
         
-        # 示例 11: 调整量化配置
+        # 示例 10: 调整量化配置
         example_adjust_quant_config()
         
-        # 示例 12: 调试工具使用
+        # 示例 11: 调试工具使用
         example_debug_tools()
         
-        # 示例 13: 权重和偏置的量化粒度设置
+        # 示例 12: 权重和偏置的量化粒度设置
         example_weight_bias_granularity()
         
         print("\n" + "=" * 60)
