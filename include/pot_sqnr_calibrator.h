@@ -57,6 +57,7 @@ struct AffineScaleResult {
 };
 
 struct EncodedScaleResult {
+    float continuous_scale;
     FixedPointScale fixed_scale;
     float effective_scale;
     int8_t pot_shift;
@@ -519,6 +520,7 @@ inline EncodedScaleResult encodeScaleResult(
     if (use_pot2) {
         PotScaleResult pot = convertToPot(continuous_scale, continuous_min, bw, is_symmetric, coverage_round);
         return EncodedScaleResult{
+            continuous_scale,
             FixedPointScale{1u, pot.exp2_inv},
             pot.po2_scale,
             pot.exp2_inv,
@@ -529,6 +531,7 @@ inline EncodedScaleResult encodeScaleResult(
     AffineScaleResult affine = convertToAffineScale(continuous_scale, continuous_min, bw, is_symmetric);
     int8_t compat_shift = static_cast<int8_t>(round_f(-std::log2(affine.effective_scale)));
     return EncodedScaleResult{
+        continuous_scale,
         affine.fixed_scale,
         affine.effective_scale,
         compat_shift,
