@@ -7,14 +7,13 @@ QuantGRU - 支持量化的 GRU 实现
     - 支持 MinMax / SQNR / Percentile 校准方法
     - 支持 JSON 配置文件指定各算子的位宽和对称量化设置
     - 支持量化参数导出/导入（JSON 格式，便于部署和调试）
-    - 支持 ONNX 导出(float 格式)
+    - 支持 ONNX 导出（标准 GRU 节点）
 
 关键属性:
     - use_quantization: 是否启用量化(默认 False)
     - calibrating: 是否在 forward 中收集校准数据(默认 False)
     - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'(默认 'minmax')
     - export_mode: 是否使用 ONNX 导出模式(默认 False)
-    - export_format: ONNX 导出格式，仅支持 'float'
 
 典型用法:
     >>> from quant_gru import QuantGRU
@@ -66,18 +65,26 @@ QuantGRU - 支持量化的 GRU 实现
     >>> print_quant_params(gru)  # 打印量化参数详情
 
 ONNX 导出:
+    >>> from quant_gru import ensure_quant_gru_onnx_registered
     >>> gru.export_mode = True
-    >>> gru.export_format = 'float'
-    >>> torch.onnx.export(gru, x, "model.onnx", dynamo=False)  # PyTorch 2.x 需要 dynamo=False
+    >>> ensure_quant_gru_onnx_registered(opset=18)
+    >>> torch.onnx.export(
+    ...     gru, x, "model.onnx",
+    ...     opset_version=18,
+    ...     dynamo=False,  # PyTorch 2.x 需要使用 legacy exporter
+    ...     custom_opsets={"quant_gru_onnx": 1}
+    ... )
     >>> gru.export_mode = False
 """
 
 import json
 import math
+import warnings
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 from _version import __version__
+from torch.onnx import register_custom_op_symbolic, symbolic_helper
 
 try:
     import gru_interface_binding as gru_ops
@@ -239,6 +246,116 @@ def _validate_operator_map():
 
 # 模块加载时执行一致性验证（import 时自动运行）
 _validate_operator_map()
+
+# ============================================================
+#                ONNX 导出（单节点 GRU）辅助逻辑
+# ============================================================
+
+_QUANT_GRU_ONNX_LIB = None
+
+
+def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
+    """
+    注册 QuantGRU ONNX 导出所需的 custom op 与 symbolic。
+
+    说明：
+        - 首次注册仅支持 opset=18（与项目导出承诺一致）
+        - 注册成功后重复调用会静默返回（与参考实现一致）
+    """
+    if getattr(ensure_quant_gru_onnx_registered, "_done", False):
+        return
+
+    if int(opset) != 18:
+        raise ValueError(
+            f"ensure_quant_gru_onnx_registered 首次注册仅支持 opset=18，当前为 {opset}"
+        )
+
+    global _QUANT_GRU_ONNX_LIB
+    if _QUANT_GRU_ONNX_LIB is None:
+        _QUANT_GRU_ONNX_LIB = torch.library.Library("quant_gru_onnx", "DEF")
+
+    _QUANT_GRU_ONNX_LIB.define(
+        "gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+    )
+    _QUANT_GRU_ONNX_LIB.define(
+        "bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+    )
+
+    def _gru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+        t, b = x.shape[0], x.shape[1]
+        out = x.new_zeros(t, b, int(hidden_size))
+        h_n = x.new_zeros(int(num_layers), b, int(hidden_size))
+        return out, h_n
+
+    def _bigru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+        t, b = x.shape[0], x.shape[1]
+        out = x.new_zeros(t, b, 2 * int(hidden_size))
+        h_n = x.new_zeros(2 * int(num_layers), b, int(hidden_size))
+        return out, h_n
+
+    try:
+        _QUANT_GRU_ONNX_LIB.impl("gru", _gru_cpu, dispatch_key="CPU")
+    except TypeError:
+        _QUANT_GRU_ONNX_LIB.impl("gru", "CPU", _gru_cpu)
+
+    try:
+        _QUANT_GRU_ONNX_LIB.impl("bigru", _bigru_cpu, dispatch_key="CPU")
+    except TypeError:
+        _QUANT_GRU_ONNX_LIB.impl("bigru", "CPU", _bigru_cpu)
+
+    def _symbolic_gru(g, x, h0, W, R, B, hidden_size, num_layers):
+        hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
+        num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
+        if hidden_size_i is None or num_layers_i is None:
+            raise RuntimeError("quant_gru_onnx::gru 的 hidden_size/num_layers 必须为常量")
+
+        Y, Y_h = g.op(
+            "GRU",
+            x,
+            W,
+            R,
+            B,
+            symbolic_helper._optional_input_placeholder_tensor(g),
+            h0,
+            hidden_size_i=int(hidden_size_i),
+            direction_s="forward",
+            linear_before_reset_i=1,
+            outputs=2,
+        )
+        axes = g.op("Constant", value_t=torch.tensor([1], dtype=torch.long))
+        out = g.op("Squeeze", Y, axes)
+        return out, Y_h
+
+    def _symbolic_bigru(g, x, h0, W, R, B, hidden_size, num_layers):
+        hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
+        num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
+        if hidden_size_i is None or num_layers_i is None:
+            raise RuntimeError("quant_gru_onnx::bigru 的 hidden_size/num_layers 必须为常量")
+
+        Y, Y_h = g.op(
+            "GRU",
+            x,
+            W,
+            R,
+            B,
+            symbolic_helper._optional_input_placeholder_tensor(g),
+            h0,
+            hidden_size_i=int(hidden_size_i),
+            direction_s="bidirectional",
+            linear_before_reset_i=1,
+            outputs=2,
+        )
+
+        y_perm = g.op("Transpose", Y, perm_i=[0, 2, 1, 3])
+        shape = g.op("Constant", value_t=torch.tensor([0, 0, -1], dtype=torch.long))
+        out = g.op("Reshape", y_perm, shape)
+        return out, Y_h
+
+    register_custom_op_symbolic("quant_gru_onnx::gru", _symbolic_gru, int(opset))
+    register_custom_op_symbolic("quant_gru_onnx::bigru", _symbolic_bigru, int(opset))
+    ensure_quant_gru_onnx_registered._done = True
 
 
 # ============================================================
@@ -713,8 +830,7 @@ class QuantGRU(nn.Module):
         calibrating (bool): 校准模式开关，True 时 forward 会收集校准数据
         calibration_method (str): 校准方法 'minmax'|'sqnr'|'percentile'（默认 'sqnr'）
         percentile_value (float): 百分位值，仅 'percentile' 方法使用（默认 99.99）
-        export_mode (bool): ONNX 导出模式，True 时使用纯 PyTorch 实现
-        export_format (str): 导出格式，仅支持 'float'（默认）
+        export_mode (bool): ONNX 导出模式，True 时使用标准 GRU 节点导出路径
     
     Example:
         >>> gru = QuantGRU(64, 128, batch_first=True).cuda()
@@ -763,11 +879,12 @@ class QuantGRU(nn.Module):
         self._use_pot2_scale = bool(use_pot2_scale)
         self.num_directions = 2 if bidirectional else 1
 
-        # ONNX 导出开关：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
+        # ONNX 导出开关：True 时启用单节点 GRU 导出路径
         self.export_mode = False
-        # 导出格式(高级选项，仅在 export_mode=True 时有效)
-        # 'float': 浮点(默认，与 Haste GRU 行为一致)
-        self._export_format = 'float'
+        # ONNX 导出临时权重缓存（non-persistent，避免污染 state_dict）
+        self.register_buffer('_onnx_export_weight_ih', torch.empty(0), persistent=False)
+        self.register_buffer('_onnx_export_weight_hh', torch.empty(0), persistent=False)
+        self.register_buffer('_onnx_export_bias', torch.empty(0), persistent=False)
 
         # 权重参数(命名与 nn.GRU 一致)
         self.weight_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size, input_size))
@@ -1318,7 +1435,7 @@ class QuantGRU(nn.Module):
             self.quant_params_reverse = None
             self.hist_collectors_reverse = None
 
-    # -------------------- ONNX 导出模式：纯 PyTorch 实现 --------------------
+    # -------------------- ONNX 导出模式：标准 GRU 节点 --------------------
 
     def _get_config_attr(self, op_name: str, suffix: str, valid_set: set, default):
         """
@@ -1375,215 +1492,143 @@ class QuantGRU(nn.Module):
             # use_pot2_scale 切换会改变目标 scale 语义，需要重新校准
             self._quant_params_dirty = True
 
-    @property
-    def export_format(self) -> str:
-        """
-        获取导出格式(高级选项，仅在 export_mode=True 时有效)
-        
-        Returns:
-            'float': 浮点格式(默认，与 Haste GRU 行为一致)
-        """
-        return self._export_format
-
-    @export_format.setter
-    def export_format(self, mode: str):
-        """
-        设置导出格式(高级用法，大多数用户不需要修改)
-        
-        Args:
-            mode: 仅支持 'float'
-        """
-        valid_modes = ('float',)
-        if mode not in valid_modes:
-            raise ValueError(f"Invalid export_format: '{mode}'. Use one of {valid_modes}")
-        self._export_format = mode
-
-    def _forward_python_single_direction(
-            self,
-            input: torch.Tensor,
-            h0: Optional[torch.Tensor],
-            weight_ih: torch.Tensor,
-            weight_hh: torch.Tensor,
-            bias_ih: Optional[torch.Tensor],
-            bias_hh: Optional[torch.Tensor],
-            quant_params
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        纯 PyTorch 实现的单向 GRU 前向传播(可被 ONNX 追踪)
-
-        GRU 公式(Haste 格式，门顺序为 z, r, g)：
-            z = sigmoid(W_z @ x + R_z @ h + bw_z + br_z)  # update gate
-            r = sigmoid(W_r @ x + R_r @ h + bw_r + br_r)  # reset gate
-            g = tanh(W_g @ x + r * (R_g @ h + br_g) + bw_g)  # candidate gate
-            h' = z * h + (1 - z) * g
-
-        ONNX 导出模式仅保留 'float'，不再支持 'qdq'
-
-        Args:
-            input: [T, B, I] 输入序列
-            h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部自动转换)
-            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部自动转换)
-            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部自动转换)
-            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部自动转换)
-            quant_params: 量化参数(来自 finalize_calibration)
-
-        Returns:
-            output: [T, B, H] 输出序列
-            h_n: [1, B, H] 最终隐藏状态
-        """
-        # 仅保留 float 导出路径
-        return self._forward_python_float_single_direction(
-            input, h0, weight_ih, weight_hh, bias_ih, bias_hh
+    def _resolve_onnx_module_name(self) -> str:
+        """解析 ONNX 导出时用于可读命名的模块名称。"""
+        if self._module_name:
+            return str(self._module_name)
+        warnings.warn(
+            "QuantGRU._module_name 未设置，ONNX 导出将使用默认名称 'gru'。"
+            "多 GRU 模型建议先调用 set_quant_gru_module_names(model)。",
+            UserWarning,
         )
+        return "gru"
 
-    def _forward_python_float_single_direction(
+    def _pack_onnx_gru_direction_weights(
             self,
-            input: torch.Tensor,
-            h0: Optional[torch.Tensor],
             weight_ih: torch.Tensor,
             weight_hh: torch.Tensor,
-            bias_ih: Optional[torch.Tensor],
-            bias_hh: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            bias_ih: torch.Tensor,
+            bias_hh: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        浮点实现的单向 GRU 前向传播(Haste 格式)
-        
-        与 HasteGRU CUDA 浮点推理行为一致
-        门控顺序：Haste 格式 (z, r, g)
-        
-        公式(与 gru_forward_gpu.cu 一致)：
-            z = sigmoid(Wx_z + Rh_z + bw_z + br_z)
-            r = sigmoid(Wx_r + Rh_r + bw_r + br_r)
-            g = tanh(Wx_g + r * (Rh_g + br_g) + bw_g)
-            h_new = z * h_old + (1 - z) * g
-        
-        Args:
-            input: [T, B, I] 输入序列
-            h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部转换)
-            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部转换)
-            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部转换)
-            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部转换)
-            
+        将单方向 PyTorch GRU 参数打包为 ONNX GRU 方向参数。
+
         Returns:
-            output: [T, B, H] 输出序列
-            h_n: [1, B, H] 最终隐藏状态
+            W_dir: [3H, I]  (z,r,n)
+            R_dir: [3H, H]  (z,r,n)
+            B_dir: [6H]     = concat(bias_ih, bias_hh)，其中每项都为 (z,r,n)
         """
-        T, B, I = input.shape
-        H = self.hidden_size
-        device = input.device
-        dtype = input.dtype
+        W_dir = reorder_weights_pytorch_to_haste(weight_ih).contiguous()
+        R_dir = reorder_weights_pytorch_to_haste(weight_hh).contiguous()
+        b_ih_dir = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+        b_hh_dir = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
+        B_dir = torch.cat([b_ih_dir, b_hh_dir], dim=0).contiguous()
+        return W_dir, R_dir, B_dir
 
-        # 初始化隐藏状态
-        if h0 is None:
-            h = torch.zeros(B, H, device=device, dtype=dtype)
-        else:
-            h = h0
-
-        # 权重格式转换：PyTorch (r,z,n) -> Haste (z,r,g)
-        W = reorder_weights_pytorch_to_haste(weight_ih)  # [3*H, I]
-        R = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
-
-        # 处理偏置并转换格式
-        if bias_ih is None:
-            bw = torch.zeros(3 * H, device=device, dtype=dtype)
-        else:
-            bw = reorder_weights_pytorch_to_haste(bias_ih)
-        if bias_hh is None:
-            br = torch.zeros(3 * H, device=device, dtype=dtype)
-        else:
-            br = reorder_weights_pytorch_to_haste(bias_hh)
-
-        # ========== 循环外一次性计算 Wx GEMM(与 CUDA 一致)==========
-        # input: [T, B, I] -> x_flat: [T*B, I]
-        # W: [3*H, I] -> W.t(): [I, 3*H]
-        # Wx_all: [T*B, 3*H] -> reshape: [T, B, 3*H]
-        x_flat = input.reshape(T * B, I)
-        Wx_all = torch.mm(x_flat, W.t())  # [T*B, 3*H]
-        Wx_all = Wx_all.reshape(T, B, 3 * H)  # [T, B, 3*H]
-
-        # 预分割偏置(循环外完成)
-        bw_z, bw_r, bw_g = bw.chunk(3)
-        br_z, br_r, br_g = br.chunk(3)
-
-        outputs = []
-
-        for t in range(T):
-            # 获取当前时间步的 Wx(已在循环外计算好)
-            Wx = Wx_all[t]  # [B, 3*H]
-
-            # Rh = h @ R.T, shape [B, 3H](依赖上一步的 h，必须在循环内)
-            Rh = torch.mm(h, R.t())
-
-            # 分割门控(Haste 格式：z, r, g)
-            Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)
-            Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)
-
-            # Update gate (z)
-            z = torch.sigmoid(Wx_z + Rh_z + bw_z + br_z)
-
-            # Reset gate (r)
-            r = torch.sigmoid(Wx_r + Rh_r + bw_r + br_r)
-
-            # Candidate gate (g): r 只乘以 (Rh_g + br_g)
-            Rh_add_br_g = Rh_g + br_g
-            g = torch.tanh(Wx_g + r * Rh_add_br_g + bw_g)
-
-            # 新隐藏状态: h_new = z * h_old + (1 - z) * g
-            h = z * h + (1 - z) * g
-
-            outputs.append(h)
-
-        # 堆叠输出: [T, B, H]
-        output = torch.stack(outputs, dim=0)
-        h_n = h.unsqueeze(0)  # [1, B, H]
-
-        return output, h_n
-
-    def _forward_python(
+    def _forward_onnx_unidirectional(
             self,
             input: torch.Tensor,
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        纯 PyTorch 实现的 GRU 前向传播(用于 ONNX 导出)
-
-        支持单向和双向模式
-        
-        Note: batch_first 转换已在 forward() 中统一处理
+        ONNX 导出（单向）：通过 quant_gru_onnx::gru symbolic 生成单 GRU 节点。
         """
-        T, B, I = input.shape
+        if hx is None:
+            h0 = input.new_zeros((1, input.size(1), self.hidden_size))
+        else:
+            expected_shape = (1, input.size(1), self.hidden_size)
+            if not torch.onnx.is_in_onnx_export() and tuple(hx.shape) != expected_shape:
+                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {tuple(hx.shape)}")
+            h0 = hx
 
-        # 初始状态处理(统一接口)
-        h0_forward, h0_reverse = self._parse_initial_state(hx, B, to_cuda=False)
+        w_f, r_f, b_f = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.weight_hh_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.bias_ih_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.bias_hh_l0.detach().to(device=input.device, dtype=input.dtype),
+        )
+        self._onnx_export_weight_ih = w_f.unsqueeze(0).contiguous()
+        self._onnx_export_weight_hh = r_f.unsqueeze(0).contiguous()
+        self._onnx_export_bias = b_f.unsqueeze(0).contiguous()
 
-        # 前向方向
-        output_forward, h_n_forward = self._forward_python_single_direction(
-            input, h0_forward,
-            self.weight_ih_l0, self.weight_hh_l0,
-            self.bias_ih_l0 if self.bias else None,
-            self.bias_hh_l0 if self.bias else None,
-            self.quant_params
+        output, h_n = torch.ops.quant_gru_onnx.gru(
+            input,
+            h0,
+            self._onnx_export_weight_ih,
+            self._onnx_export_weight_hh,
+            self._onnx_export_bias,
+            int(self.hidden_size),
+            int(self.num_layers),
+        )
+        return output, h_n
+
+    def _prepare_onnx_bidirectional_weights(self, input_tensor: torch.Tensor) -> None:
+        """准备双向 custom bigru 导出所需的 ONNX 格式 W/R/B。"""
+        w_f, r_f, b_f = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.weight_hh_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_ih_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_hh_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+        )
+        w_b, r_b, b_b = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.weight_hh_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_ih_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_hh_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
         )
 
-        # 反向方向(双向时)
-        output_reverse, h_n_reverse = None, None
-        if self.bidirectional:
-            output_reverse, h_n_reverse = self._forward_python_single_direction(
-                input.flip(0), h0_reverse,
-                self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
-                self.bias_ih_l0_reverse if self.bias else None,
-                self.bias_hh_l0_reverse if self.bias else None,
-                self.quant_params_reverse
+        self._onnx_export_weight_ih = torch.stack([w_f, w_b], dim=0).contiguous()
+        self._onnx_export_weight_hh = torch.stack([r_f, r_b], dim=0).contiguous()
+        self._onnx_export_bias = torch.stack([b_f, b_b], dim=0).contiguous()
+
+    def _forward_onnx_bidirectional(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """ONNX 导出（双向）：通过 quant_gru_onnx::bigru symbolic 生成单 GRU 节点。"""
+        if hx is None:
+            h0 = input.new_zeros((2, input.size(1), self.hidden_size))
+        else:
+            expected_shape = (2, input.size(1), self.hidden_size)
+            if not torch.onnx.is_in_onnx_export() and tuple(hx.shape) != expected_shape:
+                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {tuple(hx.shape)}")
+            h0 = hx
+
+        self._prepare_onnx_bidirectional_weights(input)
+        output, h_n = torch.ops.quant_gru_onnx.bigru(
+            input,
+            h0,
+            self._onnx_export_weight_ih,
+            self._onnx_export_weight_hh,
+            self._onnx_export_bias,
+            int(self.hidden_size),
+            int(self.num_layers),
+        )
+        return output, h_n
+
+    def _forward_onnx_gru(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        ONNX 导出路径：导出标准 ONNX GRU 节点。
+        """
+        if not torch.onnx.is_in_onnx_export():
+            raise RuntimeError(
+                "export_mode=True 仅用于 ONNX 导出上下文。"
+                "请在 torch.onnx.export(..., dynamo=False) 中调用模型。"
             )
-            # 反转反向输出以对齐时间步
-            output_reverse = output_reverse.flip(0)
+        if not self.bias:
+            raise RuntimeError("ONNX 导出暂不支持 bias=False，请使用 bias=True")
 
-        # 合并双向输出(统一接口)
-        return self._combine_bidirectional_outputs(
-            output_forward, h_n_forward, output_reverse, h_n_reverse
-        )
+        _ = self._resolve_onnx_module_name()
+        ensure_quant_gru_onnx_registered(opset=18)
+
+        if self.bidirectional:
+            return self._forward_onnx_bidirectional(input, hx)
+        return self._forward_onnx_unidirectional(input, hx)
 
     # -------------------- 校准模式 forward --------------------
 
@@ -1740,7 +1785,7 @@ class QuantGRU(nn.Module):
 
         Note:
             - export_mode=False (默认): 使用 CUDA C++ 实现(高性能)
-            - export_mode=True: 使用纯 PyTorch 实现(可被 ONNX 追踪)
+            - export_mode=True: 使用 ONNX 单节点 GRU 导出路径
         """
         # ===== 统一处理 batch_first 输入转换(唯一入口)=====
         if self.batch_first:
@@ -1748,8 +1793,8 @@ class QuantGRU(nn.Module):
 
         # ===== 根据模式选择执行路径 =====
         if self.export_mode:
-            # ONNX 导出模式：使用纯 PyTorch 实现
-            output, h_n = self._forward_python(input, hx)
+            # ONNX 导出模式：使用标准 ONNX GRU 节点路径
+            output, h_n = self._forward_onnx_gru(input, hx)
         elif self.calibrating:
             # 校准模式：在 forward 过程中收集校准数据
             self._ensure_cublas_initialized()
