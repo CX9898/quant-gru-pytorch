@@ -9,28 +9,16 @@
 ### 版本更新
 1. **版本号更新**: 将版本号从 1.0.4 更新至 1.0.5
 
-### 新功能
-1. **普通 scale 支持**: 量化 scale 从原先仅支持 POT2（2 的幂次）形式扩展为支持普通 scale，可使用任意 `M + shift` 组合表示量化缩放参数，提升量化参数配置的灵活性。
-2. **量化参数导入/导出格式更新**: 为适配普通 scale，量化参数 JSON 不再仅依赖旧 POT2 的 `n`/`exp2_inv` 编码；导出时会在 `model_info` 中记录 `use_pot2_scale`，并为各算子写入 `scale`、`multiplier`、`shift` 和 `scale_encoding`，其中普通 scale 按 `scale ≈ multiplier * 2^(-shift)` 表示。导入时优先解析新格式，并保留对旧 POT2 格式的兼容。
+### 功能优化
+1. **量化参数导入/导出格式更新**: 导出改为 **scale-only**，算子级仅保留 `scale` 与 `zero_point`（及 `real_min`/`real_max`、`enc_type` 等语义字段），不再输出 `multiplier`、`shift`、`scale_encoding`。`scale` 字段统一表示运行时语义 scale（避免使用 `decode(fixed_scale)` 近似值）。导入侧优先解析 scale-only，同时继续兼容旧 `multiplier/shift` 与 `n/exp2_inv` 格式。
    ```json
    {
-     "model_info": {
-       "input_size": 4,
-       "hidden_size": 3,
-       "bias": true,
-       "batch_first": true,
-       "bidirectional": false,
-       "use_pot2_scale": false
-     },
      "operators": {
        "input": {
          "dtype": "INT8",
          "symmetric": false,
          "scale": [0.010382890701293945],
-         "multiplier": [43549],
-         "shift": [22],
          "zero_point": [-5],
-         "scale_encoding": "affine",
          "enc_type": "PER_TENSOR",
          "real_min": [-1.2770955562591553],
          "real_max": [1.3705415725708008]
@@ -38,6 +26,14 @@
      }
    }
    ```
+
+### Bug 修复
+1. 修复"对于一开始没有开启POT2模式, 中间开启了POT2模式调用了对应的接口, C++中进行了量化参数的调整, 但没有反应到python端", 数据流链路断开的bug. 修复点: 所有会改变量化参数生成语义的配置变更，都必须标记 `_quant_params_dirty=True`
+
+## [2026-06-04]
+
+### 新功能
+1. **普通 scale 支持**: 量化 scale 从原先仅支持 POT2（2 的幂次）形式扩展为支持普通 scale，可使用任意 `M + shift` 组合表示量化缩放参数，提升量化参数配置的灵活性。
 
 ### Bug 修复
 1. 修复 affine 模式下边界量化导致的精度回退问题。
