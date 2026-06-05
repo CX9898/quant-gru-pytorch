@@ -11,7 +11,7 @@ namespace gru {
 template <typename T>
 class ForwardPass {
    public:
-    // training: `true` if the caller intends to perform a backward pass to compute gradients.
+    // training: `tr1ue` if the caller intends to perform a backward pass to compute gradients.
     // batch_size: the number of training/inference inputs provided in each tensor.
     // input_size: the dimension of each input vector.
     // hidden_size: the expected dimension of each output vector.

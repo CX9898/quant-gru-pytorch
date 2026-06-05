@@ -913,6 +913,13 @@ inline float decode_scale_for_python(const FixedPointScale &fixed, int8_t shift)
     return exp2_scale(shift);
 }
 
+inline float prefer_raw_scale(float raw_scale, const FixedPointScale &fixed, int8_t shift) {
+    if (raw_scale > 0.0f) {
+        return raw_scale;
+    }
+    return decode_scale_for_python(fixed, shift);
+}
+
 inline int8_t encode_shift_from_scale(float scale) {
     if (!(scale > 0.0f)) {
         throw std::invalid_argument("scale must be > 0");
@@ -932,59 +939,59 @@ inline FixedPointScale encode_fixed_from_scale(float scale, bool usePOT2) {
 void GRUQuantParamsPy::from_cpp(const GRUQuantParams &cpp_params) {
     hidden_ = cpp_params.hidden_;
     // 基础参数
-    scale_x_ = decode_scale_for_python(cpp_params.fixed_scale_x_, cpp_params.shift_x_);
+    scale_x_ = prefer_raw_scale(cpp_params.raw_scale_x_, cpp_params.fixed_scale_x_, cpp_params.shift_x_);
     zp_x_ = cpp_params.zp_x_;
-    scale_h_ = decode_scale_for_python(cpp_params.fixed_scale_h_, cpp_params.shift_h_);
+    scale_h_ = prefer_raw_scale(cpp_params.raw_scale_h_, cpp_params.fixed_scale_h_, cpp_params.shift_h_);
     zp_h_ = cpp_params.zp_h_;
     // 权重参数
     scale_W_.resize(cpp_params.shift_W_.size());
     scale_R_.resize(cpp_params.shift_R_.size());
     scale_bw_.resize(cpp_params.shift_bw_.size());
     scale_br_.resize(cpp_params.shift_br_.size());
-    for (size_t i = 0; i < scale_W_.size(); ++i) scale_W_[i] = decode_scale_for_python(cpp_params.fixed_scale_W_[i], cpp_params.shift_W_[i]);
-    for (size_t i = 0; i < scale_R_.size(); ++i) scale_R_[i] = decode_scale_for_python(cpp_params.fixed_scale_R_[i], cpp_params.shift_R_[i]);
-    for (size_t i = 0; i < scale_bw_.size(); ++i) scale_bw_[i] = decode_scale_for_python(cpp_params.fixed_scale_bw_[i], cpp_params.shift_bw_[i]);
-    for (size_t i = 0; i < scale_br_.size(); ++i) scale_br_[i] = decode_scale_for_python(cpp_params.fixed_scale_br_[i], cpp_params.shift_br_[i]);
+    for (size_t i = 0; i < scale_W_.size(); ++i) scale_W_[i] = prefer_raw_scale(i < cpp_params.raw_scale_W_.size() ? cpp_params.raw_scale_W_[i] : 0.0f, cpp_params.fixed_scale_W_[i], cpp_params.shift_W_[i]);
+    for (size_t i = 0; i < scale_R_.size(); ++i) scale_R_[i] = prefer_raw_scale(i < cpp_params.raw_scale_R_.size() ? cpp_params.raw_scale_R_[i] : 0.0f, cpp_params.fixed_scale_R_[i], cpp_params.shift_R_[i]);
+    for (size_t i = 0; i < scale_bw_.size(); ++i) scale_bw_[i] = prefer_raw_scale(i < cpp_params.raw_scale_bw_.size() ? cpp_params.raw_scale_bw_[i] : 0.0f, cpp_params.fixed_scale_bw_[i], cpp_params.shift_bw_[i]);
+    for (size_t i = 0; i < scale_br_.size(); ++i) scale_br_[i] = prefer_raw_scale(i < cpp_params.raw_scale_br_.size() ? cpp_params.raw_scale_br_[i] : 0.0f, cpp_params.fixed_scale_br_[i], cpp_params.shift_br_[i]);
     
     // Per-Tensor 参数
-    scale_W_tensor_ = exp2_scale(cpp_params.shift_W_tensor_);
-    scale_R_tensor_ = exp2_scale(cpp_params.shift_R_tensor_);
-    scale_bw_tensor_ = exp2_scale(cpp_params.shift_bw_tensor_);
-    scale_br_tensor_ = exp2_scale(cpp_params.shift_br_tensor_);
+    scale_W_tensor_ = (cpp_params.raw_scale_W_tensor_ > 0.0f) ? cpp_params.raw_scale_W_tensor_ : exp2_scale(cpp_params.shift_W_tensor_);
+    scale_R_tensor_ = (cpp_params.raw_scale_R_tensor_ > 0.0f) ? cpp_params.raw_scale_R_tensor_ : exp2_scale(cpp_params.shift_R_tensor_);
+    scale_bw_tensor_ = (cpp_params.raw_scale_bw_tensor_ > 0.0f) ? cpp_params.raw_scale_bw_tensor_ : exp2_scale(cpp_params.shift_bw_tensor_);
+    scale_br_tensor_ = (cpp_params.raw_scale_br_tensor_ > 0.0f) ? cpp_params.raw_scale_br_tensor_ : exp2_scale(cpp_params.shift_br_tensor_);
     
     // Per-Gate 参数
     for (int i = 0; i < 3; ++i) {
-        scale_W_gate_[i] = exp2_scale(cpp_params.shift_W_gate_[i]);
-        scale_R_gate_[i] = exp2_scale(cpp_params.shift_R_gate_[i]);
-        scale_bw_gate_[i] = exp2_scale(cpp_params.shift_bw_gate_[i]);
-        scale_br_gate_[i] = exp2_scale(cpp_params.shift_br_gate_[i]);
+        scale_W_gate_[i] = (cpp_params.raw_scale_W_gate_[i] > 0.0f) ? cpp_params.raw_scale_W_gate_[i] : exp2_scale(cpp_params.shift_W_gate_[i]);
+        scale_R_gate_[i] = (cpp_params.raw_scale_R_gate_[i] > 0.0f) ? cpp_params.raw_scale_R_gate_[i] : exp2_scale(cpp_params.shift_R_gate_[i]);
+        scale_bw_gate_[i] = (cpp_params.raw_scale_bw_gate_[i] > 0.0f) ? cpp_params.raw_scale_bw_gate_[i] : exp2_scale(cpp_params.shift_bw_gate_[i]);
+        scale_br_gate_[i] = (cpp_params.raw_scale_br_gate_[i] > 0.0f) ? cpp_params.raw_scale_br_gate_[i] : exp2_scale(cpp_params.shift_br_gate_[i]);
     }
     // Linear 输出参数
-    scale_weight_ih_linear_ = decode_scale_for_python(cpp_params.fixed_scale_weight_ih_linear_, cpp_params.shift_weight_ih_linear_);
+    scale_weight_ih_linear_ = prefer_raw_scale(cpp_params.raw_scale_weight_ih_linear_, cpp_params.fixed_scale_weight_ih_linear_, cpp_params.shift_weight_ih_linear_);
     zp_weight_ih_linear_ = cpp_params.zp_weight_ih_linear_;
-    scale_weight_hh_linear_ = decode_scale_for_python(cpp_params.fixed_scale_weight_hh_linear_, cpp_params.shift_weight_hh_linear_);
+    scale_weight_hh_linear_ = prefer_raw_scale(cpp_params.raw_scale_weight_hh_linear_, cpp_params.fixed_scale_weight_hh_linear_, cpp_params.shift_weight_hh_linear_);
     zp_weight_hh_linear_ = cpp_params.zp_weight_hh_linear_;
     // 门激活函数输入参数
-    scale_update_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_update_gate_input_, cpp_params.shift_update_gate_input_);
+    scale_update_gate_input_ = prefer_raw_scale(cpp_params.raw_scale_update_gate_input_, cpp_params.fixed_scale_update_gate_input_, cpp_params.shift_update_gate_input_);
     zp_update_gate_input_ = cpp_params.zp_update_gate_input_;
-    scale_reset_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_reset_gate_input_, cpp_params.shift_reset_gate_input_);
+    scale_reset_gate_input_ = prefer_raw_scale(cpp_params.raw_scale_reset_gate_input_, cpp_params.fixed_scale_reset_gate_input_, cpp_params.shift_reset_gate_input_);
     zp_reset_gate_input_ = cpp_params.zp_reset_gate_input_;
-    scale_new_gate_input_ = decode_scale_for_python(cpp_params.fixed_scale_new_gate_input_, cpp_params.shift_new_gate_input_);
+    scale_new_gate_input_ = prefer_raw_scale(cpp_params.raw_scale_new_gate_input_, cpp_params.fixed_scale_new_gate_input_, cpp_params.shift_new_gate_input_);
     zp_new_gate_input_ = cpp_params.zp_new_gate_input_;
     // 门激活函数输出参数
-    scale_update_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_update_gate_output_, cpp_params.shift_update_gate_output_);
+    scale_update_gate_output_ = prefer_raw_scale(cpp_params.raw_scale_update_gate_output_, cpp_params.fixed_scale_update_gate_output_, cpp_params.shift_update_gate_output_);
     zp_update_gate_output_ = cpp_params.zp_update_gate_output_;
-    scale_reset_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_reset_gate_output_, cpp_params.shift_reset_gate_output_);
+    scale_reset_gate_output_ = prefer_raw_scale(cpp_params.raw_scale_reset_gate_output_, cpp_params.fixed_scale_reset_gate_output_, cpp_params.shift_reset_gate_output_);
     zp_reset_gate_output_ = cpp_params.zp_reset_gate_output_;
-    scale_new_gate_output_ = decode_scale_for_python(cpp_params.fixed_scale_new_gate_output_, cpp_params.shift_new_gate_output_);
+    scale_new_gate_output_ = prefer_raw_scale(cpp_params.raw_scale_new_gate_output_, cpp_params.fixed_scale_new_gate_output_, cpp_params.shift_new_gate_output_);
     zp_new_gate_output_ = cpp_params.zp_new_gate_output_;
     // 中间计算参数
-    scale_mul_reset_hidden_ = decode_scale_for_python(cpp_params.fixed_scale_mul_reset_hidden_, cpp_params.shift_mul_reset_hidden_);
+    scale_mul_reset_hidden_ = prefer_raw_scale(cpp_params.raw_scale_mul_reset_hidden_, cpp_params.fixed_scale_mul_reset_hidden_, cpp_params.shift_mul_reset_hidden_);
     zp_mul_reset_hidden_ = cpp_params.zp_mul_reset_hidden_;
     // 隐状态更新参数
-    scale_mul_new_contribution_ = decode_scale_for_python(cpp_params.fixed_scale_mul_new_contribution_, cpp_params.shift_mul_new_contribution_);
+    scale_mul_new_contribution_ = prefer_raw_scale(cpp_params.raw_scale_mul_new_contribution_, cpp_params.fixed_scale_mul_new_contribution_, cpp_params.shift_mul_new_contribution_);
     zp_mul_new_contribution_ = cpp_params.zp_mul_new_contribution_;
-    scale_mul_old_contribution_ = decode_scale_for_python(cpp_params.fixed_scale_mul_old_contribution_, cpp_params.shift_mul_old_contribution_);
+    scale_mul_old_contribution_ = prefer_raw_scale(cpp_params.raw_scale_mul_old_contribution_, cpp_params.fixed_scale_mul_old_contribution_, cpp_params.shift_mul_old_contribution_);
     zp_mul_old_contribution_ = cpp_params.zp_mul_old_contribution_;
 
     // ⚠️ 关键：复制位宽配置
@@ -997,9 +1004,11 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     cpp_params.hidden_ = hidden_;
     // 基础参数
     cpp_params.shift_x_ = encode_shift_from_scale(scale_x_);
+    cpp_params.raw_scale_x_ = scale_x_;
     cpp_params.fixed_scale_x_ = encode_fixed_from_scale(scale_x_, bitwidth_config_.usePOT2_);
     cpp_params.zp_x_ = zp_x_;
     cpp_params.shift_h_ = encode_shift_from_scale(scale_h_);
+    cpp_params.raw_scale_h_ = scale_h_;
     cpp_params.fixed_scale_h_ = encode_fixed_from_scale(scale_h_, bitwidth_config_.usePOT2_);
     cpp_params.zp_h_ = zp_h_;
     // 权重参数
@@ -1007,76 +1016,103 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     cpp_params.shift_R_.resize(scale_R_.size());
     cpp_params.shift_bw_.resize(scale_bw_.size());
     cpp_params.shift_br_.resize(scale_br_.size());
+    cpp_params.raw_scale_W_.resize(scale_W_.size());
+    cpp_params.raw_scale_R_.resize(scale_R_.size());
+    cpp_params.raw_scale_bw_.resize(scale_bw_.size());
+    cpp_params.raw_scale_br_.resize(scale_br_.size());
     cpp_params.fixed_scale_W_.resize(scale_W_.size());
     cpp_params.fixed_scale_R_.resize(scale_R_.size());
     cpp_params.fixed_scale_bw_.resize(scale_bw_.size());
     cpp_params.fixed_scale_br_.resize(scale_br_.size());
     for (size_t i = 0; i < scale_W_.size(); ++i) {
         cpp_params.shift_W_[i] = encode_shift_from_scale(scale_W_[i]);
+        cpp_params.raw_scale_W_[i] = scale_W_[i];
         cpp_params.fixed_scale_W_[i] = encode_fixed_from_scale(scale_W_[i], bitwidth_config_.usePOT2_);
     }
     for (size_t i = 0; i < scale_R_.size(); ++i) {
         cpp_params.shift_R_[i] = encode_shift_from_scale(scale_R_[i]);
+        cpp_params.raw_scale_R_[i] = scale_R_[i];
         cpp_params.fixed_scale_R_[i] = encode_fixed_from_scale(scale_R_[i], bitwidth_config_.usePOT2_);
     }
     for (size_t i = 0; i < scale_bw_.size(); ++i) {
         cpp_params.shift_bw_[i] = encode_shift_from_scale(scale_bw_[i]);
+        cpp_params.raw_scale_bw_[i] = scale_bw_[i];
         cpp_params.fixed_scale_bw_[i] = encode_fixed_from_scale(scale_bw_[i], bitwidth_config_.usePOT2_);
     }
     for (size_t i = 0; i < scale_br_.size(); ++i) {
         cpp_params.shift_br_[i] = encode_shift_from_scale(scale_br_[i]);
+        cpp_params.raw_scale_br_[i] = scale_br_[i];
         cpp_params.fixed_scale_br_[i] = encode_fixed_from_scale(scale_br_[i], bitwidth_config_.usePOT2_);
     }
     
     // Per-Tensor 参数
     cpp_params.shift_W_tensor_ = encode_shift_from_scale(scale_W_tensor_);
+    cpp_params.raw_scale_W_tensor_ = scale_W_tensor_;
     cpp_params.shift_R_tensor_ = encode_shift_from_scale(scale_R_tensor_);
+    cpp_params.raw_scale_R_tensor_ = scale_R_tensor_;
     cpp_params.shift_bw_tensor_ = encode_shift_from_scale(scale_bw_tensor_);
+    cpp_params.raw_scale_bw_tensor_ = scale_bw_tensor_;
     cpp_params.shift_br_tensor_ = encode_shift_from_scale(scale_br_tensor_);
+    cpp_params.raw_scale_br_tensor_ = scale_br_tensor_;
     
     // Per-Gate 参数
     for (int i = 0; i < 3; ++i) {
         cpp_params.shift_W_gate_[i] = encode_shift_from_scale(scale_W_gate_[i]);
+        cpp_params.raw_scale_W_gate_[i] = scale_W_gate_[i];
         cpp_params.shift_R_gate_[i] = encode_shift_from_scale(scale_R_gate_[i]);
+        cpp_params.raw_scale_R_gate_[i] = scale_R_gate_[i];
         cpp_params.shift_bw_gate_[i] = encode_shift_from_scale(scale_bw_gate_[i]);
+        cpp_params.raw_scale_bw_gate_[i] = scale_bw_gate_[i];
         cpp_params.shift_br_gate_[i] = encode_shift_from_scale(scale_br_gate_[i]);
+        cpp_params.raw_scale_br_gate_[i] = scale_br_gate_[i];
     }
     // Linear 输出参数
     cpp_params.shift_weight_ih_linear_ = encode_shift_from_scale(scale_weight_ih_linear_);
+    cpp_params.raw_scale_weight_ih_linear_ = scale_weight_ih_linear_;
     cpp_params.fixed_scale_weight_ih_linear_ = encode_fixed_from_scale(scale_weight_ih_linear_, bitwidth_config_.usePOT2_);
     cpp_params.zp_weight_ih_linear_ = zp_weight_ih_linear_;
     cpp_params.shift_weight_hh_linear_ = encode_shift_from_scale(scale_weight_hh_linear_);
+    cpp_params.raw_scale_weight_hh_linear_ = scale_weight_hh_linear_;
     cpp_params.fixed_scale_weight_hh_linear_ = encode_fixed_from_scale(scale_weight_hh_linear_, bitwidth_config_.usePOT2_);
     cpp_params.zp_weight_hh_linear_ = zp_weight_hh_linear_;
     // 门激活函数输入参数
     cpp_params.shift_update_gate_input_ = encode_shift_from_scale(scale_update_gate_input_);
+    cpp_params.raw_scale_update_gate_input_ = scale_update_gate_input_;
     cpp_params.fixed_scale_update_gate_input_ = encode_fixed_from_scale(scale_update_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_update_gate_input_ = zp_update_gate_input_;
     cpp_params.shift_reset_gate_input_ = encode_shift_from_scale(scale_reset_gate_input_);
+    cpp_params.raw_scale_reset_gate_input_ = scale_reset_gate_input_;
     cpp_params.fixed_scale_reset_gate_input_ = encode_fixed_from_scale(scale_reset_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_reset_gate_input_ = zp_reset_gate_input_;
     cpp_params.shift_new_gate_input_ = encode_shift_from_scale(scale_new_gate_input_);
+    cpp_params.raw_scale_new_gate_input_ = scale_new_gate_input_;
     cpp_params.fixed_scale_new_gate_input_ = encode_fixed_from_scale(scale_new_gate_input_, bitwidth_config_.usePOT2_);
     cpp_params.zp_new_gate_input_ = zp_new_gate_input_;
     // 门激活函数输出参数
     cpp_params.shift_update_gate_output_ = encode_shift_from_scale(scale_update_gate_output_);
+    cpp_params.raw_scale_update_gate_output_ = scale_update_gate_output_;
     cpp_params.fixed_scale_update_gate_output_ = encode_fixed_from_scale(scale_update_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_update_gate_output_ = zp_update_gate_output_;
     cpp_params.shift_reset_gate_output_ = encode_shift_from_scale(scale_reset_gate_output_);
+    cpp_params.raw_scale_reset_gate_output_ = scale_reset_gate_output_;
     cpp_params.fixed_scale_reset_gate_output_ = encode_fixed_from_scale(scale_reset_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_reset_gate_output_ = zp_reset_gate_output_;
     cpp_params.shift_new_gate_output_ = encode_shift_from_scale(scale_new_gate_output_);
+    cpp_params.raw_scale_new_gate_output_ = scale_new_gate_output_;
     cpp_params.fixed_scale_new_gate_output_ = encode_fixed_from_scale(scale_new_gate_output_, bitwidth_config_.usePOT2_);
     cpp_params.zp_new_gate_output_ = zp_new_gate_output_;
     // 中间计算参数
     cpp_params.shift_mul_reset_hidden_ = encode_shift_from_scale(scale_mul_reset_hidden_);
+    cpp_params.raw_scale_mul_reset_hidden_ = scale_mul_reset_hidden_;
     cpp_params.fixed_scale_mul_reset_hidden_ = encode_fixed_from_scale(scale_mul_reset_hidden_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_reset_hidden_ = zp_mul_reset_hidden_;
     // 隐状态更新参数
     cpp_params.shift_mul_new_contribution_ = encode_shift_from_scale(scale_mul_new_contribution_);
+    cpp_params.raw_scale_mul_new_contribution_ = scale_mul_new_contribution_;
     cpp_params.fixed_scale_mul_new_contribution_ = encode_fixed_from_scale(scale_mul_new_contribution_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_new_contribution_ = zp_mul_new_contribution_;
     cpp_params.shift_mul_old_contribution_ = encode_shift_from_scale(scale_mul_old_contribution_);
+    cpp_params.raw_scale_mul_old_contribution_ = scale_mul_old_contribution_;
     cpp_params.fixed_scale_mul_old_contribution_ = encode_fixed_from_scale(scale_mul_old_contribution_, bitwidth_config_.usePOT2_);
     cpp_params.zp_mul_old_contribution_ = zp_mul_old_contribution_;
 
