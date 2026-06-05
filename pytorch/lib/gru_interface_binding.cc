@@ -933,6 +933,95 @@ inline FixedPointScale encode_fixed_from_scale(float scale, bool usePOT2) {
     }
     return encodeMShift(scale);
 }
+
+inline void encode_per_tensor_scale(float scale, int8_t &shift, float &raw_scale) {
+    shift = encode_shift_from_scale(scale);
+    raw_scale = scale;
+}
+
+template <size_t N>
+inline void encode_per_gate_scale(
+    const std::array<float, N> &scale,
+    std::array<int8_t, N> &shift,
+    std::array<float, N> &raw_scale) {
+    for (size_t i = 0; i < N; ++i) {
+        shift[i] = encode_shift_from_scale(scale[i]);
+        raw_scale[i] = scale[i];
+    }
+}
+
+inline void encode_per_channel_scale(
+    const std::vector<float> &scale,
+    std::vector<int8_t> &shift,
+    std::vector<float> &raw_scale,
+    std::vector<FixedPointScale> &fixed_scale,
+    bool usePOT2) {
+    shift.resize(scale.size());
+    raw_scale.resize(scale.size());
+    fixed_scale.resize(scale.size());
+    for (size_t i = 0; i < scale.size(); ++i) {
+        shift[i] = encode_shift_from_scale(scale[i]);
+        raw_scale[i] = scale[i];
+        fixed_scale[i] = encode_fixed_from_scale(scale[i], usePOT2);
+    }
+}
+
+inline void encode_runtime_scale(
+    int granularity,
+    int hidden,
+    float tensor_scale,
+    const std::array<float, 3> &gate_scale,
+    const std::vector<float> &channel_scale,
+    int8_t &shift_tensor,
+    float &raw_scale_tensor,
+    std::array<int8_t, 3> &shift_gate,
+    std::array<float, 3> &raw_scale_gate,
+    std::vector<int8_t> &shift_channel,
+    std::vector<float> &raw_scale_channel,
+    std::vector<FixedPointScale> &fixed_scale_channel,
+    bool usePOT2,
+    const char *name) {
+    if (hidden <= 0) {
+        throw std::invalid_argument(std::string(name) + " hidden size must be > 0");
+    }
+    if (granularity < 0 || granularity > 2) {
+        throw std::invalid_argument(std::string(name) + " granularity must be 0, 1, or 2");
+    }
+    const size_t channel_count = static_cast<size_t>(hidden) * 3;
+
+    shift_channel.resize(channel_count);
+    raw_scale_channel.resize(channel_count);
+    fixed_scale_channel.resize(channel_count);
+
+    if (granularity == 0) {  // PER_TENSOR
+        encode_per_tensor_scale(tensor_scale, shift_tensor, raw_scale_tensor);
+        const FixedPointScale fixed = encode_fixed_from_scale(tensor_scale, usePOT2);
+        for (size_t i = 0; i < channel_count; ++i) {
+            shift_channel[i] = shift_tensor;
+            raw_scale_channel[i] = raw_scale_tensor;
+            fixed_scale_channel[i] = fixed;
+        }
+    } else if (granularity == 1) {  // PER_GATE
+        encode_per_gate_scale(gate_scale, shift_gate, raw_scale_gate);
+        for (int gate = 0; gate < 3; ++gate) {
+            const FixedPointScale fixed = encode_fixed_from_scale(gate_scale[gate], usePOT2);
+            for (int c = gate * hidden; c < (gate + 1) * hidden; ++c) {
+                shift_channel[static_cast<size_t>(c)] = shift_gate[gate];
+                raw_scale_channel[static_cast<size_t>(c)] = raw_scale_gate[gate];
+                fixed_scale_channel[static_cast<size_t>(c)] = fixed;
+            }
+        }
+    } else {  // PER_CHANNEL
+        if (channel_scale.size() != channel_count) {
+            throw std::invalid_argument(
+                std::string(name) + " per-channel scale size mismatch: got " +
+                std::to_string(channel_scale.size()) + ", expected " +
+                std::to_string(channel_count));
+        }
+        encode_per_channel_scale(
+            channel_scale, shift_channel, raw_scale_channel, fixed_scale_channel, usePOT2);
+    }
+}
 }  // namespace
 
 // 从 C++ 结构体转换
@@ -1011,61 +1100,32 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     cpp_params.raw_scale_h_ = scale_h_;
     cpp_params.fixed_scale_h_ = encode_fixed_from_scale(scale_h_, bitwidth_config_.usePOT2_);
     cpp_params.zp_h_ = zp_h_;
-    // 权重参数
-    cpp_params.shift_W_.resize(scale_W_.size());
-    cpp_params.shift_R_.resize(scale_R_.size());
-    cpp_params.shift_bw_.resize(scale_bw_.size());
-    cpp_params.shift_br_.resize(scale_br_.size());
-    cpp_params.raw_scale_W_.resize(scale_W_.size());
-    cpp_params.raw_scale_R_.resize(scale_R_.size());
-    cpp_params.raw_scale_bw_.resize(scale_bw_.size());
-    cpp_params.raw_scale_br_.resize(scale_br_.size());
-    cpp_params.fixed_scale_W_.resize(scale_W_.size());
-    cpp_params.fixed_scale_R_.resize(scale_R_.size());
-    cpp_params.fixed_scale_bw_.resize(scale_bw_.size());
-    cpp_params.fixed_scale_br_.resize(scale_br_.size());
-    for (size_t i = 0; i < scale_W_.size(); ++i) {
-        cpp_params.shift_W_[i] = encode_shift_from_scale(scale_W_[i]);
-        cpp_params.raw_scale_W_[i] = scale_W_[i];
-        cpp_params.fixed_scale_W_[i] = encode_fixed_from_scale(scale_W_[i], bitwidth_config_.usePOT2_);
-    }
-    for (size_t i = 0; i < scale_R_.size(); ++i) {
-        cpp_params.shift_R_[i] = encode_shift_from_scale(scale_R_[i]);
-        cpp_params.raw_scale_R_[i] = scale_R_[i];
-        cpp_params.fixed_scale_R_[i] = encode_fixed_from_scale(scale_R_[i], bitwidth_config_.usePOT2_);
-    }
-    for (size_t i = 0; i < scale_bw_.size(); ++i) {
-        cpp_params.shift_bw_[i] = encode_shift_from_scale(scale_bw_[i]);
-        cpp_params.raw_scale_bw_[i] = scale_bw_[i];
-        cpp_params.fixed_scale_bw_[i] = encode_fixed_from_scale(scale_bw_[i], bitwidth_config_.usePOT2_);
-    }
-    for (size_t i = 0; i < scale_br_.size(); ++i) {
-        cpp_params.shift_br_[i] = encode_shift_from_scale(scale_br_[i]);
-        cpp_params.raw_scale_br_[i] = scale_br_[i];
-        cpp_params.fixed_scale_br_[i] = encode_fixed_from_scale(scale_br_[i], bitwidth_config_.usePOT2_);
-    }
-    
-    // Per-Tensor 参数
-    cpp_params.shift_W_tensor_ = encode_shift_from_scale(scale_W_tensor_);
-    cpp_params.raw_scale_W_tensor_ = scale_W_tensor_;
-    cpp_params.shift_R_tensor_ = encode_shift_from_scale(scale_R_tensor_);
-    cpp_params.raw_scale_R_tensor_ = scale_R_tensor_;
-    cpp_params.shift_bw_tensor_ = encode_shift_from_scale(scale_bw_tensor_);
-    cpp_params.raw_scale_bw_tensor_ = scale_bw_tensor_;
-    cpp_params.shift_br_tensor_ = encode_shift_from_scale(scale_br_tensor_);
-    cpp_params.raw_scale_br_tensor_ = scale_br_tensor_;
-    
-    // Per-Gate 参数
-    for (int i = 0; i < 3; ++i) {
-        cpp_params.shift_W_gate_[i] = encode_shift_from_scale(scale_W_gate_[i]);
-        cpp_params.raw_scale_W_gate_[i] = scale_W_gate_[i];
-        cpp_params.shift_R_gate_[i] = encode_shift_from_scale(scale_R_gate_[i]);
-        cpp_params.raw_scale_R_gate_[i] = scale_R_gate_[i];
-        cpp_params.shift_bw_gate_[i] = encode_shift_from_scale(scale_bw_gate_[i]);
-        cpp_params.raw_scale_bw_gate_[i] = scale_bw_gate_[i];
-        cpp_params.shift_br_gate_[i] = encode_shift_from_scale(scale_br_gate_[i]);
-        cpp_params.raw_scale_br_gate_[i] = scale_br_gate_[i];
-    }
+    // 权重/偏置参数：按当前粒度编码，同时展开到 per-channel runtime 数组。
+    // forward/量化执行路径统一读取 shift_*_/fixed_scale_*_ 数组；tensor/gate 字段保留原始粒度语义。
+    encode_runtime_scale(
+        bitwidth_config_.W_granularity_, hidden_, scale_W_tensor_, scale_W_gate_, scale_W_,
+        cpp_params.shift_W_tensor_, cpp_params.raw_scale_W_tensor_,
+        cpp_params.shift_W_gate_, cpp_params.raw_scale_W_gate_,
+        cpp_params.shift_W_, cpp_params.raw_scale_W_, cpp_params.fixed_scale_W_,
+        bitwidth_config_.usePOT2_, "W");
+    encode_runtime_scale(
+        bitwidth_config_.R_granularity_, hidden_, scale_R_tensor_, scale_R_gate_, scale_R_,
+        cpp_params.shift_R_tensor_, cpp_params.raw_scale_R_tensor_,
+        cpp_params.shift_R_gate_, cpp_params.raw_scale_R_gate_,
+        cpp_params.shift_R_, cpp_params.raw_scale_R_, cpp_params.fixed_scale_R_,
+        bitwidth_config_.usePOT2_, "R");
+    encode_runtime_scale(
+        bitwidth_config_.bw_granularity_, hidden_, scale_bw_tensor_, scale_bw_gate_, scale_bw_,
+        cpp_params.shift_bw_tensor_, cpp_params.raw_scale_bw_tensor_,
+        cpp_params.shift_bw_gate_, cpp_params.raw_scale_bw_gate_,
+        cpp_params.shift_bw_, cpp_params.raw_scale_bw_, cpp_params.fixed_scale_bw_,
+        bitwidth_config_.usePOT2_, "bw");
+    encode_runtime_scale(
+        bitwidth_config_.br_granularity_, hidden_, scale_br_tensor_, scale_br_gate_, scale_br_,
+        cpp_params.shift_br_tensor_, cpp_params.raw_scale_br_tensor_,
+        cpp_params.shift_br_gate_, cpp_params.raw_scale_br_gate_,
+        cpp_params.shift_br_, cpp_params.raw_scale_br_, cpp_params.fixed_scale_br_,
+        bitwidth_config_.usePOT2_, "br");
     // Linear 输出参数
     cpp_params.shift_weight_ih_linear_ = encode_shift_from_scale(scale_weight_ih_linear_);
     cpp_params.raw_scale_weight_ih_linear_ = scale_weight_ih_linear_;
