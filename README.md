@@ -306,7 +306,7 @@ torch.onnx.export(
     gru, dummy_input, "gru_float.onnx",
     opset_version=18,
     dynamo=False, # PyTorch 2.x 需要此参数使用传统导出
-    custom_opsets={"quant_gru_onnx": 1},
+    custom_opsets={"custom_gru": 1},
     input_names=['input'],
     output_names=['output', 'hidden'],
     dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
@@ -327,7 +327,7 @@ gru.export_mode = False
 
 1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
 2. **导出使用 legacy exporter**：`torch.onnx.export(..., dynamo=False)`
-3. **必须指定 custom_opsets**：`custom_opsets={"quant_gru_onnx": 1}`
+3. **必须指定 custom_opsets**：`custom_opsets={"custom_gru": 1}`
 4. **第一版仅承诺 opset=18**
 5. **导出后恢复运行模式**：设置 `export_mode = False` 以恢复常规高性能推理
 
