@@ -72,13 +72,14 @@ ONNX 导出:
     ...     gru, x, "model.onnx",
     ...     opset_version=18,
     ...     dynamo=False,  # PyTorch 2.x 需要使用 legacy exporter
-    ...     custom_opsets={"quant_gru_onnx": 1}
+    ...     custom_opsets={"custom_gru": 1}
     ... )
     >>> gru.export_mode = False
 """
 
 import json
 import math
+import re
 import warnings
 import torch
 import torch.nn as nn
@@ -272,14 +273,14 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
 
     global _QUANT_GRU_ONNX_LIB
     if _QUANT_GRU_ONNX_LIB is None:
-        _QUANT_GRU_ONNX_LIB = torch.library.Library("quant_gru_onnx", "DEF")
+        _QUANT_GRU_ONNX_LIB = torch.library.Library("custom_gru", "FRAGMENT")
 
     _QUANT_GRU_ONNX_LIB.define(
-        "gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "quant_gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
         "int hidden_size, int num_layers) -> (Tensor, Tensor)"
     )
     _QUANT_GRU_ONNX_LIB.define(
-        "bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "quant_bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
         "int hidden_size, int num_layers) -> (Tensor, Tensor)"
     )
 
@@ -296,20 +297,20 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         return out, h_n
 
     try:
-        _QUANT_GRU_ONNX_LIB.impl("gru", _gru_cpu, dispatch_key="CPU")
+        _QUANT_GRU_ONNX_LIB.impl("quant_gru", _gru_cpu, dispatch_key="CPU")
     except TypeError:
-        _QUANT_GRU_ONNX_LIB.impl("gru", "CPU", _gru_cpu)
+        _QUANT_GRU_ONNX_LIB.impl("quant_gru", "CPU", _gru_cpu)
 
     try:
-        _QUANT_GRU_ONNX_LIB.impl("bigru", _bigru_cpu, dispatch_key="CPU")
+        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", _bigru_cpu, dispatch_key="CPU")
     except TypeError:
-        _QUANT_GRU_ONNX_LIB.impl("bigru", "CPU", _bigru_cpu)
+        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", "CPU", _bigru_cpu)
 
     def _symbolic_gru(g, x, h0, W, R, B, hidden_size, num_layers):
         hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
         num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
         if hidden_size_i is None or num_layers_i is None:
-            raise RuntimeError("quant_gru_onnx::gru 的 hidden_size/num_layers 必须为常量")
+            raise RuntimeError("custom_gru::quant_gru 的 hidden_size/num_layers 必须为常量")
 
         Y, Y_h = g.op(
             "GRU",
@@ -320,7 +321,6 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
             symbolic_helper._optional_input_placeholder_tensor(g),
             h0,
             hidden_size_i=int(hidden_size_i),
-            direction_s="forward",
             linear_before_reset_i=1,
             outputs=2,
         )
@@ -332,7 +332,7 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
         num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
         if hidden_size_i is None or num_layers_i is None:
-            raise RuntimeError("quant_gru_onnx::bigru 的 hidden_size/num_layers 必须为常量")
+            raise RuntimeError("custom_gru::quant_bigru 的 hidden_size/num_layers 必须为常量")
 
         Y, Y_h = g.op(
             "GRU",
@@ -353,9 +353,242 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         out = g.op("Reshape", y_perm, shape)
         return out, Y_h
 
-    register_custom_op_symbolic("quant_gru_onnx::gru", _symbolic_gru, int(opset))
-    register_custom_op_symbolic("quant_gru_onnx::bigru", _symbolic_bigru, int(opset))
+    register_custom_op_symbolic("custom_gru::quant_gru", _symbolic_gru, int(opset))
+    register_custom_op_symbolic("custom_gru::quant_bigru", _symbolic_bigru, int(opset))
     ensure_quant_gru_onnx_registered._done = True
+
+
+def _rename_onnx_initializer_and_refs(model, old_name: str, new_name: str) -> bool:
+    if old_name == new_name:
+        return False
+    renamed = False
+    for init in model.graph.initializer:
+        if init.name == old_name:
+            init.name = new_name
+            renamed = True
+            break
+    if not renamed:
+        return False
+    for node in model.graph.node:
+        node.input[:] = [new_name if n == old_name else n for n in node.input]
+        node.output[:] = [new_name if n == old_name else n for n in node.output]
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        if vi.name == old_name:
+            vi.name = new_name
+    return True
+
+
+def _rename_onnx_node_io_refs(model, old_name: str, new_name: str) -> None:
+    if old_name == new_name:
+        return
+    for node in model.graph.node:
+        node.input[:] = [new_name if n == old_name else n for n in node.input]
+        node.output[:] = [new_name if n == old_name else n for n in node.output]
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        if vi.name == old_name:
+            vi.name = new_name
+
+
+def _onnx_module_value_prefix_for_baseline(gru_name: str) -> str:
+    parts = [p for p in str(gru_name).split(".") if p]
+    if not parts:
+        return "/gru"
+    if len(parts) == 1:
+        return f"/{parts[0]}"
+    prefix = f"/{parts[0]}/{parts[0]}.{parts[1]}"
+    if len(parts) > 2:
+        prefix += "/" + "/".join(parts[2:])
+    return prefix
+
+
+def _reorder_onnx_initializers_for_unidir_gru(model, gru_name: str) -> None:
+    target_order = [
+        f"{gru_name}.weight_ih.weight",
+        f"{gru_name}.weight_hh.weight",
+        f"{gru_name}.bias",
+        f"{gru_name}.gru#1.initial_h",
+        f"/{gru_name}/gru/Constant_output_0",
+    ]
+    current = list(model.graph.initializer)
+    name_to_init = {i.name: i for i in current}
+    if not all(name in name_to_init for name in target_order):
+        return
+    ordered = [name_to_init[name] for name in target_order]
+    remaining = [i for i in current if i.name not in set(target_order)]
+    model.graph.ClearField("initializer")
+    model.graph.initializer.extend(ordered + remaining)
+
+
+def normalize_quant_gru_onnx_to_optimized_baseline(onnx_path: str) -> None:
+    """
+    将 QuantGRU 直接导出的 ONNX GRU 局部命名规范化为 OptimizedQuantizableGRU baseline 风格。
+
+    PyTorch legacy ONNX exporter 对节点名和中间 value 名的源头控制有限；这里把
+    QuantGRU 自身的导出外观收敛在 QuantGRU 模块内，避免上层导出脚本持有 GRU
+    内部命名知识。全模型/AIMET 级后处理仍应留在调用方。
+    """
+    import onnx
+
+    model = onnx.load(onnx_path)
+    changed = False
+
+    for gru_node in model.graph.node:
+        if gru_node.op_type != "GRU":
+            continue
+
+        gru_name = gru_node.name or "gru"
+        value_prefix = _onnx_module_value_prefix_for_baseline(gru_name)
+        attrs = {a.name: onnx.helper.get_attribute_value(a) for a in gru_node.attribute}
+        direction = attrs.get("direction", b"forward")
+        if isinstance(direction, bytes):
+            direction = direction.decode("utf-8")
+        is_bidir = direction == "bidirectional"
+
+        if len(gru_node.input) >= 5:
+            seq_len_old = gru_node.input[4]
+            if seq_len_old and re.match(r"^/Constant_\d+_output_0$", seq_len_old):
+                seq_len_old = ""
+            if seq_len_old:
+                seq_len_new = f"/{gru_name}/Constant_2_output_0" if is_bidir else f"{value_prefix}/gru/Constant_output_0"
+                if _rename_onnx_initializer_and_refs(model, seq_len_old, seq_len_new):
+                    gru_node.input[4] = seq_len_new
+                    changed = True
+
+        if len(gru_node.input) >= 6:
+            h0_old = gru_node.input[5]
+            if h0_old:
+                h0_new = f"{gru_name}#6.initial_h" if is_bidir else f"{gru_name}.gru#1.initial_h"
+                if _rename_onnx_initializer_and_refs(model, h0_old, h0_new):
+                    gru_node.input[5] = h0_new
+                    changed = True
+
+        if is_bidir:
+            const_pat = re.compile(rf"^/{re.escape(gru_name)}/Constant_\d+_output_0$")
+            for init in model.graph.initializer:
+                if const_pat.match(init.name):
+                    target = f"/{gru_name}/Constant_2_output_0"
+                    if _rename_onnx_initializer_and_refs(model, init.name, target):
+                        changed = True
+            continue
+
+        x_name = gru_node.input[0] if len(gru_node.input) > 0 else ""
+        y_name = gru_node.output[0] if len(gru_node.output) > 0 else ""
+        transpose_node = None
+        squeeze_node = None
+        tail_transpose = None
+        for node in model.graph.node:
+            if node is gru_node:
+                continue
+            if x_name and x_name in node.output and node.op_type == "Transpose":
+                transpose_node = node
+            if y_name and y_name in node.input and node.op_type == "Squeeze":
+                squeeze_node = node
+        if squeeze_node is not None and len(squeeze_node.output) > 0:
+            sq_out = squeeze_node.output[0]
+            for node in model.graph.node:
+                if node is squeeze_node:
+                    continue
+                if sq_out and sq_out in node.input and node.op_type == "Transpose":
+                    tail_transpose = node
+                    break
+
+        if transpose_node is not None and transpose_node.name != f"{gru_name}.gru":
+            transpose_node.name = f"{gru_name}.gru"
+            changed = True
+        if transpose_node is not None and len(transpose_node.output) >= 1:
+            t_old = transpose_node.output[0]
+            t_new = f"{value_prefix}/gru/Transpose_output_0"
+            if t_old and t_old != t_new:
+                _rename_onnx_node_io_refs(model, t_old, t_new)
+                changed = True
+
+        if squeeze_node is not None:
+            if squeeze_node.name != f"{gru_name}.gru#2":
+                squeeze_node.name = f"{gru_name}.gru#2"
+                changed = True
+            if len(squeeze_node.input) >= 2:
+                axes_old = squeeze_node.input[1]
+                axes_new = f"{value_prefix}/gru/Constant_output_0"
+                if axes_old and re.match(r"^/Constant_\d+_output_0$", axes_old):
+                    axes_old = ""
+                if axes_old and _rename_onnx_initializer_and_refs(model, axes_old, axes_new):
+                    squeeze_node.input[1] = axes_new
+                    changed = True
+                elif axes_old and axes_old != axes_new:
+                    _rename_onnx_node_io_refs(model, axes_old, axes_new)
+                    squeeze_node.input[1] = axes_new
+                    changed = True
+            if len(squeeze_node.output) >= 1:
+                sq_old = squeeze_node.output[0]
+                sq_new = f"{value_prefix}/gru#2/Squeeze_output_0"
+                if sq_old and sq_old != sq_new:
+                    _rename_onnx_node_io_refs(model, sq_old, sq_new)
+                    changed = True
+
+        if tail_transpose is not None and tail_transpose.name != f"{gru_name}.gru#3.end":
+            tail_transpose.name = f"{gru_name}.gru#3.end"
+            changed = True
+
+        if len(gru_node.output) >= 2:
+            y0_old = gru_node.output[0]
+            y0_new = f"{value_prefix}/gru#1/GRU_output_0"
+            if y0_old and y0_old != y0_new:
+                _rename_onnx_node_io_refs(model, y0_old, y0_new)
+                changed = True
+            y1_old = gru_node.output[1]
+            y1_new = f"{value_prefix}/gru#1/GRU_output_1"
+            if y1_old and y1_old != y1_new:
+                _rename_onnx_node_io_refs(model, y1_old, y1_new)
+                changed = True
+
+        if tail_transpose is not None and len(tail_transpose.output) >= 1:
+            tp_old = tail_transpose.output[0]
+            tp_new = f"{value_prefix}/gru#3.end/Transpose_1_output_0"
+            graph_outputs = {o.name for o in model.graph.output}
+            if tp_old and tp_old != tp_new and tp_old not in graph_outputs:
+                _rename_onnx_node_io_refs(model, tp_old, tp_new)
+                changed = True
+
+        if any(a.name == "direction" for a in gru_node.attribute):
+            new_attrs = [a for a in gru_node.attribute if a.name != "direction"]
+            del gru_node.attribute[:]
+            gru_node.attribute.extend(new_attrs)
+            changed = True
+
+        _reorder_onnx_initializers_for_unidir_gru(model, gru_name)
+
+    for init in model.graph.initializer:
+        if re.match(r"^/neck_seqs/neck_seqs\.0/seq_t#\d+/ConstantOfShape_output_0$", init.name):
+            if _rename_onnx_initializer_and_refs(model, init.name, "/seq_t_2/ConstantOfShape_output_0"):
+                changed = True
+            break
+
+    if changed:
+        onnx.save(model, onnx_path)
+
+
+def prune_quant_gru_raw_l0_param_encodings(enc_out_path: str) -> None:
+    """删除 AIMET 原生 QuantGRU *_l0 参数键，保留 ONNX baseline 风格参数键。"""
+    with open(enc_out_path, "r", encoding="utf-8") as f:
+        enc = json.load(f)
+
+    param_encodings = enc.get("param_encodings", {})
+    if not isinstance(param_encodings, dict):
+        return
+
+    pattern = re.compile(
+        r".*\.(weight_ih_l0(_reverse)?|weight_hh_l0(_reverse)?|bias_ih_l0(_reverse)?|bias_hh_l0(_reverse)?)$"
+    )
+    remove_keys = [key for key in param_encodings.keys() if pattern.match(key)]
+    if not remove_keys:
+        return
+
+    for key in remove_keys:
+        param_encodings.pop(key, None)
+    enc["param_encodings"] = param_encodings
+
+    with open(enc_out_path, "w", encoding="utf-8") as f:
+        json.dump(enc, f, indent=2, ensure_ascii=False)
 
 
 # ============================================================
@@ -1531,7 +1764,7 @@ class QuantGRU(nn.Module):
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        ONNX 导出（单向）：通过 quant_gru_onnx::gru symbolic 生成单 GRU 节点。
+        ONNX 导出（单向）：通过 custom_gru::quant_gru symbolic 生成单 GRU 节点。
         """
         if hx is None:
             h0 = input.new_zeros((1, input.size(1), self.hidden_size))
@@ -1551,7 +1784,7 @@ class QuantGRU(nn.Module):
         self._onnx_export_weight_hh = r_f.unsqueeze(0).contiguous()
         self._onnx_export_bias = b_f.unsqueeze(0).contiguous()
 
-        output, h_n = torch.ops.quant_gru_onnx.gru(
+        output, h_n = torch.ops.custom_gru.quant_gru(
             input,
             h0,
             self._onnx_export_weight_ih,
@@ -1586,7 +1819,7 @@ class QuantGRU(nn.Module):
             input: torch.Tensor,
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ONNX 导出（双向）：通过 quant_gru_onnx::bigru symbolic 生成单 GRU 节点。"""
+        """ONNX 导出（双向）：通过 custom_gru::quant_bigru symbolic 生成单 GRU 节点。"""
         if hx is None:
             h0 = input.new_zeros((2, input.size(1), self.hidden_size))
         else:
@@ -1596,7 +1829,7 @@ class QuantGRU(nn.Module):
             h0 = hx
 
         self._prepare_onnx_bidirectional_weights(input)
-        output, h_n = torch.ops.quant_gru_onnx.bigru(
+        output, h_n = torch.ops.custom_gru.quant_bigru(
             input,
             h0,
             self._onnx_export_weight_ih,
@@ -3558,14 +3791,28 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
             print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，默认 PER_CHANNEL")
         enc_type = "PER_CHANNEL"
     scale_list, _ = _parse_runtime_scale_lists(op_name, op_data)
-    setattr(quant_params, scale_attr, scale_list)
 
     if enc_type == "PER_TENSOR":
         setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
+        if len(scale_list) == 0:
+            raise ValueError(f"算子 '{op_name}' 的 PER_TENSOR scale 不能为空")
+        tensor_attr = f"scale_{op_info['bw_attr']}tensor_"
+        if not hasattr(quant_params, tensor_attr):
+            raise AttributeError(f"GRUQuantParams 缺少属性 '{tensor_attr}'")
+        setattr(quant_params, tensor_attr, float(scale_list[0]))
     elif enc_type == "PER_GATE":
         setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
+        if len(scale_list) != 3:
+            raise ValueError(
+                f"算子 '{op_name}' 的 PER_GATE scale 长度必须为 3，当前为 {len(scale_list)}"
+            )
+        gate_attr = f"scale_{op_info['bw_attr']}gate_"
+        if not hasattr(quant_params, gate_attr):
+            raise AttributeError(f"GRUQuantParams 缺少属性 '{gate_attr}'")
+        setattr(quant_params, gate_attr, [float(v) for v in scale_list])
     else:
         setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
+        setattr(quant_params, scale_attr, [float(v) for v in scale_list])
 
 
 def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_data: dict) -> None:

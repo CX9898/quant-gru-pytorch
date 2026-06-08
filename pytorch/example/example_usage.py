@@ -468,7 +468,7 @@ def example_onnx_export():
     - 导出前必须设置 export_mode = True
     - 必须调用 ensure_quant_gru_onnx_registered(opset=18)
     - 导出需要使用 legacy exporter（dynamo=False）
-    - custom_opsets 需要包含 {"quant_gru_onnx": 1}
+    - custom_opsets 需要包含 {"custom_gru": 1}
     - 导出后应恢复 export_mode = False
     """
     print("\n" + "=" * 60)
@@ -515,7 +515,7 @@ def example_onnx_export():
         },
         opset_version=18,
         dynamo=False,
-        custom_opsets={"quant_gru_onnx": 1},
+        custom_opsets={"custom_gru": 1},
         verbose=False
     )
     print(f"   ✅ 导出成功: {onnx_path}")
