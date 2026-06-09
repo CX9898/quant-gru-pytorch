@@ -253,6 +253,13 @@ _validate_operator_map()
 # ============================================================
 
 _QUANT_GRU_ONNX_LIB = None
+QUANT_GRU_ONNX_DOMAIN = "custom_gru"
+QUANT_GRU_ONNX_OPSET_VERSION = 1
+
+
+def get_quant_gru_custom_opsets() -> dict:
+    """返回 QuantGRU ONNX 导出所需 custom_opsets。"""
+    return {QUANT_GRU_ONNX_DOMAIN: QUANT_GRU_ONNX_OPSET_VERSION}
 
 
 def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
@@ -273,7 +280,7 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
 
     global _QUANT_GRU_ONNX_LIB
     if _QUANT_GRU_ONNX_LIB is None:
-        _QUANT_GRU_ONNX_LIB = torch.library.Library("custom_gru", "FRAGMENT")
+        _QUANT_GRU_ONNX_LIB = torch.library.Library(QUANT_GRU_ONNX_DOMAIN, "FRAGMENT")
 
     _QUANT_GRU_ONNX_LIB.define(
         "quant_gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
@@ -310,7 +317,7 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
         num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
         if hidden_size_i is None or num_layers_i is None:
-            raise RuntimeError("custom_gru::quant_gru 的 hidden_size/num_layers 必须为常量")
+            raise RuntimeError(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru 的 hidden_size/num_layers 必须为常量")
 
         Y, Y_h = g.op(
             "GRU",
@@ -332,7 +339,7 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
         num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
         if hidden_size_i is None or num_layers_i is None:
-            raise RuntimeError("custom_gru::quant_bigru 的 hidden_size/num_layers 必须为常量")
+            raise RuntimeError(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru 的 hidden_size/num_layers 必须为常量")
 
         Y, Y_h = g.op(
             "GRU",
@@ -353,8 +360,8 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         out = g.op("Reshape", y_perm, shape)
         return out, Y_h
 
-    register_custom_op_symbolic("custom_gru::quant_gru", _symbolic_gru, int(opset))
-    register_custom_op_symbolic("custom_gru::quant_bigru", _symbolic_bigru, int(opset))
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru", _symbolic_gru, int(opset))
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru", _symbolic_bigru, int(opset))
     ensure_quant_gru_onnx_registered._done = True
 
 
@@ -556,12 +563,6 @@ def normalize_quant_gru_onnx_to_optimized_baseline(onnx_path: str) -> None:
             changed = True
 
         _reorder_onnx_initializers_for_unidir_gru(model, gru_name)
-
-    for init in model.graph.initializer:
-        if re.match(r"^/neck_seqs/neck_seqs\.0/seq_t#\d+/ConstantOfShape_output_0$", init.name):
-            if _rename_onnx_initializer_and_refs(model, init.name, "/seq_t_2/ConstantOfShape_output_0"):
-                changed = True
-            break
 
     if changed:
         onnx.save(model, onnx_path)
@@ -1784,7 +1785,8 @@ class QuantGRU(nn.Module):
         self._onnx_export_weight_hh = r_f.unsqueeze(0).contiguous()
         self._onnx_export_bias = b_f.unsqueeze(0).contiguous()
 
-        output, h_n = torch.ops.custom_gru.quant_gru(
+        quant_gru_ops = getattr(torch.ops, QUANT_GRU_ONNX_DOMAIN)
+        output, h_n = quant_gru_ops.quant_gru(
             input,
             h0,
             self._onnx_export_weight_ih,
@@ -1829,7 +1831,8 @@ class QuantGRU(nn.Module):
             h0 = hx
 
         self._prepare_onnx_bidirectional_weights(input)
-        output, h_n = torch.ops.custom_gru.quant_bigru(
+        quant_gru_ops = getattr(torch.ops, QUANT_GRU_ONNX_DOMAIN)
+        output, h_n = quant_gru_ops.quant_bigru(
             input,
             h0,
             self._onnx_export_weight_ih,
