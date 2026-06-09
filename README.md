@@ -15,6 +15,8 @@
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
 - **ONNX 导出**：支持标准 GRU 单节点导出，便于硬件部署
 
+具体更新内容请查看 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 🔧 环境要求
 
 - **Python** >= 3.9
