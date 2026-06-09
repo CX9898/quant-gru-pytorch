@@ -20,23 +20,41 @@
 // 在 finalize_calibration 时调用一次，然后在每次 forward 时从参数复制到 QuantGRUReScale
 void generate_piecewise_linear_lut_to_params(GRUQuantParams &params) {
     const auto &config = params.bitwidth_config_;
+    const float update_in_scale = (params.fixed_scale_update_gate_input_.multiplier != 0)
+                                      ? decode_scale(params.fixed_scale_update_gate_input_)
+                                      : exp2_scale(params.shift_update_gate_input_);
+    const float update_out_scale = (params.fixed_scale_update_gate_output_.multiplier != 0)
+                                       ? decode_scale(params.fixed_scale_update_gate_output_)
+                                       : exp2_scale(params.shift_update_gate_output_);
+    const float reset_in_scale = (params.fixed_scale_reset_gate_input_.multiplier != 0)
+                                     ? decode_scale(params.fixed_scale_reset_gate_input_)
+                                     : exp2_scale(params.shift_reset_gate_input_);
+    const float reset_out_scale = (params.fixed_scale_reset_gate_output_.multiplier != 0)
+                                      ? decode_scale(params.fixed_scale_reset_gate_output_)
+                                      : exp2_scale(params.shift_reset_gate_output_);
+    const float new_in_scale = (params.fixed_scale_new_gate_input_.multiplier != 0)
+                                   ? decode_scale(params.fixed_scale_new_gate_input_)
+                                   : exp2_scale(params.shift_new_gate_input_);
+    const float new_out_scale = (params.fixed_scale_new_gate_output_.multiplier != 0)
+                                    ? decode_scale(params.fixed_scale_new_gate_output_)
+                                    : exp2_scale(params.shift_new_gate_output_);
 
     // update gate Sigmoid
     params.sigmoid_update_gate_lut_ = generate_sigmoid_lut(
-        params.shift_update_gate_input_, params.zp_update_gate_input_,
-        params.shift_update_gate_output_, params.zp_update_gate_output_,
+        update_in_scale, params.zp_update_gate_input_,
+        update_out_scale, params.zp_update_gate_output_,
         config.update_gate_input_, config.update_gate_output_);
 
     // reset gate Sigmoid
     params.sigmoid_reset_gate_lut_ = generate_sigmoid_lut(
-        params.shift_reset_gate_input_, params.zp_reset_gate_input_,
-        params.shift_reset_gate_output_, params.zp_reset_gate_output_,
+        reset_in_scale, params.zp_reset_gate_input_,
+        reset_out_scale, params.zp_reset_gate_output_,
         config.reset_gate_input_, config.reset_gate_output_);
 
     // new gate Tanh
     params.tanh_new_gate_lut_ = generate_tanh_lut(
-        params.shift_new_gate_input_, params.zp_new_gate_input_,
-        params.shift_new_gate_output_, params.zp_new_gate_output_,
+        new_in_scale, params.zp_new_gate_input_,
+        new_out_scale, params.zp_new_gate_output_,
         config.new_gate_input_, config.new_gate_output_);
 
 #ifdef DEBUG
@@ -111,7 +129,7 @@ __global__ void computeWeightSumMulZP_i32(
 
 
 template <typename T, typename QuantT>
-__global__ void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv,
+__global__ void dequantification(const QuantT *quant_data, T *data, size_t size, FixedPointScale exp2_inv,
                                  int32_t zp) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) {
@@ -133,7 +151,7 @@ __global__ void dequantification(const QuantT *quant_data, T *data, size_t size,
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <bool Training = false>
 __global__ void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
-                                  size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+                                  size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
@@ -149,7 +167,7 @@ __global__ void quantificationFP(const float *data, float *quant_data, uint8_t *
 template <bool Training = false>
 __global__ void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *mask,
                                             size_t input_size, size_t channel_size,
-                                            const int8_t *__restrict__ exp2_invs,
+                                            const FixedPointScale *__restrict__ exp2_invs,
                                             QuantBitWidth bw) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
@@ -170,7 +188,7 @@ __global__ void quantificationPerChannelFP(const float *src, float *quant_data, 
 template <bool Training = false>
 __global__ void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
                                          size_t input_size, size_t hidden_size,
-                                         int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                                         FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g,
                                          QuantBitWidth bw) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
@@ -180,7 +198,7 @@ __global__ void quantificationPerGateFP(const float *src, float *quant_data, uin
     
     // 计算 gate 索引：0=z, 1=r, 2=g
     const size_t gate_idx = channel_idx / hidden_size;
-    int8_t exp2_inv;
+    FixedPointScale exp2_inv;
     if (gate_idx == 0) {
         exp2_inv = exp2_inv_z;
     } else if (gate_idx == 1) {
@@ -199,7 +217,7 @@ __global__ void quantificationPerGateFP(const float *src, float *quant_data, uin
 
 // 从 float 存储的量化值反量化
 __global__ void dequantificationFP(const float *quant_data, float *data, size_t size,
-                                    int8_t exp2_inv, int32_t zp) {
+                                    FixedPointScale exp2_inv, int32_t zp) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
@@ -208,7 +226,7 @@ __global__ void dequantificationFP(const float *quant_data, float *data, size_t 
 
 // 从 float 存储的量化值原地反量化（in-place）
 __global__ void dequantificationFPInplace(float *data, size_t size,
-                                          int8_t exp2_inv, int32_t zp) {
+                                          FixedPointScale exp2_inv, int32_t zp) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
@@ -218,7 +236,7 @@ __global__ void dequantificationFPInplace(float *data, size_t size,
 // 从 float 存储的量化值进行 per-channel 反量化
 __global__ void dequantificationPerChannelFP(const float *quant_data, float *data,
                                              size_t input_size, size_t channel_size,
-                                             const int8_t *__restrict__ exp2_invs) {
+                                             const FixedPointScale *__restrict__ exp2_invs) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -226,7 +244,7 @@ __global__ void dequantificationPerChannelFP(const float *quant_data, float *dat
         return;
     }
 
-    const int8_t exp2_inv = exp2_invs[channel_idx];
+    const FixedPointScale exp2_inv = exp2_invs[channel_idx];
     
     // 内存布局：idx = input_idx * channel_size + channel_idx
     // 与 quantificationPerChannelFP 保持一致
@@ -239,7 +257,7 @@ __global__ void dequantificationPerChannelFP(const float *quant_data, float *dat
 // 从 float 存储的量化值进行 per-channel 原地反量化（in-place）
 __global__ void dequantificationPerChannelFPInplace(float *data,
                                                     size_t input_size, size_t channel_size,
-                                                    const int8_t *__restrict__ exp2_invs) {
+                                                    const FixedPointScale *__restrict__ exp2_invs) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -247,7 +265,7 @@ __global__ void dequantificationPerChannelFPInplace(float *data,
         return;
     }
 
-    const int8_t exp2_inv = exp2_invs[channel_idx];
+    const FixedPointScale exp2_inv = exp2_invs[channel_idx];
     
     // 内存布局：idx = input_idx * channel_size + channel_idx
     // 与 quantificationPerChannelFP 保持一致
@@ -261,7 +279,7 @@ __global__ void dequantificationPerChannelFPInplace(float *data,
 // 数据布局: [input_size, hidden_size * 3]，每个 gate 有 hidden_size 个通道
 __global__ void dequantificationPerGateFPInplace(float *data,
                                                  size_t input_size, size_t hidden_size,
-                                                 int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g) {
+                                                 FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -270,7 +288,7 @@ __global__ void dequantificationPerGateFPInplace(float *data,
     
     // 计算 gate 索引：0=z, 1=r, 2=g
     const size_t gate_idx = channel_idx / hidden_size;
-    int8_t exp2_inv;
+    FixedPointScale exp2_inv;
     if (gate_idx == 0) {
         exp2_inv = exp2_inv_z;
     } else if (gate_idx == 1) {
@@ -289,7 +307,7 @@ __global__ void dequantificationPerGateFPInplace(float *data,
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <typename T, bool Training = false>
 __global__ void quantificationBitwidth(const T *data, int32_t *quant_data, uint8_t *mask,
-                                        size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+                                        size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= size) return;
     
@@ -305,14 +323,14 @@ __global__ void quantificationBitwidth(const T *data, int32_t *quant_data, uint8
 template <typename T, bool Training = false>
 __global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_data, uint8_t *mask,
                                                   size_t input_size, size_t channel_size, 
-                                                  const int8_t *exp2_invs, QuantBitWidth bw) {
+                                                  const FixedPointScale *exp2_invs, QuantBitWidth bw) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (channel_idx >= channel_size || input_idx >= input_size) {
         return;
     }
 
-    const int8_t exp2_inv = exp2_invs[channel_idx];
+    const FixedPointScale exp2_inv = exp2_invs[channel_idx];
     const size_t idx = input_idx * channel_size + channel_idx;
     uint8_t keep_gradient;
     quant_data[idx] = ::quantize<Training>(src[idx], exp2_inv, 0, bw, Training ? &keep_gradient : nullptr);
@@ -326,10 +344,10 @@ __global__ void quantificationPerChannelBitwidth(const T *src, int32_t *quant_da
 // 4个部分: [z_out, r_out, g_out, weight_hh_linear_g]
 __global__ void dequantificationVFP(const float *quant_data, float *data, int time_steps,
                                      int batch_size, int hidden_size,
-                                     int8_t shift_z, int32_t zp_z,
-                                     int8_t shift_r, int32_t zp_r,
-                                     int8_t shift_g, int32_t zp_g,
-                                     int8_t shift_hh, int32_t zp_hh) {
+                                     FixedPointScale shift_z, int32_t zp_z,
+                                     FixedPointScale shift_r, int32_t zp_r,
+                                     FixedPointScale shift_g, int32_t zp_g,
+                                     FixedPointScale shift_hh, int32_t zp_hh) {
     const int t = blockIdx.x;
     const int b = blockIdx.y;
     const int h = threadIdx.x;
@@ -360,10 +378,10 @@ __global__ void dequantificationVFP(const float *quant_data, float *data, int ti
 // 4个部分: [z_out, r_out, g_out, weight_hh_linear_g]
 __global__ void dequantificationVFPInplace(float *data, int time_steps,
                                             int batch_size, int hidden_size,
-                                            int8_t shift_z, int32_t zp_z,
-                                            int8_t shift_r, int32_t zp_r,
-                                            int8_t shift_g, int32_t zp_g,
-                                            int8_t shift_hh, int32_t zp_hh) {
+                                            FixedPointScale shift_z, int32_t zp_z,
+                                            FixedPointScale shift_r, int32_t zp_r,
+                                            FixedPointScale shift_g, int32_t zp_g,
+                                            FixedPointScale shift_hh, int32_t zp_hh) {
     const int t = blockIdx.x;
     const int b = blockIdx.y;
     const int h = threadIdx.x;
@@ -406,13 +424,13 @@ __global__ void dequantificationVFPInplace(float *data, int time_steps,
 template <bool Training = false>
 __global__ void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
                                       size_t channel_size,
-                                      const int8_t *__restrict__ exp2_invs,
+                                      const FixedPointScale *__restrict__ exp2_invs,
                                       QuantBitWidth bw) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (channel_idx >= channel_size) return;
     
-    float scale = exp2_scale(exp2_invs[channel_idx]);
+    float scale = decode_scale(exp2_invs[channel_idx]);
     // 特殊量化: round((bias / scale) / 128) * 128
     float normalized = src[channel_idx] / scale;
     float q = round_f(normalized / 128.0f) * 128.0f;
@@ -430,9 +448,9 @@ __global__ void quantificationBiasFP(const float *src, float *quant_data, uint8_
 // - weight_hh_linear_g: 使用 shift_hh, zp_hh (weight_hh_linear)
 template <typename T>
 __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_steps,
-                                  int batch_size, int hidden_size, int8_t shift_z, int32_t zp_z,
-                                  int8_t shift_r, int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                                  int8_t shift_hh, int32_t zp_hh) {
+                                  int batch_size, int hidden_size, FixedPointScale shift_z, int32_t zp_z,
+                                  FixedPointScale shift_r, int32_t zp_r, FixedPointScale shift_g, int32_t zp_g,
+                                  FixedPointScale shift_hh, int32_t zp_hh) {
     // 计算当前线程处理的索引
     // blockIdx.x: time_step
     // blockIdx.y: batch
@@ -472,14 +490,14 @@ __global__ void dequantificationV(const int32_t *quant_data, T *data, int time_s
 
 template <typename T, typename QuantT>
 __global__ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
-                                           size_t channel_size, const int8_t *exp2_invs) {
+                                           size_t channel_size, const FixedPointScale *exp2_invs) {
     const size_t channel_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const size_t input_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (channel_idx >= channel_size || input_idx >= input_size) {
         return;
     }
 
-    const int8_t exp2_inv = exp2_invs[channel_idx];
+    const FixedPointScale exp2_inv = exp2_invs[channel_idx];
 
     const size_t idx = input_idx * channel_size + channel_idx;
     data[idx] = dequantize<QuantT>(quant_data[idx], exp2_inv, 0);
@@ -566,7 +584,7 @@ namespace dev {
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <bool Training>
 void quantificationBitwidth(const float *data, int32_t *quant_data, uint8_t *mask,
-                             size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+                             size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::quantificationBitwidth<float, Training><<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
@@ -581,7 +599,7 @@ void quantificationBitwidth(const float *data, int32_t *quant_data, uint8_t *mas
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <bool Training>
 void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
-                      size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw) {
+                      size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::quantificationFP<Training><<<grid, block>>>(data, quant_data, mask, size, exp2_inv, zp, bw);
@@ -596,7 +614,7 @@ void quantificationFP(const float *data, float *quant_data, uint8_t *mask,
 template <bool Training>
 void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *mask,
                                 size_t input_size, size_t channel_size, 
-                                const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+                                const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
@@ -614,7 +632,7 @@ void quantificationPerChannelFP(const float *src, float *quant_data, uint8_t *ma
 template <bool Training>
 void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, uint8_t *mask,
                                        size_t input_size, size_t channel_size, 
-                                       const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+                                       const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
@@ -630,28 +648,28 @@ void quantificationPerChannelBitwidth(const float *src, int32_t *quant_data, uin
 
 // 显式实例化模板函数
 template void quantificationBitwidth<false>(const float *data, int32_t *quant_data, uint8_t *mask,
-                                            size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                                            size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 template void quantificationBitwidth<true>(const float *data, int32_t *quant_data, uint8_t *mask,
-                                           size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                                           size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 
 template void quantificationFP<false>(const float *data, float *quant_data, uint8_t *mask,
-                                     size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                                     size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 template void quantificationFP<true>(const float *data, float *quant_data, uint8_t *mask,
-                                    size_t size, int8_t exp2_inv, int32_t zp, QuantBitWidth bw);
+                                    size_t size, FixedPointScale exp2_inv, int32_t zp, QuantBitWidth bw);
 
 template void quantificationPerChannelFP<false>(const float *src, float *quant_data, uint8_t *mask,
                                                 size_t input_size, size_t channel_size,
-                                                const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                                const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 template void quantificationPerChannelFP<true>(const float *src, float *quant_data, uint8_t *mask,
                                                size_t input_size, size_t channel_size,
-                                               const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                               const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 // Per-gate 量化 wrapper（用于 GRU 权重）
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <bool Training>
 void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
                              size_t input_size, size_t hidden_size,
-                             int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                             FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g,
                              QuantBitWidth bw) {
     const size_t channel_size = hidden_size * 3;
     const dim3 blockDim(32, 16);
@@ -668,11 +686,11 @@ void quantificationPerGateFP(const float *src, float *quant_data, uint8_t *mask,
 
 template void quantificationPerGateFP<false>(const float *src, float *quant_data, uint8_t *mask,
                                             size_t input_size, size_t hidden_size,
-                                            int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                                            FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g,
                                             QuantBitWidth bw);
 template void quantificationPerGateFP<true>(const float *src, float *quant_data, uint8_t *mask,
                                             size_t input_size, size_t hidden_size,
-                                            int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g,
+                                            FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g,
                                             QuantBitWidth bw);
 
 // 通用权重量化函数（根据 granularity 自动选择）
@@ -681,9 +699,9 @@ template <bool Training>
 void quantificationWeightFP(const float *src, float *quant_data, uint8_t *mask,
                             size_t input_size, size_t hidden_size,
                             OperatorQuantConfig::QuantizationGranularity granularity,
-                            int8_t shift_tensor,
-                            const std::array<int8_t, 3> &shift_gate,
-                            const dev::vector<int8_t> &shift_channel,
+                            FixedPointScale shift_tensor,
+                            const std::array<FixedPointScale, 3> &shift_gate,
+                            const dev::vector<FixedPointScale> &shift_channel,
                             QuantBitWidth bw) {
     const size_t channel_size = hidden_size * 3;
     const size_t total_size = input_size * channel_size;
@@ -715,31 +733,31 @@ void quantificationWeightFP(const float *src, float *quant_data, uint8_t *mask,
 template void quantificationWeightFP<false>(const float *src, float *quant_data, uint8_t *mask,
                                             size_t input_size, size_t hidden_size,
                                             OperatorQuantConfig::QuantizationGranularity granularity,
-                                            int8_t shift_tensor,
-                                            const std::array<int8_t, 3> &shift_gate,
-                                            const dev::vector<int8_t> &shift_channel,
+                                            FixedPointScale shift_tensor,
+                                            const std::array<FixedPointScale, 3> &shift_gate,
+                                            const dev::vector<FixedPointScale> &shift_channel,
                                             QuantBitWidth bw);
 template void quantificationWeightFP<true>(const float *src, float *quant_data, uint8_t *mask,
                                            size_t input_size, size_t hidden_size,
                                            OperatorQuantConfig::QuantizationGranularity granularity,
-                                           int8_t shift_tensor,
-                                           const std::array<int8_t, 3> &shift_gate,
-                                           const dev::vector<int8_t> &shift_channel,
+                                           FixedPointScale shift_tensor,
+                                           const std::array<FixedPointScale, 3> &shift_gate,
+                                           const dev::vector<FixedPointScale> &shift_channel,
                                            QuantBitWidth bw);
 
 template void quantificationPerChannelBitwidth<false>(const float *src, int32_t *quant_data, uint8_t *mask,
                                                       size_t input_size, size_t channel_size,
-                                                      const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                                      const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 template void quantificationPerChannelBitwidth<true>(const float *src, int32_t *quant_data, uint8_t *mask,
                                                      size_t input_size, size_t channel_size,
-                                                     const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                                     const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 // Bias 特殊量化函数（使用 round(bias / scale / 128) * 128）
 // @tparam Training 是否训练模式（决定是否使用 mask）
 template <bool Training>
 void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
                           size_t channel_size,
-                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw) {
+                          const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw) {
     size_t block = 256;
     size_t grid = (channel_size + block - 1) / block;
     kernel::quantificationBiasFP<Training><<<grid, block>>>(src, quant_data, mask, channel_size, exp2_invs.data(), bw);
@@ -753,13 +771,13 @@ void quantificationBiasFP(const float *src, float *quant_data, uint8_t *mask,
 // 显式实例化模板函数
 template void quantificationBiasFP<false>(const float *src, float *quant_data, uint8_t *mask,
                                           size_t channel_size,
-                                          const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                          const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 template void quantificationBiasFP<true>(const float *src, float *quant_data, uint8_t *mask,
                                          size_t channel_size,
-                                         const dev::vector<int8_t> &exp2_invs, QuantBitWidth bw);
+                                         const dev::vector<FixedPointScale> &exp2_invs, QuantBitWidth bw);
 
 void dequantificationFP(const float *quant_data, float *data, size_t size,
-                        int8_t exp2_inv, int32_t zp) {
+                        FixedPointScale exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::dequantificationFP<<<grid, block>>>(quant_data, data, size, exp2_inv, zp);
@@ -767,7 +785,7 @@ void dequantificationFP(const float *quant_data, float *data, size_t size,
 }
 
 void dequantificationFPInplace(float *data, size_t size,
-                               int8_t exp2_inv, int32_t zp) {
+                               FixedPointScale exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::dequantificationFPInplace<<<grid, block>>>(data, size, exp2_inv, zp);
@@ -782,9 +800,9 @@ void dequantificationFPInplace(float *data, size_t size,
 }
 
 void dequantificationVFP(const float *quant_data, float *data, int time_steps, int batch_size,
-                         int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                         int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                         int8_t shift_hh, int32_t zp_hh) {
+                         int hidden_size, FixedPointScale shift_z, int32_t zp_z, FixedPointScale shift_r,
+                         int32_t zp_r, FixedPointScale shift_g, int32_t zp_g,
+                         FixedPointScale shift_hh, int32_t zp_hh) {
     const dim3 blockDim(hidden_size);
     const dim3 gridDim(time_steps, batch_size);
 
@@ -800,9 +818,9 @@ void dequantificationVFP(const float *quant_data, float *data, int time_steps, i
 }
 
 void dequantificationVFPInplace(float *data, int time_steps, int batch_size,
-                                 int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                                 int32_t zp_r, int8_t shift_g, int32_t zp_g,
-                                 int8_t shift_hh, int32_t zp_hh) {
+                                 int hidden_size, FixedPointScale shift_z, int32_t zp_z, FixedPointScale shift_r,
+                                 int32_t zp_r, FixedPointScale shift_g, int32_t zp_g,
+                                 FixedPointScale shift_hh, int32_t zp_hh) {
     const dim3 blockDim(hidden_size);
     const dim3 gridDim(time_steps, batch_size);
 
@@ -821,7 +839,7 @@ void dequantificationVFPInplace(float *data, int time_steps, int batch_size,
 
 void dequantificationPerChannelFP(const float *quant_data, float *data,
                                   size_t input_size, size_t channel_size,
-                                  const dev::vector<int8_t> &exp2_invs) {
+                                  const dev::vector<FixedPointScale> &exp2_invs) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
@@ -841,7 +859,7 @@ void dequantificationPerChannelFP(const float *quant_data, float *data,
 
 void dequantificationPerChannelFPInplace(float *data,
                                         size_t input_size, size_t channel_size,
-                                        const dev::vector<int8_t> &exp2_invs) {
+                                        const dev::vector<FixedPointScale> &exp2_invs) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
@@ -861,7 +879,7 @@ void dequantificationPerChannelFPInplace(float *data,
 
 void dequantificationPerGateFPInplace(float *data,
                                      size_t input_size, size_t hidden_size,
-                                     int8_t exp2_inv_z, int8_t exp2_inv_r, int8_t exp2_inv_g) {
+                                     FixedPointScale exp2_inv_z, FixedPointScale exp2_inv_r, FixedPointScale exp2_inv_g) {
     const dim3 blockDim(32, 16);
     const size_t channel_size = hidden_size * 3;
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
@@ -884,9 +902,9 @@ void dequantificationPerGateFPInplace(float *data,
 void dequantificationWeightFPInplace(float *data,
                                      size_t input_size, size_t hidden_size,
                                      OperatorQuantConfig::QuantizationGranularity granularity,
-                                     int8_t shift_tensor,
-                                     const std::array<int8_t, 3> &shift_gate,
-                                     const dev::vector<int8_t> &shift_channel) {
+                                     FixedPointScale shift_tensor,
+                                     const std::array<FixedPointScale, 3> &shift_gate,
+                                     const dev::vector<FixedPointScale> &shift_channel) {
     const size_t channel_size = hidden_size * 3;
     const size_t total_size = input_size * channel_size;
     
@@ -914,7 +932,7 @@ void dequantificationWeightFPInplace(float *data,
 }
 
 template <typename T, typename QuantT>
-void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp2_inv, int32_t zp) {
+void dequantification(const QuantT *quant_data, T *data, size_t size, FixedPointScale exp2_inv, int32_t zp) {
     size_t block = 256;
     size_t grid = (size + block - 1) / block;
     kernel::dequantification<<<grid, block>>>(quant_data, data, size, exp2_inv, zp);
@@ -922,19 +940,19 @@ void dequantification(const QuantT *quant_data, T *data, size_t size, int8_t exp
 }
 
 template void dequantification<float, int8_t>(const int8_t *quant_data, float *data, size_t size,
-                                              int8_t exp2_inv, int32_t zp);
+                                              FixedPointScale exp2_inv, int32_t zp);
 template void dequantification<float, int16_t>(const int16_t *quant_data, float *data, size_t size,
-                                               int8_t exp2_inv, int32_t zp);
+                                               FixedPointScale exp2_inv, int32_t zp);
 template void dequantification<float, int32_t>(const int32_t *quant_data, float *data, size_t size,
-                                               int8_t exp2_inv, int32_t zp);
+                                               FixedPointScale exp2_inv, int32_t zp);
 
 // v 统一使用 int32_t 存储
 // V 向量布局: [z_out, r_out, g_out, weight_hh_linear_g]
 template <typename T>
 void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int batch_size,
-                       int hidden_size, int8_t shift_z, int32_t zp_z, int8_t shift_r,
-                       int32_t zp_r, int8_t shift_g, int32_t zp_g, 
-                       int8_t shift_hh, int32_t zp_hh) {
+                       int hidden_size, FixedPointScale shift_z, int32_t zp_z, FixedPointScale shift_r,
+                       int32_t zp_r, FixedPointScale shift_g, int32_t zp_g, 
+                       FixedPointScale shift_hh, int32_t zp_hh) {
     // Launch configuration: 每个block处理一个时间步和一个batch的所有hidden单元
     // blockDim.x = hidden_size (每个线程处理一个hidden单元)
     // gridDim.x = time_steps
@@ -954,15 +972,15 @@ void dequantificationV(const int32_t *quant_data, T *data, int time_steps, int b
 }
 
 template void dequantificationV<float>(const int32_t *quant_data, float *data, int time_steps,
-                                       int batch_size, int hidden_size, int8_t shift_z,
-                                       int32_t zp_z, int8_t shift_r, int32_t zp_r,
-                                       int8_t shift_g, int32_t zp_g, 
-                                       int8_t shift_hh, int32_t zp_hh);
+                                       int batch_size, int hidden_size, FixedPointScale shift_z,
+                                       int32_t zp_z, FixedPointScale shift_r, int32_t zp_r,
+                                       FixedPointScale shift_g, int32_t zp_g, 
+                                       FixedPointScale shift_hh, int32_t zp_hh);
 
 
 template <typename T, typename QuantT>
 void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_size,
-                                size_t channel_size, const dev::vector<int8_t> &exp2_invs) {
+                                size_t channel_size, const dev::vector<FixedPointScale> &exp2_invs) {
     const dim3 blockDim(32, 16);
     const dim3 gridDim((channel_size + blockDim.x - 1) / blockDim.x,
                        (input_size + blockDim.y - 1) / blockDim.y);
@@ -974,13 +992,13 @@ void dequantificationPerChannel(const QuantT *quant_data, T *data, size_t input_
 
 template void dequantificationPerChannel<float, int8_t>(const int8_t *quant_data, float *data,
                                                         size_t input_size, size_t channel_size,
-                                                        const dev::vector<int8_t> &exp2_invs);
+                                                        const dev::vector<FixedPointScale> &exp2_invs);
 template void dequantificationPerChannel<float, int16_t>(const int16_t *quant_data, float *data,
                                                          size_t input_size, size_t channel_size,
-                                                         const dev::vector<int8_t> &exp2_invs);
+                                                         const dev::vector<FixedPointScale> &exp2_invs);
 template void dequantificationPerChannel<float, int32_t>(const int32_t *quant_data, float *data,
                                                          size_t input_size, size_t channel_size,
-                                                         const dev::vector<int8_t> &exp2_invs);
+                                                         const dev::vector<FixedPointScale> &exp2_invs);
 }  // namespace dev
 
 // ==================== 分段线性量化参数生成函数 ====================
@@ -1127,13 +1145,24 @@ std::vector<float> adaptive_segmentation_sigmoid(float x_min, float x_max, int n
  * @param input_bw 输入位宽（决定输入范围）
  * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
-SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+static inline std::pair<int32_t, int8_t> quantize_multiplier_signed(float value, QuantBitWidth output_bw) {
+    if (std::abs(value) < 1e-12f) {
+        return {0, 0};
+    }
+    const int32_t max_q = output_bw.qmax();
+    int8_t n = static_cast<int8_t>(std::floor(std::log2(static_cast<double>(max_q) / std::abs(value))));
+    int64_t q = round_to_int64(static_cast<double>(value) * std::ldexp(1.0, n));
+    q = std::max<int64_t>(-max_q, std::min<int64_t>(max_q, q));
+    return {static_cast<int32_t>(q), n};
+}
+
+SigmoidLUT generate_sigmoid_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
                                  int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围（任意位宽支持）
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = exp2_scale(shift_bits_x);
+    float scale_x = effective_scale_x;
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -1143,15 +1172,17 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     x_max = std::min(x_max, SIGMOID_EFFECTIVE_RANGE);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
-           static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
+    printf("[DEBUG] generate_sigmoid_lut: input_bw=%d, eff_scale_x=%.8f, zp_x=%d, x_range=[%.4f, %.4f]\n",
+           static_cast<int>(input_bw), scale_x, zp_x, x_min, x_max);
 #endif
 
-    SigmoidLUT lut;
-    lut.shift_bits_x = shift_bits_x;
+    SigmoidLUT lut{};
+    lut.shift_bits_x = 0;
     lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_bits_y;
+    lut.shift_bits_y = 0;
     lut.zp_y = zp_y;
+    lut.effective_scale_x = effective_scale_x;
+    lut.effective_scale_y = effective_scale_y;
 
     // 生成分段点
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
@@ -1178,41 +1209,14 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
         all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    // 第二遍扫描：统一量化参数
-    float scale_y = exp2_scale(shift_bits_y);
-    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
-
-    float b_abs_max = 0.0f, c_abs_max = 0.0f;
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
-        float c_adjusted = all_coeffs[i].c + zp_y_offset;
-        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
-    }
-
-    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
-    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
-
-    // 根据输出位宽自动确定 shift_bits
-    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
-    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
-
-#ifdef DEBUG
-    printf("[DEBUG] generate_sigmoid_lut: output_bw.bits_=%d, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, shift_bits_b, shift_bits_c);
-#endif
+    const float scale_y = effective_scale_y;
 
     // 第三遍扫描：量化每段
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         const auto &coeff = all_coeffs[i];
-        float c_adjusted = coeff.c + zp_y_offset;
-
-        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
-        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
-
-        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
-        int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
+        const float m_real = coeff.b * (scale_x / scale_y);
+        auto [q_b, n_BX_total] = quantize_multiplier_signed(m_real, output_bw);
+        int32_t term_c_precomputed = round_to_int(coeff.c / scale_y + static_cast<float>(zp_y));
 
         // threshold 量化（任意位宽支持，存储为 int32_t）
         int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
@@ -1227,6 +1231,11 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
     return lut;
 }
 
+SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                                int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    return generate_sigmoid_lut(exp2_scale(shift_bits_x), zp_x, exp2_scale(shift_bits_y), zp_y, input_bw, output_bw);
+}
+
 /**
  * @brief 统一的 Tanh LUT 生成函数
  * @param shift_bits_x 输入量化 shift bits
@@ -1236,13 +1245,13 @@ SigmoidLUT generate_sigmoid_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_
  * @param input_bw 输入位宽（决定输入范围）
  * @param output_bw 输出位宽（决定 shift_bits_b 精度）
  */
-SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+SigmoidLUT generate_tanh_lut(float effective_scale_x, int32_t zp_x, float effective_scale_y,
                               int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
     // 根据输入位宽确定量化范围（任意位宽支持）
     int32_t quant_min = input_bw.qmin();
     int32_t quant_max = input_bw.qmax();
 
-    float scale_x = exp2_scale(shift_bits_x);
+    float scale_x = effective_scale_x;
     float x_min = static_cast<float>(quant_min - zp_x) * scale_x;
     float x_max = static_cast<float>(quant_max - zp_x) * scale_x;
 
@@ -1252,15 +1261,17 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     x_max = std::min(x_max, TANH_EFFECTIVE_RANGE);
 
 #ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: input_bw=%d, shift_x=%d, zp_x=%d, x_range=[%.4f, %.4f]\n",
-           static_cast<int>(input_bw), shift_bits_x, zp_x, x_min, x_max);
+    printf("[DEBUG] generate_tanh_lut: input_bw=%d, eff_scale_x=%.8f, zp_x=%d, x_range=[%.4f, %.4f]\n",
+           static_cast<int>(input_bw), scale_x, zp_x, x_min, x_max);
 #endif
 
-    SigmoidLUT lut;
-    lut.shift_bits_x = shift_bits_x;
+    SigmoidLUT lut{};
+    lut.shift_bits_x = 0;
     lut.zp_x = zp_x;
-    lut.shift_bits_y = shift_bits_y;
+    lut.shift_bits_y = 0;
     lut.zp_y = zp_y;
+    lut.effective_scale_x = effective_scale_x;
+    lut.effective_scale_y = effective_scale_y;
 
     std::vector<float> segment_points = adaptive_segmentation_sigmoid(x_min, x_max, NUM_SEGMENTS);
 
@@ -1285,39 +1296,13 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
         all_coeffs[i] = {x_start, x_end, b_fp, c_fp};
     }
 
-    float scale_y = exp2_scale(shift_bits_y);
-    float zp_y_offset = static_cast<float>(zp_y) * scale_y;
-
-    float b_abs_max = 0.0f, c_abs_max = 0.0f;
-    for (int i = 0; i < NUM_SEGMENTS; i++) {
-        b_abs_max = std::max(b_abs_max, std::abs(all_coeffs[i].b));
-        float c_adjusted = all_coeffs[i].c + zp_y_offset;
-        c_abs_max = std::max(c_abs_max, std::abs(c_adjusted));
-    }
-
-    if (b_abs_max < 1e-9f) b_abs_max = 1e-9f;
-    if (c_abs_max < 1e-9f) c_abs_max = 1e-9f;
-
-    // 根据输出位宽自动确定 shift_bits
-    int8_t shift_bits_b = determine_shift_bits(b_abs_max, output_bw);
-    int8_t shift_bits_c = determine_shift_bits(c_abs_max, output_bw);
-
-#ifdef DEBUG
-    printf("[DEBUG] generate_tanh_lut: output_bw.bits_=%d, b_abs_max=%.6f, shift_bits_b=%d, shift_bits_c=%d\n",
-           output_bw.bits_, b_abs_max, shift_bits_b, shift_bits_c);
-#endif
+    const float scale_y = effective_scale_y;
 
     for (int i = 0; i < NUM_SEGMENTS; i++) {
         const auto &coeff = all_coeffs[i];
-        float c_adjusted = coeff.c + zp_y_offset;
-
-        int32_t q_b = quantize_coefficient_int32(coeff.b, shift_bits_b);
-        int32_t q_c = quantize_coefficient_int32(c_adjusted, shift_bits_c);
-
-        int8_t n_BX_total = shift_bits_b + shift_bits_x - shift_bits_y;
-        int8_t n_yc = shift_bits_c - shift_bits_y;
-
-        int32_t term_c_precomputed = (n_yc >= 0) ? (q_c >> n_yc) : (q_c << (-n_yc));
+        const float m_real = coeff.b * (scale_x / scale_y);
+        auto [q_b, n_BX_total] = quantize_multiplier_signed(m_real, output_bw);
+        int32_t term_c_precomputed = round_to_int(coeff.c / scale_y + static_cast<float>(zp_y));
         
         // threshold 量化（任意位宽支持，存储为 int32_t）
         int32_t threshold = round_to_int(coeff.x_end / scale_x + zp_x);
@@ -1330,4 +1315,9 @@ SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bit
     }
 
     return lut;
+}
+
+SigmoidLUT generate_tanh_lut(int8_t shift_bits_x, int32_t zp_x, int8_t shift_bits_y,
+                             int32_t zp_y, QuantBitWidth input_bw, QuantBitWidth output_bw) {
+    return generate_tanh_lut(exp2_scale(shift_bits_x), zp_x, exp2_scale(shift_bits_y), zp_y, input_bw, output_bw);
 }

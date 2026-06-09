@@ -79,6 +79,8 @@ struct OperatorQuantConfig {
     bool new_gate_input_symmetric_ = false, new_gate_output_symmetric_ = true;
     bool mul_reset_hidden_symmetric_ = false;
     bool mul_old_contribution_symmetric_ = false, mul_new_contribution_symmetric_ = false;
+    // true: POT2 (multiplier=1, shift-only fast path), false: affine M+shift
+    bool usePOT2_ = true;
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
         QuantBitWidth* signed_members[] = {
@@ -92,6 +94,11 @@ struct OperatorQuantConfig {
         }
         update_gate_output_ = {bits, true};   // UINT
         reset_gate_output_ = {bits, true};    // UINT
+        return *this;
+    }
+
+    OperatorQuantConfig& setUsePOT2(bool usePOT2) {
+        usePOT2_ = usePOT2;
         return *this;
     }
 };

@@ -11,8 +11,10 @@
 // ============================================================================
 
 #include "gru_quant_cpu.h"
+#include "pot_sqnr_calibrator.h"
 
 #include <cstdio>
+#include <stdexcept>
 
 namespace cpu {
 
@@ -123,11 +125,17 @@ void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, con
             int64_t gemm_val = acc - W_sum_mul_x_zp_[m];
             
             // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-            int64_t bias_shifted = rshift_round(static_cast<int64_t>(bw[m]), linear_params_.shift_bw_to_weight_ih_linear_[m]);
-            int64_t gemm_plus_bias = gemm_val + bias_shifted;
-            int32_t result = static_cast<int32_t>(
-                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_x_to_weight_ih_linear_[m])) +
-                gate_params_.zp_weight_ih_linear_;
+            // POT2 模式用整数移位；affine 模式用 per-channel FixedPointScale
+            int64_t bias_shifted;
+            int64_t gemm_plus_bias_rescaled;
+            if (gate_params_.bitwidth_config_.usePOT2_) {
+                bias_shifted = rshift_round(static_cast<int64_t>(bw[m]), linear_params_.shift_bw_to_weight_ih_linear_[m]);
+                gemm_plus_bias_rescaled = rshift_round(gemm_val + bias_shifted, linear_params_.shift_gemm_x_to_weight_ih_linear_[m]);
+            } else {
+                bias_shifted = rescale_round<false>(static_cast<int64_t>(bw[m]), linear_params_.fixed_rescale_bw_to_weight_ih_linear_[m]);
+                gemm_plus_bias_rescaled = rescale_round<false>(gemm_val + bias_shifted, linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[m]);
+            }
+            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gate_params_.zp_weight_ih_linear_;
             tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_ih_linear_);
         }
     }
@@ -149,11 +157,17 @@ void ForwardPassQuantCPU::ComputeLinearH(const int32_t *R, const int32_t *h, con
             int64_t gemm_val = acc - R_sum_mul_h_zp_[m];
             
             // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-            int64_t bias_shifted = rshift_round(static_cast<int64_t>(br[m]), linear_params_.shift_br_to_weight_hh_linear_[m]);
-            int64_t gemm_plus_bias = gemm_val + bias_shifted;
-            int32_t result = static_cast<int32_t>(
-                rshift_round(gemm_plus_bias, linear_params_.shift_gemm_h_to_weight_hh_linear_[m])) +
-                gate_params_.zp_weight_hh_linear_;
+            // POT2 模式用整数移位；affine 模式用 per-channel FixedPointScale
+            int64_t bias_shifted;
+            int64_t gemm_plus_bias_rescaled;
+            if (gate_params_.bitwidth_config_.usePOT2_) {
+                bias_shifted = rshift_round(static_cast<int64_t>(br[m]), linear_params_.shift_br_to_weight_hh_linear_[m]);
+                gemm_plus_bias_rescaled = rshift_round(gemm_val + bias_shifted, linear_params_.shift_gemm_h_to_weight_hh_linear_[m]);
+            } else {
+                bias_shifted = rescale_round<false>(static_cast<int64_t>(br[m]), linear_params_.fixed_rescale_br_to_weight_hh_linear_[m]);
+                gemm_plus_bias_rescaled = rescale_round<false>(gemm_val + bias_shifted, linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[m]);
+            }
+            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gate_params_.zp_weight_hh_linear_;
             tmp_weight_hh_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_hh_linear_);
         }
     }
@@ -208,6 +222,21 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
 // setRescaleParam: 直接复用 quantize_lut_types.h 中声明的 generate_*_lut 函数
 void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
+    const bool usePOT2 = parms.bitwidth_config_.usePOT2_;
+    auto to_fixed_rescale = [usePOT2](int8_t shift) {
+        if (usePOT2) return FixedPointScale{1u, shift};
+        return encodeMShift(exp2_scale(static_cast<int8_t>(-shift)));
+    };
+    auto to_ratio_fixed = [usePOT2](float src_scale, float dst_scale) {
+        const float ratio = src_scale / dst_scale;
+        if (!(ratio > 0.0f)) {
+            throw std::runtime_error("Invalid non-positive rescale ratio");
+        }
+        if (usePOT2) {
+            return FixedPointScale{1u, static_cast<int8_t>(round_f(-std::log2(ratio)))};
+        }
+        return encodeMShift(ratio);
+    };
 
     // ==================== Linear 层参数（per-channel）====================
     linear_params_.zp_x_ = parms.zp_x_;
@@ -228,6 +257,32 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
         linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
         linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
     }
+    linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_.resize(channel);
+    linear_params_.fixed_rescale_bw_to_weight_ih_linear_.resize(channel);
+    linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_.resize(channel);
+    linear_params_.fixed_rescale_br_to_weight_hh_linear_.resize(channel);
+    for (int idx = 0; idx < channel; ++idx) {
+        linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[idx] =
+            to_fixed_rescale(linear_params_.shift_gemm_x_to_weight_ih_linear_[idx]);
+        linear_params_.fixed_rescale_bw_to_weight_ih_linear_[idx] =
+            to_fixed_rescale(linear_params_.shift_bw_to_weight_ih_linear_[idx]);
+        linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[idx] =
+            to_fixed_rescale(linear_params_.shift_gemm_h_to_weight_hh_linear_[idx]);
+        linear_params_.fixed_rescale_br_to_weight_hh_linear_[idx] =
+            to_fixed_rescale(linear_params_.shift_br_to_weight_hh_linear_[idx]);
+        if (!usePOT2) {
+            const float scale_wx = decode_scale(parms.fixed_scale_W_[idx]) * decode_scale(parms.fixed_scale_x_);
+            const float scale_rh = decode_scale(parms.fixed_scale_R_[idx]) * decode_scale(parms.fixed_scale_h_);
+            linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[idx] =
+                to_ratio_fixed(scale_wx, decode_scale(parms.fixed_scale_weight_ih_linear_));
+            linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[idx] =
+                to_ratio_fixed(scale_rh, decode_scale(parms.fixed_scale_weight_hh_linear_));
+            linear_params_.fixed_rescale_bw_to_weight_ih_linear_[idx] =
+                to_ratio_fixed(decode_scale(parms.fixed_scale_bw_[idx]), scale_wx);
+            linear_params_.fixed_rescale_br_to_weight_hh_linear_[idx] =
+                to_ratio_fixed(decode_scale(parms.fixed_scale_br_[idx]), scale_rh);
+        }
+    }
 
 #ifdef DEBUG
     linear_params_.shift_bw_ = parms.shift_bw_;
@@ -244,12 +299,32 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.zp_update_gate_output_ = parms.zp_update_gate_output_;
     gate_params_.shift_weight_ih_linear_to_update_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_update_gate_input_;
     gate_params_.shift_weight_hh_linear_to_update_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_update_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_update_gate_input_);
+    gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_update_gate_input_);
+    if (!usePOT2) {
+        gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
+        gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
+    }
 
     // reset gate
     gate_params_.zp_reset_gate_input_ = parms.zp_reset_gate_input_;
     gate_params_.zp_reset_gate_output_ = parms.zp_reset_gate_output_;
     gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
     gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_reset_gate_input_);
+    gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_reset_gate_input_);
+    if (!usePOT2) {
+        gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
+        gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
+    }
 
     // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
     gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
@@ -257,25 +332,45 @@ void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
     gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
     gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
         (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
+    gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_new_gate_input_);
+    gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
+        to_fixed_rescale(gate_params_.shift_reset_mul_hh_to_new_gate_input_);
+    if (!usePOT2) {
+        gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_new_gate_input_));
+        gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
+            to_ratio_fixed(
+                decode_scale(parms.fixed_scale_reset_gate_output_) * decode_scale(parms.fixed_scale_weight_hh_linear_),
+                decode_scale(parms.fixed_scale_new_gate_input_));
+    }
 
     // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
-    gate_params_.quant_one_in_update_gate_scale_ = rshift_round(1, -parms.shift_update_gate_output_) + parms.zp_update_gate_output_;
+    gate_params_.quant_one_in_update_gate_scale_ =
+        round_to_int(1.0f / decode_scale(parms.fixed_scale_update_gate_output_)) + parms.zp_update_gate_output_;
     // new_gate_output 对齐到 h 的移位
     gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
     // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
     gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
+    gate_params_.fixed_rescale_new_gate_output_to_h_ = to_fixed_rescale(gate_params_.shift_new_gate_output_to_h_);
+    gate_params_.fixed_rescale_update_old_to_h_ = to_fixed_rescale(gate_params_.shift_update_old_to_h_);
+    if (!usePOT2) {
+        gate_params_.fixed_rescale_new_gate_output_to_h_ =
+            to_ratio_fixed(decode_scale(parms.fixed_scale_new_gate_output_), decode_scale(parms.fixed_scale_h_));
+        gate_params_.fixed_rescale_update_old_to_h_ =
+            to_ratio_fixed(
+                decode_scale(parms.fixed_scale_update_gate_output_) * decode_scale(parms.fixed_scale_h_),
+                decode_scale(parms.fixed_scale_h_));
+    }
 
     // 位宽配置和 LUT
     gate_params_.bitwidth_config_ = parms.bitwidth_config_;
-    gate_params_.sigmoid_update_gate_lut_ = generate_sigmoid_lut(
-        parms.shift_update_gate_input_, parms.zp_update_gate_input_, parms.shift_update_gate_output_, parms.zp_update_gate_output_,
-        parms.bitwidth_config_.update_gate_input_, parms.bitwidth_config_.update_gate_output_);
-    gate_params_.sigmoid_reset_gate_lut_ = generate_sigmoid_lut(
-        parms.shift_reset_gate_input_, parms.zp_reset_gate_input_, parms.shift_reset_gate_output_, parms.zp_reset_gate_output_,
-        parms.bitwidth_config_.reset_gate_input_, parms.bitwidth_config_.reset_gate_output_);
-    gate_params_.tanh_new_gate_lut_ = generate_tanh_lut(
-        parms.shift_new_gate_input_, parms.zp_new_gate_input_, parms.shift_new_gate_output_, parms.zp_new_gate_output_,
-        parms.bitwidth_config_.new_gate_input_, parms.bitwidth_config_.new_gate_output_);
+    // 直接复用校准时预计算的 LUT（与 GPU 路径一致）。
+    // 校准 LUT 使用 affine 连续 scale（fixed_scale），CPU 不可再用 POT2 shift 重新生成，
+    // 否则 affine 模式下 CPU/GPU LUT 不一致。
+    gate_params_.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
+    gate_params_.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
+    gate_params_.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
 
 #ifdef DEBUG
     gate_params_.test = parms;

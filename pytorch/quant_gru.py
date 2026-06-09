@@ -7,14 +7,13 @@ QuantGRU - 支持量化的 GRU 实现
     - 支持 MinMax / SQNR / Percentile 校准方法
     - 支持 JSON 配置文件指定各算子的位宽和对称量化设置
     - 支持量化参数导出/导入（JSON 格式，便于部署和调试）
-    - 支持 ONNX 导出(float / QDQ 两种格式)
+    - 支持 ONNX 导出（标准 GRU 节点）
 
 关键属性:
     - use_quantization: 是否启用量化(默认 False)
     - calibrating: 是否在 forward 中收集校准数据(默认 False)
     - calibration_method: 校准方法 'minmax'|'sqnr'|'percentile'(默认 'minmax')
     - export_mode: 是否使用 ONNX 导出模式(默认 False)
-    - export_format: ONNX 导出格式 'float'|'qdq'(默认 'float')
 
 典型用法:
     >>> from quant_gru import QuantGRU
@@ -58,7 +57,7 @@ QuantGRU - 支持量化的 GRU 实现
     >>>
     >>> # 获取量化配置
     >>> config = gru.get_quant_config("z_out")
-    >>> print(config)  # {'bitwidth': 16, 'exp2_inv': 14, ...}
+    >>> print(config)  # {'bitwidth': 16, 'scale': 0.000061, ...}
 
 调试工具（模块级函数）:
     >>> from quant_gru import print_quant_config, print_quant_params
@@ -66,16 +65,27 @@ QuantGRU - 支持量化的 GRU 实现
     >>> print_quant_params(gru)  # 打印量化参数详情
 
 ONNX 导出:
+    >>> from quant_gru import ensure_quant_gru_onnx_registered
     >>> gru.export_mode = True
-    >>> gru.export_format = 'float'  # 或 'qdq' (量化模型, 可选)
-    >>> torch.onnx.export(gru, x, "model.onnx", dynamo=False)  # PyTorch 2.x 需要 dynamo=False
+    >>> ensure_quant_gru_onnx_registered(opset=18)
+    >>> torch.onnx.export(
+    ...     gru, x, "model.onnx",
+    ...     opset_version=18,
+    ...     dynamo=False,  # PyTorch 2.x 需要使用 legacy exporter
+    ...     custom_opsets={"custom_gru": 1}
+    ... )
     >>> gru.export_mode = False
 """
 
 import json
+import math
+import re
+import warnings
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+from _version import __version__
+from torch.onnx import register_custom_op_symbolic, symbolic_helper
 
 try:
     import gru_interface_binding as gru_ops
@@ -117,7 +127,7 @@ GRAD_TARGET_MAX = 0.5        # 目标最大值（放大后的梯度最大值，�
 # 格式: "算子名" -> {
 #   "bw_attr": 位宽属性名,
 #   "sym_attr": 对称量化属性名,
-#   "shift_attr": shift 属性名 (scale = 2^(-shift)),
+#   "scale_attr": scale 属性名 (scale > 0),
 #   "zp_attr": zp 属性名 (None 表示无 zp，如 per-channel 权重),
 #   "is_per_channel": 是否 per-channel
 # }
@@ -134,14 +144,14 @@ def _make_op_info(base_name: str, is_per_channel: bool = False, default_unsigned
         - bw_attr: "{base_name}" (位宽)
         - sym_attr: "{base_name}symmetric_" (对称量化)
         - unsigned_attr: "{base_name}unsigned_" (无符号量化，只标记例外)
-        - shift_attr: "shift_{base_name}" (量化移位量，scale = 2^(-shift))
+        - scale_attr: "scale_{base_name}" (量化 scale)
         - zp_attr: "zp_{base_name}" (零点，per-channel 为 None)
     """
     return {
         "bw_attr": base_name,
         "sym_attr": f"{base_name}symmetric_",
         "unsigned_attr": f"{base_name}unsigned_",
-        "shift_attr": f"shift_{base_name}",
+        "scale_attr": f"scale_{base_name}",
         "zp_attr": None if is_per_channel else f"zp_{base_name}",
         "is_per_channel": is_per_channel,
         "default_unsigned": default_unsigned,
@@ -190,7 +200,7 @@ _OPERATOR_SHORT_NAME_MAP = {
         'bw_attr': info["bw_attr"],
         'sym_attr': info["sym_attr"],
         'unsigned_attr': info.get("unsigned_attr"),
-        'shift_attr': info["shift_attr"],
+        'scale_attr': info["scale_attr"],
         'zp_attr': info["zp_attr"],
         'is_per_channel': info["is_per_channel"],
     }
@@ -237,6 +247,349 @@ def _validate_operator_map():
 
 # 模块加载时执行一致性验证（import 时自动运行）
 _validate_operator_map()
+
+# ============================================================
+#                ONNX 导出（单节点 GRU）辅助逻辑
+# ============================================================
+
+_QUANT_GRU_ONNX_LIB = None
+QUANT_GRU_ONNX_DOMAIN = "custom_gru"
+QUANT_GRU_ONNX_OPSET_VERSION = 1
+
+
+def get_quant_gru_custom_opsets() -> dict:
+    """返回 QuantGRU ONNX 导出所需 custom_opsets。"""
+    return {QUANT_GRU_ONNX_DOMAIN: QUANT_GRU_ONNX_OPSET_VERSION}
+
+
+def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
+    """
+    注册 QuantGRU ONNX 导出所需的 custom op 与 symbolic。
+
+    说明：
+        - 首次注册仅支持 opset=18（与项目导出承诺一致）
+        - 注册成功后重复调用会静默返回（与参考实现一致）
+    """
+    if getattr(ensure_quant_gru_onnx_registered, "_done", False):
+        return
+
+    if int(opset) != 18:
+        raise ValueError(
+            f"ensure_quant_gru_onnx_registered 首次注册仅支持 opset=18，当前为 {opset}"
+        )
+
+    global _QUANT_GRU_ONNX_LIB
+    if _QUANT_GRU_ONNX_LIB is None:
+        _QUANT_GRU_ONNX_LIB = torch.library.Library(QUANT_GRU_ONNX_DOMAIN, "FRAGMENT")
+
+    _QUANT_GRU_ONNX_LIB.define(
+        "quant_gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+    )
+    _QUANT_GRU_ONNX_LIB.define(
+        "quant_bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+    )
+
+    def _gru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+        t, b = x.shape[0], x.shape[1]
+        out = x.new_zeros(t, b, int(hidden_size))
+        h_n = x.new_zeros(int(num_layers), b, int(hidden_size))
+        return out, h_n
+
+    def _bigru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+        t, b = x.shape[0], x.shape[1]
+        out = x.new_zeros(t, b, 2 * int(hidden_size))
+        h_n = x.new_zeros(2 * int(num_layers), b, int(hidden_size))
+        return out, h_n
+
+    try:
+        _QUANT_GRU_ONNX_LIB.impl("quant_gru", _gru_cpu, dispatch_key="CPU")
+    except TypeError:
+        _QUANT_GRU_ONNX_LIB.impl("quant_gru", "CPU", _gru_cpu)
+
+    try:
+        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", _bigru_cpu, dispatch_key="CPU")
+    except TypeError:
+        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", "CPU", _bigru_cpu)
+
+    def _symbolic_gru(g, x, h0, W, R, B, hidden_size, num_layers):
+        hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
+        num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
+        if hidden_size_i is None or num_layers_i is None:
+            raise RuntimeError(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru 的 hidden_size/num_layers 必须为常量")
+
+        Y, Y_h = g.op(
+            "GRU",
+            x,
+            W,
+            R,
+            B,
+            symbolic_helper._optional_input_placeholder_tensor(g),
+            h0,
+            hidden_size_i=int(hidden_size_i),
+            linear_before_reset_i=1,
+            outputs=2,
+        )
+        axes = g.op("Constant", value_t=torch.tensor([1], dtype=torch.long))
+        out = g.op("Squeeze", Y, axes)
+        return out, Y_h
+
+    def _symbolic_bigru(g, x, h0, W, R, B, hidden_size, num_layers):
+        hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
+        num_layers_i = symbolic_helper._maybe_get_const(num_layers, "i")
+        if hidden_size_i is None or num_layers_i is None:
+            raise RuntimeError(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru 的 hidden_size/num_layers 必须为常量")
+
+        Y, Y_h = g.op(
+            "GRU",
+            x,
+            W,
+            R,
+            B,
+            symbolic_helper._optional_input_placeholder_tensor(g),
+            h0,
+            hidden_size_i=int(hidden_size_i),
+            direction_s="bidirectional",
+            linear_before_reset_i=1,
+            outputs=2,
+        )
+
+        y_perm = g.op("Transpose", Y, perm_i=[0, 2, 1, 3])
+        shape = g.op("Constant", value_t=torch.tensor([0, 0, -1], dtype=torch.long))
+        out = g.op("Reshape", y_perm, shape)
+        return out, Y_h
+
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru", _symbolic_gru, int(opset))
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru", _symbolic_bigru, int(opset))
+    ensure_quant_gru_onnx_registered._done = True
+
+
+def _rename_onnx_initializer_and_refs(model, old_name: str, new_name: str) -> bool:
+    if old_name == new_name:
+        return False
+    renamed = False
+    for init in model.graph.initializer:
+        if init.name == old_name:
+            init.name = new_name
+            renamed = True
+            break
+    if not renamed:
+        return False
+    for node in model.graph.node:
+        node.input[:] = [new_name if n == old_name else n for n in node.input]
+        node.output[:] = [new_name if n == old_name else n for n in node.output]
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        if vi.name == old_name:
+            vi.name = new_name
+    return True
+
+
+def _rename_onnx_node_io_refs(model, old_name: str, new_name: str) -> None:
+    if old_name == new_name:
+        return
+    for node in model.graph.node:
+        node.input[:] = [new_name if n == old_name else n for n in node.input]
+        node.output[:] = [new_name if n == old_name else n for n in node.output]
+    for vi in list(model.graph.value_info) + list(model.graph.input) + list(model.graph.output):
+        if vi.name == old_name:
+            vi.name = new_name
+
+
+def _onnx_module_value_prefix_for_baseline(gru_name: str) -> str:
+    parts = [p for p in str(gru_name).split(".") if p]
+    if not parts:
+        return "/gru"
+    if len(parts) == 1:
+        return f"/{parts[0]}"
+    prefix = f"/{parts[0]}/{parts[0]}.{parts[1]}"
+    if len(parts) > 2:
+        prefix += "/" + "/".join(parts[2:])
+    return prefix
+
+
+def _reorder_onnx_initializers_for_unidir_gru(model, gru_name: str) -> None:
+    target_order = [
+        f"{gru_name}.weight_ih.weight",
+        f"{gru_name}.weight_hh.weight",
+        f"{gru_name}.bias",
+        f"{gru_name}.gru#1.initial_h",
+        f"/{gru_name}/gru/Constant_output_0",
+    ]
+    current = list(model.graph.initializer)
+    name_to_init = {i.name: i for i in current}
+    if not all(name in name_to_init for name in target_order):
+        return
+    ordered = [name_to_init[name] for name in target_order]
+    remaining = [i for i in current if i.name not in set(target_order)]
+    model.graph.ClearField("initializer")
+    model.graph.initializer.extend(ordered + remaining)
+
+
+def normalize_quant_gru_onnx_to_optimized_baseline(onnx_path: str) -> None:
+    """
+    将 QuantGRU 直接导出的 ONNX GRU 局部命名规范化为 OptimizedQuantizableGRU baseline 风格。
+
+    PyTorch legacy ONNX exporter 对节点名和中间 value 名的源头控制有限；这里把
+    QuantGRU 自身的导出外观收敛在 QuantGRU 模块内，避免上层导出脚本持有 GRU
+    内部命名知识。全模型/AIMET 级后处理仍应留在调用方。
+    """
+    import onnx
+
+    model = onnx.load(onnx_path)
+    changed = False
+
+    for gru_node in model.graph.node:
+        if gru_node.op_type != "GRU":
+            continue
+
+        gru_name = gru_node.name or "gru"
+        value_prefix = _onnx_module_value_prefix_for_baseline(gru_name)
+        attrs = {a.name: onnx.helper.get_attribute_value(a) for a in gru_node.attribute}
+        direction = attrs.get("direction", b"forward")
+        if isinstance(direction, bytes):
+            direction = direction.decode("utf-8")
+        is_bidir = direction == "bidirectional"
+
+        if len(gru_node.input) >= 5:
+            seq_len_old = gru_node.input[4]
+            if seq_len_old and re.match(r"^/Constant_\d+_output_0$", seq_len_old):
+                seq_len_old = ""
+            if seq_len_old:
+                seq_len_new = f"/{gru_name}/Constant_2_output_0" if is_bidir else f"{value_prefix}/gru/Constant_output_0"
+                if _rename_onnx_initializer_and_refs(model, seq_len_old, seq_len_new):
+                    gru_node.input[4] = seq_len_new
+                    changed = True
+
+        if len(gru_node.input) >= 6:
+            h0_old = gru_node.input[5]
+            if h0_old:
+                h0_new = f"{gru_name}#6.initial_h" if is_bidir else f"{gru_name}.gru#1.initial_h"
+                if _rename_onnx_initializer_and_refs(model, h0_old, h0_new):
+                    gru_node.input[5] = h0_new
+                    changed = True
+
+        if is_bidir:
+            const_pat = re.compile(rf"^/{re.escape(gru_name)}/Constant_\d+_output_0$")
+            for init in model.graph.initializer:
+                if const_pat.match(init.name):
+                    target = f"/{gru_name}/Constant_2_output_0"
+                    if _rename_onnx_initializer_and_refs(model, init.name, target):
+                        changed = True
+            continue
+
+        x_name = gru_node.input[0] if len(gru_node.input) > 0 else ""
+        y_name = gru_node.output[0] if len(gru_node.output) > 0 else ""
+        transpose_node = None
+        squeeze_node = None
+        tail_transpose = None
+        for node in model.graph.node:
+            if node is gru_node:
+                continue
+            if x_name and x_name in node.output and node.op_type == "Transpose":
+                transpose_node = node
+            if y_name and y_name in node.input and node.op_type == "Squeeze":
+                squeeze_node = node
+        if squeeze_node is not None and len(squeeze_node.output) > 0:
+            sq_out = squeeze_node.output[0]
+            for node in model.graph.node:
+                if node is squeeze_node:
+                    continue
+                if sq_out and sq_out in node.input and node.op_type == "Transpose":
+                    tail_transpose = node
+                    break
+
+        if transpose_node is not None and transpose_node.name != f"{gru_name}.gru":
+            transpose_node.name = f"{gru_name}.gru"
+            changed = True
+        if transpose_node is not None and len(transpose_node.output) >= 1:
+            t_old = transpose_node.output[0]
+            t_new = f"{value_prefix}/gru/Transpose_output_0"
+            if t_old and t_old != t_new:
+                _rename_onnx_node_io_refs(model, t_old, t_new)
+                changed = True
+
+        if squeeze_node is not None:
+            if squeeze_node.name != f"{gru_name}.gru#2":
+                squeeze_node.name = f"{gru_name}.gru#2"
+                changed = True
+            if len(squeeze_node.input) >= 2:
+                axes_old = squeeze_node.input[1]
+                axes_new = f"{value_prefix}/gru/Constant_output_0"
+                if axes_old and re.match(r"^/Constant_\d+_output_0$", axes_old):
+                    axes_old = ""
+                if axes_old and _rename_onnx_initializer_and_refs(model, axes_old, axes_new):
+                    squeeze_node.input[1] = axes_new
+                    changed = True
+                elif axes_old and axes_old != axes_new:
+                    _rename_onnx_node_io_refs(model, axes_old, axes_new)
+                    squeeze_node.input[1] = axes_new
+                    changed = True
+            if len(squeeze_node.output) >= 1:
+                sq_old = squeeze_node.output[0]
+                sq_new = f"{value_prefix}/gru#2/Squeeze_output_0"
+                if sq_old and sq_old != sq_new:
+                    _rename_onnx_node_io_refs(model, sq_old, sq_new)
+                    changed = True
+
+        if tail_transpose is not None and tail_transpose.name != f"{gru_name}.gru#3.end":
+            tail_transpose.name = f"{gru_name}.gru#3.end"
+            changed = True
+
+        if len(gru_node.output) >= 2:
+            y0_old = gru_node.output[0]
+            y0_new = f"{value_prefix}/gru#1/GRU_output_0"
+            if y0_old and y0_old != y0_new:
+                _rename_onnx_node_io_refs(model, y0_old, y0_new)
+                changed = True
+            y1_old = gru_node.output[1]
+            y1_new = f"{value_prefix}/gru#1/GRU_output_1"
+            if y1_old and y1_old != y1_new:
+                _rename_onnx_node_io_refs(model, y1_old, y1_new)
+                changed = True
+
+        if tail_transpose is not None and len(tail_transpose.output) >= 1:
+            tp_old = tail_transpose.output[0]
+            tp_new = f"{value_prefix}/gru#3.end/Transpose_1_output_0"
+            graph_outputs = {o.name for o in model.graph.output}
+            if tp_old and tp_old != tp_new and tp_old not in graph_outputs:
+                _rename_onnx_node_io_refs(model, tp_old, tp_new)
+                changed = True
+
+        if any(a.name == "direction" for a in gru_node.attribute):
+            new_attrs = [a for a in gru_node.attribute if a.name != "direction"]
+            del gru_node.attribute[:]
+            gru_node.attribute.extend(new_attrs)
+            changed = True
+
+        _reorder_onnx_initializers_for_unidir_gru(model, gru_name)
+
+    if changed:
+        onnx.save(model, onnx_path)
+
+
+def prune_quant_gru_raw_l0_param_encodings(enc_out_path: str) -> None:
+    """删除 AIMET 原生 QuantGRU *_l0 参数键，保留 ONNX baseline 风格参数键。"""
+    with open(enc_out_path, "r", encoding="utf-8") as f:
+        enc = json.load(f)
+
+    param_encodings = enc.get("param_encodings", {})
+    if not isinstance(param_encodings, dict):
+        return
+
+    pattern = re.compile(
+        r".*\.(weight_ih_l0(_reverse)?|weight_hh_l0(_reverse)?|bias_ih_l0(_reverse)?|bias_hh_l0(_reverse)?)$"
+    )
+    remove_keys = [key for key in param_encodings.keys() if pattern.match(key)]
+    if not remove_keys:
+        return
+
+    for key in remove_keys:
+        param_encodings.pop(key, None)
+    enc["param_encodings"] = param_encodings
+
+    with open(enc_out_path, "w", encoding="utf-8") as f:
+        json.dump(enc, f, indent=2, ensure_ascii=False)
 
 
 # ============================================================
@@ -348,19 +701,8 @@ def convert_weights_to_haste_format(
 
 
 # ============================================================
-#                      QDQ (Quantize-Dequantize) 伪量化
+#                      量化通用工具函数
 # ============================================================
-#
-# 伪量化用于 ONNX 导出，在浮点域模拟量化效果：
-#   q = clamp(round(x / scale) + zp, qmin, qmax)
-#   x' = (q - zp) * scale
-#
-# 推理引擎（如 TensorRT）会识别 QDQ 模式并替换为真实量化算子。
-#
-# 量化参数说明：
-#   - exp2_inv: 量化指数，scale = 2^(-exp2_inv)
-#   - zp: 零点（对称量化时为 0）
-#   - bitwidth: 位宽 (1-32)
 
 def get_quant_range(bitwidth: int, is_unsigned: bool = False) -> Tuple[int, int]:
     """
@@ -392,84 +734,6 @@ def get_quant_range(bitwidth: int, is_unsigned: bool = False) -> Tuple[int, int]
         qmax = (1 << (bitwidth - 1)) - 1
     
     return qmin, qmax
-
-def fake_quantize(x: torch.Tensor, exp2_inv: int, zp: int = 0,
-                  bitwidth: int = 8, symmetric: bool = True,
-                  is_unsigned: bool = False) -> torch.Tensor:
-    """
-    伪量化(Fake Quantize): 量化后立即反量化，保持浮点格式
-    
-    用于 ONNX 导出，推理引擎会识别 QDQ 模式并优化
-    
-    [与 CUDA 一致] 量化参数 (exp2_inv, zp) 与 CUDA 端完全一致
-    [ONNX 兼容] 使用浮点运算模拟量化效果
-    
-    Args:
-        x: 输入张量
-        exp2_inv: 量化指数 (scale = 2^(-exp2_inv))
-        zp: 零点
-        bitwidth: 位宽 (1-32)
-        symmetric: 对称量化 (影响 zp 的使用方式)
-        is_unsigned: 是否无符号（只标记 UINT 例外）
-                     - False: INT 范围(默认)，如 8bit: -128~127
-                     - True: UINT 范围，如 8bit: 0~255
-    """
-    # 计算 scale
-    if exp2_inv >= 0:
-        scale = 1.0 / (1 << exp2_inv)
-    else:
-        scale = float(1 << (-exp2_inv))
-
-    # 确定量化范围
-    qmin, qmax = get_quant_range(bitwidth, is_unsigned)
-
-    # 量化: q = clamp(round(x / scale) + zp, qmin, qmax)
-    # 注意: torch.round 使用银行家舍入，与 CUDA 的 round half up 略有差异
-    # 但实际影响极小 (随机数据差异率 < 0.001%)
-    q = torch.clamp(torch.round(x / scale) + zp, qmin, qmax)
-
-    # 反量化: x' = (q - zp) * scale
-    x_dequant = (q - zp) * scale
-
-    return x_dequant
-
-
-def fake_quantize_per_channel(x: torch.Tensor, exp2_invs: list, zp: int = 0,
-                              bitwidth: int = 8, symmetric: bool = True,
-                              is_unsigned: bool = False) -> torch.Tensor:
-    """
-    Per-channel 伪量化
-    
-    [与 CUDA 一致] per-channel 量化参数与 CUDA quantificationPerChannel 一致
-    [ONNX 兼容] 使用浮点运算模拟量化效果
-    
-    Args:
-        x: 输入张量
-        exp2_invs: per-channel 量化指数列表
-        zp: 零点
-        bitwidth: 位宽 (1-32)
-        symmetric: 对称量化
-        is_unsigned: 是否无符号（只标记 UINT 例外）
-    """
-    # 确定量化范围
-    qmin, qmax = get_quant_range(bitwidth, is_unsigned)
-
-    device = x.device
-    result = torch.zeros_like(x)
-    channel_size = len(exp2_invs)
-
-    for c in range(channel_size):
-        exp2_inv = exp2_invs[c]
-        if exp2_inv >= 0:
-            scale = 1.0 / (1 << exp2_inv)
-        else:
-            scale = float(1 << (-exp2_inv))
-
-        q = torch.clamp(torch.round(x[..., c] / scale) + zp, qmin, qmax)
-        result[..., c] = (q - zp) * scale
-
-    return result
-
 
 # ============================================================
 #                   GRUFunction (autograd.Function)
@@ -774,7 +1038,7 @@ class GRUFunction(torch.autograd.Function):
 #   - 兼容 nn.GRU 的接口
 #   - 任意位宽 (1-32 bit) 混合精度量化推理
 #   - 多种校准方法（MinMax/SQNR/Percentile）
-#   - ONNX 导出支持（float/QDQ 格式）
+#   - ONNX 导出支持（float 格式）
 #
 # 内部状态管理：
 #   - _bitwidth_config: C++ OperatorQuantConfig 对象（位宽配置）
@@ -800,8 +1064,7 @@ class QuantGRU(nn.Module):
         calibrating (bool): 校准模式开关，True 时 forward 会收集校准数据
         calibration_method (str): 校准方法 'minmax'|'sqnr'|'percentile'（默认 'sqnr'）
         percentile_value (float): 百分位值，仅 'percentile' 方法使用（默认 99.99）
-        export_mode (bool): ONNX 导出模式，True 时使用纯 PyTorch 实现
-        export_format (str): 导出格式 'float'|'qdq'（默认 'float'）
+        export_mode (bool): ONNX 导出模式，True 时使用标准 GRU 节点导出路径
     
     Example:
         >>> gru = QuantGRU(64, 128, batch_first=True).cuda()
@@ -829,6 +1092,7 @@ class QuantGRU(nn.Module):
             dropout: float = 0.0,
             bidirectional: bool = False,
             use_quantization: bool = False,
+            use_pot2_scale: bool = True,
     ):
         super(QuantGRU, self).__init__()
 
@@ -846,14 +1110,15 @@ class QuantGRU(nn.Module):
         self.dropout = dropout
         self.bidirectional = bidirectional
         self.use_quantization = use_quantization
+        self._use_pot2_scale = bool(use_pot2_scale)
         self.num_directions = 2 if bidirectional else 1
 
-        # ONNX 导出开关：True 时使用纯 PyTorch 实现，可被 ONNX 追踪
+        # ONNX 导出开关：True 时启用单节点 GRU 导出路径
         self.export_mode = False
-        # 导出格式(高级选项，仅在 export_mode=True 时有效)
-        # 'float': 浮点(默认，与 Haste GRU 行为一致)
-        # 'qdq': QDQ 伪量化(推荐用于量化模型)
-        self._export_format = 'float'
+        # ONNX 导出临时权重缓存（non-persistent，避免污染 state_dict）
+        self.register_buffer('_onnx_export_weight_ih', torch.empty(0), persistent=False)
+        self.register_buffer('_onnx_export_weight_hh', torch.empty(0), persistent=False)
+        self.register_buffer('_onnx_export_bias', torch.empty(0), persistent=False)
 
         # 权重参数(命名与 nn.GRU 一致)
         self.weight_ih_l0 = nn.Parameter(torch.empty(3 * hidden_size, input_size))
@@ -893,6 +1158,7 @@ class QuantGRU(nn.Module):
 
         # 位宽配置对象（直接初始化，避免延迟创建的线程安全问题）
         self._bitwidth_config = gru_ops.OperatorQuantConfig()  # 位宽配置(直接存储 C++ 对象)
+        self._bitwidth_config.usePOT2_ = self._use_pot2_scale
 
         self._cublas_initialized = False  # CUDA 延迟初始化标志
         
@@ -940,6 +1206,7 @@ class QuantGRU(nn.Module):
                 bitwidth_dict[sym_attr] = getattr(self._bitwidth_config, sym_attr)
                 if unsigned_attr:
                     bitwidth_dict[unsigned_attr] = getattr(self._bitwidth_config, unsigned_attr)
+            bitwidth_dict['usePOT2_'] = getattr(self._bitwidth_config, 'usePOT2_', self._use_pot2_scale)
             state['_bitwidth_config'] = bitwidth_dict
         
         # C++ 对象无法序列化，设为 None（反序列化后需重新校准）
@@ -985,6 +1252,7 @@ class QuantGRU(nn.Module):
         state.pop('_quant_params_allow_overwrite', None)
         
         self.__dict__.update(state)
+        self._use_pot2_scale = bool(getattr(self._bitwidth_config, 'usePOT2_', getattr(self, '_use_pot2_scale', True)))
 
     def reset_parameters(self):
         """权重初始化(与 nn.GRU 相同的均匀分布)"""
@@ -1099,6 +1367,8 @@ class QuantGRU(nn.Module):
         default_config = gru_config.get('default_config', {})
         if 'disable_quantization' in default_config:
             self.use_quantization = not default_config['disable_quantization']
+        if 'use_pot2_scale' in default_config:
+            self.use_pot2_scale = bool(default_config['use_pot2_scale'])
 
         # 直接将配置写入 C++ 对象
         op_config = gru_config.get('operator_config', {})
@@ -1399,7 +1669,7 @@ class QuantGRU(nn.Module):
             self.quant_params_reverse = None
             self.hist_collectors_reverse = None
 
-    # -------------------- ONNX 导出模式：纯 PyTorch 实现 --------------------
+    # -------------------- ONNX 导出模式：标准 GRU 节点 --------------------
 
     def _get_config_attr(self, op_name: str, suffix: str, valid_set: set, default):
         """
@@ -1440,535 +1710,161 @@ class QuantGRU(nn.Module):
         return self._get_config_attr(op_name, '_unsigned_', _VALID_UNSIGNED_ATTRS, False)
 
     @property
-    def export_format(self) -> str:
-        """
-        获取导出格式(高级选项，仅在 export_mode=True 时有效)
-        
-        Returns:
-            'float': 浮点格式(默认，与 Haste GRU 行为一致)
-            'qdq': QDQ 伪量化格式(推荐用于量化模型 ONNX 导出)
-        """
-        return self._export_format
+    def use_pot2_scale(self) -> bool:
+        """是否使用 POT2 scale 编码；False 时使用 affine/M+shift 编码。"""
+        if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
+            return bool(self._bitwidth_config.usePOT2_)
+        return bool(getattr(self, '_use_pot2_scale', True))
 
-    @export_format.setter
-    def export_format(self, mode: str):
-        """
-        设置导出格式(高级用法，大多数用户不需要修改)
-        
-        Args:
-            mode: 'qdq' | 'float'
-        """
-        valid_modes = ('qdq', 'float')
-        if mode not in valid_modes:
-            raise ValueError(f"Invalid export_format: '{mode}'. Use one of {valid_modes}")
-        self._export_format = mode
+    @use_pot2_scale.setter
+    def use_pot2_scale(self, value: bool):
+        self._use_pot2_scale = bool(value)
+        if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
+            self._bitwidth_config.usePOT2_ = self._use_pot2_scale
+            if self.quant_params is not None:
+                self.quant_params.bitwidth_config_ = self._bitwidth_config
+            # use_pot2_scale 切换会改变目标 scale 语义，需要重新校准
+            self._quant_params_dirty = True
 
-    def _forward_python_single_direction(
+    def _resolve_onnx_module_name(self) -> str:
+        """解析 ONNX 导出时用于可读命名的模块名称。"""
+        if self._module_name:
+            return str(self._module_name)
+        warnings.warn(
+            "QuantGRU._module_name 未设置，ONNX 导出将使用默认名称 'gru'。"
+            "多 GRU 模型建议先调用 set_quant_gru_module_names(model)。",
+            UserWarning,
+        )
+        return "gru"
+
+    def _pack_onnx_gru_direction_weights(
             self,
-            input: torch.Tensor,
-            h0: Optional[torch.Tensor],
             weight_ih: torch.Tensor,
             weight_hh: torch.Tensor,
-            bias_ih: Optional[torch.Tensor],
-            bias_hh: Optional[torch.Tensor],
-            quant_params
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            bias_ih: torch.Tensor,
+            bias_hh: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        纯 PyTorch 实现的单向 GRU 前向传播(可被 ONNX 追踪)
-
-        GRU 公式(Haste 格式，门顺序为 z, r, g)：
-            z = sigmoid(W_z @ x + R_z @ h + bw_z + br_z)  # update gate
-            r = sigmoid(W_r @ x + R_r @ h + bw_r + br_r)  # reset gate
-            g = tanh(W_g @ x + r * (R_g @ h + br_g) + bw_g)  # candidate gate
-            h' = z * h + (1 - z) * g
-
-        量化模式下根据 ONNX 导出模式选择实现：
-            - 'qdq': QDQ 格式，使用标准算子 + 伪量化
-            - 'float': 标准浮点计算(Haste 格式)
-
-        Args:
-            input: [T, B, I] 输入序列
-            h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部自动转换)
-            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部自动转换)
-            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部自动转换)
-            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部自动转换)
-            quant_params: 量化参数(来自 finalize_calibration)
+        将单方向 PyTorch GRU 参数打包为 ONNX GRU 方向参数。
 
         Returns:
-            output: [T, B, H] 输出序列
-            h_n: [1, B, H] 最终隐藏状态
+            W_dir: [3H, I]  (z,r,n)
+            R_dir: [3H, H]  (z,r,n)
+            B_dir: [6H]     = concat(bias_ih, bias_hh)，其中每项都为 (z,r,n)
         """
-        # 根据 export_format 选择实现
-        if self._export_format == 'float':
-            # 浮点模式：直接使用浮点实现
-            return self._forward_python_float_single_direction(
-                input, h0, weight_ih, weight_hh, bias_ih, bias_hh
-            )
-
-        # qdq 需要量化参数
-        if quant_params is None:
-            raise RuntimeError(
-                f"export_format='{self._export_format}' 需要量化参数，"
-                f"请先设置 calibrating=True 并调用 forward()"
-            )
-
-        if self._export_format == 'qdq':
-            return self._forward_onnx_qdq_single_direction(
-                input, h0, weight_ih, weight_hh, bias_ih, bias_hh, quant_params
-            )
-
-        # 理论上不会执行到这里(setter 已限制值)，但为了健壮性抛出异常
-        raise ValueError(f"未知的 export_format: '{self._export_format}'")
-
-    def _forward_python_float_single_direction(
-            self,
-            input: torch.Tensor,
-            h0: Optional[torch.Tensor],
-            weight_ih: torch.Tensor,
-            weight_hh: torch.Tensor,
-            bias_ih: Optional[torch.Tensor],
-            bias_hh: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        浮点实现的单向 GRU 前向传播(Haste 格式)
-        
-        与 HasteGRU CUDA 浮点推理行为一致
-        门控顺序：Haste 格式 (z, r, g)
-        
-        公式(与 gru_forward_gpu.cu 一致)：
-            z = sigmoid(Wx_z + Rh_z + bw_z + br_z)
-            r = sigmoid(Wx_r + Rh_r + bw_r + br_r)
-            g = tanh(Wx_g + r * (Rh_g + br_g) + bw_g)
-            h_new = z * h_old + (1 - z) * g
-        
-        Args:
-            input: [T, B, I] 输入序列
-            h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重 (PyTorch r,z,n 格式，内部转换)
-            weight_hh: [3*H, H] 循环权重 (PyTorch r,z,n 格式，内部转换)
-            bias_ih: [3*H] 输入偏置 或 None (PyTorch 格式，内部转换)
-            bias_hh: [3*H] 循环偏置 或 None (PyTorch 格式，内部转换)
-            
-        Returns:
-            output: [T, B, H] 输出序列
-            h_n: [1, B, H] 最终隐藏状态
-        """
-        T, B, I = input.shape
-        H = self.hidden_size
-        device = input.device
-        dtype = input.dtype
-
-        # 初始化隐藏状态
-        if h0 is None:
-            h = torch.zeros(B, H, device=device, dtype=dtype)
-        else:
-            h = h0
-
-        # 权重格式转换：PyTorch (r,z,n) -> Haste (z,r,g)
-        W = reorder_weights_pytorch_to_haste(weight_ih)  # [3*H, I]
-        R = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
-
-        # 处理偏置并转换格式
-        if bias_ih is None:
-            bw = torch.zeros(3 * H, device=device, dtype=dtype)
-        else:
-            bw = reorder_weights_pytorch_to_haste(bias_ih)
-        if bias_hh is None:
-            br = torch.zeros(3 * H, device=device, dtype=dtype)
-        else:
-            br = reorder_weights_pytorch_to_haste(bias_hh)
-
-        # ========== 循环外一次性计算 Wx GEMM(与 CUDA 一致)==========
-        # input: [T, B, I] -> x_flat: [T*B, I]
-        # W: [3*H, I] -> W.t(): [I, 3*H]
-        # Wx_all: [T*B, 3*H] -> reshape: [T, B, 3*H]
-        x_flat = input.reshape(T * B, I)
-        Wx_all = torch.mm(x_flat, W.t())  # [T*B, 3*H]
-        Wx_all = Wx_all.reshape(T, B, 3 * H)  # [T, B, 3*H]
-
-        # 预分割偏置(循环外完成)
-        bw_z, bw_r, bw_g = bw.chunk(3)
-        br_z, br_r, br_g = br.chunk(3)
-
-        outputs = []
-
-        for t in range(T):
-            # 获取当前时间步的 Wx(已在循环外计算好)
-            Wx = Wx_all[t]  # [B, 3*H]
-
-            # Rh = h @ R.T, shape [B, 3H](依赖上一步的 h，必须在循环内)
-            Rh = torch.mm(h, R.t())
-
-            # 分割门控(Haste 格式：z, r, g)
-            Wx_z, Wx_r, Wx_g = Wx.chunk(3, dim=1)
-            Rh_z, Rh_r, Rh_g = Rh.chunk(3, dim=1)
-
-            # Update gate (z)
-            z = torch.sigmoid(Wx_z + Rh_z + bw_z + br_z)
-
-            # Reset gate (r)
-            r = torch.sigmoid(Wx_r + Rh_r + bw_r + br_r)
-
-            # Candidate gate (g): r 只乘以 (Rh_g + br_g)
-            Rh_add_br_g = Rh_g + br_g
-            g = torch.tanh(Wx_g + r * Rh_add_br_g + bw_g)
-
-            # 新隐藏状态: h_new = z * h_old + (1 - z) * g
-            h = z * h + (1 - z) * g
-
-            outputs.append(h)
-
-        # 堆叠输出: [T, B, H]
-        output = torch.stack(outputs, dim=0)
-        h_n = h.unsqueeze(0)  # [1, B, H]
-
-        return output, h_n
-
-    # -------------------- ONNX 导出版本(QDQ 格式)--------------------
-
-    def _forward_onnx_qdq_single_direction(
-            self,
-            input: torch.Tensor,
-            h0: Optional[torch.Tensor],
-            weight_ih: torch.Tensor,
-            weight_hh: torch.Tensor,
-            bias_ih: Optional[torch.Tensor],
-            bias_hh: Optional[torch.Tensor],
-            quant_params
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        用于 ONNX 导出的 QDQ 格式前向传播
-        
-        使用伪量化(Fake Quantize)在关键点插入 Q/DQ 操作，
-        推理引擎会识别 QDQ 模式并自动优化为量化算子。
-        
-        设计原则：
-        ==========
-        [与 CUDA 一致]
-          - 量化参数(scale/zp)完全一致
-          - 计算图结构一致(门顺序、计算顺序)
-          - Linear 层融合：weight_ih_linear = W*x + bw, weight_hh_linear = R*h + br
-          - shift_weight_ih_linear 是 GEMM+bias 融合后的输出 scale
-          - 门计算不再单独加 bias（已融合到 Linear 层）
-          
-        [ONNX 兼容 - 与 CUDA 实现不同]
-          - GEMM: 使用标准 torch.mm(推理引擎会用 MatMulInteger)
-          - sigmoid/tanh: 使用标准 torch.sigmoid/tanh(推理引擎会优化)
-          - rescale: 通过 QDQ 实现(不用显式 rshift_round)
-        
-        量化计算流程（与 CUDA quantizedGemmBiasFused 一致）：
-        ==========
-        1. weight_ih_linear = W*x + bw（融合 Linear，再统一量化到 shift_weight_ih_linear）
-        2. weight_hh_linear = R*h + br（融合 Linear，再统一量化到 shift_weight_hh_linear）
-        3. update_gate_input = ih_z + hh_z（不加 bias，已融合）
-        4. reset_gate_input = ih_r + hh_r（不加 bias，已融合）
-        5. mul_reset_hidden = reset_gate * hh_n（hh_n 已含 br）
-        6. new_gate_input = ih_n + mul_reset_hidden（不加 bias，已融合）
-        
-        Args:
-            input: [T, B, I] 输入序列
-            h0: [B, H] 初始隐藏状态 或 None
-            weight_ih: [3*H, I] 输入权重
-            weight_hh: [3*H, H] 循环权重
-            bias_ih: [3*H] 输入偏置 或 None
-            bias_hh: [3*H] 循环偏置 或 None
-            quant_params: 量化参数
-            
-        Returns:
-            output: [T, B, H] 输出序列
-            h_n: [1, B, H] 最终隐藏状态
-        """
-        T, B, I = input.shape
-        H = self.hidden_size
-        device = input.device
-        dtype = input.dtype
-
-        # ========== 量化参数提取 ==========
-        # [与 CUDA 一致] 使用相同的量化参数
-        # 命名与 C++ quantize_ops_helper.h 对齐
-        shift_x = quant_params.shift_x_
-        zp_x = quant_params.zp_x_
-        shift_h = quant_params.shift_h_
-        zp_h = quant_params.zp_h_
-        shift_weight_ih_linear = quant_params.shift_weight_ih_linear_
-        zp_weight_ih_linear = quant_params.zp_weight_ih_linear_
-        shift_weight_hh_linear = quant_params.shift_weight_hh_linear_
-        zp_weight_hh_linear = quant_params.zp_weight_hh_linear_
-
-        # 门激活函数量化参数（pre-activation / post-activation）
-        shift_update_gate_input = quant_params.shift_update_gate_input_
-        zp_update_gate_input = quant_params.zp_update_gate_input_
-        shift_update_gate_output = quant_params.shift_update_gate_output_
-        zp_update_gate_output = quant_params.zp_update_gate_output_
-
-        shift_reset_gate_input = quant_params.shift_reset_gate_input_
-        zp_reset_gate_input = quant_params.zp_reset_gate_input_
-        shift_reset_gate_output = quant_params.shift_reset_gate_output_
-        zp_reset_gate_output = quant_params.zp_reset_gate_output_
-
-        shift_new_gate_input = quant_params.shift_new_gate_input_
-        zp_new_gate_input = quant_params.zp_new_gate_input_
-        shift_new_gate_output = quant_params.shift_new_gate_output_
-        zp_new_gate_output = quant_params.zp_new_gate_output_
-
-        # per-channel 量化参数
-        shift_W = list(quant_params.shift_W_)
-        shift_R = list(quant_params.shift_R_)
-        shift_bw = list(quant_params.shift_bw_)
-        shift_br = list(quant_params.shift_br_)
-
-        # ========== 权重重排序 ==========
-        # [与 CUDA 一致] PyTorch 格式 (r, z, n) -> Haste 格式 (z, r, n)
-        W_reordered = reorder_weights_pytorch_to_haste(weight_ih)  # [3*H, I]
-        R_reordered = reorder_weights_pytorch_to_haste(weight_hh)  # [3*H, H]
-
-        if bias_ih is not None:
-            bw_reordered = reorder_weights_pytorch_to_haste(bias_ih)  # [3*H]
-        else:
-            bw_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
-
-        if bias_hh is not None:
-            br_reordered = reorder_weights_pytorch_to_haste(bias_hh)  # [3*H]
-        else:
-            br_reordered = torch.zeros(3 * H, device=device, dtype=dtype)
-
-        # ========== 权重伪量化 ==========
-        # [与 CUDA 一致] per-channel 量化
-        # [ONNX 兼容] 使用 fake_quantize 保持浮点格式
-        W_q = fake_quantize_per_channel(W_reordered.t(), shift_W, zp=0,
-                                        bitwidth=self._get_bitwidth('weight_ih'),
-                                        symmetric=self._get_symmetric('weight_ih')).t()
-        R_q = fake_quantize_per_channel(R_reordered.t(), shift_R, zp=0,
-                                        bitwidth=self._get_bitwidth('weight_hh'),
-                                        symmetric=self._get_symmetric('weight_hh')).t()
-        # 偏置使用配置的位宽(注意：偏置始终使用对称量化)
-        bw_q = fake_quantize_per_channel(bw_reordered.unsqueeze(0), shift_bw, zp=0,
-                                         bitwidth=self._get_bitwidth('bias_ih'),
-                                         symmetric=self._get_symmetric('bias_ih')).squeeze(0)
-        br_q = fake_quantize_per_channel(br_reordered.unsqueeze(0), shift_br, zp=0,
-                                         bitwidth=self._get_bitwidth('bias_hh'),
-                                         symmetric=self._get_symmetric('bias_hh')).squeeze(0)
-
-        # ========== 初始化隐藏状态 ==========
-        if h0 is None:
-            h = torch.zeros(B, H, device=device, dtype=dtype)
-        else:
-            h = h0
-
-        # [与 CUDA 一致] 量化初始状态
-        h = fake_quantize(h, shift_h, zp_h, bitwidth=self._get_bitwidth('output'),
-                          symmetric=self._get_symmetric('output'))
-
-        # ========== 输入伪量化 ==========
-        # [与 CUDA 一致] 所有时间步一起量化
-        x_q = fake_quantize(input, shift_x, zp_x, bitwidth=self._get_bitwidth('input'),
-                            symmetric=self._get_symmetric('input'))
-
-        # ========== weight_ih_linear = W*x + bw（融合 Linear，循环外一次性计算）==========
-        # [与 CUDA quantizedGemmBiasFused 一致]
-        # CUDA: result = rshift(W*x, shift_gemm[i]) + rshift(bw, shift_bw[i]) + zp_out
-        # 在 fake_quantize 模式下：先浮点相加，再统一量化到 shift_weight_ih_linear
-        # x_q: [T, B, I], W_q: [3*H, I] -> gemm: [T, B, 3*H]
-        gemm_Wx = torch.matmul(x_q, W_q.t())  # [T, B, 3*H]
-        
-        # [与 CUDA 一致] 融合 bias：weight_ih_linear = W*x + bw
-        # bw_q: [3*H] -> broadcast to [T, B, 3*H]
-        weight_ih_linear_all = gemm_Wx + bw_q.unsqueeze(0).unsqueeze(0)  # [T, B, 3*H]
-
-        # [与 CUDA 一致] 融合后统一量化到 shift_weight_ih_linear
-        # 这是 GEMM+bias 之后的输出 scale
-        weight_ih_linear_all = fake_quantize(weight_ih_linear_all, shift_weight_ih_linear, zp_weight_ih_linear,
-                                             bitwidth=self._get_bitwidth('weight_ih_linear'),
-                                             symmetric=self._get_symmetric('weight_ih_linear'))
-
-        # 预分配输出张量(ONNX 友好，避免动态列表)
-        outputs = torch.zeros(T, B, H, device=device, dtype=dtype)
-
-        for t in range(T):
-            weight_ih_linear = weight_ih_linear_all[t]  # [B, 3*H]
-
-            # ========== weight_hh_linear = R*h + br（融合 Linear）==========
-            # [与 CUDA quantizedGemmBiasFused 一致]
-            # CUDA: result = rshift(R*h, shift_gemm[i]) + rshift(br, shift_br[i]) + zp_out
-            gemm_Rh = torch.mm(h, R_q.t())  # [B, 3*H]
-            
-            # [与 CUDA 一致] 融合 bias：weight_hh_linear = R*h + br
-            weight_hh_linear = gemm_Rh + br_q.unsqueeze(0)  # [B, 3*H]
-
-            # [与 CUDA 一致] 融合后统一量化到 shift_weight_hh_linear
-            weight_hh_linear = fake_quantize(weight_hh_linear, shift_weight_hh_linear, zp_weight_hh_linear,
-                                             bitwidth=self._get_bitwidth('weight_hh_linear'),
-                                             symmetric=self._get_symmetric('weight_hh_linear'))
-
-            # ========== 分割门控 ==========
-            # [与 CUDA 一致] Haste 格式 (z, r, n) → (update, reset, new)
-            # 注意：分割后的 ih_z/ih_r/ih_n 和 hh_z/hh_r/hh_n 都已包含各自的 bias
-            ih_z, ih_r, ih_n = weight_ih_linear.chunk(3, dim=1)  # 各 [B, H]，已含 bw
-            hh_z, hh_r, hh_n = weight_hh_linear.chunk(3, dim=1)  # 各 [B, H]，已含 br
-
-            # ========== Update Gate (z 门) ==========
-            # [与 CUDA computeUpdateGate 一致]
-            # CUDA: update_gate_input = rescale(ih_z) + rescale(hh_z) + zp_update_gate_input
-            # 不需要再加 bias（已融合到 weight_ih_linear 和 weight_hh_linear）
-            update_gate_input = ih_z + hh_z
-
-            # [与 CUDA 一致] 激活前量化
-            update_gate_input = fake_quantize(update_gate_input, shift_update_gate_input, zp_update_gate_input,
-                                              bitwidth=self._get_bitwidth('update_gate_input'),
-                                              symmetric=self._get_symmetric('update_gate_input'))
-
-            # [ONNX 兼容] 使用标准 sigmoid(推理引擎会用量化版本或 LUT)
-            update_gate_output = torch.sigmoid(update_gate_input)
-
-            # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
-            update_gate_output = fake_quantize(update_gate_output, shift_update_gate_output, zp_update_gate_output,
-                                               bitwidth=self._get_bitwidth('update_gate_output'),
-                                               symmetric=self._get_symmetric('update_gate_output'),
-                                               is_unsigned=self._get_unsigned('update_gate_output'))
-
-            # ========== Reset Gate (r 门) ==========
-            # [与 CUDA computeResetGate 一致]
-            # 不需要再加 bias（已融合）
-            reset_gate_input = ih_r + hh_r
-
-            reset_gate_input = fake_quantize(reset_gate_input, shift_reset_gate_input, zp_reset_gate_input,
-                                             bitwidth=self._get_bitwidth('reset_gate_input'),
-                                             symmetric=self._get_symmetric('reset_gate_input'))
-
-            # [ONNX 兼容] 使用标准 sigmoid
-            reset_gate_output = torch.sigmoid(reset_gate_input)
-
-            # [与 CUDA 一致] sigmoid 输出量化（从配置读取所有参数）
-            reset_gate_output = fake_quantize(reset_gate_output, shift_reset_gate_output, zp_reset_gate_output,
-                                              bitwidth=self._get_bitwidth('reset_gate_output'),
-                                              symmetric=self._get_symmetric('reset_gate_output'),
-                                              is_unsigned=self._get_unsigned('reset_gate_output'))
-
-            # ========== New Gate (g 门 / Candidate) ==========
-            # [与 CUDA computeNewGate 一致]
-            # CUDA: mul_reset_hidden = reset_gate * weight_hh_linear_g（hh_n 已含 br）
-            # CUDA: new_gate_input = rescale(ih_n) + rescale(mul_reset_hidden) + zp_new_gate_input
-            # 
-            # 注意：hh_n 已经包含了 br_n（融合到 weight_hh_linear）
-            # 所以 mul_reset_hidden = reset_gate * hh_n，不需要额外加 br
-            mul_reset_hidden = reset_gate_output * hh_n
-
-            # [与 CUDA 一致] 乘积量化(从配置读取位宽)
-            mul_reset_hidden = fake_quantize(mul_reset_hidden, quant_params.shift_mul_reset_hidden_,
-                                             quant_params.zp_mul_reset_hidden_,
-                                             bitwidth=self._get_bitwidth('mul_reset_hidden'),
-                                             symmetric=self._get_symmetric('mul_reset_hidden'))
-
-            # ih_n 已经包含了 bw_n（融合到 weight_ih_linear），不需要额外加 bw
-            new_gate_input = ih_n + mul_reset_hidden
-
-            new_gate_input = fake_quantize(new_gate_input, shift_new_gate_input, zp_new_gate_input,
-                                           bitwidth=self._get_bitwidth('new_gate_input'),
-                                           symmetric=self._get_symmetric('new_gate_input'))
-
-            # [ONNX 兼容] 使用标准 tanh
-            new_gate_output = torch.tanh(new_gate_input)
-
-            # [与 CUDA 一致] 激活后量化，对称性从配置读取
-            new_gate_output = fake_quantize(new_gate_output, shift_new_gate_output, zp_new_gate_output,
-                                            bitwidth=self._get_bitwidth('new_gate_output'),
-                                            symmetric=self._get_symmetric('new_gate_output'))
-
-            # ========== 新隐藏状态 ==========
-            # [与 CUDA computeHiddenState 一致]
-            # h_new = update_gate * h + (1 - update_gate) * new_gate
-            # CUDA 分别计算并量化 mul_old_contribution 和 mul_new_contribution
-
-            # mul_old_contribution = update_gate * h(从配置读取位宽)
-            mul_old_contribution = update_gate_output * h
-            mul_old_contribution = fake_quantize(mul_old_contribution, quant_params.shift_mul_old_contribution_,
-                                                 quant_params.zp_mul_old_contribution_,
-                                                 bitwidth=self._get_bitwidth('mul_old_contribution'),
-                                                 symmetric=self._get_symmetric('mul_old_contribution'))
-
-            # mul_new_contribution = (1 - update_gate) * new_gate(从配置读取位宽)
-            mul_new_contribution = (1 - update_gate_output) * new_gate_output
-            mul_new_contribution = fake_quantize(mul_new_contribution, quant_params.shift_mul_new_contribution_,
-                                                 quant_params.zp_mul_new_contribution_,
-                                                 bitwidth=self._get_bitwidth('mul_new_contribution'),
-                                                 symmetric=self._get_symmetric('mul_new_contribution'))
-
-            # h_new = mul_old_contribution + mul_new_contribution
-            h_new = mul_old_contribution + mul_new_contribution
-
-            # [与 CUDA 一致] 输出量化
-            h_new = fake_quantize(h_new, shift_h, zp_h,
-                                  bitwidth=self._get_bitwidth('output'),
-                                  symmetric=self._get_symmetric('output'))
-
-            h = h_new
-
-            # 使用索引赋值存储(ONNX 友好)
-            outputs[t] = h
-
-        # ========== 输出 ==========
-        output = outputs  # [T, B, H]，已预分配
-        h_n = h.unsqueeze(0)  # [1, B, H]
-
-        return output, h_n
-
-    def _forward_python(
+        W_dir = reorder_weights_pytorch_to_haste(weight_ih).contiguous()
+        R_dir = reorder_weights_pytorch_to_haste(weight_hh).contiguous()
+        b_ih_dir = reorder_weights_pytorch_to_haste(bias_ih).contiguous()
+        b_hh_dir = reorder_weights_pytorch_to_haste(bias_hh).contiguous()
+        B_dir = torch.cat([b_ih_dir, b_hh_dir], dim=0).contiguous()
+        return W_dir, R_dir, B_dir
+
+    def _forward_onnx_unidirectional(
             self,
             input: torch.Tensor,
             hx: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        纯 PyTorch 实现的 GRU 前向传播(用于 ONNX 导出)
-
-        支持单向和双向模式
-        
-        Note: batch_first 转换已在 forward() 中统一处理
+        ONNX 导出（单向）：通过 custom_gru::quant_gru symbolic 生成单 GRU 节点。
         """
-        # ===== QDQ 模式提前校验(快速失败)=====
-        if self._export_format == 'qdq':
-            if self.quant_params is None:
-                raise RuntimeError(
-                    "export_format='qdq' 需要量化参数，"
-                    "请先设置 calibrating=True 进行校准"
-                )
-            if self.bidirectional and self.quant_params_reverse is None:
-                raise RuntimeError(
-                    "双向 GRU 的 export_format='qdq' 需要反向量化参数，"
-                    "请先设置 calibrating=True 进行校准"
-                )
+        if hx is None:
+            h0 = input.new_zeros((1, input.size(1), self.hidden_size))
+        else:
+            expected_shape = (1, input.size(1), self.hidden_size)
+            if not torch.onnx.is_in_onnx_export() and tuple(hx.shape) != expected_shape:
+                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {tuple(hx.shape)}")
+            h0 = hx
 
-        T, B, I = input.shape
+        w_f, r_f, b_f = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.weight_hh_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.bias_ih_l0.detach().to(device=input.device, dtype=input.dtype),
+            self.bias_hh_l0.detach().to(device=input.device, dtype=input.dtype),
+        )
+        self._onnx_export_weight_ih = w_f.unsqueeze(0).contiguous()
+        self._onnx_export_weight_hh = r_f.unsqueeze(0).contiguous()
+        self._onnx_export_bias = b_f.unsqueeze(0).contiguous()
 
-        # 初始状态处理(统一接口)
-        h0_forward, h0_reverse = self._parse_initial_state(hx, B, to_cuda=False)
+        quant_gru_ops = getattr(torch.ops, QUANT_GRU_ONNX_DOMAIN)
+        output, h_n = quant_gru_ops.quant_gru(
+            input,
+            h0,
+            self._onnx_export_weight_ih,
+            self._onnx_export_weight_hh,
+            self._onnx_export_bias,
+            int(self.hidden_size),
+            int(self.num_layers),
+        )
+        return output, h_n
 
-        # 前向方向
-        output_forward, h_n_forward = self._forward_python_single_direction(
-            input, h0_forward,
-            self.weight_ih_l0, self.weight_hh_l0,
-            self.bias_ih_l0 if self.bias else None,
-            self.bias_hh_l0 if self.bias else None,
-            self.quant_params
+    def _prepare_onnx_bidirectional_weights(self, input_tensor: torch.Tensor) -> None:
+        """准备双向 custom bigru 导出所需的 ONNX 格式 W/R/B。"""
+        w_f, r_f, b_f = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.weight_hh_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_ih_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_hh_l0.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+        )
+        w_b, r_b, b_b = self._pack_onnx_gru_direction_weights(
+            self.weight_ih_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.weight_hh_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_ih_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
+            self.bias_hh_l0_reverse.detach().to(device=input_tensor.device, dtype=input_tensor.dtype),
         )
 
-        # 反向方向(双向时)
-        output_reverse, h_n_reverse = None, None
-        if self.bidirectional:
-            output_reverse, h_n_reverse = self._forward_python_single_direction(
-                input.flip(0), h0_reverse,
-                self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
-                self.bias_ih_l0_reverse if self.bias else None,
-                self.bias_hh_l0_reverse if self.bias else None,
-                self.quant_params_reverse
+        self._onnx_export_weight_ih = torch.stack([w_f, w_b], dim=0).contiguous()
+        self._onnx_export_weight_hh = torch.stack([r_f, r_b], dim=0).contiguous()
+        self._onnx_export_bias = torch.stack([b_f, b_b], dim=0).contiguous()
+
+    def _forward_onnx_bidirectional(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """ONNX 导出（双向）：通过 custom_gru::quant_bigru symbolic 生成单 GRU 节点。"""
+        if hx is None:
+            h0 = input.new_zeros((2, input.size(1), self.hidden_size))
+        else:
+            expected_shape = (2, input.size(1), self.hidden_size)
+            if not torch.onnx.is_in_onnx_export() and tuple(hx.shape) != expected_shape:
+                raise ValueError(f"hx 形状应为 {expected_shape}，实际 {tuple(hx.shape)}")
+            h0 = hx
+
+        self._prepare_onnx_bidirectional_weights(input)
+        quant_gru_ops = getattr(torch.ops, QUANT_GRU_ONNX_DOMAIN)
+        output, h_n = quant_gru_ops.quant_bigru(
+            input,
+            h0,
+            self._onnx_export_weight_ih,
+            self._onnx_export_weight_hh,
+            self._onnx_export_bias,
+            int(self.hidden_size),
+            int(self.num_layers),
+        )
+        return output, h_n
+
+    def _forward_onnx_gru(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        ONNX 导出路径：导出标准 ONNX GRU 节点。
+        """
+        if not torch.onnx.is_in_onnx_export():
+            raise RuntimeError(
+                "export_mode=True 仅用于 ONNX 导出上下文。"
+                "请在 torch.onnx.export(..., dynamo=False) 中调用模型。"
             )
-            # 反转反向输出以对齐时间步
-            output_reverse = output_reverse.flip(0)
+        if not self.bias:
+            raise RuntimeError("ONNX 导出暂不支持 bias=False，请使用 bias=True")
 
-        # 合并双向输出(统一接口)
-        return self._combine_bidirectional_outputs(
-            output_forward, h_n_forward, output_reverse, h_n_reverse
-        )
+        _ = self._resolve_onnx_module_name()
+        ensure_quant_gru_onnx_registered(opset=18)
+
+        if self.bidirectional:
+            return self._forward_onnx_bidirectional(input, hx)
+        return self._forward_onnx_unidirectional(input, hx)
 
     # -------------------- 校准模式 forward --------------------
 
@@ -2125,7 +2021,7 @@ class QuantGRU(nn.Module):
 
         Note:
             - export_mode=False (默认): 使用 CUDA C++ 实现(高性能)
-            - export_mode=True: 使用纯 PyTorch 实现(可被 ONNX 追踪)
+            - export_mode=True: 使用 ONNX 单节点 GRU 导出路径
         """
         # ===== 统一处理 batch_first 输入转换(唯一入口)=====
         if self.batch_first:
@@ -2133,8 +2029,8 @@ class QuantGRU(nn.Module):
 
         # ===== 根据模式选择执行路径 =====
         if self.export_mode:
-            # ONNX 导出模式：使用纯 PyTorch 实现
-            output, h_n = self._forward_python(input, hx)
+            # ONNX 导出模式：使用标准 ONNX GRU 节点路径
+            output, h_n = self._forward_onnx_gru(input, hx)
         elif self.calibrating:
             # 校准模式：在 forward 过程中收集校准数据
             self._ensure_cublas_initialized()
@@ -2278,13 +2174,26 @@ class QuantGRU(nn.Module):
         Returns:
             修正后的编码字典
         """
-        if isinstance(data, dict) and "scale" in data and "zero_point" in data:
+        if isinstance(data, dict) and "scale" in data:
             scale = data["scale"]
-            zero_point = data["zero_point"]
             
-            # 如果 scale 是列表但 zero_point 不是，则转换 zero_point 为相同长度的列表
-            if isinstance(scale, list) and not isinstance(zero_point, list):
-                data["zero_point"] = [zero_point] * len(scale)
+            # AIMET encodings 要求 per-channel/per-gate 的 zero_point 与 scale 等长。
+            # 对称量化权重通常没有独立 zp 属性，导出时需要显式补 0。
+            if isinstance(scale, list):
+                zero_point = data.get("zero_point", 0)
+                if isinstance(zero_point, list):
+                    if len(zero_point) == len(scale):
+                        return data
+                    if len(zero_point) == 1:
+                        data["zero_point"] = zero_point * len(scale)
+                    elif len(zero_point) == 0:
+                        data["zero_point"] = [0] * len(scale)
+                    else:
+                        raise ValueError(
+                            f"zero_point 长度不匹配: 期望 {len(scale)}，实际 {len(zero_point)}"
+                        )
+                else:
+                    data["zero_point"] = [zero_point] * len(scale)
         
         return data
 
@@ -2327,6 +2236,11 @@ class QuantGRU(nn.Module):
         # 确保 is_symmetric 字段的值是字符串格式（如果已经存在）
         if "is_symmetric" in encoding and isinstance(encoding["is_symmetric"], bool):
             encoding["is_symmetric"] = "True" if encoding["is_symmetric"] else "False"
+
+        # scale-only 导出：清理历史 runtime 编码字段
+        for legacy_key in ("multiplier", "shift", "scale_encoding", "n", "exp2_inv"):
+            if legacy_key in encoding:
+                del encoding[legacy_key]
         
         return encoding
 
@@ -2543,7 +2457,7 @@ class QuantGRU(nn.Module):
                 data = _concat_operator_fields(
                     data,
                     self._fix_zero_point(operators_reverse["weight_ih"]),
-                    list_fields=["scale", "n", "real_min", "real_max"],
+                    list_fields=["scale", "zero_point", "real_min", "real_max"],
                     verbose_prefix=f"{param_key}/weight_ih"
                 )
             data = self._convert_to_encoding_format(data)
@@ -2562,7 +2476,7 @@ class QuantGRU(nn.Module):
                 data = _concat_operator_fields(
                     data,
                     self._fix_zero_point(operators_reverse["weight_hh"]),
-                    list_fields=["scale", "n", "real_min", "real_max"],
+                    list_fields=["scale", "zero_point", "real_min", "real_max"],
                     verbose_prefix=f"{param_key}/weight_hh"
                 )
             data = self._convert_to_encoding_format(data)
@@ -2600,13 +2514,12 @@ class QuantGRU(nn.Module):
         
         # 处理 bias_hh（第二个源，需要拼接）
         br_data = self._fix_zero_point(operators["bias_hh"])
-        # 需要拼接的字段：scale, zero_point, real_min, real_max, n
+        # 需要拼接的字段：scale, zero_point, real_min, real_max
         list_fields = [
             "scale",
             "zero_point",
             "real_min",
             "real_max",
-            "n",
         ]
         for field in list_fields:
             if field in br_data and field in merged_dict:
@@ -2847,14 +2760,14 @@ class QuantGRU(nn.Module):
         def _split_operator_for_bidirectional(op_data: dict) -> tuple:
             """
             将导出时拼接的权重算子数据拆回 (forward, reverse) 两份。
-            仅拆分数组字段：scale/n/real_min/real_max（以及可能为列表的 zero_point）。
+            仅拆分数组字段：scale/real_min/real_max（以及可能为列表的 zero_point）。
             """
             if op_data is None or not isinstance(op_data, dict):
                 return op_data, None
 
             out_f = copy.deepcopy(op_data)
             out_r = copy.deepcopy(op_data)
-            for field in ["scale", "n", "real_min", "real_max"]:
+            for field in ["scale", "multiplier", "shift", "real_min", "real_max"]:
                 if field in op_data and isinstance(op_data[field], list):
                     a, b = _split_list_in_half(op_data[field])
                     out_f[field] = a
@@ -2991,8 +2904,8 @@ class QuantGRU(nn.Module):
             if param_key in param_encodings:
                 merged_data = param_encodings[param_key]
                 
-                # 需要拆分的字段：scale, zero_point, real_min, real_max, n
-                list_fields = ["scale", "zero_point", "real_min", "real_max", "n"]
+                # 需要拆分的字段：scale, zero_point, real_min, real_max
+                list_fields = ["scale", "zero_point", "real_min", "real_max"]
                 
                 # 计算每个字段应该拆分的长度（假设 bias_ih 和 bias_hh 长度相同）
                 split_length = None
@@ -3223,7 +3136,7 @@ class QuantGRU(nn.Module):
         operator: str,
         bitwidth: int = None,
         is_symmetric: bool = None,
-        exp2_inv: int = None,
+        scale: float = None,
         zero_point: int = None,
         verbose: bool = False
     ) -> None:
@@ -3234,7 +3147,7 @@ class QuantGRU(nn.Module):
             operator: 算子名称 ("x", "h", "W", "z_out" 等)
             bitwidth: 新的位宽 (1-32)
             is_symmetric: 是否对称量化
-            exp2_inv: 量化指数，None 表示自动计算
+            scale: 量化 scale（正数）；None 表示不修改 scale
             zero_point: 零点
             verbose: 是否打印详情
             
@@ -3242,7 +3155,7 @@ class QuantGRU(nn.Module):
             >>> gru.adjust_quant_config("z_out", bitwidth=16, verbose=True)
         """
         # 调用模块级实现
-        _adjust_quant_config_impl(self, operator, bitwidth, is_symmetric, exp2_inv, zero_point, verbose)
+        _adjust_quant_config_impl(self, operator, bitwidth, is_symmetric, scale, zero_point, verbose)
 
     def get_quant_config(self, operator: str = None) -> dict:
         """
@@ -3308,42 +3221,31 @@ def print_quant_params(gru: 'QuantGRU'):
         print(f"  hidden_ = {gru.hidden_size} (未校准)")
     
     # 辅助函数：格式化单个算子的信息
-    def format_op_info(op_name: str, shift_val, zp_val, bitwidth: int, is_symmetric: bool, is_unsigned: bool = False):
+    def format_op_info(op_name: str, scale_val, zp_val, bitwidth: int, is_symmetric: bool, is_unsigned: bool = False):
         """格式化单个算子的打印信息"""
         sym_str = "对称" if is_symmetric else "非对称"
         
         # 根据 is_unsigned 和 bitwidth 生成数据类型字符串
         dtype_str = f"UINT{bitwidth}" if is_unsigned else f"INT{bitwidth}"
         
-        if shift_val is not None:
-            if isinstance(shift_val, (list, tuple)):
-                # per-channel 或 per-gate
-                if len(shift_val) == 3 and all(isinstance(x, int) for x in shift_val):
-                    # per-gate (3个整数值)
-                    shift_str = f"[z={shift_val[0]:3d}, r={shift_val[1]:3d}, g={shift_val[2]:3d}]"
-                    scale_str = f"[{_exp2_inv_to_scale(shift_val[0]):.6f}, {_exp2_inv_to_scale(shift_val[1]):.6f}, {_exp2_inv_to_scale(shift_val[2]):.6f}]"
-                else:
-                    # per-channel (多个值，只显示前几个)
-                    if len(shift_val) > 0:
-                        if len(shift_val) >= 2:
-                            shift_str = f"[{shift_val[0]}, {shift_val[1]}, ...] (len={len(shift_val)})"
-                        else:
-                            shift_str = f"[{shift_val[0]}] (len={len(shift_val)})"
-                        scale_str = f"[{_exp2_inv_to_scale(shift_val[0]):.6f}, ...]"
+        shift_str = "N/A"
+        if scale_val is not None:
+            if isinstance(scale_val, (list, tuple)):
+                if len(scale_val) > 0:
+                    if len(scale_val) >= 2:
+                        scale_str = f"[{float(scale_val[0]):.6f}, {float(scale_val[1]):.6f}, ...] (len={len(scale_val)})"
                     else:
-                        shift_str = "[]"
-                        scale_str = "N/A"
+                        scale_str = f"[{float(scale_val[0]):.6f}] (len={len(scale_val)})"
+                else:
+                    scale_str = "[]"
             else:
-                # per-tensor
-                shift_str = f"{shift_val:3d}"
-                scale_str = f"{_exp2_inv_to_scale(shift_val):.6f}"
+                scale_str = f"{float(scale_val):.6f}"
         else:
-            shift_str = "N/A"
             scale_str = "N/A"
         
         zp_str = f"{zp_val}" if zp_val is not None else "N/A"
         
-        return f"  [{op_name:23s}] {dtype_str:6s}, {sym_str:4s}, shift={shift_str:30s}, scale={scale_str:10s}, zp={zp_str}"
+        return f"  [{op_name:23s}] {dtype_str:6s}, {sym_str:4s}, shift={shift_str:10s}, scale={scale_str:30s}, zp={zp_str}"
     
     # 打印基础算子（input, output, weight_ih_linear, weight_hh_linear）
     for op_name in ['input', 'output', 'weight_ih_linear', 'weight_hh_linear']:
@@ -3357,7 +3259,7 @@ def print_quant_params(gru: 'QuantGRU'):
         is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
         
         if params is not None:
-            shift_attr = attrs['shift_attr']
+            shift_attr = attrs['scale_attr']
             zp_attr = attrs.get('zp_attr')
             shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
             zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
@@ -3381,7 +3283,7 @@ def print_quant_params(gru: 'QuantGRU'):
         is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
         
         if params is not None:
-            shift_attr = attrs['shift_attr']
+            shift_attr = attrs['scale_attr']
             zp_attr = attrs.get('zp_attr')
             shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
             zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
@@ -3403,7 +3305,7 @@ def print_quant_params(gru: 'QuantGRU'):
         is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
         
         if params is not None:
-            shift_attr = attrs['shift_attr']
+            shift_attr = attrs['scale_attr']
             zp_attr = attrs.get('zp_attr')
             shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
             zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
@@ -3427,7 +3329,7 @@ def print_quant_params(gru: 'QuantGRU'):
         is_unsigned = getattr(bitwidth_config, unsigned_attr) if unsigned_attr and hasattr(bitwidth_config, unsigned_attr) else False
         
         if params is not None:
-            shift_attr = attrs['shift_attr']
+            shift_attr = attrs['scale_attr']
             zp_attr = attrs.get('zp_attr')
             shift_val = getattr(params, shift_attr) if hasattr(params, shift_attr) else None
             zp_val = getattr(params, zp_attr) if zp_attr and hasattr(params, zp_attr) else None
@@ -3446,19 +3348,19 @@ def print_quant_params(gru: 'QuantGRU'):
         if bitwidth_config.W_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
-            shift_val = params.shift_W_tensor_
+            shift_val = params.scale_W_
             print(format_op_info("weight_ih (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
         elif bitwidth_config.W_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
-            shift_val = [params.shift_W_gate_[0], params.shift_W_gate_[1], params.shift_W_gate_[2]]
+            shift_val = list(params.scale_W_)
             print(format_op_info("weight_ih (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_W))
         elif bitwidth_config.W_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.W_
             is_symmetric = bitwidth_config.W_symmetric_
-            if params.shift_W_ and len(params.shift_W_) > 0:
+            if params.scale_W_ and len(params.scale_W_) > 0:
                 # 传递完整列表，格式化函数会处理显示
-                shift_val = list(params.shift_W_)
+                shift_val = list(params.scale_W_)
                 print(format_op_info("weight_ih (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_W))
             else:
                 print(format_op_info("weight_ih (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_W))
@@ -3468,18 +3370,18 @@ def print_quant_params(gru: 'QuantGRU'):
         if bitwidth_config.R_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
-            shift_val = params.shift_R_tensor_
+            shift_val = params.scale_R_
             print(format_op_info("weight_hh (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
         elif bitwidth_config.R_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
-            shift_val = [params.shift_R_gate_[0], params.shift_R_gate_[1], params.shift_R_gate_[2]]
+            shift_val = list(params.scale_R_)
             print(format_op_info("weight_hh (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_R))
         elif bitwidth_config.R_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.R_
             is_symmetric = bitwidth_config.R_symmetric_
-            if params.shift_R_ and len(params.shift_R_) > 0:
-                shift_val = list(params.shift_R_)
+            if params.scale_R_ and len(params.scale_R_) > 0:
+                shift_val = list(params.scale_R_)
                 print(format_op_info("weight_hh (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_R))
             else:
                 print(format_op_info("weight_hh (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_R))
@@ -3489,18 +3391,18 @@ def print_quant_params(gru: 'QuantGRU'):
         if bitwidth_config.bw_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
-            shift_val = params.shift_bw_tensor_
+            shift_val = params.scale_bw_
             print(format_op_info("bias_ih (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
         elif bitwidth_config.bw_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
-            shift_val = [params.shift_bw_gate_[0], params.shift_bw_gate_[1], params.shift_bw_gate_[2]]
+            shift_val = list(params.scale_bw_)
             print(format_op_info("bias_ih (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_bw))
         elif bitwidth_config.bw_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.bw_
             is_symmetric = bitwidth_config.bw_symmetric_
-            if params.shift_bw_ and len(params.shift_bw_) > 0:
-                shift_val = list(params.shift_bw_)
+            if params.scale_bw_ and len(params.scale_bw_) > 0:
+                shift_val = list(params.scale_bw_)
                 print(format_op_info("bias_ih (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_bw))
             else:
                 print(format_op_info("bias_ih (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_bw))
@@ -3510,18 +3412,18 @@ def print_quant_params(gru: 'QuantGRU'):
         if bitwidth_config.br_granularity_ == 0:  # PER_TENSOR
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
-            shift_val = params.shift_br_tensor_
+            shift_val = params.scale_br_
             print(format_op_info("bias_hh (per-tensor)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
         elif bitwidth_config.br_granularity_ == 1:  # PER_GATE
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
-            shift_val = [params.shift_br_gate_[0], params.shift_br_gate_[1], params.shift_br_gate_[2]]
+            shift_val = list(params.scale_br_)
             print(format_op_info("bias_hh (per-gate)", shift_val, 0, bitwidth, is_symmetric, is_unsigned_br))
         elif bitwidth_config.br_granularity_ == 2:  # PER_CHANNEL
             bitwidth = bitwidth_config.br_
             is_symmetric = bitwidth_config.br_symmetric_
-            if params.shift_br_ and len(params.shift_br_) > 0:
-                shift_val = list(params.shift_br_)
+            if params.scale_br_ and len(params.scale_br_) > 0:
+                shift_val = list(params.scale_br_)
                 print(format_op_info("bias_hh (per-channel)", shift_val, None, bitwidth, is_symmetric, is_unsigned_br))
             else:
                 print(format_op_info("bias_hh (per-channel)", None, None, bitwidth, is_symmetric, is_unsigned_br))
@@ -3586,40 +3488,14 @@ def print_quant_ranges(gru: 'QuantGRU'):
 #   - operators: 各算子的量化参数
 #     - dtype: 数据类型 (INT8/UINT8/INT16 等)
 #     - symmetric: 是否对称量化
-#     - scale: 浮点 scale (= 2^(-n))
+#     - scale: 浮点 scale
 #     - zero_point: 零点
-#     - n: power-of-2 指数 (exp2_inv)
 #     - enc_type: 量化粒度 (PER_TENSOR/PER_GATE/PER_CHANNEL)
 #   - model_info: 模型元信息
 
 # ============================================================
 #                   辅助函数：数据类型转换
 # ============================================================
-
-def _exp2_inv_to_scale(exp2_inv: int) -> float:
-    """
-    将 power-of-2 指数转换为浮点 scale
-    
-    exp2_inv -> scale = 2^(-exp2_inv)
-    例如: exp2_inv=7 -> scale=0.0078125 (1/128)
-    """
-    if exp2_inv >= 0:
-        return 1.0 / (1 << exp2_inv)
-    else:
-        return float(1 << (-exp2_inv))
-
-
-def _scale_to_exp2_inv(scale: float) -> int:
-    """
-    将浮点 scale 转换为最接近的 power-of-2 指数
-    
-    scale -> exp2_inv = -log2(scale)
-    """
-    import math
-    if scale <= 0:
-        return 0
-    return int(round(-math.log2(scale)))
-
 
 def _bitwidth_to_dtype(bitwidth: int, is_unsigned: bool = False) -> str:
     """将位宽转换为 AIMET 风格的 dtype 字符串"""
@@ -3648,232 +3524,87 @@ def _get_weight_granularity(bitwidth_config, json_key: str) -> int:
     return None
 
 
-def _extract_weight_shift_per_tensor(quant_params, json_key: str, shift_list_full: list, verbose: bool = False) -> tuple:
-    """
-    从量化参数中提取 PER_TENSOR 粒度的 shift 值
-    
-    注意：即使 enc_type 是 PER_TENSOR，也返回数组格式（所有值相同），
-    因为实际存储的 shift_W_ 等是 per-channel 数组，只是所有值都相同。
-    
-    Args:
-        quant_params: GRUQuantParams 对象
-        json_key: 算子名称
-        shift_list_full: per-channel 数组
-        verbose: 是否输出详细信息
-    
-    Returns:
-        (n_value, scale_value, enc_type) 或 None（如果无法提取）
-        n_value 和 scale_value 都是列表（数组格式）
-    """
-    # 优先使用 shift_list_full（per-channel 数组，所有值应该相同）
-    if shift_list_full and len(shift_list_full) > 0:
-        # 验证所有值是否相同（per-tensor 应该所有值相同）
-        first_value = shift_list_full[0]
-        if all(v == first_value for v in shift_list_full):
-            # 所有值相同，返回数组格式
-            n_list = shift_list_full
-            scale_list = [_exp2_inv_to_scale(e) for e in n_list]
-            return n_list, scale_list, "PER_TENSOR"
-        else:
-            # 值不一致，发出警告但继续使用数组
-            if verbose:
-                print(f"  ⚠️ 警告：算子 '{json_key}' 配置为 PER_TENSOR，但 per-channel 数组中的值不一致。"
-                      f"将使用数组格式导出，但请注意值不一致的问题。")
-            n_list = shift_list_full
-            scale_list = [_exp2_inv_to_scale(e) for e in n_list]
-            return n_list, scale_list, "PER_TENSOR"
-    
-    # 回退：尝试使用 tensor_attr（向后兼容）
-    tensor_attr = f"shift_{json_key}_tensor_"
-    if hasattr(quant_params, tensor_attr):
-        shift_value = getattr(quant_params, tensor_attr)
-        n_scalar = int(shift_value)
-        # 从 shift_list_full 获取长度，如果为空则使用 hidden_size * 3
-        if shift_list_full:
-            array_len = len(shift_list_full)
-        else:
-            array_len = quant_params.hidden_ * 3
-        # 返回数组格式（所有值相同）
-        n_list = [n_scalar] * array_len
-        scale_list = [_exp2_inv_to_scale(n_scalar)] * array_len
-        return n_list, scale_list, "PER_TENSOR"
+def _extract_weight_scale_for_export(bitwidth_config, quant_params, op_name: str, op_info: dict, verbose: bool = False) -> tuple:
+    """提取权重/偏置算子的 scale 列表与 enc_type。"""
+    granularity = _get_weight_granularity(bitwidth_config, op_name)
+    scale_attr = op_info["scale_attr"]
+    if not hasattr(quant_params, scale_attr):
+        return None
+
+    raw_value = getattr(quant_params, scale_attr)
+    scale_list = list(raw_value) if hasattr(raw_value, '__iter__') and not isinstance(raw_value, str) else [float(raw_value)]
+    scale_list = [float(v) for v in scale_list]
+
+    if granularity == 0:
+        enc_type = "PER_TENSOR"
+    elif granularity == 1:
+        enc_type = "PER_GATE"
+    elif granularity == 2:
+        enc_type = "PER_CHANNEL"
     else:
-        # 配置了 PER_TENSOR 但没有对应的 tensor 属性，这是配置错误
         if verbose:
-            print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_TENSOR 粒度，但在 quant_params 中未找到 'shift_{json_key}_tensor_' 属性。"
-                  f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。")
+            print(f"  ⚠️ 警告：算子 '{op_name}' 未配置 quantization_granularity，按 PER_CHANNEL 导出")
+        enc_type = "PER_CHANNEL"
+
+    return scale_list, enc_type
+
+
+def _extract_non_weight_scale_for_export(quant_params, op_info: dict) -> tuple:
+    """提取非权重算子的 scale（统一数组格式）与 enc_type。"""
+    scale_attr = op_info["scale_attr"]
+    if not hasattr(quant_params, scale_attr):
         return None
 
+    raw_value = getattr(quant_params, scale_attr)
+    if op_info["is_per_channel"]:
+        scale_list = list(raw_value) if hasattr(raw_value, '__iter__') and not isinstance(raw_value, str) else [float(raw_value)]
+        return [float(v) for v in scale_list], "PER_CHANNEL"
 
-def _extract_weight_shift_per_gate(quant_params, json_key: str, shift_list_full: list, hidden_size: int, verbose: bool = False) -> tuple:
-    """
-    从量化参数中提取 PER_GATE 粒度的 shift 值
-    
-    注意：即使 enc_type 是 PER_GATE，也返回完整数组格式（每个 gate 的值重复 hidden_size 次），
-    因为实际存储的 shift_W_ 等是 per-channel 数组，只是每个 gate 内的值相同。
-    
-    Args:
-        quant_params: GRUQuantParams 对象
-        json_key: 算子名称
-        shift_list_full: per-channel 数组
-        hidden_size: 隐藏层大小
-        verbose: 是否输出详细信息
-    
-    Returns:
-        (n_value, scale_value, enc_type) 或 None（如果无法提取）
-        n_value 和 scale_value 都是列表（完整数组格式）
-    """
-    # 优先使用 shift_list_full（per-channel 数组，每个 gate 内的值应该相同）
-    if shift_list_full and len(shift_list_full) > 0:
-        # 验证每个 gate 内的值是否相同
-        expected_len = hidden_size * 3
-        if len(shift_list_full) == expected_len:
-            # 验证每个 gate 内的值是否相同
-            gate_values = []
-            for gate in range(3):
-                gate_start = gate * hidden_size
-                gate_end = (gate + 1) * hidden_size
-                gate_shift = shift_list_full[gate_start]
-                if all(shift_list_full[i] == gate_shift for i in range(gate_start, gate_end)):
-                    gate_values.append(gate_shift)
-                else:
-                    # gate 内值不一致，发出警告但继续使用数组
-                    if verbose:
-                        print(f"  ⚠️ 警告：算子 '{json_key}' 配置为 PER_GATE，但 gate {gate} 内的值不一致。"
-                              f"将使用数组格式导出，但请注意值不一致的问题。")
-                    gate_values.append(shift_list_full[gate_start])
-            
-            # 返回完整数组格式
-            n_list = shift_list_full
-            scale_list = [_exp2_inv_to_scale(e) for e in n_list]
-            return n_list, scale_list, "PER_GATE"
-    
-    # 回退：尝试使用 gate_attr（向后兼容）
-    gate_attr = f"shift_{json_key}_gate_"
-    if hasattr(quant_params, gate_attr):
-        shift_value = getattr(quant_params, gate_attr)
-        # shift_*_gate_ 是 std::array<int8_t, 3>
-        if hasattr(shift_value, '__iter__') and not isinstance(shift_value, str):
-            shift_list = list(shift_value)
+    if hasattr(raw_value, '__iter__') and not isinstance(raw_value, str):
+        scale_list = [float(v) for v in list(raw_value)]
+        if len(scale_list) == 0:
+            scale_list = [1.0]
+        return scale_list, "PER_TENSOR"
+    return [float(raw_value)], "PER_TENSOR"
+
+
+def _encode_mshift_py(scale: float) -> tuple:
+    if not (scale > 0.0):
+        raise ValueError(f"scale 必须 > 0，当前值: {scale}")
+    mant, exp2 = math.frexp(float(scale))
+    m = int(round(mant * 65536.0))
+    if m == 65536:
+        m = 32768
+        exp2 += 1
+    if m < 32768:
+        m = 32768
+    shift = 16 - exp2
+    if shift < -128 or shift > 127:
+        raise ValueError(f"encodeMShift shift 超范围: shift={shift}, scale={scale}")
+    return int(m), int(shift)
+
+
+def _decode_fixed_py(multiplier: int, shift: int) -> float:
+    return float(multiplier) * math.ldexp(1.0, -int(shift))
+
+
+def _encode_effective_scale_list(scale_list: list, use_pot2_scale: bool) -> tuple:
+    multipliers = []
+    shifts = []
+    effective_scales = []
+    for s in scale_list:
+        s = float(s)
+        if use_pot2_scale:
+            sh = int(round(-math.log2(s)))
+            m = 1
+            eff = math.ldexp(1.0, -sh)
         else:
-            shift_list = [shift_value] if isinstance(shift_value, (int, float)) else []
-        
-        if len(shift_list) == 3:
-            # 将每个 gate 的值重复 hidden_size 次，构建完整数组
-            n_list = []
-            for gate_shift in shift_list:
-                n_list.extend([gate_shift] * hidden_size)
-            scale_list = [_exp2_inv_to_scale(e) for e in n_list]
-            return n_list, scale_list, "PER_GATE"
-        else:
-            # gate 属性存在但长度不对
-            if verbose:
-                print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_GATE 粒度，但 'shift_{json_key}_gate_' 的长度不正确 "
-                      f"（实际长度: {len(shift_list)}，期望长度: 3）。这可能表明校准错误。")
-    
-    # 配置了 PER_GATE 但没有对应的 gate 属性，这是配置错误
-    if verbose:
-        print(f"  ⚠️ 警告：算子 '{json_key}' 配置了 PER_GATE 粒度，但在 quant_params 中未找到 'shift_{json_key}_gate_' 属性。"
-              f"这表明校准错误或配置不匹配。请使用正确的粒度配置重新校准。")
-    return None
-
-
-def _extract_weight_shift_per_channel(shift_list_full: list) -> tuple:
-    """
-    从量化参数中提取 PER_CHANNEL 粒度的 shift 值
-    
-    Returns:
-        (n_value, scale_value, enc_type)
-    """
-    scale_list = [_exp2_inv_to_scale(e) for e in shift_list_full]
-    return shift_list_full, scale_list, "PER_CHANNEL"
-
-
-def _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name: str, op_info: dict, verbose: bool = False) -> tuple:
-    """
-    提取权重算子（weight_ih/weight_hh/bias_ih/bias_hh）的 shift 值用于导出
-    
-    Args:
-        bitwidth_config: OperatorQuantConfig 对象
-        quant_params: GRUQuantParams 对象
-        op_name: 算子名称（如 'weight_ih'）
-        op_info: 算子信息字典
-        verbose: 是否输出详细信息
-        
-    Returns:
-        (n_value, scale_value, enc_type) 或 None（如果无法提取）
-    """
-    json_key = op_name  # 直接使用算子名称，不再需要 split('.')[-1]
-    granularity = _get_weight_granularity(bitwidth_config, json_key)
-    shift_attr = op_info["shift_attr"]  # shift_W_, shift_R_, etc.
-    
-    if not hasattr(quant_params, shift_attr):
-        return None
-    
-    shift_list_full = list(getattr(quant_params, shift_attr))
-    hidden_size = quant_params.hidden_
-    
-    if granularity == 0:  # PER_TENSOR
-        return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full, verbose)
-    elif granularity == 1:  # PER_GATE
-        return _extract_weight_shift_per_gate(quant_params, json_key, shift_list_full, hidden_size, verbose)
-    elif granularity == 2:  # PER_CHANNEL
-        return _extract_weight_shift_per_channel(shift_list_full)
-    else:
-        # 兼容：没有粒度配置，使用默认逻辑
-        if verbose:
-            print(f"  ⚠️ 警告：算子 '{json_key}' 未配置 quantization_granularity。"
-                  f"将基于 is_per_channel 标志使用默认值。"
-                  f"请显式设置 quantization_granularity (PER_TENSOR/PER_GATE/PER_CHANNEL)。")
-        is_per_channel = op_info["is_per_channel"]
-        if is_per_channel:
-            return _extract_weight_shift_per_channel(shift_list_full)
-        else:
-            return _extract_weight_shift_per_tensor(quant_params, json_key, shift_list_full, verbose)
-
-
-def _extract_non_weight_shift_for_export(quant_params, op_info: dict) -> tuple:
-    """
-    提取非权重算子的 shift 值用于导出
-    
-    注意：即使 enc_type 是 PER_TENSOR，也返回数组格式（单个值重复），
-    以保持与权重算子导出格式的一致性。
-    
-    Returns:
-        (n_value, scale_value, enc_type) 或 None（如果无法提取）
-        n_value 和 scale_value 都是列表（数组格式）
-    """
-    shift_attr = op_info["shift_attr"]
-    if not hasattr(quant_params, shift_attr):
-        return None
-    
-    shift_value = getattr(quant_params, shift_attr)
-    is_per_channel = op_info["is_per_channel"]
-    
-    if is_per_channel:
-        shift_list = list(shift_value)
-        scale_list = [_exp2_inv_to_scale(e) for e in shift_list]
-        return shift_list, scale_list, "PER_CHANNEL"
-    else:
-        # PER_TENSOR: 返回数组格式（单个值重复）
-        # 对于非权重算子，通常只有一个值，但为了格式统一，也返回数组
-        # 如果 shift_value 已经是数组，直接使用；否则转换为数组
-        if hasattr(shift_value, '__iter__') and not isinstance(shift_value, str):
-            shift_list = list(shift_value)
-            if len(shift_list) > 1:
-                # 已经是数组，直接使用
-                scale_list = [_exp2_inv_to_scale(e) for e in shift_list]
-                return shift_list, scale_list, "PER_TENSOR"
-            else:
-                # 单元素数组，保持数组格式
-                n = int(shift_list[0]) if shift_list else 0
-                scale = _exp2_inv_to_scale(n)
-                return [n], [scale], "PER_TENSOR"
-        else:
-            # 标量值，转换为单元素数组
-            n = int(shift_value)
-            scale = _exp2_inv_to_scale(n)
-            return [n], [scale], "PER_TENSOR"
+            m, sh = _encode_mshift_py(s)
+            eff = _decode_fixed_py(m, sh)
+        multipliers.append(int(m))
+        shifts.append(int(sh))
+        effective_scales.append(float(eff))
+    return effective_scales, multipliers, shifts
 
 
 # ============================================================
@@ -3908,36 +3639,33 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     # 计算量化范围
     qmin, qmax = get_quant_range(bitwidth, is_unsigned)
     
-    # 提取 shift 值
+    # 提取 scale 值
     if op_name in ['weight_ih', 'weight_hh', 'bias_ih', 'bias_hh']:
-        result = _extract_weight_shift_for_export(bitwidth_config, quant_params, op_name, op_info, verbose)
+        result = _extract_weight_scale_for_export(bitwidth_config, quant_params, op_name, op_info, verbose)
     else:
-        result = _extract_non_weight_shift_for_export(quant_params, op_info)
+        result = _extract_non_weight_scale_for_export(quant_params, op_info)
     
     if result is None:
         return None
     
-    n_value, scale_value, enc_type = result
+    scale_value, enc_type = result
+    scale_value = [float(v) for v in scale_value]
     
     # 构建算子数据（按 AIMET 字段顺序）
     zp_value = int(getattr(quant_params, op_info["zp_attr"])) if op_info["zp_attr"] and hasattr(quant_params, op_info["zp_attr"]) else 0
+    zp_list = [zp_value for _ in scale_value]
     
     op_data = {
         "dtype": _bitwidth_to_dtype(bitwidth, is_unsigned=is_unsigned),
         "symmetric": is_symmetric,
         "scale": scale_value,
-        "zero_point": zp_value,
+        "zero_point": zp_list,
         "enc_type": enc_type,
-        "n": n_value,
     }
     
     # 计算 real_min 和 real_max
-    if isinstance(scale_value, list):
-        op_data["real_min"] = [s * (qmin - zp_value) for s in scale_value]
-        op_data["real_max"] = [s * (qmax - zp_value) for s in scale_value]
-    else:
-        op_data["real_min"] = scale_value * (qmin - zp_value)
-        op_data["real_max"] = scale_value * (qmax - zp_value)
+    op_data["real_min"] = [s * (qmin - zp) for s, zp in zip(scale_value, zp_list)]
+    op_data["real_max"] = [s * (qmax - zp) for s, zp in zip(scale_value, zp_list)]
     
     return op_data
 
@@ -3962,7 +3690,7 @@ def _build_operators_dict(bitwidth_config, quant_params, verbose: bool = False) 
         5. real_min: 量化表示的最小实际值
         6. real_max: 量化表示的最大实际值
         7. enc_type: "PER_TENSOR"/"PER_GATE"/"PER_CHANNEL"
-        8. n: exp2_inv 指数（scale = 2^(-n)）
+        8. enc_type: 量化粒度标记
     """
     operators = {}
     per_channel_ops = {}  # 存放 per-channel/per-gate 算子，最后再添加
@@ -4001,6 +3729,45 @@ def _dtype_to_is_unsigned(dtype: str) -> bool:
     return dtype.upper().startswith("UINT")
 
 
+def _parse_runtime_scale_lists(op_name: str, op_data: dict) -> tuple:
+    """解析 scale 列表：优先 scale-only，其次兼容旧 multiplier/shift 与 POT2 字段。"""
+    if "scale" in op_data:
+        exported_scale = op_data["scale"]
+        if isinstance(exported_scale, list):
+            scales = [float(v) for v in exported_scale]
+        else:
+            scales = [float(exported_scale)]
+        if len(scales) == 0:
+            raise ValueError(f"算子 '{op_name}' 的 scale 不能为空")
+        if any(v <= 0 for v in scales):
+            raise ValueError(f"算子 '{op_name}' 的 scale 必须全部 > 0")
+        return scales, "scale_only"
+
+    if "multiplier" in op_data and "shift" in op_data:
+        multiplier = op_data["multiplier"]
+        shift = op_data["shift"]
+        if not isinstance(multiplier, list):
+            multiplier = [multiplier]
+        if not isinstance(shift, list):
+            shift = [shift]
+        if len(multiplier) != len(shift):
+            raise ValueError(f"算子 '{op_name}' 的 multiplier/shift 长度不一致")
+        scales = [_decode_fixed_py(int(m), int(s)) for m, s in zip(multiplier, shift)]
+        return scales, "new"
+
+    # 旧 POT2 fallback
+    if "n" in op_data or "exp2_inv" in op_data or "shift" in op_data:
+        old_shift = op_data.get("n", op_data.get("exp2_inv", op_data.get("shift")))
+        if isinstance(old_shift, list):
+            shifts = [int(v) for v in old_shift]
+        else:
+            shifts = [int(old_shift)]
+        scales = [math.ldexp(1.0, -s) for s in shifts]
+        return scales, "legacy_pot2"
+
+    raise ValueError(f"算子 '{op_name}' 缺少 scale/runtime 编码字段")
+
+
 # ============================================================
 #                   导入函数：解析 operators 字典
 # ============================================================
@@ -4016,158 +3783,39 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
         op_data: 算子数据字典
         verbose: 是否输出详细信息
     """
-    # ⚠️ 关键修复：从 _OPERATOR_MAP 获取正确的字段名
-    # 例如：weight_ih -> shift_W_ (不是 shift_weight_ih_)
     if op_name not in _OPERATOR_MAP:
         raise ValueError(f"未知的权重算子名称: {op_name}")
     
     op_info = _OPERATOR_MAP[op_name]
-    shift_attr_base = op_info["shift_attr"]  # 例如: "shift_W_", "shift_R_", "shift_bw_", "shift_br_"
-    
-    # 提取基础名称（去掉 "shift_" 前缀和 "_" 后缀）
-    # 例如: "shift_W_" -> "W_", "shift_R_" -> "R_"
-    base_name = shift_attr_base.replace("shift_", "").rstrip("_") + "_"
-    
+    scale_attr = op_info["scale_attr"]
     enc_type = op_data.get("enc_type")
     if enc_type is None:
         if verbose:
-            print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段。"
-                  f"为向后兼容，默认使用 PER_CHANNEL。"
-                  f"请显式添加 'enc_type' 字段 (PER_TENSOR/PER_GATE/PER_CHANNEL)。")
+            print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，默认 PER_CHANNEL")
         enc_type = "PER_CHANNEL"
-    
-    # 解析 n 或 scale
-    if "n" in op_data:
-        value = op_data["n"]
-        if enc_type == "PER_TENSOR":
-            # 支持数组格式（所有值应该相同，取第一个值）
-            if isinstance(value, list):
-                if len(value) > 0:
-                    # 验证所有值是否相同
-                    first_val = int(value[0])
-                    if all(int(v) == first_val for v in value):
-                        setattr(quant_params, f"shift_{base_name}tensor_", first_val)
-                        # 同时填充 per-channel 数组（所有值相同）
-                        setattr(quant_params, shift_attr_base, list(value))
-                    else:
-                        if verbose:
-                            print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
-                                  f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。")
-                        setattr(quant_params, f"shift_{base_name}tensor_", first_val)
-                        setattr(quant_params, shift_attr_base, [int(v) for v in value])
-                else:
-                    raise ValueError(f"PER_TENSOR granularity for '{op_name}' requires non-empty array")
-            else:
-                # 兼容旧格式：标量值
-                setattr(quant_params, f"shift_{base_name}tensor_", int(value))
-            setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
-        elif enc_type == "PER_GATE":
-            if isinstance(value, list):
-                # 支持完整数组格式（每个 gate 的值重复 hidden_size 次）
-                # 或 3 元素格式（每个 gate 一个值）
-                if len(value) == 3:
-                    # 3 元素格式：每个 gate 一个值
-                    setattr(quant_params, f"shift_{base_name}gate_", [int(v) for v in value])
-                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
-                elif len(value) > 3:
-                    # 完整数组格式：提取每个 gate 的第一个值
-                    hidden_size = len(value) // 3
-                    gate_values = [int(value[gate * hidden_size]) for gate in range(3)]
-                    setattr(quant_params, f"shift_{base_name}gate_", gate_values)
-                    setattr(quant_params, shift_attr_base, [int(v) for v in value])
-                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
-                else:
-                    raise ValueError(
-                        f"PER_GATE granularity for '{op_name}' requires at least 3 elements, "
-                        f"got {len(value)}"
-                    )
-            else:
-                raise ValueError(
-                    f"PER_GATE granularity for '{op_name}' requires a list, "
-                    f"got {type(value).__name__}"
-                )
-        else:  # PER_CHANNEL
-            if isinstance(value, list):
-                setattr(quant_params, shift_attr_base, [int(v) for v in value])
-                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
-            else:
-                # 兼容旧格式：标量被当作per-channel（只有一个元素）
-                if verbose:
-                    print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'n' 值为标量。"
-                          f"为向后兼容，将转换为单元素数组。"
-                          f"请使用数组格式: [n_value]。")
-                setattr(quant_params, shift_attr_base, [int(value)])
-                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
-    elif "scale" in op_data:
-        value = op_data["scale"]
-        if enc_type == "PER_TENSOR":
-            # 支持数组格式（所有值应该相同，取第一个值）
-            if isinstance(value, list):
-                if len(value) > 0:
-                    # 验证所有值是否相同
-                    first_scale = value[0]
-                    first_shift = _scale_to_exp2_inv(first_scale)
-                    if all(_scale_to_exp2_inv(v) == first_shift for v in value):
-                        setattr(quant_params, f"shift_{base_name}tensor_", int(first_shift))
-                        # 同时填充 per-channel 数组（所有值相同）
-                        shift_list = [_scale_to_exp2_inv(v) for v in value]
-                        setattr(quant_params, shift_attr_base, shift_list)
-                    else:
-                        if verbose:
-                            print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_TENSOR，但数组中的值不一致。"
-                                  f"将使用第一个值作为 tensor 值，并使用完整数组填充 per-channel。")
-                        setattr(quant_params, f"shift_{base_name}tensor_", int(first_shift))
-                        shift_list = [_scale_to_exp2_inv(v) for v in value]
-                        setattr(quant_params, shift_attr_base, shift_list)
-                else:
-                    raise ValueError(f"PER_TENSOR granularity for '{op_name}' requires non-empty array")
-            else:
-                # 兼容旧格式：标量值
-                shift_val = _scale_to_exp2_inv(value)
-                setattr(quant_params, f"shift_{base_name}tensor_", int(shift_val))
-            setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
-        elif enc_type == "PER_GATE":
-            if isinstance(value, list):
-                # 支持完整数组格式（每个 gate 的值重复 hidden_size 次）
-                # 或 3 元素格式（每个 gate 一个值）
-                if len(value) == 3:
-                    # 3 元素格式：每个 gate 一个值
-                    shift_list = [_scale_to_exp2_inv(v) for v in value]
-                    setattr(quant_params, f"shift_{base_name}gate_", shift_list)
-                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
-                elif len(value) > 3:
-                    # 完整数组格式：提取每个 gate 的第一个值
-                    hidden_size = len(value) // 3
-                    gate_scales = [value[gate * hidden_size] for gate in range(3)]
-                    gate_shifts = [_scale_to_exp2_inv(s) for s in gate_scales]
-                    setattr(quant_params, f"shift_{base_name}gate_", gate_shifts)
-                    shift_list = [_scale_to_exp2_inv(v) for v in value]
-                    setattr(quant_params, shift_attr_base, shift_list)
-                    setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
-                else:
-                    raise ValueError(
-                        f"PER_GATE granularity for '{op_name}' requires at least 3 scale values, "
-                        f"got {len(value)}"
-                    )
-            else:
-                raise ValueError(
-                    f"PER_GATE granularity for '{op_name}' requires a list, "
-                    f"got {type(value).__name__}"
-                )
-        else:  # PER_CHANNEL
-            if isinstance(value, list):
-                shift_list = [_scale_to_exp2_inv(v) for v in value]
-                setattr(quant_params, shift_attr_base, shift_list)
-                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
-            else:
-                # 兼容旧格式：标量被当作per-channel（只有一个元素）
-                if verbose:
-                    print(f"  ⚠️ 警告：算子 '{op_name}' 的 enc_type 为 PER_CHANNEL，但 'scale' 值为标量。"
-                          f"为向后兼容，将转换为单元素数组。"
-                          f"请使用数组格式: [scale_value]。")
-                shift_val = _scale_to_exp2_inv(value)
-                setattr(quant_params, shift_attr_base, [int(shift_val)])
-                setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
+    scale_list, _ = _parse_runtime_scale_lists(op_name, op_data)
+
+    if enc_type == "PER_TENSOR":
+        setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 0)
+        if len(scale_list) == 0:
+            raise ValueError(f"算子 '{op_name}' 的 PER_TENSOR scale 不能为空")
+        tensor_attr = f"scale_{op_info['bw_attr']}tensor_"
+        if not hasattr(quant_params, tensor_attr):
+            raise AttributeError(f"GRUQuantParams 缺少属性 '{tensor_attr}'")
+        setattr(quant_params, tensor_attr, float(scale_list[0]))
+    elif enc_type == "PER_GATE":
+        setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 1)
+        if len(scale_list) != 3:
+            raise ValueError(
+                f"算子 '{op_name}' 的 PER_GATE scale 长度必须为 3，当前为 {len(scale_list)}"
+            )
+        gate_attr = f"scale_{op_info['bw_attr']}gate_"
+        if not hasattr(quant_params, gate_attr):
+            raise AttributeError(f"GRUQuantParams 缺少属性 '{gate_attr}'")
+        setattr(quant_params, gate_attr, [float(v) for v in scale_list])
+    else:
+        setattr(bitwidth_config, f"{op_info['bw_attr']}granularity_", 2)
+        setattr(quant_params, scale_attr, [float(v) for v in scale_list])
 
 
 def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_data: dict) -> None:
@@ -4182,54 +3830,25 @@ def _parse_non_weight_operator(bitwidth_config, quant_params, op_info: dict, op_
         op_info: 算子信息字典
         op_data: 算子数据字典
     """
-    shift_attr = op_info["shift_attr"]
+    scale_attr = op_info["scale_attr"]
     
     # 调试信息：检查属性是否存在
-    if not hasattr(quant_params, shift_attr):
-        print(f"\n[DEBUG _parse_non_weight_operator] ❌ 错误：quant_params 没有属性 '{shift_attr}'")
+    if not hasattr(quant_params, scale_attr):
+        print(f"\n[DEBUG _parse_non_weight_operator] ❌ 错误：quant_params 没有属性 '{scale_attr}'")
         print(f"  op_info: {op_info}")
         print(f"  quant_params 的所有相关属性 (包含 'weight_ih'):")
         for attr in dir(quant_params):
             if not attr.startswith('_') and 'weight_ih' in attr:
                 print(f"    - {attr}")
-        raise AttributeError(f"'gru_interface_binding.GRUQuantParams' object has no attribute '{shift_attr}'")
-    
-    if "n" in op_data:
-        value = op_data["n"]
-        if op_info["is_per_channel"]:
-            setattr(quant_params, shift_attr, [int(v) for v in value] if isinstance(value, list) else [int(value)])
-        else:
-            # PER_TENSOR: 支持数组格式（取第一个值或所有值相同）
-            if isinstance(value, list):
-                if len(value) > 0:
-                    # 取第一个值（所有值应该相同）
-                    setattr(quant_params, shift_attr, int(value[0]))
-                else:
-                    raise ValueError(f"PER_TENSOR granularity requires non-empty array")
-            else:
-                # 兼容旧格式：标量值
-                setattr(quant_params, shift_attr, int(value))
-    elif "scale" in op_data:
-        value = op_data["scale"]
-        shift_attr = op_info["shift_attr"]  # 重用上面定义的 shift_attr
-        
-        if op_info["is_per_channel"]:
-            if isinstance(value, list):
-                setattr(quant_params, shift_attr, 
-                        [_scale_to_exp2_inv(v) for v in value])
-            else:
-                setattr(quant_params, shift_attr, [_scale_to_exp2_inv(value)])
-        else:
-            # PER_TENSOR: 支持数组格式（取第一个值或所有值相同）
-            if isinstance(value, list):
-                if len(value) > 0:
-                    # 取第一个值（所有值应该相同）
-                    setattr(quant_params, shift_attr, _scale_to_exp2_inv(value[0]))
-                else:
-                    raise ValueError(f"PER_TENSOR granularity requires non-empty array")
-            else:
-                # 兼容旧格式：标量值
-                setattr(quant_params, shift_attr, _scale_to_exp2_inv(value))
+        raise AttributeError(f"'gru_interface_binding.GRUQuantParams' object has no attribute '{scale_attr}'")
+
+    scale_list, _ = _parse_runtime_scale_lists(op_info["bw_attr"].rstrip("_"), op_data)
+    if op_info["is_per_channel"]:
+        setattr(quant_params, scale_attr, [float(v) for v in scale_list])
+    else:
+        if len(scale_list) == 0:
+            raise ValueError("PER_TENSOR granularity requires non-empty scale list")
+        setattr(quant_params, scale_attr, float(scale_list[0]))
 
 
 def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data: dict, verbose: bool = False) -> None:
@@ -4251,9 +3870,9 @@ def _parse_single_operator(bitwidth_config, quant_params, op_name: str, op_data:
     op_info = _OPERATOR_MAP[op_name]
     
     # 错误检查：如果属性不存在，打印详细信息（仅在出错时）
-    if not hasattr(quant_params, op_info['shift_attr']):
+    if not hasattr(quant_params, op_info['scale_attr']):
         print(f"\n[DEBUG _parse_single_operator] ❌ 错误：处理算子 '{op_name}' 时发现属性缺失")
-        print(f"  op_info['shift_attr']: {op_info['shift_attr']}")
+        print(f"  op_info['scale_attr']: {op_info['scale_attr']}")
         print(f"  op_info['zp_attr']: {op_info.get('zp_attr')}")
         print(f"  quant_params 的所有相关属性 (包含 '{op_name.split('_')[0]}'):")
         for attr in dir(quant_params):
@@ -4339,6 +3958,7 @@ def _export_quant_params_impl(
             "bias": gru.bias,
             "batch_first": gru.batch_first,
             "bidirectional": gru.bidirectional,
+            "use_pot2_scale": bool(gru.use_pot2_scale),
         },
         "operators": _build_operators_dict(gru._bitwidth_config, gru.quant_params, verbose),
     }
@@ -4384,18 +4004,13 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     )
     
     # 量化权重（使用 per-channel 参数）
-    def quantize_per_channel(tensor, shift_list, bitwidth, symmetric):
+    def quantize_per_channel(tensor, scale_list, bitwidth, symmetric):
         """对每个 channel 应用量化（权重使用有符号量化）"""
         qmin, qmax = get_quant_range(bitwidth)  # 权重使用有符号量化（默认）
         result = torch.zeros_like(tensor, dtype=torch.int32)
         
-        for c in range(len(shift_list)):
-            shift = shift_list[c]
-            if shift >= 0:
-                scale = 1.0 / (1 << shift)
-            else:
-                scale = float(1 << (-shift))
-            
+        for c in range(len(scale_list)):
+            scale = float(scale_list[c])
             q = torch.clamp(torch.round(tensor[:, c] / scale), qmin, qmax)
             result[:, c] = q.int()
         
@@ -4408,16 +4023,16 @@ def _export_quantized_weights(gru: QuantGRU) -> dict:
     br_bitwidth = gru._bitwidth_config.br_
     
     weights = {
-        "W": quantize_per_channel(W, list(params.shift_W_), W_bitwidth, True),
-        "R": quantize_per_channel(R, list(params.shift_R_), R_bitwidth, True),
+        "W": quantize_per_channel(W, list(params.scale_W_), W_bitwidth, True),
+        "R": quantize_per_channel(R, list(params.scale_R_), R_bitwidth, True),
     }
     
     if gru.bias:
         # 偏置是 1D，需要 unsqueeze
         bw_2d = bw.unsqueeze(0)  # [1, 3*H]
         br_2d = br.unsqueeze(0)
-        weights["bw"] = quantize_per_channel(bw_2d, list(params.shift_bw_), bw_bitwidth, True)[0]
-        weights["br"] = quantize_per_channel(br_2d, list(params.shift_br_), br_bitwidth, True)[0]
+        weights["bw"] = quantize_per_channel(bw_2d, list(params.scale_bw_), bw_bitwidth, True)[0]
+        weights["br"] = quantize_per_channel(br_2d, list(params.scale_br_), br_bitwidth, True)[0]
     
     return weights
 
@@ -4463,6 +4078,8 @@ def _load_quant_params_impl(
     
     # 解析 operators 字典
     gru._bitwidth_config = gru_ops.OperatorQuantConfig()
+    gru.use_pot2_scale = bool(model_info.get("use_pot2_scale", True))
+    gru._bitwidth_config.usePOT2_ = gru.use_pot2_scale
     gru.quant_params = gru_ops.GRUQuantParams()
     gru.quant_params.hidden_ = gru.hidden_size
     
@@ -4479,13 +4096,23 @@ def _load_quant_params_impl(
     #   2. 模型对称性：双向 GRU 的正反向是对称结构，应使用对称的量化配置
     #   3. 导出时 operators 和 operators_reverse 的 bitwidth 来自同一 _bitwidth_config，
     #      所以导入时解析两次 bitwidth 是等价的（值相同）
+    if gru.bidirectional and "operators_reverse" not in data:
+        raise ValueError("bidirectional=True 时导入文件必须包含 operators_reverse")
+
     if gru.bidirectional and "operators_reverse" in data:
         gru.quant_params_reverse = gru_ops.GRUQuantParams()
         gru.quant_params_reverse.hidden_ = gru.hidden_size
         
-        # 从 operators_reverse 解析 exp2_inv/zp，bitwidth 与正向相同（共用 _bitwidth_config）
+        # 从 operators_reverse 解析 scale/zp，bitwidth 与正向相同（共用 _bitwidth_config）
         _parse_operators_dict(data["operators_reverse"], gru._bitwidth_config, gru.quant_params_reverse, verbose)
         gru.quant_params_reverse.bitwidth_config_ = gru._bitwidth_config
+        # 输入量化参数在双向中必须一致
+        fwd_input = data["operators"].get("input", {})
+        rev_input = data["operators_reverse"].get("input", {})
+        for field in ("multiplier", "shift", "zero_point"):
+            if field in fwd_input or field in rev_input:
+                if fwd_input.get(field) != rev_input.get(field):
+                    raise ValueError(f"双向导入失败：operators.input 与 operators_reverse.input 的 {field} 不一致")
     
     # 清除脏标志
     gru._quant_params_dirty = False
@@ -4504,7 +4131,7 @@ def _adjust_quant_config_impl(
     operator: str,
     bitwidth: int = None,
     is_symmetric: bool = None,
-    exp2_inv: int = None,
+    scale: float = None,
     zero_point: int = None,
     verbose: bool = False
 ) -> None:
@@ -4533,91 +4160,38 @@ def _adjust_quant_config_impl(
             raise ValueError(f"bitwidth 必须在 [1, 32] 范围内，当前值: {bitwidth}")
         setattr(gru._bitwidth_config, attrs['bw_attr'], bitwidth)
         new_values['bitwidth'] = bitwidth
-        
-        # 自动计算 shift 和 zp（当 exp2_inv 未指定时）
-        # 
-        # 原理：保持相同的数据表示范围，但用更多/更少的量化级别
-        # - scale = 2^(-shift) 
-        # - 位宽增加 -> 量化级别增多 -> scale 应减小 -> shift 应增大
-        # - 公式: new_shift = old_shift + (new_bitwidth - old_bitwidth)
-        #
-        # 对于 zp:
-        # - 对称量化: zp = 0（固定不变）
-        # - 非对称量化: zp_new ≈ zp_old * 2^delta_bits
-        #
-        if exp2_inv is None and gru.quant_params is not None:
-            shift_attr = attrs['shift_attr']
-            zp_attr = attrs['zp_attr']
-            is_per_channel = attrs['is_per_channel']
-            is_symmetric = old_symmetric  # 使用当前的对称性设置
-            
-            bitwidth_delta = bitwidth - old_bitwidth
-            scale_factor = 1 << abs(bitwidth_delta)  # 2^|delta|
-            
-            if hasattr(gru.quant_params, shift_attr):
-                if is_per_channel:
-                    old_shift_list = list(getattr(gru.quant_params, shift_attr))
-                    # shift 增加 delta_bits（scale 减小）
-                    new_shift_list = [max(-32, min(32, e + bitwidth_delta)) for e in old_shift_list]
-                    setattr(gru.quant_params, shift_attr, new_shift_list)
-                    new_values['shift'] = f"auto: [{new_shift_list[0]}, ...] (delta=+{bitwidth_delta})"
-                else:
-                    old_shift = int(getattr(gru.quant_params, shift_attr))
-                    # shift 增加 delta_bits
-                    new_shift = max(-32, min(32, old_shift + bitwidth_delta))
-                    setattr(gru.quant_params, shift_attr, new_shift)
-                    new_values['shift'] = f"auto: {new_shift} (was {old_shift}, delta=+{bitwidth_delta})"
-                    
-                    # 同时调整 zp（非 per-channel 情况）
-                    if zp_attr and hasattr(gru.quant_params, zp_attr):
-                        old_zp = int(getattr(gru.quant_params, zp_attr))
-                        
-                        if is_symmetric:
-                            # 对称量化：zp 恒为 0
-                            new_zp = 0
-                            if old_zp != 0:
-                                new_values['zero_point'] = f"auto: 0 (对称量化, 强制为0)"
-                            else:
-                                new_values['zero_point'] = f"auto: 0 (对称量化)"
-                        else:
-                            # 非对称量化：zp 按比例缩放
-                            if bitwidth_delta > 0:
-                                new_zp = old_zp * scale_factor
-                            else:
-                                new_zp = old_zp // scale_factor
-                            new_values['zero_point'] = f"auto: {new_zp} (was {old_zp}, x{scale_factor if bitwidth_delta > 0 else '/' + str(scale_factor)})"
-                        
-                        setattr(gru.quant_params, zp_attr, new_zp)
     
     if is_symmetric is not None:
         setattr(gru._bitwidth_config, attrs['sym_attr'], is_symmetric)
         new_values['is_symmetric'] = is_symmetric
     
-    # 修改量化参数（如果已校准且未被 auto_scale 处理）
+    # 修改量化参数
     if gru.quant_params is not None:
-        # 从 attrs 获取属性名
-        shift_attr = attrs['shift_attr']
+        scale_attr = attrs['scale_attr']
         zp_attr = attrs['zp_attr']
         is_per_channel = attrs['is_per_channel']
         
-        if is_per_channel:
-            # per-channel 参数只有 shift，没有 zp
-            if hasattr(gru.quant_params, shift_attr):
-                old_shift = list(getattr(gru.quant_params, shift_attr))
-                old_values['shift'] = f"[{old_shift[0]}, {old_shift[1]}, ...] (per-channel)"
-                
-                if exp2_inv is not None:
-                    # 将所有 channel 设置为相同的值
-                    new_shift = [exp2_inv] * len(old_shift)
-                    setattr(gru.quant_params, shift_attr, new_shift)
-                    new_values['shift'] = f"[{exp2_inv}, {exp2_inv}, ...] (all channels)"
-        else:
-            # 标量参数
-            if hasattr(gru.quant_params, shift_attr):
-                old_values['shift'] = int(getattr(gru.quant_params, shift_attr))
-                if exp2_inv is not None:
-                    setattr(gru.quant_params, shift_attr, exp2_inv)
-                    new_values['shift'] = exp2_inv
+        if hasattr(gru.quant_params, scale_attr):
+            old_scale = getattr(gru.quant_params, scale_attr)
+            old_values['scale'] = list(old_scale) if hasattr(old_scale, '__iter__') and not isinstance(old_scale, str) else float(old_scale)
+            if scale is not None:
+                if is_per_channel:
+                    old_scale_list = list(old_scale)
+                    if not isinstance(scale, (list, tuple)):
+                        raise ValueError("per-channel/per-gate 算子调整 scale 必须传 list，禁止 scalar 广播")
+                    if len(scale) != len(old_scale_list):
+                        raise ValueError(f"scale 长度不匹配: 期望 {len(old_scale_list)}，实际 {len(scale)}")
+                    requested = [float(v) for v in scale]
+                    if any(v <= 0 for v in requested):
+                        raise ValueError("scale 列表中的所有元素必须 > 0")
+                    setattr(gru.quant_params, scale_attr, requested)
+                    new_values['scale'] = requested
+                else:
+                    scalar_scale = float(scale[0]) if isinstance(scale, (list, tuple)) else float(scale)
+                    if scalar_scale <= 0:
+                        raise ValueError(f"scale 必须 > 0，当前值: {scalar_scale}")
+                    setattr(gru.quant_params, scale_attr, scalar_scale)
+                    new_values['scale'] = scalar_scale
             
             if zp_attr and hasattr(gru.quant_params, zp_attr):
                 old_values['zero_point'] = int(getattr(gru.quant_params, zp_attr))
@@ -4648,20 +4222,19 @@ def _get_quant_config_impl(gru: 'QuantGRU', operator: str = None) -> dict:
         }
         
         if gru.quant_params is not None:
-            shift_attr = attrs['shift_attr']
+            scale_attr = attrs['scale_attr']
             zp_attr = attrs['zp_attr']
             is_per_channel = attrs['is_per_channel']
             
             if is_per_channel:
-                if hasattr(gru.quant_params, shift_attr):
-                    config['shift'] = list(getattr(gru.quant_params, shift_attr))
-                    # 计算对应的 scale
-                    config['scale'] = [_exp2_inv_to_scale(e) for e in config['shift']]
+                if hasattr(gru.quant_params, scale_attr):
+                    scales = [float(v) for v in list(getattr(gru.quant_params, scale_attr))]
+                    config['scale'] = scales
+                    if zp_attr and hasattr(gru.quant_params, zp_attr):
+                        config['zero_point'] = [int(getattr(gru.quant_params, zp_attr)) for _ in scales]
             else:
-                if hasattr(gru.quant_params, shift_attr):
-                    shift = int(getattr(gru.quant_params, shift_attr))
-                    config['shift'] = shift
-                    config['scale'] = _exp2_inv_to_scale(shift)
+                if hasattr(gru.quant_params, scale_attr):
+                    config['scale'] = float(getattr(gru.quant_params, scale_attr))
                 if zp_attr and hasattr(gru.quant_params, zp_attr):
                     config['zero_point'] = int(getattr(gru.quant_params, zp_attr))
         

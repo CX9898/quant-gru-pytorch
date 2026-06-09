@@ -34,6 +34,11 @@
 #include "quantize_bitwidth_config.h"
 #include "quantize_lut_types.h"
 
+struct FixedPointScale {
+    uint16_t multiplier = 1;
+    int8_t shift = 0;
+};
+
 // ============================================================================
 // GRU 完整量化参数结构体（Host 端）
 // ============================================================================
@@ -60,6 +65,10 @@ struct GRUQuantParams {
     int32_t zp_x_;     ///< 输入 x 的零点
     int8_t shift_h_;   ///< 隐状态 h 的移位量
     int32_t zp_h_;     ///< 隐状态 h 的零点
+    float raw_scale_x_ = 0.0f;  ///< encode 前连续 scale（导出/调试语义）
+    float raw_scale_h_ = 0.0f;  ///< encode 前连续 scale（导出/调试语义）
+    FixedPointScale fixed_scale_x_;
+    FixedPointScale fixed_scale_h_;
 
     // ========== 多粒度参数存储 ==========
     // Per-Tensor 参数（标量）
@@ -79,12 +88,32 @@ struct GRUQuantParams {
     std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
     std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
     std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
+    std::vector<float> raw_scale_W_;   ///< encode 前连续 scale（per-channel）
+    std::vector<float> raw_scale_R_;   ///< encode 前连续 scale（per-channel）
+    std::vector<float> raw_scale_bw_;  ///< encode 前连续 scale（per-channel）
+    std::vector<float> raw_scale_br_;  ///< encode 前连续 scale（per-channel）
+    float raw_scale_W_tensor_ = 0.0f;  ///< encode 前连续 scale（per-tensor）
+    float raw_scale_R_tensor_ = 0.0f;  ///< encode 前连续 scale（per-tensor）
+    float raw_scale_bw_tensor_ = 0.0f; ///< encode 前连续 scale（per-tensor）
+    float raw_scale_br_tensor_ = 0.0f; ///< encode 前连续 scale（per-tensor）
+    std::array<float, 3> raw_scale_W_gate_ = {0.0f, 0.0f, 0.0f};   ///< encode 前连续 scale（per-gate）
+    std::array<float, 3> raw_scale_R_gate_ = {0.0f, 0.0f, 0.0f};   ///< encode 前连续 scale（per-gate）
+    std::array<float, 3> raw_scale_bw_gate_ = {0.0f, 0.0f, 0.0f};  ///< encode 前连续 scale（per-gate）
+    std::array<float, 3> raw_scale_br_gate_ = {0.0f, 0.0f, 0.0f};  ///< encode 前连续 scale（per-gate）
+    std::vector<FixedPointScale> fixed_scale_W_;
+    std::vector<FixedPointScale> fixed_scale_R_;
+    std::vector<FixedPointScale> fixed_scale_bw_;
+    std::vector<FixedPointScale> fixed_scale_br_;
 
     // -------------------- Linear 输出参数 (GEMM+bias) --------------------
     int8_t shift_weight_ih_linear_;    ///< W*x + bw 的移位量
     int32_t zp_weight_ih_linear_;      ///< W*x + bw 的零点
     int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
     int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
+    float raw_scale_weight_ih_linear_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_weight_hh_linear_ = 0.0f;  ///< encode 前连续 scale
+    FixedPointScale fixed_scale_weight_ih_linear_;
+    FixedPointScale fixed_scale_weight_hh_linear_;
 
     // -------------------- 门激活函数输入参数（pre-activation）--------------------
     int8_t shift_update_gate_input_;   ///< update gate 激活前的移位量
@@ -93,6 +122,12 @@ struct GRUQuantParams {
     int32_t zp_reset_gate_input_;      ///< reset gate 激活前的零点
     int8_t shift_new_gate_input_;      ///< new gate 激活前的移位量
     int32_t zp_new_gate_input_;        ///< new gate 激活前的零点
+    float raw_scale_update_gate_input_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_reset_gate_input_ = 0.0f;   ///< encode 前连续 scale
+    float raw_scale_new_gate_input_ = 0.0f;     ///< encode 前连续 scale
+    FixedPointScale fixed_scale_update_gate_input_;
+    FixedPointScale fixed_scale_reset_gate_input_;
+    FixedPointScale fixed_scale_new_gate_input_;
 
     // -------------------- 门激活函数输出参数（post-activation）--------------------
     int8_t shift_update_gate_output_;   ///< update gate 激活后的移位量（sigmoid 输出）
@@ -101,16 +136,28 @@ struct GRUQuantParams {
     int32_t zp_reset_gate_output_;      ///< reset gate 激活后的零点
     int8_t shift_new_gate_output_;      ///< new gate 激活后的移位量（tanh 输出）
     int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
+    float raw_scale_update_gate_output_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_reset_gate_output_ = 0.0f;   ///< encode 前连续 scale
+    float raw_scale_new_gate_output_ = 0.0f;     ///< encode 前连续 scale
+    FixedPointScale fixed_scale_update_gate_output_;
+    FixedPointScale fixed_scale_reset_gate_output_;
+    FixedPointScale fixed_scale_new_gate_output_;
 
     // -------------------- 中间计算参数 --------------------
     int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
     int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
+    float raw_scale_mul_reset_hidden_ = 0.0f;  ///< encode 前连续 scale
+    FixedPointScale fixed_scale_mul_reset_hidden_;
 
     // -------------------- 隐状态更新参数 --------------------
     int8_t shift_mul_new_contribution_;   ///< (1-u)*n 的移位量
     int32_t zp_mul_new_contribution_;     ///< (1-u)*n 的零点
     int8_t shift_mul_old_contribution_;   ///< u*h 的移位量
     int32_t zp_mul_old_contribution_;     ///< u*h 的零点
+    float raw_scale_mul_new_contribution_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_mul_old_contribution_ = 0.0f;  ///< encode 前连续 scale
+    FixedPointScale fixed_scale_mul_new_contribution_;
+    FixedPointScale fixed_scale_mul_old_contribution_;
 
     // -------------------- LUT 表（每层独立，在 finalize_calibration 时生成）--------------------
     SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
@@ -144,23 +191,31 @@ struct GateQuantParams {
     int32_t zp_update_gate_output_;                 ///< update gate 激活后零点
     int8_t shift_weight_ih_linear_to_update_gate_input_;    ///< weight_ih_linear 到 update_gate_input 的移位
     int8_t shift_weight_hh_linear_to_update_gate_input_;    ///< weight_hh_linear 到 update_gate_input 的移位
+    FixedPointScale fixed_rescale_weight_ih_linear_to_update_gate_input_;
+    FixedPointScale fixed_rescale_weight_hh_linear_to_update_gate_input_;
 
     // -------------------- Reset Gate 参数 --------------------
     int32_t zp_reset_gate_input_;                  ///< reset gate 激活前零点
     int32_t zp_reset_gate_output_;                 ///< reset gate 激活后零点
     int8_t shift_weight_ih_linear_to_reset_gate_input_;    ///< weight_ih_linear 到 reset_gate_input 的移位
     int8_t shift_weight_hh_linear_to_reset_gate_input_;    ///< weight_hh_linear 到 reset_gate_input 的移位
+    FixedPointScale fixed_rescale_weight_ih_linear_to_reset_gate_input_;
+    FixedPointScale fixed_rescale_weight_hh_linear_to_reset_gate_input_;
 
     // -------------------- New Gate（候选隐状态）参数 --------------------
     int32_t zp_new_gate_input_;                  ///< new gate 激活前零点
     int32_t zp_new_gate_output_;                 ///< new gate 激活后零点
     int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
     int8_t shift_reset_mul_hh_to_new_gate_input_;          ///< r*weight_hh_linear 直接对齐到 new_gate_input 的移位（融合）
+    FixedPointScale fixed_rescale_weight_ih_linear_to_new_gate_input_;
+    FixedPointScale fixed_rescale_reset_mul_hh_to_new_gate_input_;
 
     // -------------------- 隐状态更新参数（乘法scale融合，统一scale空间优化）--------------------
     int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
     int8_t shift_new_gate_output_to_h_;          ///< new_gate_output 对齐到 h 的移位（统一scale空间优化）
     int8_t shift_update_old_to_h_;               ///< u*h 统一scale到 h 的移位（= shift_update_gate_output，统一scale空间优化）
+    FixedPointScale fixed_rescale_new_gate_output_to_h_;
+    FixedPointScale fixed_rescale_update_old_to_h_;
 
     // -------------------- 运行时配置 --------------------
     OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
@@ -213,6 +268,10 @@ struct LinearQuantParamsGPU {
     dev::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
     dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
     dev::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
+    dev::vector<FixedPointScale> fixed_rescale_gemm_x_to_weight_ih_linear_;
+    dev::vector<FixedPointScale> fixed_rescale_bw_to_weight_ih_linear_;
+    dev::vector<FixedPointScale> fixed_rescale_gemm_h_to_weight_hh_linear_;
+    dev::vector<FixedPointScale> fixed_rescale_br_to_weight_hh_linear_;
 
 #ifdef DEBUG
     dev::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
@@ -233,6 +292,10 @@ struct LinearQuantParamsCPU {
     std::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
     std::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
     std::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
+    std::vector<FixedPointScale> fixed_rescale_gemm_x_to_weight_ih_linear_;
+    std::vector<FixedPointScale> fixed_rescale_bw_to_weight_ih_linear_;
+    std::vector<FixedPointScale> fixed_rescale_gemm_h_to_weight_hh_linear_;
+    std::vector<FixedPointScale> fixed_rescale_br_to_weight_hh_linear_;
 
 #ifdef DEBUG
     std::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）

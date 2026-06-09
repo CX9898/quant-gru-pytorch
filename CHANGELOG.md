@@ -4,6 +4,57 @@
 
 ---
 
+## [2026-06-05]
+
+### 版本更新
+1. **版本号更新**: 将版本号从 1.0.4 更新至 1.0.5
+
+### 功能优化
+1. **量化参数导入/导出格式更新**: 导出改为 **scale-only**，算子级仅保留 `scale` 与 `zero_point`（及 `real_min`/`real_max`、`enc_type` 等语义字段），不再输出 `multiplier`、`shift`、`scale_encoding`。`scale` 字段统一表示运行时语义 scale（避免使用 `decode(fixed_scale)` 近似值）。导入侧优先解析 scale-only，同时继续兼容旧 `multiplier/shift` 与 `n/exp2_inv` 格式。
+   ```json
+   {
+     "operators": {
+       "input": {
+         "dtype": "INT8",
+         "symmetric": false,
+         "scale": [0.010382890701293945],
+         "zero_point": [-5],
+         "enc_type": "PER_TENSOR",
+         "real_min": [-1.2770955562591553],
+         "real_max": [1.3705415725708008]
+       }
+     }
+   }
+   ```
+2. **ONNX 导出路径更新**: 新增 `export_mode` 单节点 GRU 导出路径，通过 `ensure_quant_gru_onnx_registered(opset=18)` 注册 `custom_gru::quant_gru` / `custom_gru::quant_bigru` symbolic，并在 legacy exporter (`dynamo=False`) 下导出为标准 ONNX `GRU` 节点；支持单向/双向 GRU、`hx=None` 与显式 `hx` 输入。新增 `get_quant_gru_custom_opsets()`、`normalize_quant_gru_onnx_to_optimized_baseline()` 和 `prune_quant_gru_raw_l0_param_encodings()`，用于统一 custom opset 配置、规范化 ONNX 局部命名并清理 AIMET 原生 `*_l0` 参数 encoding。
+
+### Bug 修复
+1. 修复"对于一开始没有开启POT2模式, 中间开启了POT2模式调用了对应的接口, C++中进行了量化参数的调整, 但没有反应到python端", 数据流链路断开的bug. 修复点: 所有会改变量化参数生成语义的配置变更，都必须标记 `_quant_params_dirty=True`
+
+---
+
+## [2026-06-04]
+
+### 新功能
+1. **普通 scale 支持**: 量化 scale 从原先仅支持 POT2（2 的幂次）形式扩展为支持普通 scale，可使用任意 `M + shift` 组合表示量化缩放参数，提升量化参数配置的灵活性。
+
+### Bug 修复
+1. 修复 affine 模式下边界量化导致的精度回退问题。
+2. 修复 LUT 表使用错误 scale 的问题。
+3. 修复 `encodeMShift` 中 Q mantissa 缺少 16-bit offset 的问题。
+4. 修复双向 GRU 导出 AIMET encodings 时，`weight_ih.weight` 和 `weight_hh.weight` 的 `zero_point` 未随反向分支拼接的问题；对称量化权重现在会输出与拼接后 `scale` 等长的全 0 `zero_point` 列表。
+
+---
+
+## [2026-04-21]
+
+### 工程化优化
+1. **GitHub Actions 工作流完善**: 新增并完善 Linux CUDA 构建、Docker CI 镜像构建和 Python 包发布流程。
+2. **Docker 环境更新**: 更新 Docker 构建环境及配套说明文档，改善 CI 和本地构建的一致性。
+3. **安装打包流程优化**: 更新 PyTorch 扩展的安装与打包流程，提升安装脚本的可维护性。
+
+---
+
 ## [2026-03-24]
 
 ### 版本更新

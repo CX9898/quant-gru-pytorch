@@ -13,7 +13,9 @@
 - **AIMET 兼容**：支持 AIMET encodings 格式的导入导出
 - **双向 GRU**：完整支持 bidirectional 模式
 - **与 PyTorch 兼容**：`QuantGRU` 接口与 `nn.GRU` 一致，可无缝替换
-- **ONNX 导出**：支持 QDQ 格式导出，便于部署到各类推理引擎
+- **ONNX 导出**：支持标准 GRU 单节点导出，便于硬件部署
+
+具体更新内容请查看 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 🔧 环境要求
 
@@ -279,110 +281,61 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 
 ## 📦 ONNX 导出
 
-`QuantGRU` 通过 `export_mode` 切换到纯 PyTorch 实现，使模型可被 ONNX 追踪；通过 `export_format` 选择浮点或 QDQ 伪量化路径。
+`QuantGRU` 在 `export_mode=True` 时导出为标准 ONNX `GRU` 节点（核心计算单节点）
 
 ### 导出模式工作原理
 
 ```
 forward()
   ├─ export_mode=False (默认) → CUDA C++ 实现（高性能推理）
-  └─ export_mode=True         → 纯 PyTorch 实现（可 ONNX 追踪）
-                                   ├─ export_format='float' → 浮点计算
-                                   └─ export_format='qdq'   → QDQ 伪量化
+  └─ export_mode=True         → ONNX 单节点 GRU 导出路径（仅导出上下文可用）
 ```
 
-### 导出模式
-
-| 属性 | 说明 |
-|------|------|
-| `export_mode=False` | **默认**，使用 CUDA C++ 实现（高性能推理） |
-| `export_mode=True` | 使用纯 PyTorch 实现（可被 ONNX 追踪） |
-
-### 导出格式选择
-
-通过 `export_format` 设置具体导出格式：
-
-| 格式 | 说明 | 适用场景 | 量化参数要求 |
-|------|------|----------|--------------|
-| `'float'` | **默认**，浮点格式 | 非量化模型部署 | 无 |
-| `'qdq'` | QDQ（Quantize-Dequantize）格式 | 量化模型部署（TensorRT、ONNX Runtime） | 需先校准 |
+### 标准导出示例（standalone）
 
 ```python
-gru.export_mode = True           # ONNX 导出前必须开启
-gru.export_format = 'float'      # 默认，浮点
-gru.export_format = 'qdq'        # 量化模型推荐（需先校准）
-```
-
-### QDQ 格式说明
-
-QDQ 在关键计算点插入伪量化（Fake Quantize）操作：
-
-- **与 CUDA 一致**：量化参数（scale/zero_point）与 CUDA 端完全一致
-- **ONNX 兼容**：使用标准 PyTorch 算子，推理引擎会自动识别并优化
-- **Per-channel 量化**：权重支持 per-channel 量化以保持精度
-
-### 浮点模型导出（默认）
-
-```python
-from quant_gru import QuantGRU
+from quant_gru import (
+    QuantGRU,
+    ensure_quant_gru_onnx_registered,
+    get_quant_gru_custom_opsets,
+)
 import torch
 
-gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
+gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cpu()
 gru.eval()
 
 gru.export_mode = True
+ensure_quant_gru_onnx_registered(opset=18)
 
-dummy_input = torch.randn(1, 50, 64).cuda()
+dummy_input = torch.randn(1, 50, 64).cpu()
 torch.onnx.export(
     gru, dummy_input, "gru_float.onnx",
+    opset_version=18,
+    dynamo=False, # PyTorch 2.x 需要此参数使用传统导出
+    custom_opsets=get_quant_gru_custom_opsets(),
     input_names=['input'],
     output_names=['output', 'hidden'],
     dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
-                  'output': {0: 'batch', 1: 'seq_len'}},
-    dynamo=False  # PyTorch 2.x 需要此参数使用传统导出
+                  'output': {0: 'batch', 1: 'seq_len'}}
 )
 
 gru.export_mode = False
 ```
 
-### 量化模型导出（QDQ 格式）
+### 与 `aimet_rx` 配合
 
-```python
-from quant_gru import QuantGRU
-import torch
-
-gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
-gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
-
-gru.calibrating = True
-for batch in calibration_loader:
-    gru(batch.cuda())
-gru.calibrating = False
-gru.finalize_calibration()  # 可选，导出时会自动调用
-
-gru.export_mode = True
-gru.export_format = 'qdq'
-gru.eval()
-
-dummy_input = torch.randn(1, 50, 64).cuda()
-torch.onnx.export(
-    gru, dummy_input, "gru_quantized.onnx",
-    input_names=['input'],
-    output_names=['output', 'hidden'],
-    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
-                  'output': {0: 'batch', 1: 'seq_len'}},
-    dynamo=False
-)
-
-gru.export_mode = False
-```
+- 本项目负责导出标准 ONNX `GRU` 节点和量化参数导入/导出接口。
+- 高层 `aimet_rx/export_onnx_and_encodings` 负责整模型导出、postprocess、
+  encodings 合并与命名规范化。
+- 推荐多 GRU 模型在导出前调用 `set_quant_gru_module_names(model)` 提升命名稳定性。
 
 ### 注意事项
 
 1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
-2. **QDQ 格式需要先完成校准**：先设置 `calibrating=True` 并调用 `forward()`，再调用 `finalize_calibration()`
-3. **导出后恢复 CUDA 模式**：设置 `export_mode = False` 以恢复高性能推理
-4. **PyTorch 2.x 兼容**：使用 `dynamo=False` 以使用传统 TorchScript 导出
+2. **导出使用 legacy exporter**：`torch.onnx.export(..., dynamo=False)`
+3. **必须指定 custom_opsets**：推荐使用 `custom_opsets=get_quant_gru_custom_opsets()`
+4. **第一版仅承诺 opset=18**
+5. **导出后恢复运行模式**：设置 `export_mode = False` 以恢复常规高性能推理
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
 
@@ -419,8 +372,7 @@ class QuantGRU(nn.Module):
 | `calibrating` | bool | False | 校准模式开关，True 时 forward 会收集校准数据 |
 | `calibration_method` | str | 'minmax' | 校准方法：'minmax'（快速，默认）/ 'sqnr'（高精度）/ 'percentile'（百分位） |
 | `percentile_value` | float | 100.0 | 百分位值，仅 'percentile' 方法使用（100.0 表示不裁剪） |
-| `export_mode` | bool | False | ONNX 导出模式，True 时使用纯 PyTorch 实现 |
-| `export_format` | str | 'float' | 导出格式：'float'（浮点）/ 'qdq'（伪量化，需先校准） |
+| `export_mode` | bool | False | ONNX 导出模式，True 时启用标准 GRU 单节点导出路径 |
 
 ### 主要方法
 

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "histogram_collector.h"
+#include "quantize_param_types.h"
 #include "quantize_bitwidth_config.h"  // for QuantBitWidth
 #include "quantize_ops_helper.h"       // for round_f, round_to_int
 
@@ -47,6 +48,20 @@ struct PotScaleResult {
     int8_t exp2_inv;   // POT 指数 (scale = 2^(-exp2_inv))
     float po2_scale;   // POT scale 值
     int32_t zero_point; // 零点
+};
+
+struct AffineScaleResult {
+    FixedPointScale fixed_scale;
+    float effective_scale;
+    int32_t zero_point;
+};
+
+struct EncodedScaleResult {
+    float continuous_scale;
+    FixedPointScale fixed_scale;
+    float effective_scale;
+    int8_t pot_shift;
+    int32_t zero_point;
 };
 
 // ============================================================================
@@ -388,6 +403,31 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
     return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
 }
 
+inline FixedPointScale encodeMShift(float scale) {
+    if (!(scale > 0.0f)) {
+        throw std::runtime_error("Invalid scale <= 0 in encodeMShift");
+    }
+    int exp2 = 0;
+    double mant = std::frexp(static_cast<double>(scale), &exp2);  // scale = mant * 2^exp2
+    uint32_t m = static_cast<uint32_t>(std::llround(mant * 65536.0));
+    if (m == 65536u) {
+        m = 32768u;
+        exp2 += 1;
+    }
+    if (m < 32768u) {
+        m = 32768u;
+    }
+    const int shift = 16 - exp2;
+    if (shift < std::numeric_limits<int8_t>::min() || shift > std::numeric_limits<int8_t>::max()) {
+        throw std::runtime_error("encodeMShift shift out of int8 range");
+    }
+    return FixedPointScale{static_cast<uint16_t>(m), static_cast<int8_t>(shift)};
+}
+
+inline float decodeMShift(const FixedPointScale &s) {
+    return static_cast<float>(s.multiplier) * std::ldexp(1.0f, -static_cast<int>(s.shift));
+}
+
 /**
  * 计算 zero-point
  * 
@@ -428,17 +468,164 @@ inline PotScaleResult convertToPot(
     float continuous_scale,
     float continuous_min,
     QuantBitWidth bw,
-    bool is_symmetric) {
-    
+    bool is_symmetric,
+    bool coverage_round = false) {
+
     const int64_t quant_min = bw.qmin();
-    
-    // 步骤 1: 转换到 POT（AIMET find_closest_power_of_2_scale）
-    auto [po2_scale, n] = roundScaleToPowerOfTwo(continuous_scale);
-    
-    // 步骤 2: 计算 zero-point
-    int32_t zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
-    
+
+    int8_t n;
+    float po2_scale;
+    if (coverage_round) {
+        // MINMAX 路径：与 main calibrateQuantParams 一致，向上取 scale（floor(log2(1/scale))）
+        // 保证 POT scale >= 连续 scale，避免范围被截断（覆盖优先）。
+        n = static_cast<int8_t>(std::floor(std::log2(1.0f / continuous_scale)));
+        po2_scale = std::pow(2.0f, -static_cast<float>(n));
+    } else {
+        // 直方图(SQNR/Percentile)路径：四舍五入到最近 2^n（AIMET find_closest_power_of_2_scale）
+        std::tie(po2_scale, n) = roundScaleToPowerOfTwo(continuous_scale);
+    }
+
+    int32_t zp;
+    if (is_symmetric) {
+        zp = 0;
+    } else if (coverage_round) {
+        // 与 main calibrateQuantParams 一致：将 min 对齐到 POT 网格后再算 zp
+        const float aligned_min = std::floor(continuous_min / po2_scale) * po2_scale;
+        zp = round_to_int(static_cast<float>(quant_min) - aligned_min / po2_scale);
+    } else {
+        zp = computeZeroPoint(continuous_min, po2_scale, quant_min, is_symmetric);
+    }
+
     return PotScaleResult{n, po2_scale, zp};
+}
+
+inline AffineScaleResult convertToAffineScale(
+    float continuous_scale,
+    float continuous_min,
+    QuantBitWidth bw,
+    bool is_symmetric) {
+    FixedPointScale fs = encodeMShift(continuous_scale);
+    float effective = decodeMShift(fs);
+    int32_t zp = computeZeroPoint(continuous_min, effective, bw.qmin(), is_symmetric);
+    return AffineScaleResult{fs, effective, zp};
+}
+
+inline EncodedScaleResult encodeScaleResult(
+    float continuous_scale,
+    float continuous_min,
+    QuantBitWidth bw,
+    bool is_symmetric,
+    bool use_pot2,
+    bool coverage_round = false) {
+    if (use_pot2) {
+        PotScaleResult pot = convertToPot(continuous_scale, continuous_min, bw, is_symmetric, coverage_round);
+        return EncodedScaleResult{
+            continuous_scale,
+            FixedPointScale{1u, pot.exp2_inv},
+            pot.po2_scale,
+            pot.exp2_inv,
+            pot.zero_point
+        };
+    }
+
+    AffineScaleResult affine = convertToAffineScale(continuous_scale, continuous_min, bw, is_symmetric);
+    int8_t compat_shift = static_cast<int8_t>(round_f(-std::log2(affine.effective_scale)));
+    return EncodedScaleResult{
+        continuous_scale,
+        affine.fixed_scale,
+        affine.effective_scale,
+        compat_shift,
+        affine.zero_point
+    };
+}
+
+inline ContinuousScaleResult calibrateContinuousScaleFromHistogram(
+    const Histogram &hist,
+    QuantBitWidth bw,
+    bool is_symmetric,
+    bool use_percentile = false,
+    float percentile = 99.99f) {
+    if (!hist.is_valid()) {
+        throw std::runtime_error("Histogram is invalid in calibrateContinuousScaleFromHistogram");
+    }
+    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
+    const bool is_unsigned = bw.is_unsigned_;
+    if (use_percentile) {
+        PercentileConfig config;
+        config.percentile = percentile;
+        return calibratePercentile(hist, num_steps, is_symmetric, config, is_unsigned);
+    }
+    SqnrConfig config;
+    return calibrateSqnr(hist, num_steps, is_symmetric, config, is_unsigned);
+}
+
+inline ContinuousScaleResult calibrateContinuousScaleFromRange(
+    float min_val,
+    float max_val,
+    QuantBitWidth bw,
+    bool is_symmetric) {
+    const int32_t quant_min = bw.qmin_auto_scale();
+    const int32_t quant_max = bw.qmax_auto_scale();
+    const int64_t num_steps = static_cast<int64_t>(quant_max) - static_cast<int64_t>(quant_min);
+    if (num_steps <= 0) {
+        throw std::runtime_error("num_steps must be > 0 in calibrateContinuousScaleFromRange");
+    }
+    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+
+    float min_with_zero = std::min(min_val, 0.0f);
+    float max_with_zero = std::max(max_val, 0.0f);
+    const float tensor_diff = (max_with_zero - min_with_zero) / static_cast<float>(num_steps);
+    const float adjustment_step = (tensor_diff < minimum_scale) ? minimum_scale : 0.0f;
+
+    float updated_min = min_with_zero;
+    float updated_max = max_with_zero;
+    if (is_symmetric) {
+        if (bw.is_unsigned_) {
+            updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
+            updated_min = 0.0f;
+        } else {
+            updated_max = max_with_zero + std::floor(static_cast<float>(num_steps) / 2.0f) * adjustment_step;
+            updated_min = min_with_zero - std::ceil(static_cast<float>(num_steps) / 2.0f) * adjustment_step;
+        }
+    } else {
+        updated_max = max_with_zero + static_cast<float>(num_steps) * adjustment_step;
+    }
+
+    float continuous_scale = minimum_scale;
+    float aligned_min = updated_min;
+    float aligned_max = updated_max;
+    if (is_symmetric) {
+        if (bw.is_unsigned_) {
+            const float data_max = std::max(updated_max, minimum_scale);
+            continuous_scale = std::max(data_max / static_cast<float>(quant_max), minimum_scale);
+            aligned_min = 0.0f;
+            aligned_max = continuous_scale * static_cast<float>(quant_max);
+        } else {
+            const int64_t num_pos_steps = num_steps / 2;
+            const int64_t num_neg_steps = (num_steps + 1) / 2;
+            const int additional_step = (num_steps == 3) ? 1 : 0;
+            const float delta_from_max = (num_pos_steps + additional_step > 0)
+                                             ? updated_max / static_cast<float>(num_pos_steps + additional_step)
+                                             : 0.0f;
+            const float delta_from_min =
+                (num_neg_steps > 0) ? -updated_min / static_cast<float>(num_neg_steps) : 0.0f;
+            continuous_scale = std::max(std::max(delta_from_max, delta_from_min), minimum_scale);
+            aligned_min = -static_cast<float>(num_neg_steps) * continuous_scale;
+            aligned_max = static_cast<float>(num_pos_steps) * continuous_scale;
+        }
+    } else {
+        const float range = std::max(updated_max - updated_min, minimum_scale * static_cast<float>(num_steps));
+        continuous_scale = std::max(range / static_cast<float>(num_steps), minimum_scale);
+        aligned_min = updated_min;
+        aligned_max = updated_min + continuous_scale * static_cast<float>(num_steps);
+    }
+
+    ContinuousScaleResult out;
+    out.scale = continuous_scale;
+    out.min = aligned_min;
+    out.max = aligned_max;
+    out.noise = 0.0f;
+    return out;
 }
 
 // ============================================================================
@@ -473,21 +660,9 @@ inline void calibrateQuantParamsFromHistogram(
         throw std::runtime_error("Histogram is invalid in calibrateQuantParamsFromHistogram");
     }
     
-    // 使用 auto scale 版本计算 num_steps（用于 SQNR/Percentile 校准）
-    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
-    const bool is_unsigned = bw.is_unsigned_;
-    
     // 步骤 1: 使用对应的校准方法计算连续 scale
-    ContinuousScaleResult continuous_result;
-    
-    if (use_percentile) {
-        PercentileConfig config;
-        config.percentile = percentile;
-        continuous_result = calibratePercentile(hist, num_steps, is_symmetric, config, is_unsigned);
-    } else {
-        SqnrConfig config;
-        continuous_result = calibrateSqnr(hist, num_steps, is_symmetric, config, is_unsigned);
-    }
+    ContinuousScaleResult continuous_result = calibrateContinuousScaleFromHistogram(
+        hist, bw, is_symmetric, use_percentile, percentile);
     
     // 步骤 2: 转换为 POT（与 AIMET 一致，无位宽约束）
     PotScaleResult pot_result = convertToPot(

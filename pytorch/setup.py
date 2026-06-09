@@ -18,6 +18,15 @@ except ImportError as exc:
 here = os.path.abspath(os.path.dirname(__file__))
 SHARED_LIB_NAME = 'libgru_quant_shared.so'
 SOURCE_LIB = os.path.join(here, 'lib', SHARED_LIB_NAME)
+VERSION_FILE = os.path.join(here, '_version.py')
+
+
+def read_version():
+    """Read package version without importing quant_gru."""
+    namespace = {}
+    with open(VERSION_FILE, 'r', encoding='utf-8') as f:
+        exec(f.read(), namespace)
+    return namespace['__version__']
 
 
 def normalize_arch_list(arch_list):
@@ -92,13 +101,6 @@ def resolve_cuda_arch_list():
     return arch_list
 
 
-ensure_supported_platform()
-ensure_cuda_build_environment()
-ensure_prebuilt_shared_library()
-RESOLVED_CUDA_ARCH_LIST = resolve_cuda_arch_list()
-print(f'Using TORCH_CUDA_ARCH_LIST={RESOLVED_CUDA_ARCH_LIST}')
-
-
 def copy_shared_library(install_dir):
     """
     复制共享库到安装目录的 lib 子目录
@@ -161,11 +163,23 @@ class DevelopWithLib(develop):
             copy_shared_library(install_dir)
 
 
+class BuildExtWithChecks(BuildExtension):
+    """Run CUDA-specific checks only when building the extension."""
+
+    def run(self):
+        ensure_supported_platform()
+        ensure_cuda_build_environment()
+        ensure_prebuilt_shared_library()
+        resolved_cuda_arch_list = resolve_cuda_arch_list()
+        print(f'Using TORCH_CUDA_ARCH_LIST={resolved_cuda_arch_list}')
+        super().run()
+
+
 setup(
     name='quant_gru',
-    version='1.0.4',
+    version=read_version(),
     description='Quantized GRU implementation with C++ backend',
-    py_modules=['quant_gru'],
+    py_modules=['quant_gru', '_version'],
     ext_modules=[
         CUDAExtension(
             name='gru_interface_binding',
@@ -194,7 +208,7 @@ setup(
         )
     ],
     cmdclass={
-        'build_ext': BuildExtension,
+        'build_ext': BuildExtWithChecks,
         'install': InstallWithLib,
         'install_lib': InstallLibWithLib,
         'develop': DevelopWithLib,
