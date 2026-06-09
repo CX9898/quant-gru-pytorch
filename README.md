@@ -292,7 +292,11 @@ forward()
 ### 标准导出示例（standalone）
 
 ```python
-from quant_gru import QuantGRU, ensure_quant_gru_onnx_registered
+from quant_gru import (
+    QuantGRU,
+    ensure_quant_gru_onnx_registered,
+    get_quant_gru_custom_opsets,
+)
 import torch
 
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cpu()
@@ -306,7 +310,7 @@ torch.onnx.export(
     gru, dummy_input, "gru_float.onnx",
     opset_version=18,
     dynamo=False, # PyTorch 2.x 需要此参数使用传统导出
-    custom_opsets={"custom_gru": 1},
+    custom_opsets=get_quant_gru_custom_opsets(),
     input_names=['input'],
     output_names=['output', 'hidden'],
     dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
@@ -327,7 +331,7 @@ gru.export_mode = False
 
 1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
 2. **导出使用 legacy exporter**：`torch.onnx.export(..., dynamo=False)`
-3. **必须指定 custom_opsets**：`custom_opsets={"custom_gru": 1}`
+3. **必须指定 custom_opsets**：推荐使用 `custom_opsets=get_quant_gru_custom_opsets()`
 4. **第一版仅承诺 opset=18**
 5. **导出后恢复运行模式**：设置 `export_mode = False` 以恢复常规高性能推理
 
