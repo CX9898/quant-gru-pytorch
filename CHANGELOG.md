@@ -26,9 +26,12 @@
      }
    }
    ```
+2. **ONNX 导出路径更新**: 新增 `export_mode` 单节点 GRU 导出路径，通过 `ensure_quant_gru_onnx_registered(opset=18)` 注册 `custom_gru::quant_gru` / `custom_gru::quant_bigru` symbolic，并在 legacy exporter (`dynamo=False`) 下导出为标准 ONNX `GRU` 节点；支持单向/双向 GRU、`hx=None` 与显式 `hx` 输入。新增 `get_quant_gru_custom_opsets()`、`normalize_quant_gru_onnx_to_optimized_baseline()` 和 `prune_quant_gru_raw_l0_param_encodings()`，用于统一 custom opset 配置、规范化 ONNX 局部命名并清理 AIMET 原生 `*_l0` 参数 encoding。
 
 ### Bug 修复
 1. 修复"对于一开始没有开启POT2模式, 中间开启了POT2模式调用了对应的接口, C++中进行了量化参数的调整, 但没有反应到python端", 数据流链路断开的bug. 修复点: 所有会改变量化参数生成语义的配置变更，都必须标记 `_quant_params_dirty=True`
+
+---
 
 ## [2026-06-04]
 
