@@ -760,7 +760,7 @@ class GRUFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input, weight_ih, weight_hh, bias_ih, bias_hh, h0, is_training,
-                use_quantization=False, quant_params=None):
+                use_quantization=False, quant_params=None, quant_storage_dtype="float32"):
         """
         前向传播
         
@@ -789,6 +789,7 @@ class GRUFunction(torch.autograd.Function):
         ctx.h0_is_none = (h0 is None)
         ctx.use_quantization = use_quantization
         ctx.is_training = is_training
+        ctx.quant_storage_dtype = quant_storage_dtype
 
         device = input.device if input.is_cuda else torch.device('cuda')
         input = ensure_cuda_float32(input, device)
@@ -811,11 +812,17 @@ class GRUFunction(torch.autograd.Function):
 
         # 根据 use_quantization 调用不同的前向函数
         if use_quantization:
-            # 量化模式：调用 forward_quant，返回量化值
+            # 量化模式：按 quant_storage_dtype 选择量化值存储类型
+            #   float32: 量化值用 float32 存储
+            #   int32:   量化值用 int32 存储（纯定点核心）
+            if quant_storage_dtype == "int32":
+                forward_quant_fn = gru_ops.forward_quant_int_storage
+            else:
+                forward_quant_fn = gru_ops.forward_quant_float_storage
             (output_full, v,
              W_q, R_q, bw_q, br_q, x_q,
              x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
-             weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = gru_ops.forward_quant(
+             weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask) = forward_quant_fn(
                 is_training=is_training,
                 time_steps=time_steps,
                 batch_size=batch_size,
@@ -979,7 +986,12 @@ class GRUFunction(torch.autograd.Function):
             weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask = \
                 [m.to(device) if m.numel() > 0 and not m.is_cuda else m for m in masks]
             
-            dx, dW, dR, dbw, dbr, dh = gru_ops.backward_quant(
+            # 按 quant_storage_dtype 选择反向函数：int32 接收 int32 量化值，内部转 float 后复用
+            if getattr(ctx, "quant_storage_dtype", "float32") == "int32":
+                backward_quant_fn = gru_ops.backward_quant_int_storage
+            else:
+                backward_quant_fn = gru_ops.backward_quant_float_storage
+            dx, dW, dR, dbw, dbr, dh = backward_quant_fn(
                 time_steps=time_steps, batch_size=batch_size,
                 input_size=input_size, hidden_size=hidden_size,
                 W_q=W_q, R_q=R_q, bw_q=bw_q, br_q=br_q, x_q=x_q,
@@ -1026,8 +1038,9 @@ class GRUFunction(torch.autograd.Function):
         dbr_pytorch = reorder_weights_haste_to_pytorch(dbr).contiguous() if not ctx.bias_hh_is_none else None
         grad_h0 = None if ctx.h0_is_none else dh
 
-        # 返回梯度(对应 forward 的 9 个参数)
-        return dx, dW_pytorch, dR_pytorch, dbw_pytorch, dbr_pytorch, grad_h0, None, None, None
+        # 返回梯度(对应 forward 的 10 个参数：最后三个 None 对应
+        # is_training/use_quantization/quant_params，第 10 个 None 对应 quant_storage_dtype)
+        return dx, dW_pytorch, dR_pytorch, dbw_pytorch, dbr_pytorch, grad_h0, None, None, None, None
 
 
 # ============================================================
@@ -1093,6 +1106,7 @@ class QuantGRU(nn.Module):
             bidirectional: bool = False,
             use_quantization: bool = False,
             use_pot2_scale: bool = True,
+            quant_storage_dtype: str = "float32",
     ):
         super(QuantGRU, self).__init__()
 
@@ -1100,6 +1114,10 @@ class QuantGRU(nn.Module):
             raise NotImplementedError("仅支持 num_layers=1")
         if dropout > 0:
             raise NotImplementedError("暂不支持 dropout")
+        if quant_storage_dtype not in ("float32", "int32"):
+            raise ValueError(
+                f"quant_storage_dtype 仅支持 'float32' 或 'int32'，当前为 {quant_storage_dtype}"
+            )
 
         # 基本配置
         self.input_size = input_size
@@ -1112,6 +1130,11 @@ class QuantGRU(nn.Module):
         self.use_quantization = use_quantization
         self._use_pot2_scale = bool(use_pot2_scale)
         self.num_directions = 2 if bidirectional else 1
+
+        # 量化值存储类型：
+        #   'float32': 量化值用 float32 存储（走 forward_quant_float_storage）
+        #   'int32':   量化值用 int32 存储（走 forward_quant_int_storage）
+        self.quant_storage_dtype = quant_storage_dtype
 
         # ONNX 导出开关：True 时启用单节点 GRU 导出路径
         self.export_mode = False
@@ -1250,6 +1273,10 @@ class QuantGRU(nn.Module):
             else:
                 state['_quant_params_locked'] = False
         state.pop('_quant_params_allow_overwrite', None)
+
+        # 兼容旧 pickle：缺省量化值存储类型为 float32
+        if 'quant_storage_dtype' not in state:
+            state['quant_storage_dtype'] = "float32"
         
         self.__dict__.update(state)
         self._use_pot2_scale = bool(getattr(self._bitwidth_config, 'usePOT2_', getattr(self, '_use_pot2_scale', True)))
@@ -2097,7 +2124,7 @@ class QuantGRU(nn.Module):
             input, self.weight_ih_l0, self.weight_hh_l0,
             self.bias_ih_l0 if self.bias else None,
             self.bias_hh_l0 if self.bias else None,
-            h0_forward, self.training, self.use_quantization, self.quant_params)
+            h0_forward, self.training, self.use_quantization, self.quant_params, self.quant_storage_dtype)
 
         # 反向方向(双向时)
         output_reverse, h_n_reverse = None, None
@@ -2107,7 +2134,7 @@ class QuantGRU(nn.Module):
                 input.flip(0), self.weight_ih_l0_reverse, self.weight_hh_l0_reverse,
                 self.bias_ih_l0_reverse if self.bias else None,
                 self.bias_hh_l0_reverse if self.bias else None,
-                h0_reverse, self.training, self.use_quantization, self.quant_params_reverse)
+                h0_reverse, self.training, self.use_quantization, self.quant_params_reverse, self.quant_storage_dtype)
             # 反转反向输出以对齐时间步
             output_reverse = output_reverse.flip(0)
 

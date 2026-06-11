@@ -282,7 +282,14 @@ void quantGRUForwardInt(
     uint8_t *weight_hh_linear_mask = nullptr,
     uint8_t *gate_input_mask = nullptr,
     uint8_t *gate_output_mask = nullptr,
-    uint8_t *h_mask = nullptr);
+    uint8_t *h_mask = nullptr,
+    // int32 量化值输出（int_storage 路径使用，由外部分配；nullptr=内部临时分配）
+    // 内容为定点整数值，供 backward 反量化后复用 float backward
+    int32_t *W_q_out = nullptr,   // [input_size, hidden_size * 3]
+    int32_t *R_q_out = nullptr,   // [hidden_size, hidden_size * 3]
+    int32_t *bw_q_out = nullptr,  // [hidden_size * 3]
+    int32_t *br_q_out = nullptr,  // [hidden_size * 3]
+    int32_t *x_q_out = nullptr);  // [time_steps, batch_size, input_size]
 
 // =====================================================================
 // CPU 量化 GRU 前向传播接口

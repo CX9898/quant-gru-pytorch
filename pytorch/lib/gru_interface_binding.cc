@@ -291,7 +291,7 @@ std::tuple<torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
            torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> 
-forward_quant_wrapper(
+forward_quant_float_storage_wrapper(
     bool is_training,  // 是否开启训练模式
     int time_steps, int batch_size, int input_size, int hidden_size,
     const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
@@ -425,6 +425,143 @@ forward_quant_wrapper(
                       W_q_ptr, R_q_ptr, bw_q_ptr, br_q_ptr, x_q_ptr,
                       x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
                       weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr);
+
+    return std::make_tuple(h, v, W_q, R_q, bw_q, br_q, x_q,
+                           x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor,
+                           weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
+}
+
+// =====================================================================
+// forward_quant_int_storage_wrapper: 量化前向传播（int32 存储）
+// =====================================================================
+// 与 forward_quant_float_storage_wrapper 的区别：
+//   - 量化值 W_q/R_q/bw_q/br_q/x_q 使用 torch.int32 存储（内容为定点整数）
+//   - 内部走 quantGRUForwardInt -> quantGRUForwardInt32 纯定点计算
+//   - h/v 仍反量化为 float32 返回，供 autograd 使用
+// 返回协议与 float 版本一致：
+//   (h, v, W_q, R_q, bw_q, br_q, x_q, ...masks)
+std::tuple<torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+forward_quant_int_storage_wrapper(
+    bool is_training,  // 是否开启训练模式
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
+    const torch::Tensor &br, const torch::Tensor &x,
+    const torch::Tensor &h0,  // 初始隐藏状态，可以为空张量
+    const GRUQuantParamsPy &quant_params) {
+
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "x must be CUDA float32 tensor");
+
+    // h0 可以为空张量（未提供初始状态）
+    const float *h0_ptr = nullptr;
+    if (h0.defined() && h0.numel() > 0) {
+        TORCH_CHECK(h0.is_cuda() && h0.dtype() == torch::kFloat32,
+                    "h0 must be CUDA float32 tensor");
+        TORCH_CHECK(h0.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
+                    "h0 must have shape [batch_size, hidden_size]");
+        h0_ptr = h0.data_ptr<float>();
+    }
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // 创建输出张量（h/v 仍是 float32，反量化后返回给 autograd）
+    auto h = torch::empty({time_steps + 1, batch_size, hidden_size},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+    auto v = torch::empty({time_steps, batch_size, hidden_size * 4},
+                          torch::dtype(torch::kFloat32).device(torch::kCUDA));
+
+    // 创建 int32 量化值输出张量（训练和推理都分配，由 quantGRUForwardInt 写入）
+    const int hidden3 = hidden_size * 3;
+    auto W_q = torch::empty({input_size, hidden3}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto R_q = torch::empty({hidden_size, hidden3}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto bw_q = torch::empty({hidden3}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto br_q = torch::empty({hidden3}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    auto x_q = torch::empty({time_steps, batch_size, input_size}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+
+    // 创建 QAT mask 张量（训练模式时分配，否则为空张量）
+    torch::Tensor x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor;
+    torch::Tensor weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask;
+
+    uint8_t *x_mask_ptr = nullptr, *h0_mask_ptr = nullptr;
+    uint8_t *W_mask_ptr = nullptr, *R_mask_ptr = nullptr;
+    uint8_t *bw_mask_ptr = nullptr, *br_mask_ptr = nullptr;
+    uint8_t *weight_ih_mask_ptr = nullptr, *weight_hh_mask_ptr = nullptr;
+    uint8_t *gate_input_mask_ptr = nullptr, *gate_output_mask_ptr = nullptr, *h_mask_ptr = nullptr;
+
+    if (is_training) {
+        x_mask_tensor = torch::empty({time_steps, batch_size, input_size},
+                                     torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        h0_mask_tensor = (h0_ptr != nullptr)
+            ? torch::empty({batch_size, hidden_size}, torch::dtype(torch::kUInt8).device(torch::kCUDA))
+            : torch::empty({0}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        W_mask_tensor = torch::empty({input_size, hidden3},
+                                     torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        R_mask_tensor = torch::empty({hidden_size, hidden3},
+                                     torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        bw_mask_tensor = torch::empty({hidden3},
+                                      torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        br_mask_tensor = torch::empty({hidden3},
+                                      torch::dtype(torch::kUInt8).device(torch::kCUDA));
+
+        weight_ih_linear_mask = torch::empty({time_steps, batch_size, hidden3},
+                                             torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        weight_hh_linear_mask = torch::empty({time_steps, batch_size, hidden3},
+                                             torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        gate_input_mask = torch::empty({time_steps, batch_size, hidden3},
+                                       torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        gate_output_mask = torch::empty({time_steps, batch_size, hidden3},
+                                        torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        h_mask = torch::empty({time_steps, batch_size, hidden_size},
+                              torch::dtype(torch::kUInt8).device(torch::kCUDA));
+
+        x_mask_ptr = x_mask_tensor.data_ptr<uint8_t>();
+        h0_mask_ptr = (h0_ptr != nullptr) ? h0_mask_tensor.data_ptr<uint8_t>() : nullptr;
+        W_mask_ptr = W_mask_tensor.data_ptr<uint8_t>();
+        R_mask_ptr = R_mask_tensor.data_ptr<uint8_t>();
+        bw_mask_ptr = bw_mask_tensor.data_ptr<uint8_t>();
+        br_mask_ptr = br_mask_tensor.data_ptr<uint8_t>();
+        weight_ih_mask_ptr = weight_ih_linear_mask.data_ptr<uint8_t>();
+        weight_hh_mask_ptr = weight_hh_linear_mask.data_ptr<uint8_t>();
+        gate_input_mask_ptr = gate_input_mask.data_ptr<uint8_t>();
+        gate_output_mask_ptr = gate_output_mask.data_ptr<uint8_t>();
+        h_mask_ptr = h_mask.data_ptr<uint8_t>();
+    } else {
+        auto empty_mask = torch::empty({0}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
+        x_mask_tensor = empty_mask.clone();
+        h0_mask_tensor = empty_mask.clone();
+        W_mask_tensor = empty_mask.clone();
+        R_mask_tensor = empty_mask.clone();
+        bw_mask_tensor = empty_mask.clone();
+        br_mask_tensor = empty_mask.clone();
+        weight_ih_linear_mask = empty_mask.clone();
+        weight_hh_linear_mask = empty_mask.clone();
+        gate_input_mask = empty_mask.clone();
+        gate_output_mask = empty_mask.clone();
+        h_mask = empty_mask.clone();
+    }
+
+    // 转换量化参数
+    GRUQuantParams cpp_params = quant_params.to_cpp();
+
+    // 调用整数存储量化前向传播：内部量化并写入 int32 q 输出，h/v 反量化为 float
+    quantGRUForwardInt(is_training, time_steps, batch_size, input_size, hidden_size,
+                       W.data_ptr<float>(), R.data_ptr<float>(),
+                       bw.data_ptr<float>(), br.data_ptr<float>(),
+                       x.data_ptr<float>(), h0_ptr, cpp_params, g_blas_handle,
+                       h.data_ptr<float>(), v.data_ptr<float>(),
+                       x_mask_ptr, h0_mask_ptr, W_mask_ptr, R_mask_ptr, bw_mask_ptr, br_mask_ptr,
+                       weight_ih_mask_ptr, weight_hh_mask_ptr, gate_input_mask_ptr, gate_output_mask_ptr, h_mask_ptr,
+                       W_q.data_ptr<int32_t>(), R_q.data_ptr<int32_t>(),
+                       bw_q.data_ptr<int32_t>(), br_q.data_ptr<int32_t>(), x_q.data_ptr<int32_t>());
 
     return std::make_tuple(h, v, W_q, R_q, bw_q, br_q, x_q,
                            x_mask_tensor, h0_mask_tensor, W_mask_tensor, R_mask_tensor, bw_mask_tensor, br_mask_tensor,
@@ -572,7 +709,7 @@ std::tuple<torch::Tensor, torch::Tensor> forward_calibrate_wrapper(
 // 输入: W_q, R_q, bw_q, br_q, x_q 是前向传播保存的量化值
 // 函数会直接反量化这些值，然后进行反向传播
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-backward_quant_wrapper(
+backward_quant_float_storage_wrapper(
     int time_steps, int batch_size, int input_size, int hidden_size,
     torch::Tensor &W_q, torch::Tensor &R_q, torch::Tensor &bw_q,
     torch::Tensor &br_q, torch::Tensor &x_q,
@@ -701,6 +838,55 @@ backward_quant_wrapper(
                      get_mask_ptr(h_mask));
 
     return std::make_tuple(dx, dW, dR, dbw, dbr, dh);
+}
+
+// =====================================================================
+// backward_quant_int_storage_wrapper: 量化反向传播（int32 存储）
+// =====================================================================
+// 输入 W_q/R_q/bw_q/br_q/x_q 为 forward 保存的 int32 量化值。
+// 先转换为 float32 q 值，然后复用 float 存储版的反量化 + 反向逻辑。
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+backward_quant_int_storage_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    torch::Tensor &W_q, torch::Tensor &R_q, torch::Tensor &bw_q,
+    torch::Tensor &br_q, torch::Tensor &x_q,
+    const torch::Tensor &dh_new,
+    const torch::Tensor &h,
+    const torch::Tensor &v,
+    const GRUQuantParamsPy &quant_params,
+    // QAT masks（仅在训练模式时有效）
+    const torch::Tensor &x_mask,
+    const torch::Tensor &h0_mask,
+    const torch::Tensor &W_mask,
+    const torch::Tensor &R_mask,
+    const torch::Tensor &bw_mask,
+    const torch::Tensor &br_mask,
+    const torch::Tensor &weight_ih_linear_mask,
+    const torch::Tensor &weight_hh_linear_mask,
+    const torch::Tensor &gate_input_mask,
+    const torch::Tensor &gate_output_mask,
+    const torch::Tensor &h_mask) {
+
+    TORCH_CHECK(W_q.is_cuda() && W_q.dtype() == torch::kInt32, "W_q must be CUDA int32 tensor");
+    TORCH_CHECK(R_q.is_cuda() && R_q.dtype() == torch::kInt32, "R_q must be CUDA int32 tensor");
+    TORCH_CHECK(bw_q.is_cuda() && bw_q.dtype() == torch::kInt32, "bw_q must be CUDA int32 tensor");
+    TORCH_CHECK(br_q.is_cuda() && br_q.dtype() == torch::kInt32, "br_q must be CUDA int32 tensor");
+    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kInt32, "x_q must be CUDA int32 tensor");
+
+    // int32 量化值 -> float32 量化值（内容仍是定点整数，dtype 转 float）
+    // 后续 float 存储版会对这些 buffer 原地反量化，因此必须是独立可写副本。
+    torch::Tensor W_q_f = W_q.to(torch::kFloat32);
+    torch::Tensor R_q_f = R_q.to(torch::kFloat32);
+    torch::Tensor bw_q_f = bw_q.to(torch::kFloat32);
+    torch::Tensor br_q_f = br_q.to(torch::kFloat32);
+    torch::Tensor x_q_f = x_q.to(torch::kFloat32);
+
+    return backward_quant_float_storage_wrapper(
+        time_steps, batch_size, input_size, hidden_size,
+        W_q_f, R_q_f, bw_q_f, br_q_f, x_q_f,
+        dh_new, h, v, quant_params,
+        x_mask, h0_mask, W_mask, R_mask, bw_mask, br_mask,
+        weight_ih_linear_mask, weight_hh_linear_mask, gate_input_mask, gate_output_mask, h_mask);
 }
 
 // =====================================================================
@@ -1396,10 +1582,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("percentile_value") = 99.99f);
 
     // =====================================================================
-    // forward_quant: 量化前向传播（返回量化值）
+    // forward_quant_float_storage: 量化前向传播（量化值 float32 存储）
     // =====================================================================
-    m.def("forward_quant", &forward_quant_wrapper,
-          "GRU quantized forward pass (returns quantized values for backward).\n"
+    m.def("forward_quant_float_storage", &forward_quant_float_storage_wrapper,
+          "GRU quantized forward pass with float32-storage quantized values.\n"
           "\n"
           "Args:\n"
           "  is_training: Enable training mode (saves quantized values)\n"
@@ -1413,7 +1599,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "  tuple(h, v, W_q, R_q, bw_q, br_q, x_q, ...masks)\n"
           "  - h: Hidden states [T+1, B, H]\n"
           "  - v: Intermediate values [T, B, H*4]\n"
-          "  - W_q, R_q, bw_q, br_q, x_q: Quantized values (empty if not training)\n"
+          "  - W_q, R_q, bw_q, br_q, x_q: Quantized values (float32 storage)\n"
+          "  - ...masks: QAT masks (empty if not training)\n",
+          py::arg("is_training"),
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
+          py::arg("h0") = torch::Tensor(),
+          py::arg("quant_params"));
+
+    // =====================================================================
+    // forward_quant_int_storage: 量化前向传播（量化值 int32 存储）
+    // =====================================================================
+    m.def("forward_quant_int_storage", &forward_quant_int_storage_wrapper,
+          "GRU quantized forward pass with int32-storage quantized values.\n"
+          "Internally uses quantGRUForwardInt -> quantGRUForwardInt32 fixed-point path.\n"
+          "\n"
+          "Args:\n"
+          "  is_training: Enable training mode (saves quantized values)\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bw, br: Weight matrices and biases (float32)\n"
+          "  x: Input tensor [T, B, I] (float32)\n"
+          "  h0: Initial hidden state [B, H], optional\n"
+          "  quant_params: Quantization parameters\n"
+          "\n"
+          "Returns:\n"
+          "  tuple(h, v, W_q, R_q, bw_q, br_q, x_q, ...masks)\n"
+          "  - h: Hidden states [T+1, B, H] (float32, dequantized)\n"
+          "  - v: Intermediate values [T, B, H*4] (float32, dequantized)\n"
+          "  - W_q, R_q, bw_q, br_q, x_q: Quantized values (int32 storage)\n"
           "  - ...masks: QAT masks (empty if not training)\n",
           py::arg("is_training"),
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
@@ -1489,14 +1702,48 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 
     // =====================================================================
-    // backward_quant: 量化反向传播（使用保存的量化值）
+    // backward_quant_float_storage: 量化反向传播（量化值 float32 存储）
     // =====================================================================
-    m.def("backward_quant", &backward_quant_wrapper,
-          "GRU quantized backward pass (uses saved quantized values from forward).\n"
+    m.def("backward_quant_float_storage", &backward_quant_float_storage_wrapper,
+          "GRU quantized backward pass with float32-storage quantized values.\n"
           "\n"
           "Args:\n"
           "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
-          "  W_q, R_q, bw_q, br_q, x_q: Quantized values from forward pass\n"
+          "  W_q, R_q, bw_q, br_q, x_q: Quantized values from forward pass (float32 storage)\n"
+          "  dh_new: Upstream gradient [T+1, B, H]\n"
+          "  h: Hidden states from forward [T+1, B, H]\n"
+          "  v: Intermediate values from forward [T, B, H*4]\n"
+          "  quant_params: Quantization parameters\n"
+          "  ...masks: QAT masks (empty if not training)\n"
+          "\n"
+          "Returns:\n"
+          "  (dx, dW, dR, dbw, dbr, dh) gradient tuple\n",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W_q"), py::arg("R_q"), py::arg("bw_q"), py::arg("br_q"), py::arg("x_q"),
+          py::arg("dh_new"), py::arg("h"), py::arg("v"),
+          py::arg("quant_params"),
+          py::arg("x_mask") = torch::Tensor(),
+          py::arg("h0_mask") = torch::Tensor(),
+          py::arg("W_mask") = torch::Tensor(),
+          py::arg("R_mask") = torch::Tensor(),
+          py::arg("bw_mask") = torch::Tensor(),
+          py::arg("br_mask") = torch::Tensor(),
+          py::arg("weight_ih_linear_mask") = torch::Tensor(),
+          py::arg("weight_hh_linear_mask") = torch::Tensor(),
+          py::arg("gate_input_mask") = torch::Tensor(),
+          py::arg("gate_output_mask") = torch::Tensor(),
+          py::arg("h_mask") = torch::Tensor());
+
+    // =====================================================================
+    // backward_quant_int_storage: 量化反向传播（量化值 int32 存储）
+    // =====================================================================
+    m.def("backward_quant_int_storage", &backward_quant_int_storage_wrapper,
+          "GRU quantized backward pass with int32-storage quantized values.\n"
+          "Converts int32 quantized values to float32 then reuses float-storage backward.\n"
+          "\n"
+          "Args:\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W_q, R_q, bw_q, br_q, x_q: Quantized values from forward pass (int32 storage)\n"
           "  dh_new: Upstream gradient [T+1, B, H]\n"
           "  h: Hidden states from forward [T+1, B, H]\n"
           "  v: Intermediate values from forward [T, B, H*4]\n"
