@@ -31,3 +31,5 @@
 /tmp/
 
 /release/
+
+__pycache__/
