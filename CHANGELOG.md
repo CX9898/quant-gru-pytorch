@@ -4,6 +4,33 @@
 
 ---
 
+## [2026-06-12]
+
+### 版本更新
+1. **版本号更新**: 将版本号从 1.0.5 更新至 1.0.6
+
+### 新功能
+1. **量化值存储类型开关 `quant_storage_dtype`**: `QuantGRU` 新增 `quant_storage_dtype` 参数，可在量化前向中切换量化值的存储类型：
+   - `"float32"`（默认，原行为）：量化值以 float32 存储，走 `forward_quant_float_storage`；
+   - `"int32"`：量化值以 int32 存储，走纯定点核心 `forward_quant_int_storage`。
+   反向传播按存储类型自动选择对应实现（int32 路径内部转 float 后复用原 backward），训练/推理两端均支持。
+2. **纯定点 int 进 int 出推理接口（AIMET INT16_FIXED_EVAL 打通）**:
+   - C++ 新增 `quantGRUForwardIntIO`：输入 `x_q` / `h0_q` 为上游已量化的 int32 值（同 `scale_x/zp_x`、`scale_h/zp_h` 网格），内部仅量化权重、跳过输入量化，直出 int32 `h_q`（不反量化）。
+   - 新增 binding `forward_quantized_int_io`（int32 输入 → int32 `output_q`/`h_n_q`）。
+   - `QuantGRU` 新增 `forward_quantized(input, hx=None)`：纯定点推理边界，仅接受已量化的 int32 输入（非整数输入抛 `TypeError`），输出恒为 int32 量化隐藏状态，满足 `(output_q - zp) * scale == 部署核 fp 输出`。
+3. **AIMET 黑盒接入契约方法**: `QuantGRU` 新增 `aimet_capabilities()`、`aimet_configure(mode)`、`get_io_quant_meta()`，用于 AIMET 适配层的能力上报、模式配置与输入/输出/隐藏态量化元数据查询。
+4. **有效定点 scale 解码**: 新增 binding `decode_effective_scale(scale, usePOT2)`，返回内核实际使用的（POT2/M16 编码后）有效 scale，保证 `get_io_quant_meta` 上报的 scale 与定点输出 bit-exact 一致。
+
+### 功能优化
+1. **输入/隐藏态校准改用全局 min/max（与 AIMET 对齐）**: 输入 `x` 与隐藏态 `h` 的 MinMax 校准范围统计由原先的「分时间步 EMA（decay=0.9，顺序相关）」改为顺序无关的全局 min/max。
+   - 修复双向 GRU 正/反向因 EMA 顺序相关导致 `scale_x/zp_x` 不一致的问题：正/反向现共享同一输入网格，双向纯定点 int 进 int 出可达 bit-exact。
+   - 与 AIMET 的全局 MinMax 校准语义一致，便于上游量化器对齐。
+
+### 说明 / 已知限制
+1. **校准跳过初始隐藏状态 h0**: MinMax 与直方图两条校准路径均跳过 `h[0]`（假设无状态 GRU 的 h0 恒为零，避免零值污染 `min_h_/max_h_`）。rxmet 实际接入路径（校准/推理均只传 input、h0 走零初始化）满足该前提。若未来出现有状态/流式 GRU 在校准阶段传入非零 h0，则需改为按需将 h0 纳入范围统计（已在代码注释中标注修法）。
+
+---
+
 ## [2026-06-05]
 
 ### 版本更新

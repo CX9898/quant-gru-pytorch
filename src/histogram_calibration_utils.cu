@@ -29,6 +29,9 @@ void collectAllHistogramsGPU(
     const size_t h_size = time_steps * batch_size * hidden_size;
     const size_t Wx_add_bw_size = time_steps * batch_size * hidden_size * 3;
     const size_t Rh_add_br_size = time_steps * batch_size * hidden_size * 3;
+    // 跳过 h[0]（初始隐藏状态），假设 h0 恒为零（无状态 GRU）。
+    // 详见 calibration_gpu.cu updateGRUQuantizationRangesGPU 中 h 范围统计处的说明：
+    // 若未来校准会传入非零 h0，需改为按需纳入 h0（否则 h0 超范围会被 clamp）。
     const float *h_skip_initial = h + batch_size * hidden_size;
 
     // 创建 streams（按需数量）

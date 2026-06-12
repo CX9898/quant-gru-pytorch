@@ -821,35 +821,50 @@ void quantGRUForwardInt(bool is_training, const int time_steps, const int batch_
                      uint8_t *weight_hh_linear_mask,
                      uint8_t *gate_input_mask,
                      uint8_t *gate_output_mask,
-                     uint8_t *h_mask) {
+                     uint8_t *h_mask,
+                     // int32 量化值输出（int_storage 路径使用，nullptr=内部临时分配）
+                     int32_t *W_q_out,
+                     int32_t *R_q_out,
+                     int32_t *bw_q_out,
+                     int32_t *br_q_out,
+                     int32_t *x_q_out) {
     const int hidden3 = hidden_size * 3;
     const std::size_t x_size = time_steps * batch_size * input_size;
     const std::size_t h_size = (time_steps + 1) * batch_size * hidden_size;
     const int NH = batch_size * hidden_size;
     const auto &bw_cfg = quant_parms.bitwidth_config_;
 
+    // 量化值缓冲区：优先使用外部传入的 int32 buffer（int_storage 路径），
+    // 否则退回内部临时 dev::vector（推理/独立调用）。
+    dev::vector<int32_t> W_q_tmp, R_q_tmp, bw_q_tmp, br_q_tmp, x_q_tmp;
+    int32_t *W_q = W_q_out;
+    int32_t *R_q = R_q_out;
+    int32_t *bw_q = bw_q_out;
+    int32_t *br_q = br_q_out;
+    int32_t *x_q = x_q_out;
+    if (W_q == nullptr) { W_q_tmp.resize(input_size * hidden3); W_q = W_q_tmp.data(); }
+    if (R_q == nullptr) { R_q_tmp.resize(hidden_size * hidden3); R_q = R_q_tmp.data(); }
+    if (bw_q == nullptr) { bw_q_tmp.resize(hidden3); bw_q = bw_q_tmp.data(); }
+    if (br_q == nullptr) { br_q_tmp.resize(hidden3); br_q = br_q_tmp.data(); }
+    if (x_q == nullptr) { x_q_tmp.resize(x_size); x_q = x_q_tmp.data(); }
+
     // 1. 量化权重（W, R, bw, br）- 使用统一接口
-    dev::vector<int32_t> W_q(input_size * hidden3);
-    dev::vector<int32_t> R_q(hidden_size * hidden3);
-    dev::vector<int32_t> bw_q(hidden3);
-    dev::vector<int32_t> br_q(hidden3);
     if (is_training) {
         quantitativeWeight<true>(input_size, hidden_size, W, R, bw, br, quant_parms,
-                                 W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                 W_q, R_q, bw_q, br_q,
                                  W_mask, R_mask, bw_mask, br_mask);
     } else {
         quantitativeWeight<false>(input_size, hidden_size, W, R, bw, br, quant_parms,
-                                  W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                  W_q, R_q, bw_q, br_q,
                                   nullptr, nullptr, nullptr, nullptr);
     }
 
     // 2. 量化输入 x（使用统一接口）
-    dev::vector<int32_t> x_quant(x_size);
     if (is_training) {
-        dev::quantificationBitwidth<true>(x, x_quant.data(), x_mask, x_size,
+        dev::quantificationBitwidth<true>(x, x_q, x_mask, x_size,
                                           quant_parms.fixed_scale_x_, quant_parms.zp_x_, bw_cfg.x_);
     } else {
-        dev::quantificationBitwidth<false>(x, x_quant.data(), nullptr, x_size,
+        dev::quantificationBitwidth<false>(x, x_q, nullptr, x_size,
                                            quant_parms.fixed_scale_x_, quant_parms.zp_x_, bw_cfg.x_);
     }
 
@@ -874,8 +889,8 @@ void quantGRUForwardInt(bool is_training, const int time_steps, const int batch_
 
     // 5. 调用核心定点计算（quantGRUForwardInt32 接受已量化的输入）
     quantGRUForwardInt32(is_training, time_steps, batch_size, input_size, hidden_size,
-                         W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
-                         x_quant.data(), h0_q_ptr,
+                         W_q, R_q, bw_q, br_q,
+                         x_q, h0_q_ptr,
                          quant_parms, g_blas_handle,
                          h_quant.data(), v != nullptr ? v_quant.data() : nullptr,
                          weight_ih_linear_mask, weight_hh_linear_mask, 
@@ -902,6 +917,69 @@ void quantGRUForwardInt(bool is_training, const int time_steps, const int batch_
         const char *err_str = cudaGetErrorString(err);
         fprintf(stderr, "CUDA error in quantGRUForwardInt: %s\n", err_str);
         throw std::runtime_error(std::string("CUDA error in quantGRUForwardInt: ") + err_str);
+    }
+}
+
+// =====================================================================
+// quantGRUForwardIntIO: 纯定点 int 进 int 出（上游已量化输入）
+// =====================================================================
+// 与 quantGRUForwardInt 的区别：
+//   - 输入 x_q / h0_q 已是 int32 量化值（上游层在同一 scale_x/zp_x、scale_h/zp_h
+//     网格上产生），内部不再量化输入。
+//   - 仅量化权重（float master weight → int32，每次调用按 quant_params 量化）。
+//   - 输出 h_q 为 int32 量化隐藏状态（不反量化）。
+// 用于 AIMET INT16_FIXED_EVAL 打通的纯定点链路（int-in / int-out）。
+void quantGRUForwardIntIO(
+    bool is_training,
+    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const int32_t *x_q, const int32_t *h0_q,
+    const GRUQuantParams &quant_parms, const cublasHandle_t &g_blas_handle,
+    int32_t *h_q, int32_t *v_q,
+    // 权重量化 mask（训练时外部分配，推理时可为 nullptr）
+    uint8_t *W_mask,
+    uint8_t *R_mask,
+    uint8_t *bw_mask,
+    uint8_t *br_mask,
+    // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
+    uint8_t *weight_ih_linear_mask,
+    uint8_t *weight_hh_linear_mask,
+    uint8_t *gate_input_mask,
+    uint8_t *gate_output_mask,
+    uint8_t *h_mask) {
+    const int hidden3 = hidden_size * 3;
+
+    // 1. 量化权重（int32 临时缓冲；输入 x_q/h0_q 已是量化值，无需再量化）
+    dev::vector<int32_t> W_q(input_size * hidden3);
+    dev::vector<int32_t> R_q(hidden_size * hidden3);
+    dev::vector<int32_t> bw_q(hidden3);
+    dev::vector<int32_t> br_q(hidden3);
+    if (is_training) {
+        quantitativeWeight<true>(input_size, hidden_size, W, R, bw, br, quant_parms,
+                                 W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                 W_mask, R_mask, bw_mask, br_mask);
+    } else {
+        quantitativeWeight<false>(input_size, hidden_size, W, R, bw, br, quant_parms,
+                                  W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                                  nullptr, nullptr, nullptr, nullptr);
+    }
+
+    // 2. 直接调用纯定点核心（x_q / h0_q 已是 int32）
+    quantGRUForwardInt32(is_training, time_steps, batch_size, input_size, hidden_size,
+                         W_q.data(), R_q.data(), bw_q.data(), br_q.data(),
+                         x_q, h0_q,
+                         quant_parms, g_blas_handle,
+                         h_q, v_q,
+                         weight_ih_linear_mask, weight_hh_linear_mask,
+                         gate_input_mask, gate_output_mask, h_mask);
+
+    // 同步并检查 CUDA 错误
+    cudaDeviceSynchronize();
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        const char *err_str = cudaGetErrorString(err);
+        fprintf(stderr, "CUDA error in quantGRUForwardIntIO: %s\n", err_str);
+        throw std::runtime_error(std::string("CUDA error in quantGRUForwardIntIO: ") + err_str);
     }
 }
 
