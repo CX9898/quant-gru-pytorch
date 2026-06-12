@@ -569,6 +569,68 @@ forward_quant_int_storage_wrapper(
 }
 
 // =====================================================================
+// forward_quantized_int_io_wrapper: 纯定点 int 进 int 出推理前向
+// =====================================================================
+// 与 forward_quantized_wrapper 区别：输入 x_q / h0_q 已是 int32 量化值
+// （上游层在同一 scale_x/zp_x、scale_h/zp_h 网格产生），内部不再量化输入，
+// 仅量化权重，直出 int32 h_q。用于打通 AIMET INT16_FIXED_EVAL 纯定点链路。
+// 输入:
+//   W, R, bw, br: float master 权重/偏置
+//   x_q: [T, B, I] int32（已量化输入）
+//   h0_q: [B, H] int32（已量化初始状态），可为空张量
+// 返回:
+//   (output_q[T,B,H] int32, h_n_q[1,B,H] int32)
+std::tuple<torch::Tensor, torch::Tensor>
+forward_quantized_int_io_wrapper(
+    int time_steps, int batch_size, int input_size, int hidden_size,
+    const torch::Tensor &W, const torch::Tensor &R, const torch::Tensor &bw,
+    const torch::Tensor &br, const torch::Tensor &x_q,
+    const torch::Tensor &h0_q,  // 已量化初始隐藏状态，可以为空张量
+    const GRUQuantParamsPy &quant_params) {
+
+    TORCH_CHECK(W.is_cuda() && W.dtype() == torch::kFloat32, "W must be CUDA float32 tensor");
+    TORCH_CHECK(R.is_cuda() && R.dtype() == torch::kFloat32, "R must be CUDA float32 tensor");
+    TORCH_CHECK(bw.is_cuda() && bw.dtype() == torch::kFloat32, "bw must be CUDA float32 tensor");
+    TORCH_CHECK(br.is_cuda() && br.dtype() == torch::kFloat32, "br must be CUDA float32 tensor");
+    TORCH_CHECK(x_q.is_cuda() && x_q.dtype() == torch::kInt32, "x_q must be CUDA int32 tensor");
+    TORCH_CHECK(x_q.sizes() == torch::IntArrayRef({time_steps, batch_size, input_size}),
+                "x_q must have shape [time_steps, batch_size, input_size]");
+
+    // h0_q 可以为空张量（未提供初始状态）
+    const int32_t *h0_q_ptr = nullptr;
+    if (h0_q.defined() && h0_q.numel() > 0) {
+        TORCH_CHECK(h0_q.is_cuda() && h0_q.dtype() == torch::kInt32,
+                    "h0_q must be CUDA int32 tensor");
+        TORCH_CHECK(h0_q.sizes() == torch::IntArrayRef({batch_size, hidden_size}),
+                    "h0_q must have shape [batch_size, hidden_size]");
+        h0_q_ptr = h0_q.data_ptr<int32_t>();
+    }
+
+    // 确保 cublas handle 已初始化
+    if (g_blas_handle == nullptr) {
+        init_gru_cublas(g_blas_handle);
+    }
+
+    // int32 隐藏状态量化值输出 [(T+1), B, H]
+    auto h_q = torch::empty({time_steps + 1, batch_size, hidden_size},
+                            torch::dtype(torch::kInt32).device(torch::kCUDA));
+
+    GRUQuantParams cpp_params = quant_params.to_cpp();
+
+    quantGRUForwardIntIO(/*is_training=*/false, time_steps, batch_size, input_size, hidden_size,
+                         W.data_ptr<float>(), R.data_ptr<float>(),
+                         bw.data_ptr<float>(), br.data_ptr<float>(),
+                         x_q.data_ptr<int32_t>(), h0_q_ptr,
+                         cpp_params, g_blas_handle,
+                         h_q.data_ptr<int32_t>(), /*v_q=*/nullptr);
+
+    auto output_q = h_q.slice(0, 1, time_steps + 1).contiguous();      // [T, B, H]
+    auto h_n_q = h_q.slice(0, time_steps, time_steps + 1).contiguous(); // [1, B, H]
+
+    return std::make_tuple(output_q, h_n_q);
+}
+
+// =====================================================================
 // forward_fp_wrapper: 浮点前向传播（训练/推理）
 // =====================================================================
 // 返回: (h, v)
@@ -1372,8 +1434,29 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     return cpp_params;
 }
 
+// 返回 forward 实际使用的"有效定点 scale"（连续浮点）。
+// 量化核 dequantize 使用的是按 usePOT2 编码后的 fixed_scale（POT2: 2^-shift；
+// M16: M*2^-(15+rshift)），而非校准得到的原始连续 scale。get_io_quant_meta
+// 必须返回该有效 scale，才能保证 (q - zp) * scale 与 forward_quantized 的整数
+// 输出 bit-exact 一致。
+float decode_effective_scale_wrapper(float scale, bool usePOT2) {
+    if (!(scale > 0.0f)) {
+        throw std::invalid_argument("scale must be > 0");
+    }
+    FixedPointScale fixed = encode_fixed_from_scale(scale, usePOT2);
+    int8_t shift = encode_shift_from_scale(scale);
+    return decode_scale_for_python(fixed, shift);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "GRU Interface Python Bindings";
+
+    // 有效定点 scale 解码（供 get_io_quant_meta 返回 bit-exact 一致的 scale）
+    m.def("decode_effective_scale", &decode_effective_scale_wrapper,
+          "Decode the effective fixed-point scale actually used by the quantized "
+          "kernel (POT2 or M16 encoded), given the raw continuous scale and "
+          "usePOT2 flag. Ensures (q - zp) * scale matches forward_quantized output.",
+          py::arg("scale"), py::arg("usePOT2"));
 
     // 初始化 cublas handle
     m.def("init_gru_cublas", &init_gru_cublas_wrapper, "Initialize cuBLAS handle for GRU");
@@ -1632,6 +1715,32 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
           py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x"),
           py::arg("h0") = torch::Tensor(),
+          py::arg("quant_params"));
+
+    // =====================================================================
+    // forward_quantized_int_io: 纯定点 int 进 int 出推理前向（AIMET 打通链路）
+    // =====================================================================
+    m.def("forward_quantized_int_io", &forward_quantized_int_io_wrapper,
+          "GRU pure fixed-point inference forward with INT input and INT output.\n"
+          "x_q / h0_q are already-quantized int32 values (on scale_x/zp_x, scale_h/zp_h\n"
+          "grids). Only weights are quantized internally; input quantization is skipped.\n"
+          "Outputs int32 fixed-point hidden states WITHOUT dequantization.\n"
+          "Intended for AIMET INT16_FIXED_EVAL fully-integer pipeline.\n"
+          "\n"
+          "Args:\n"
+          "  time_steps, batch_size, input_size, hidden_size: Dimension parameters\n"
+          "  W, R, bw, br: Weight matrices and biases (float32 master weights)\n"
+          "  x_q: Input tensor [T, B, I] (int32, already quantized)\n"
+          "  h0_q: Initial hidden state [B, H], optional (int32, already quantized)\n"
+          "  quant_params: Quantization parameters\n"
+          "\n"
+          "Returns:\n"
+          "  tuple(output_q, h_n_q)\n"
+          "  - output_q: [T, B, H] int32 quantized hidden states (h_q[1:])\n"
+          "  - h_n_q:    [1, B, H] int32 last hidden state (h_q[-1:])\n",
+          py::arg("time_steps"), py::arg("batch_size"), py::arg("input_size"), py::arg("hidden_size"),
+          py::arg("W"), py::arg("R"), py::arg("bw"), py::arg("br"), py::arg("x_q"),
+          py::arg("h0_q") = torch::Tensor(),
           py::arg("quant_params"));
 
     // =====================================================================

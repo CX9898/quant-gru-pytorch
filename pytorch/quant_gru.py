@@ -2143,6 +2143,227 @@ class QuantGRU(nn.Module):
             output_forward, h_n_forward, output_reverse, h_n_reverse
         )
 
+    # -------------------- AIMET 黑盒接入契约 v1 --------------------
+    #
+    # 说明：以下方法供 aimet_torch.fixed_point.quantgru_adapter 黑盒调用。
+    # adapter 通过检测 QuantGRU 类是否原生实现这些方法来决定走原生还是 stub。
+    # 契约文档：rxmet/doc/QuantGRU_INT16接入计划.md 第 1 章（已冻结 v1）。
+
+    # AIMET ExecutionMode 对应的 mode 字符串（须与 aimet_capabilities 一致）
+    _AIMET_SUPPORTED_MODES = (
+        "fp32",
+        "fp32_qdq",
+        "fp16_qdq",
+        "int16_fixed_eval",
+        "int16_fixed_qat_sim",
+        "calibrating",
+    )
+
+    def aimet_capabilities(self) -> dict:
+        """返回 AIMET 适配能力报告（契约 v1 §1.8）。
+
+        minor 1.1：forward_quantized 为纯定点 int 进 int 出（上游直接传
+        scale_x/zp_x 网格上的 int32 x_q），不再接受 fp32 输入。
+        """
+        return {
+            "adapter_version": "1.1",
+            "supported_modes": list(self._AIMET_SUPPORTED_MODES),
+            "forward_io_dtype": "float32",
+            "forward_io_device": "cuda",
+            "requires_calibration_for": ["int16_fixed_eval", "int16_fixed_qat_sim"],
+            "supports_forward_quantized": True,
+            # forward_quantized 接受的输入 dtype（int 进 int 出纯定点链路）
+            "forward_quantized_input_dtypes": ["int32"],
+        }
+
+    def aimet_configure(self, mode: str) -> None:
+        """AIMET 单一入口：把 mode 字符串映射到已有 flag（契约 v1 §1.5）。
+
+        仅复用 use_quantization / calibrating / export_mode 已有语义，
+        不引入新的内部计算路径。
+        """
+        normalized = str(mode).lower()
+        if normalized not in self._AIMET_SUPPORTED_MODES:
+            raise ValueError(
+                f"Unsupported aimet_configure mode: {mode!r}. "
+                f"Expected one of: {', '.join(self._AIMET_SUPPORTED_MODES)}."
+            )
+        if normalized == "calibrating":
+            self.calibrating = True
+            self.use_quantization = False
+            self.export_mode = False
+            return
+        self.calibrating = False
+        self.export_mode = False
+        self.use_quantization = normalized in ("int16_fixed_eval", "int16_fixed_qat_sim")
+
+    def get_io_quant_meta(self) -> dict:
+        """返回输入/输出/隐藏状态的量化元数据（契约 v1 §1.3）。
+
+        Returns:
+            {
+              "input":  {"scale", "zp", "bitwidth", "is_symmetric", "is_unsigned"},
+              "output": {...},   # 与 hidden 一致（基于 h 网格）
+              "hidden": {...},
+            }
+
+        Raises:
+            RuntimeError: 未校准时抛出。
+
+        Note:
+            返回的 scale/zp 必须与 forward_quantized 的整数输出严格一致
+            （bit-exact 依赖）。这里读取的是与定点核心相同的 quant_params。
+        """
+        if not self.is_calibrated() or self.quant_params is None:
+            raise RuntimeError("QuantGRU not calibrated")
+
+        qp = self.quant_params
+        bw = self._bitwidth_config
+        use_pot2 = bool(self.use_pot2_scale)
+
+        def _entry(prefix: str) -> dict:
+            raw_scale = float(getattr(qp, f"scale_{prefix}"))
+            # 返回核实际使用的有效定点 scale（POT2/M16 编码后），保证与
+            # forward_quantized 的整数输出 bit-exact 一致。
+            scale = float(gru_ops.decode_effective_scale(raw_scale, use_pot2))
+            zp = int(getattr(qp, f"zp_{prefix}"))
+            bitwidth = int(getattr(bw, f"{prefix}")) if bw is not None else 16
+            is_symmetric = bool(getattr(bw, f"{prefix}symmetric_")) if bw is not None else True
+            is_unsigned = bool(getattr(bw, f"{prefix}unsigned_", False)) if bw is not None else False
+            if is_unsigned and is_symmetric:
+                is_symmetric = False
+            return {
+                "scale": scale,
+                "zp": zp,
+                "bitwidth": bitwidth,
+                "is_symmetric": is_symmetric,
+                "is_unsigned": is_unsigned,
+            }
+
+        return {
+            "input": _entry("x_"),
+            "output": _entry("h_"),
+            "hidden": _entry("h_"),
+        }
+
+    def _parse_initial_state_quant(
+            self,
+            hx: Optional[torch.Tensor],
+            batch_size: int,
+            device: torch.device,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """解析已量化初始隐藏状态（int32，scale_h/zp_h 网格）。"""
+        if hx is None:
+            return None, None
+        expected_shape = (self.num_layers * self.num_directions, batch_size, self.hidden_size)
+        if hx.shape != expected_shape:
+            raise ValueError(f"hx 形状应为 {expected_shape}，实际 {hx.shape}")
+
+        def _conv(t: torch.Tensor) -> torch.Tensor:
+            return t.to(device=device, dtype=torch.int32).contiguous()
+
+        h0_forward = _conv(hx[0])
+        h0_reverse = _conv(hx[1]) if self.bidirectional else None
+        return h0_forward, h0_reverse
+
+    def _run_forward_quantized_dir(
+            self,
+            input: torch.Tensor,
+            h0: Optional[torch.Tensor],
+            quant_params,
+            device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """单方向纯定点推理（int 进 int 出），返回 int32 (output_q[T,B,H], h_n_q[1,B,H])。
+
+        input 为已量化 int32 x_q（scale_x/zp_x 网格），核内仅量化权重，跳过输入量化。
+        """
+        seq_len, batch_size, input_size = input.shape
+
+        # 权重转换为 haste 格式（与 GRUFunction.forward 完全一致，含 None bias 处理）
+        W, R, bw, br = convert_weights_to_haste_format(
+            self.weight_ih_l0 if quant_params is self.quant_params else self.weight_ih_l0_reverse,
+            self.weight_hh_l0 if quant_params is self.quant_params else self.weight_hh_l0_reverse,
+            (self.bias_ih_l0 if quant_params is self.quant_params else self.bias_ih_l0_reverse) if self.bias else None,
+            (self.bias_hh_l0 if quant_params is self.quant_params else self.bias_hh_l0_reverse) if self.bias else None,
+            self.hidden_size, device,
+        )
+
+        h0_tensor = h0 if h0 is not None else \
+            torch.empty(0, device=device, dtype=torch.int32)
+        return gru_ops.forward_quantized_int_io(
+            time_steps=seq_len,
+            batch_size=batch_size,
+            input_size=input_size,
+            hidden_size=self.hidden_size,
+            W=W, R=R, bw=bw, br=br,
+            x_q=input,
+            h0_q=h0_tensor,
+            quant_params=quant_params,
+        )
+
+    def forward_quantized(
+            self,
+            input: torch.Tensor,
+            hx: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """纯定点推理边界（契约 v1 §1.4，int 进 int 出），仅供 AIMET INT16 mode 调用。
+
+        input 为上游在 scale_x/zp_x 网格上的已量化 int32 x_q，核内不再量化输入，
+        仅量化权重。hx 同样为 scale_h/zp_h 网格上的 int32 h0_q（或 None）。
+
+        输出恒为 int32 量化隐藏状态（未反量化），shape 与标准 forward 一致，
+        满足 ``(output_q - zp) * scale == 部署核 fp 输出``。
+
+        Args:
+            input: [T, B, I] 或 [B, T, I]（batch_first），int32 / CUDA。
+            hx: 已量化初始隐藏状态 int32 / CUDA，可为 None。
+
+        Raises:
+            RuntimeError: 未校准时抛出。
+            TypeError: input 非整数 dtype 时抛出。
+        """
+        if not self.is_calibrated() or self.quant_params is None:
+            raise RuntimeError("QuantGRU not calibrated")
+        if self.export_mode:
+            raise RuntimeError("forward_quantized 不支持 export_mode")
+        if input.is_floating_point():
+            raise TypeError(
+                "forward_quantized 仅接受已量化的整数输入（int 进 int 出）；"
+                f"收到 dtype={input.dtype}。上游须传 scale_x/zp_x 网格上的 int32 x_q。"
+            )
+
+        self._ensure_cublas_initialized()
+
+        # batch_first 输入转换（唯一入口，与 forward 对齐）
+        if self.batch_first:
+            input = input.transpose(0, 1).contiguous()
+
+        seq_len, batch_size, input_size = input.shape
+        device = input.device if input.is_cuda else torch.device('cuda')
+        input = input.to(device=device, dtype=torch.int32).contiguous()
+
+        h0_forward, h0_reverse = self._parse_initial_state_quant(hx, batch_size, device)
+
+        # 前向方向
+        output_q_forward, h_n_q_forward = self._run_forward_quantized_dir(
+            input, h0_forward, self.quant_params, device)
+
+        # 反向方向（双向时），整数域翻转/拼接
+        output_q_reverse, h_n_q_reverse = None, None
+        if self.bidirectional:
+            output_q_reverse, h_n_q_reverse = self._run_forward_quantized_dir(
+                input.flip(0), h0_reverse, self.quant_params_reverse, device)
+            output_q_reverse = output_q_reverse.flip(0)
+
+        output_q, h_n_q = self._combine_bidirectional_outputs(
+            output_q_forward, h_n_q_forward, output_q_reverse, h_n_q_reverse)
+
+        # batch_first 输出转换（唯一出口）
+        if self.batch_first:
+            output_q = output_q.transpose(0, 1).contiguous()
+
+        return output_q, h_n_q
+
     # -------------------- 量化参数导出/导入/调整 --------------------
 
     def export_quant_params(

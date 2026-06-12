@@ -291,6 +291,36 @@ void quantGRUForwardInt(
     int32_t *br_q_out = nullptr,  // [hidden_size * 3]
     int32_t *x_q_out = nullptr);  // [time_steps, batch_size, input_size]
 
+// GPU 纯定点 GRU 前向传播（int 进 int 出，上游已量化输入）
+// 与 quantGRUForwardInt 区别：x_q / h0_q 已是 int32 量化值（同 scale_x/zp_x、
+// scale_h/zp_h 网格），内部仅量化权重，不再量化输入；输出 int32 h_q（不反量化）。
+// 用于打通 AIMET INT16_FIXED_EVAL 的纯定点链路。
+// 输入:
+//   W, R, bw, br: [.] float master 权重/偏置（内部量化）
+//   x_q:  [T, B, I]    已量化输入序列（int32）
+//   h0_q: [B, H]       已量化初始隐藏状态（int32，可为 nullptr，nullptr 时用零点）
+// 输出:
+//   h_q:  [(T+1), B, H]  量化隐藏状态（int32，未反量化）
+//   v_q:  [T, B, H*4]    量化中间值（可为 nullptr）
+void quantGRUForwardIntIO(
+    bool is_training,
+    const int time_steps, const int batch_size, const int input_size, const int hidden_size,
+    const float *W, const float *R, const float *bw, const float *br,
+    const int32_t *x_q, const int32_t *h0_q,
+    const GRUQuantParams &quant_parms, const cublasHandle_t &g_blas_handle,
+    int32_t *h_q, int32_t *v_q,
+    // 权重量化 mask（训练时外部分配，推理时可为 nullptr）
+    uint8_t *W_mask = nullptr,
+    uint8_t *R_mask = nullptr,
+    uint8_t *bw_mask = nullptr,
+    uint8_t *br_mask = nullptr,
+    // 计算过程 mask（训练时外部分配，推理时可为 nullptr）
+    uint8_t *weight_ih_linear_mask = nullptr,
+    uint8_t *weight_hh_linear_mask = nullptr,
+    uint8_t *gate_input_mask = nullptr,
+    uint8_t *gate_output_mask = nullptr,
+    uint8_t *h_mask = nullptr);
+
 // =====================================================================
 // CPU 量化 GRU 前向传播接口
 // =====================================================================
