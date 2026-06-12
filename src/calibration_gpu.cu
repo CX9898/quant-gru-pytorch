@@ -1864,16 +1864,26 @@ void updateGRUQuantizationRangesGPU(
     }
     
     // =====================================================================
-    // 1. 输入/输出：使用 EMA 累积（平滑噪声）
+    // 1. 输入/输出：使用全局极值累积（与 AIMET MinMax 一致）
     // =====================================================================
-    
-    // 输入 x 的范围（分时间步 EMA）
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_, 0.9f, stream);
-    
-    // 隐藏状态 h 的范围（跳过 h0，分时间步 EMA）
-    gpu_hist::compute_minmax_per_step_ema_gpu(
-        h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_, 0.9f, stream);
+    // 注意：原实现对 x/h 使用「分时间步 EMA」(decay=0.9)，但 EMA 顺序相关：
+    //   - 双向 GRU 反向喂 flip(x)，时间步遍历顺序相反 → scale_x/zp_x 与正向不同；
+    //   - 且与 AIMET 的全局 min/max 网格不一致（EMA 会平滑掉极值）。
+    // 为打通纯定点 int 进 int 出链路并与 AIMET 对齐，改为顺序无关的全局 min/max。
+
+    // 输入 x 的范围（全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_, stream);
+
+    // 隐藏状态 h 的范围（跳过 h0，全局极值）
+    gpu_hist::compute_minmax_per_step_gpu(
+        h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_, stream);
+
+    // --- 原 EMA 实现（已停用，保留以备回溯）---
+    // gpu_hist::compute_minmax_per_step_ema_gpu(
+    //     x, time_steps, NI, quant_ranges.min_x_, quant_ranges.max_x_, 0.9f, stream);
+    // gpu_hist::compute_minmax_per_step_ema_gpu(
+    //     h + NH, time_steps, NH, quant_ranges.min_h_, quant_ranges.max_h_, 0.9f, stream);
     
     // =====================================================================
     // 2. 中间值：使用全局极值累积（与 AIMET 一致）
