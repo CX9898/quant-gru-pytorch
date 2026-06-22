@@ -81,7 +81,6 @@ ONNX 导出:
 import json
 import math
 import re
-import warnings
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -1419,7 +1418,7 @@ class QuantGRU(nn.Module):
         # 例如: JSON 中的 "input" 对应 _OPERATOR_MAP 的 "input"
         # 例如: JSON 中的 "weight_ih" 对应 _OPERATOR_MAP 的 "weight_ih"
         # 
-        # ⚠️ 向后兼容：支持旧的字段名映射
+        # 向后兼容：支持旧的字段名映射
         # 旧字段名 -> 新字段名
         # ========================================================================
         # 字段名映射表（向后兼容旧 JSON 配置）
@@ -1439,7 +1438,7 @@ class QuantGRU(nn.Module):
             if json_key in FIELD_NAME_MAP:
                 new_key = FIELD_NAME_MAP[json_key]
                 if verbose:
-                    print(f"  ⚠️  [字段名映射] '{json_key}' -> '{new_key}' (向后兼容)")
+                    print(f"  [字段名映射] '{json_key}' -> '{new_key}' (向后兼容)")
                 normalized_op_config[new_key] = op_cfg
             else:
                 normalized_op_config[json_key] = op_cfg
@@ -1526,12 +1525,12 @@ class QuantGRU(nn.Module):
                 unsigned_str = "is_unsigned=true (UINT)" if unsigned else "is_unsigned=false (INT)"
                 sym_str = "is_symmetric=true" if sym else "is_symmetric=false"
                 missing_details.append(
-                    f"    ⚠️ 缺少字段: '{op_name}'\n"
+                    f"    缺少字段: '{op_name}'\n"
                     f"       → 将使用默认值: bitwidth={bw}, {sym_str}, {unsigned_str}"
                 )
             
             if verbose:
-                print(f"\n  ⚠️ 警告：JSON 配置文件 '{config_file}' 缺少以下算子配置:\n"
+                print(f"\n  提示：JSON 配置文件 '{config_file}' 缺少以下算子配置，将使用默认值:\n"
                       + "\n".join(missing_details) + "\n")
         
         # 报告缺失的属性（算子存在但属性缺失）
@@ -1548,10 +1547,10 @@ class QuantGRU(nn.Module):
                 attr_lines = []
                 for attr_name, default_val in attrs:
                     attr_lines.append(f"       → 缺少 '{attr_name}'，将使用默认值: {default_val}")
-                attr_details.append(f"    ⚠️ 算子 '{op_name}':\n" + "\n".join(attr_lines))
+                attr_details.append(f"    算子 '{op_name}':\n" + "\n".join(attr_lines))
             
             if verbose:
-                print(f"\n  ⚠️ 警告：JSON 配置文件 '{config_file}' 以下算子缺少部分属性:\n"
+                print(f"\n  提示：JSON 配置文件 '{config_file}' 以下算子缺少部分属性，将使用默认值:\n"
                       + "\n".join(attr_details) + "\n")
 
         # 标记量化参数需要更新（forward 时会自动调用 finalize_calibration）
@@ -1770,11 +1769,8 @@ class QuantGRU(nn.Module):
         """解析 ONNX 导出时用于可读命名的模块名称。"""
         if self._module_name:
             return str(self._module_name)
-        warnings.warn(
-            "QuantGRU._module_name 未设置，ONNX 导出将使用默认名称 'gru'。"
-            "多 GRU 模型建议先调用 set_quant_gru_module_names(model)。",
-            UserWarning,
-        )
+        print("  提示：QuantGRU._module_name 未设置，ONNX 导出将使用默认名称 'gru'。"
+              "多 GRU 模型建议先调用 set_quant_gru_module_names(model)。")
         return "gru"
 
     def _pack_onnx_gru_direction_weights(
@@ -2560,7 +2556,7 @@ class QuantGRU(nn.Module):
                     dst[field] = [a, b]
 
             if verbose and verbose_prefix:
-                for k in ["dtype", "symmetric", "enc_type", "zero_point"]:
+                for k in ["dtype", "symmetric", "enc_type"]:
                     if k in dst and k in src and dst[k] != src[k]:
                         print(f"  ⚠️ 警告：{verbose_prefix} 字段 '{k}' 正反向不一致："
                               f"forward={dst[k]}, reverse={src[k]}。将保留 forward 值。")
@@ -2577,7 +2573,7 @@ class QuantGRU(nn.Module):
             module_name = self._module_name
             if not module_name:
                 if verbose:
-                    print(f"  ⚠️ 警告：_module_name 未设置，使用默认名称 'gru'")
+                    print(f"  _module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
         # 获取量化参数
@@ -3053,7 +3049,7 @@ class QuantGRU(nn.Module):
             module_name = self._module_name
             if not module_name:
                 if verbose:
-                    print(f"  ⚠️ 警告：_module_name 未设置，使用默认名称 'gru'")
+                    print(f"  _module_name 未设置，使用默认名称 'gru'")
                 module_name = "gru"
         
         # 保存模块名称（用于调试信息和后续使用）
@@ -3303,10 +3299,10 @@ class QuantGRU(nn.Module):
             # （因为它们分别使用 h 和 update_gate_output 的参数）
             if "add_final_hidden" in internal_ops:
                 if verbose:
-                    print(f"  ⚠️ 警告：忽略 'add_final_hidden'（使用 h 的参数）")
+                    print(f"  跳过 'add_final_hidden'（使用 h 的参数）")
             if "sub_one_minus_update" in internal_ops:
                 if verbose:
-                    print(f"  ⚠️ 警告：忽略 'sub_one_minus_update'（使用 update_gate_output 的参数）")
+                    print(f"  跳过 'sub_one_minus_update'（使用 update_gate_output 的参数）")
         else:
             if verbose:
                 print(f"  ⚠️ 警告：未找到 'internal_ops'")
@@ -3811,7 +3807,7 @@ def _extract_weight_scale_for_export(bitwidth_config, quant_params, op_name: str
         enc_type = "PER_CHANNEL"
     else:
         if verbose:
-            print(f"  ⚠️ 警告：算子 '{op_name}' 未配置 quantization_granularity，按 PER_CHANNEL 导出")
+            print(f"  算子 '{op_name}' 未配置 quantization_granularity，按默认 PER_CHANNEL 导出")
         enc_type = "PER_CHANNEL"
 
     return scale_list, enc_type
@@ -4068,7 +4064,7 @@ def _parse_weight_operator(bitwidth_config, quant_params, op_name: str, op_data:
     enc_type = op_data.get("enc_type")
     if enc_type is None:
         if verbose:
-            print(f"  ⚠️ 警告：算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，默认 PER_CHANNEL")
+            print(f"  算子 '{op_name}' 在 JSON 中缺少 'enc_type' 字段，按默认 PER_CHANNEL 解析")
         enc_type = "PER_CHANNEL"
     scale_list, _ = _parse_runtime_scale_lists(op_name, op_data)
 
