@@ -2777,6 +2777,8 @@ class QuantGRU(nn.Module):
                         print(f"      拼接字段 {field}: {len(merged_dict[field])} 元素")
                 elif isinstance(merged_dict[field], list):
                     merged_dict[field].append(br_data[field])
+                elif isinstance(br_data[field], list):
+                    merged_dict[field] = [merged_dict[field]] + br_data[field]
                 else:
                     # 都是标量，转为列表
                     merged_dict[field] = [
@@ -3816,6 +3818,13 @@ def _extract_non_weight_scale_for_export(quant_params, op_info: dict) -> tuple:
     return [float(raw_value)], "PER_TENSOR"
 
 
+def _scalar_or_list(values: list):
+    """导出量化字段时，单元素用标量，多元素保留列表。"""
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
 def _encode_mshift_py(scale: float) -> tuple:
     if not (scale > 0.0):
         raise ValueError(f"scale 必须 > 0，当前值: {scale}")
@@ -3896,24 +3905,26 @@ def _build_single_operator_data(bitwidth_config, quant_params, op_name: str, op_
     if result is None:
         return None
     
-    scale_value, enc_type = result
-    scale_value = [float(v) for v in scale_value]
+    scale_values, enc_type = result
+    scale_values = [float(v) for v in scale_values]
     
     # 构建算子数据（按 AIMET 字段顺序）
     zp_value = int(getattr(quant_params, op_info["zp_attr"])) if op_info["zp_attr"] and hasattr(quant_params, op_info["zp_attr"]) else 0
-    zp_list = [zp_value for _ in scale_value]
+    zp_values = [zp_value for _ in scale_values]
+    real_min_values = [s * (qmin - zp) for s, zp in zip(scale_values, zp_values)]
+    real_max_values = [s * (qmax - zp) for s, zp in zip(scale_values, zp_values)]
     
     op_data = {
         "dtype": _bitwidth_to_dtype(bitwidth, is_unsigned=is_unsigned),
         "symmetric": is_symmetric,
-        "scale": scale_value,
-        "zero_point": zp_list,
+        "scale": _scalar_or_list(scale_values),
+        "zero_point": _scalar_or_list(zp_values),
         "enc_type": enc_type,
     }
     
     # 计算 real_min 和 real_max
-    op_data["real_min"] = [s * (qmin - zp) for s, zp in zip(scale_value, zp_list)]
-    op_data["real_max"] = [s * (qmax - zp) for s, zp in zip(scale_value, zp_list)]
+    op_data["real_min"] = _scalar_or_list(real_min_values)
+    op_data["real_max"] = _scalar_or_list(real_max_values)
     
     return op_data
 
