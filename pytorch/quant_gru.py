@@ -66,11 +66,12 @@ QuantGRU - 支持量化的 GRU 实现
 
 ONNX 导出:
     >>> from quant_gru import ensure_quant_gru_onnx_registered
+    >>> opset = 18  # 支持 >=13；需与 torch.onnx.export(opset_version=...) 一致
     >>> gru.export_mode = True
-    >>> ensure_quant_gru_onnx_registered(opset=18)
+    >>> ensure_quant_gru_onnx_registered(opset=opset)
     >>> torch.onnx.export(
     ...     gru, x, "model.onnx",
-    ...     opset_version=18,
+    ...     opset_version=opset,
     ...     dynamo=False,  # PyTorch 2.x 需要使用 legacy exporter
     ...     custom_opsets={"custom_gru": 1}
     ... )
@@ -267,51 +268,57 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
     注册 QuantGRU ONNX 导出所需的 custom op 与 symbolic。
 
     说明：
-        - 首次注册仅支持 opset=18（与项目导出承诺一致）
-        - 注册成功后重复调用会静默返回（与参考实现一致）
+        - 支持 opset>=13（Squeeze axes 使用输入形式）
+        - runtime custom op 只定义一次；symbolic 按 opset 分别注册
+        - 注册成功后对同一 opset 重复调用会静默返回
     """
-    if getattr(ensure_quant_gru_onnx_registered, "_done", False):
-        return
-
-    if int(opset) != 18:
+    opset = int(opset)
+    if opset < 13:
         raise ValueError(
-            f"ensure_quant_gru_onnx_registered 首次注册仅支持 opset=18，当前为 {opset}"
+            f"ensure_quant_gru_onnx_registered 仅支持 opset>=13，当前为 {opset}"
         )
 
     global _QUANT_GRU_ONNX_LIB
     if _QUANT_GRU_ONNX_LIB is None:
         _QUANT_GRU_ONNX_LIB = torch.library.Library(QUANT_GRU_ONNX_DOMAIN, "FRAGMENT")
 
-    _QUANT_GRU_ONNX_LIB.define(
-        "quant_gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
-        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
-    )
-    _QUANT_GRU_ONNX_LIB.define(
-        "quant_bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
-        "int hidden_size, int num_layers) -> (Tensor, Tensor)"
-    )
+    if not getattr(ensure_quant_gru_onnx_registered, "_runtime_done", False):
+        _QUANT_GRU_ONNX_LIB.define(
+            "quant_gru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+            "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+        )
+        _QUANT_GRU_ONNX_LIB.define(
+            "quant_bigru(Tensor x, Tensor h0, Tensor W, Tensor R, Tensor B, "
+            "int hidden_size, int num_layers) -> (Tensor, Tensor)"
+        )
 
-    def _gru_cpu(x, h0, W, R, B, hidden_size, num_layers):
-        t, b = x.shape[0], x.shape[1]
-        out = x.new_zeros(t, b, int(hidden_size))
-        h_n = x.new_zeros(int(num_layers), b, int(hidden_size))
-        return out, h_n
+        def _gru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+            t, b = x.shape[0], x.shape[1]
+            out = x.new_zeros(t, b, int(hidden_size))
+            h_n = x.new_zeros(int(num_layers), b, int(hidden_size))
+            return out, h_n
 
-    def _bigru_cpu(x, h0, W, R, B, hidden_size, num_layers):
-        t, b = x.shape[0], x.shape[1]
-        out = x.new_zeros(t, b, 2 * int(hidden_size))
-        h_n = x.new_zeros(2 * int(num_layers), b, int(hidden_size))
-        return out, h_n
+        def _bigru_cpu(x, h0, W, R, B, hidden_size, num_layers):
+            t, b = x.shape[0], x.shape[1]
+            out = x.new_zeros(t, b, 2 * int(hidden_size))
+            h_n = x.new_zeros(2 * int(num_layers), b, int(hidden_size))
+            return out, h_n
 
-    try:
-        _QUANT_GRU_ONNX_LIB.impl("quant_gru", _gru_cpu, dispatch_key="CPU")
-    except TypeError:
-        _QUANT_GRU_ONNX_LIB.impl("quant_gru", "CPU", _gru_cpu)
+        try:
+            _QUANT_GRU_ONNX_LIB.impl("quant_gru", _gru_cpu, dispatch_key="CPU")
+        except TypeError:
+            _QUANT_GRU_ONNX_LIB.impl("quant_gru", "CPU", _gru_cpu)
 
-    try:
-        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", _bigru_cpu, dispatch_key="CPU")
-    except TypeError:
-        _QUANT_GRU_ONNX_LIB.impl("quant_bigru", "CPU", _bigru_cpu)
+        try:
+            _QUANT_GRU_ONNX_LIB.impl("quant_bigru", _bigru_cpu, dispatch_key="CPU")
+        except TypeError:
+            _QUANT_GRU_ONNX_LIB.impl("quant_bigru", "CPU", _bigru_cpu)
+
+        ensure_quant_gru_onnx_registered._runtime_done = True
+
+    registered_opsets = getattr(ensure_quant_gru_onnx_registered, "_registered_opsets", set())
+    if opset in registered_opsets:
+        return
 
     def _symbolic_gru(g, x, h0, W, R, B, hidden_size, num_layers):
         hidden_size_i = symbolic_helper._maybe_get_const(hidden_size, "i")
@@ -360,9 +367,15 @@ def ensure_quant_gru_onnx_registered(opset: int = 18) -> None:
         out = g.op("Reshape", y_perm, shape)
         return out, Y_h
 
-    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru", _symbolic_gru, int(opset))
-    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru", _symbolic_bigru, int(opset))
-    ensure_quant_gru_onnx_registered._done = True
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_gru", _symbolic_gru, opset)
+    register_custom_op_symbolic(f"{QUANT_GRU_ONNX_DOMAIN}::quant_bigru", _symbolic_bigru, opset)
+    registered_opsets.add(opset)
+    ensure_quant_gru_onnx_registered._registered_opsets = registered_opsets
+
+
+def _get_quant_gru_registered_onnx_opsets() -> set:
+    """返回当前进程中已注册 QuantGRU symbolic 的 ONNX opset 集合。"""
+    return set(getattr(ensure_quant_gru_onnx_registered, "_registered_opsets", set()))
 
 
 def _rename_onnx_initializer_and_refs(model, old_name: str, new_name: str) -> bool:
@@ -1887,7 +1900,12 @@ class QuantGRU(nn.Module):
             raise RuntimeError("ONNX 导出暂不支持 bias=False，请使用 bias=True")
 
         _ = self._resolve_onnx_module_name()
-        ensure_quant_gru_onnx_registered(opset=18)
+        if not _get_quant_gru_registered_onnx_opsets():
+            raise RuntimeError(
+                "使用 QuantGRU export_mode=True 导出 ONNX 前，请先调用 "
+                "ensure_quant_gru_onnx_registered(opset=...)；该 opset 必须与 "
+                "torch.onnx.export(opset_version=...) 一致。"
+            )
 
         if self.bidirectional:
             return self._forward_onnx_bidirectional(input, hx)

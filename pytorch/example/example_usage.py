@@ -466,7 +466,7 @@ def example_onnx_export():
 
     注意事项:
     - 导出前必须设置 export_mode = True
-    - 必须调用 ensure_quant_gru_onnx_registered(opset=18)
+    - 必须调用 ensure_quant_gru_onnx_registered(opset=...)，且与 torch.onnx.export 的 opset_version 一致
     - 导出需要使用 legacy exporter（dynamo=False）
     - custom_opsets 需要包含 {"custom_gru": 1}
     - 导出后应恢复 export_mode = False
@@ -490,8 +490,9 @@ def example_onnx_export():
 
     # 2. 切换到导出模式并注册 symbolic
     print("\n🔄 步骤 2: 切换导出模式并注册 custom symbolic")
+    opset = 18  # 支持 >=13；需与 torch.onnx.export(opset_version=...) 一致
     gru.export_mode = True
-    ensure_quant_gru_onnx_registered(opset=18)
+    ensure_quant_gru_onnx_registered(opset=opset)
     gru.eval()
     print(f"   export_mode = {gru.export_mode}")
 
@@ -513,7 +514,7 @@ def example_onnx_export():
             'input': {0: 'batch', 1: 'seq_len'},
             'output': {0: 'batch', 1: 'seq_len'}
         },
-        opset_version=18,
+        opset_version=opset,
         dynamo=False,
         custom_opsets={"custom_gru": 1},
         verbose=False
