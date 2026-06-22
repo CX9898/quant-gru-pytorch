@@ -11,6 +11,7 @@
 
 ### 功能优化
 1. **量化参数导出字段形态优化**: 导出量化参数时，`scale`、`zero_point`、`real_min`、`real_max` 等量化字段仅在存在多个元素时输出为列表；per-tensor 等单元素量化参数输出为标量，减少下游解析时对单元素列表的特殊处理。
+2. **ONNX 导出 opset 支持范围放宽**: `ensure_quant_gru_onnx_registered(opset=...)` 支持 `opset>=13`，并按 opset 分别注册 symbolic；`QuantGRU` 的 ONNX forward 路径不再自行写死注册 opset 18，要求调用方在导出前显式注册与 `torch.onnx.export(opset_version=...)` 一致的 opset。
 
 ---
 

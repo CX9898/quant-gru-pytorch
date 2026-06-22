@@ -304,13 +304,14 @@ import torch
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cpu()
 gru.eval()
 
+opset = 18  # 支持 >=13；需与 torch.onnx.export(opset_version=...) 一致
 gru.export_mode = True
-ensure_quant_gru_onnx_registered(opset=18)
+ensure_quant_gru_onnx_registered(opset=opset)
 
 dummy_input = torch.randn(1, 50, 64).cpu()
 torch.onnx.export(
     gru, dummy_input, "gru_float.onnx",
-    opset_version=18,
+    opset_version=opset,
     dynamo=False, # PyTorch 2.x 需要此参数使用传统导出
     custom_opsets=get_quant_gru_custom_opsets(),
     input_names=['input'],
@@ -334,7 +335,7 @@ gru.export_mode = False
 1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
 2. **导出使用 legacy exporter**：`torch.onnx.export(..., dynamo=False)`
 3. **必须指定 custom_opsets**：推荐使用 `custom_opsets=get_quant_gru_custom_opsets()`
-4. **第一版仅承诺 opset=18**
+4. **支持 opset>=13**：`ensure_quant_gru_onnx_registered(opset=...)` 必须与 `torch.onnx.export(opset_version=...)` 一致
 5. **导出后恢复运行模式**：设置 `export_mode = False` 以恢复常规高性能推理
 
 > 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
