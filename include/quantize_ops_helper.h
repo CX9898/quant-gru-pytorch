@@ -49,6 +49,9 @@
 #include <array>
 #include <cassert>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 // CUDA 编译时使用内置 min/max（有 __device__ 修饰）
@@ -1049,7 +1052,7 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
     // 从位宽配置获取量化范围（使用 auto scale 版本用于计算 num_steps 和 scale）
     const int32_t quant_min = bw.qmin_auto_scale();
     const int32_t quant_max = bw.qmax_auto_scale();
-    const int num_steps = quant_max - quant_min;  // 量化级数
+    const int64_t num_steps = static_cast<int64_t>(quant_max) - static_cast<int64_t>(quant_min);  // 量化级数
     
     // 与 AIMET 一致: num_steps 检查
     if (num_steps <= 0) {
@@ -1099,14 +1102,14 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
             raw_scale = std::max(raw_scale, minimum_scale);
             
             // POT 转换
-            exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+            exp2_inv = checkedShiftToInt8(std::floor(std::log2(1.0f / raw_scale)), "calibrateQuantParams(uint-sym)");
             scale = exp2_scale(exp2_inv);
             aligned_min = 0.0f;
             aligned_max = scale * static_cast<float>(quant_max);
         } else {
             // INT 对称量化：与 AIMET 一致
-            const int num_pos_steps = num_steps / 2;           // floor(N/2), 8-bit: 127
-            const int num_neg_steps = (num_steps + 1) / 2;     // ceil(N/2),  8-bit: 128
+            const int64_t num_pos_steps = num_steps / 2;           // floor(N/2), 8-bit: 127
+            const int64_t num_neg_steps = (num_steps + 1) / 2;     // ceil(N/2),  8-bit: 128
             
             // 与 AIMET 一致: 2-bit 特殊处理
             // "For 2-bit quantization, using math.floor to compute num_pos_steps can result 
@@ -1135,7 +1138,7 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
             
             // POT 转换
             float raw_scale = delta;
-            exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+            exp2_inv = checkedShiftToInt8(std::floor(std::log2(1.0f / raw_scale)), "calibrateQuantParams(int-sym)");
             scale = exp2_scale(exp2_inv);
             aligned_max = scale * num_pos_steps;
             aligned_min = -scale * num_neg_steps;
@@ -1146,7 +1149,7 @@ inline void calibrateQuantParams(float orig_min, float orig_max, QuantBitWidth b
         range = std::max(range, minimum_scale * static_cast<float>(num_steps));
         float raw_scale = range / static_cast<float>(num_steps);
 
-        exp2_inv = static_cast<int8_t>(std::floor(std::log2(1.0f / raw_scale)));
+        exp2_inv = checkedShiftToInt8(std::floor(std::log2(1.0f / raw_scale)), "calibrateQuantParams(asym)");
         scale = exp2_scale(exp2_inv);
 
         aligned_min = std::floor(updated_min / scale) * scale;

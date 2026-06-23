@@ -1530,7 +1530,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
             throw std::runtime_error(std::string("GPU histogram ") + (name ? name : "unknown") + " is invalid");
         }
         const auto& hist = collector.histogram();
-        const int64_t num_steps = quant_bw.qmax_auto_scale() - quant_bw.qmin_auto_scale();
+        const int64_t num_steps = static_cast<int64_t>(quant_bw.qmax_auto_scale()) - static_cast<int64_t>(quant_bw.qmin_auto_scale());
         const bool is_unsigned = quant_bw.is_unsigned_;
         
         // 步骤 1: GPU SQNR 搜索获取连续 scale
@@ -1590,7 +1590,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
             return;
         }
         const auto& hist = collector.histogram();
-        const int64_t num_steps = quant_bw.qmax_auto_scale() - quant_bw.qmin_auto_scale();
+        const int64_t num_steps = static_cast<int64_t>(quant_bw.qmax_auto_scale()) - static_cast<int64_t>(quant_bw.qmin_auto_scale());
         const bool is_unsigned = quant_bw.is_unsigned_;
         
         ContinuousScaleResult continuous_result = gpu_hist::searchSqnrGpu(
@@ -1622,7 +1622,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
                 continue;
             }
             const auto& hist = gate_collectors[gate].histogram();
-            const int64_t num_steps = quant_bw.qmax_auto_scale() - quant_bw.qmin_auto_scale();
+            const int64_t num_steps = static_cast<int64_t>(quant_bw.qmax_auto_scale()) - static_cast<int64_t>(quant_bw.qmin_auto_scale());
             const bool is_unsigned = quant_bw.is_unsigned_;
             
             ContinuousScaleResult continuous_result = gpu_hist::searchSqnrGpu(
@@ -1645,7 +1645,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
                                          std::vector<FixedPointScale>& out_fixed) {
         if (!batch.is_valid()) return;
         
-        const int64_t num_steps = quant_bw.qmax_auto_scale() - quant_bw.qmin_auto_scale();
+        const int64_t num_steps = static_cast<int64_t>(quant_bw.qmax_auto_scale()) - static_cast<int64_t>(quant_bw.qmin_auto_scale());
         const bool is_unsigned = quant_bw.is_unsigned_;
         
         // 步骤 1: GPU SQNR 搜索获取连续 scale
