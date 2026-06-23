@@ -4,6 +4,25 @@
 
 ---
 
+## [2026-06-23]
+
+### 版本更新
+1. **版本号更新**: 将版本号从 1.0.7 更新至 1.0.8
+
+### Bug 修复
+1. **支持 32bit bias 量化（修复标定阶段 `num_steps` 整型溢出）**: 标定阶段以 `int32` 计算量化级数 `num_steps = qmax_auto_scale() - qmin_auto_scale()`，在 32bit 下 `2147483647 - (-2147483648)` 发生 int32 溢出变为负数，触发 `num_steps must be > 0`，导致 `bias_ih`/`bias_hh` 设为 32bit 时校准直接报错。同时多处下游又把 `int64` 的 `num_steps` 截断回 `int`（如 `get_minimum_scale`），会得到负的 `minimum_scale` 并静默产生错误 scale。
+   - `get_minimum_scale`：入参由 `int` 改为 `int64_t`，消除截断。
+   - `pot_sqnr_calibrator.h` / `gru_interface.cc` / `calibration_gpu.cu`：减法前显式 `static_cast<int64_t>`，并去掉所有 `static_cast<int>(num_steps)`。
+   - `quantize_ops_helper.h::calibrateQuantParams`（MINMAX 路径）：`num_steps`、`num_pos_steps`、`num_neg_steps` 统一改为 `int64_t`。
+
+### 功能优化
+1. **POT shift 越界防御断言**: 新增 `checkedShiftToInt8()`，在 POT scale 编码（`roundScaleToPowerOfTwo` / `convertToPot` / `calibrateQuantParams`）以及 bias 的 per-tensor/per-gate/per-channel rescale shift 计算处，对收窄到 `int8` 的 shift 做范围校验，超界时直接抛错，避免静默截断成错误 scale。
+
+### 说明 / 已知限制
+1. **forward 路径未改逻辑**: bias 前向通路本就是 `int32` 存储 + `int64` 累加，`qmin()/qmax()` 对 `bits>=32` 已特判返回 int32 极值，clamp 到 int32 全域为无操作，故 forward 无需为 32bit bias 改动；本次 forward 侧仅新增上述防御断言，不改变正确路径数值结果。
+
+---
+
 ## [2026-06-22]
 
 ### 版本更新

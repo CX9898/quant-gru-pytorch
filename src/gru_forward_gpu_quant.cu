@@ -818,12 +818,16 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
     if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int8_t shift_W = parms.shift_W_tensor_;
         linear_params_.shift_gemm_x_tensor_ = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
-        linear_params_.shift_bw_tensor_ = parms.shift_bw_tensor_ - (shift_W + parms.shift_x_);
+        linear_params_.shift_bw_tensor_ = checkedShiftToInt8(
+            static_cast<float>(static_cast<int>(parms.shift_bw_tensor_) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
+            "rescale shift_bw (per-tensor)");
     }
     if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
         int8_t shift_R = parms.shift_R_tensor_;
         linear_params_.shift_gemm_h_tensor_ = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        linear_params_.shift_br_tensor_ = parms.shift_br_tensor_ - (shift_R + parms.shift_h_);
+        linear_params_.shift_br_tensor_ = checkedShiftToInt8(
+            static_cast<float>(static_cast<int>(parms.shift_br_tensor_) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
+            "rescale shift_br (per-tensor)");
     }
 
     // 计算并存储 per-gate rescale 参数（通过参数内存传递，访问快）
@@ -832,7 +836,9 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
             int8_t shift_W = parms.shift_W_gate_[gate];
             int8_t shift_bw = parms.shift_bw_gate_[gate];
             linear_params_.shift_gemm_x_gate_[gate] = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
-            linear_params_.shift_bw_gate_[gate] = shift_bw - (shift_W + parms.shift_x_);
+            linear_params_.shift_bw_gate_[gate] = checkedShiftToInt8(
+                static_cast<float>(static_cast<int>(shift_bw) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
+                "rescale shift_bw (per-gate)");
         }
     }
     if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
@@ -840,7 +846,9 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
             int8_t shift_R = parms.shift_R_gate_[gate];
             int8_t shift_br = parms.shift_br_gate_[gate];
             linear_params_.shift_gemm_h_gate_[gate] = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
-            linear_params_.shift_br_gate_[gate] = shift_br - (shift_R + parms.shift_h_);
+            linear_params_.shift_br_gate_[gate] = checkedShiftToInt8(
+                static_cast<float>(static_cast<int>(shift_br) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
+                "rescale shift_br (per-gate)");
         }
     }
 
@@ -883,8 +891,12 @@ void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
         // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
         // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
         // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
-        shift_bw[idx] = shift_bw_val - (shift_W + parms.shift_x_);
-        shift_br[idx] = shift_br_val - (shift_R + parms.shift_h_);
+        shift_bw[idx] = checkedShiftToInt8(
+            static_cast<float>(static_cast<int>(shift_bw_val) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
+            "rescale shift_bw (per-channel)");
+        shift_br[idx] = checkedShiftToInt8(
+            static_cast<float>(static_cast<int>(shift_br_val) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
+            "rescale shift_br (per-channel)");
     }
 
     // 存储 per-channel 数组（PER_CHANNEL 粒度时使用，其他粒度时作为占位符）

@@ -104,7 +104,7 @@ inline ContinuousScaleResult calibratePercentile(
     }
     
     // 与 AIMET _get_minimum_scale 一致
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
     
     // 获取百分位数范围
     float clip_ratio = (100.0f - config.percentile) / 100.0f;
@@ -236,7 +236,7 @@ inline ContinuousScaleResult searchSymmetric(
     const SqnrConfig& config,
     bool is_unsigned = false) {
     
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
     
     ContinuousScaleResult best{0, 0, 0, std::numeric_limits<float>::max()};
     
@@ -296,7 +296,7 @@ inline ContinuousScaleResult searchAsymmetric(
     float observed_min = max_delta * observed_offset;
     float observed_max = observed_min + max_delta * static_cast<float>(num_steps);
     
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
     
     // 生成 offset 候选值
     const int num_offsets = std::min(static_cast<int>(num_steps + 2), config.offset_candidates);
@@ -367,7 +367,7 @@ inline ContinuousScaleResult calibrateSqnr(
     }
     
     // 与 AIMET _pick_test_candidates 完全一致的范围预处理
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
     
     // 确保范围包含 0
     float min_val = std::min(hist.min_val, 0.0f);
@@ -399,7 +399,7 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
         throw std::runtime_error("Invalid scale <= 0 in roundScaleToPowerOfTwo");
     }
     float n = -std::log2(scale);
-    int8_t n_rounded = static_cast<int8_t>(round_f(n));
+    int8_t n_rounded = checkedShiftToInt8(round_f(n), "roundScaleToPowerOfTwo");
     return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
 }
 
@@ -478,7 +478,7 @@ inline PotScaleResult convertToPot(
     if (coverage_round) {
         // MINMAX 路径：与 main calibrateQuantParams 一致，向上取 scale（floor(log2(1/scale))）
         // 保证 POT scale >= 连续 scale，避免范围被截断（覆盖优先）。
-        n = static_cast<int8_t>(std::floor(std::log2(1.0f / continuous_scale)));
+        n = checkedShiftToInt8(std::floor(std::log2(1.0f / continuous_scale)), "convertToPot");
         po2_scale = std::pow(2.0f, -static_cast<float>(n));
     } else {
         // 直方图(SQNR/Percentile)路径：四舍五入到最近 2^n（AIMET find_closest_power_of_2_scale）
@@ -548,7 +548,7 @@ inline ContinuousScaleResult calibrateContinuousScaleFromHistogram(
     if (!hist.is_valid()) {
         throw std::runtime_error("Histogram is invalid in calibrateContinuousScaleFromHistogram");
     }
-    const int64_t num_steps = bw.qmax_auto_scale() - bw.qmin_auto_scale();
+    const int64_t num_steps = static_cast<int64_t>(bw.qmax_auto_scale()) - static_cast<int64_t>(bw.qmin_auto_scale());
     const bool is_unsigned = bw.is_unsigned_;
     if (use_percentile) {
         PercentileConfig config;
@@ -570,7 +570,7 @@ inline ContinuousScaleResult calibrateContinuousScaleFromRange(
     if (num_steps <= 0) {
         throw std::runtime_error("num_steps must be > 0 in calibrateContinuousScaleFromRange");
     }
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
 
     float min_with_zero = std::min(min_val, 0.0f);
     float max_with_zero = std::max(max_val, 0.0f);

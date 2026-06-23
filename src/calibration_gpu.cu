@@ -1265,7 +1265,7 @@ ContinuousScaleResult searchSqnrGpu(
     cudaStream_t stream) {
     
     // 最小 delta（与 AIMET minimum_scale 一致）
-    const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale = get_minimum_scale(num_steps);
     
     // bin_width 基于直方图原始范围
     float bin_width = (hist_max - hist_min) / num_bins;
@@ -1469,7 +1469,7 @@ void searchSqnrPerChannelGpu(
     }
     
     // 最小 delta（与 AIMET minimum_scale 一致）
-    const float minimum_scale_all = get_minimum_scale(static_cast<int>(num_steps));
+    const float minimum_scale_all = get_minimum_scale(num_steps);
     
     std::vector<std::vector<float>> h_offsets_all;
     std::vector<dev::vector<float>> offsets_dev_all;
@@ -1539,7 +1539,7 @@ void searchSqnrPerChannelGpu(
             float offset = -static_cast<float>((num_steps + 1) / 2);
             
             // 最小 delta（与 AIMET minimum_scale 一致）
-            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            const float minimum_scale = get_minimum_scale(num_steps);
             
             const int threads = 256;
             size_t shared_mem = threads * sizeof(float);
@@ -1560,7 +1560,7 @@ void searchSqnrPerChannelGpu(
             max_delta = std::max(max_delta, 1e-8f);
             
             // 最小 delta（与 AIMET minimum_scale 一致）
-            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            const float minimum_scale = get_minimum_scale(num_steps);
             
             const int num_offsets = h_offsets_all[c].size();
             const int total_combos = asym_delta_candidates * num_offsets;
@@ -1603,7 +1603,7 @@ void searchSqnrPerChannelGpu(
         if (is_symmetric) {
             float abs_max_val = (max_val > -min_val) ? max_val : -min_val;
             float max_delta = 2.0f * abs_max_val / static_cast<float>(num_steps);
-            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            const float minimum_scale = get_minimum_scale(num_steps);
             
             optimal_scale = max_delta * (best_idx + 1) / (sym_candidates - 1);
             optimal_scale = std::max(optimal_scale, minimum_scale);
@@ -1612,7 +1612,7 @@ void searchSqnrPerChannelGpu(
         } else {
             float max_delta = (max_val - min_val) / static_cast<float>(num_steps);
             max_delta = std::max(max_delta, 1e-8f);
-            const float minimum_scale = get_minimum_scale(static_cast<int>(num_steps));
+            const float minimum_scale = get_minimum_scale(num_steps);
             
             const int num_offsets = h_offsets_all[c].size();
             int best_delta_idx = best_idx / num_offsets;
