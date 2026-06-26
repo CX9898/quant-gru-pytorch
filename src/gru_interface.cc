@@ -96,7 +96,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(min_val, max_val, bw, symmetric, usePOT2);
         shift = encoded.pot_shift;
         zp = encoded.zero_point;
-        raw_scale = encoded.continuous_scale;
+        raw_scale = storedScaleForMode(encoded, usePOT2);
         fixed_scale = encoded.fixed_scale;
     };
 
@@ -123,7 +123,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             quant_ranges.min_W_[c], quant_ranges.max_W_[c], bitwidth_config.W_, bitwidth_config.W_symmetric_, usePOT2);
         quant_params.shift_W_[c] = encoded.pot_shift;
-        quant_params.raw_scale_W_[c] = encoded.continuous_scale;
+        quant_params.raw_scale_W_[c] = storedScaleForMode(encoded, usePOT2);
         quant_params.fixed_scale_W_[c] = encoded.fixed_scale;
     }
     
@@ -135,7 +135,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             min_W, max_W, bitwidth_config.W_, bitwidth_config.W_symmetric_, usePOT2);
         quant_params.shift_W_tensor_ = encoded.pot_shift;
-        quant_params.raw_scale_W_tensor_ = encoded.continuous_scale;
+        quant_params.raw_scale_W_tensor_ = storedScaleForMode(encoded, usePOT2);
         // 将所有 per-channel 值设置为 tensor 值
         std::fill(quant_params.shift_W_.begin(), quant_params.shift_W_.end(), quant_params.shift_W_tensor_);
         std::fill(quant_params.raw_scale_W_.begin(), quant_params.raw_scale_W_.end(), quant_params.raw_scale_W_tensor_);
@@ -152,7 +152,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             const EncodedScaleResult encoded = encodeFromRange(
                 min_gate, max_gate, bitwidth_config.W_, bitwidth_config.W_symmetric_, usePOT2);
             quant_params.shift_W_gate_[gate] = encoded.pot_shift;
-            quant_params.raw_scale_W_gate_[gate] = encoded.continuous_scale;
+            quant_params.raw_scale_W_gate_[gate] = storedScaleForMode(encoded, usePOT2);
             // 将该 gate 内的所有 channel 设置为 gate 值
             for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
                 quant_params.shift_W_[c] = quant_params.shift_W_gate_[gate];
@@ -171,7 +171,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             quant_ranges.min_R_[c], quant_ranges.max_R_[c], bitwidth_config.R_, bitwidth_config.R_symmetric_, usePOT2);
         quant_params.shift_R_[c] = encoded.pot_shift;
-        quant_params.raw_scale_R_[c] = encoded.continuous_scale;
+        quant_params.raw_scale_R_[c] = storedScaleForMode(encoded, usePOT2);
         quant_params.fixed_scale_R_[c] = encoded.fixed_scale;
     }
     
@@ -182,7 +182,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             min_R, max_R, bitwidth_config.R_, bitwidth_config.R_symmetric_, usePOT2);
         quant_params.shift_R_tensor_ = encoded.pot_shift;
-        quant_params.raw_scale_R_tensor_ = encoded.continuous_scale;
+        quant_params.raw_scale_R_tensor_ = storedScaleForMode(encoded, usePOT2);
         // 将所有 per-channel 值设置为 tensor 值
         std::fill(quant_params.shift_R_.begin(), quant_params.shift_R_.end(), quant_params.shift_R_tensor_);
         std::fill(quant_params.raw_scale_R_.begin(), quant_params.raw_scale_R_.end(), quant_params.raw_scale_R_tensor_);
@@ -198,7 +198,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             const EncodedScaleResult encoded = encodeFromRange(
                 min_gate, max_gate, bitwidth_config.R_, bitwidth_config.R_symmetric_, usePOT2);
             quant_params.shift_R_gate_[gate] = encoded.pot_shift;
-            quant_params.raw_scale_R_gate_[gate] = encoded.continuous_scale;
+            quant_params.raw_scale_R_gate_[gate] = storedScaleForMode(encoded, usePOT2);
             // 将该 gate 内的所有 channel 设置为 gate 值
             for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
                 quant_params.shift_R_[c] = quant_params.shift_R_gate_[gate];
@@ -216,7 +216,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             quant_ranges.min_bw_[c], quant_ranges.max_bw_[c], bitwidth_config.bw_, bitwidth_config.bw_symmetric_, usePOT2);
         quant_params.shift_bw_[c] = encoded.pot_shift;
-        quant_params.raw_scale_bw_[c] = encoded.continuous_scale;
+        quant_params.raw_scale_bw_[c] = storedScaleForMode(encoded, usePOT2);
         quant_params.fixed_scale_bw_[c] = encoded.fixed_scale;
     }
     
@@ -227,7 +227,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             min_bw, max_bw, bitwidth_config.bw_, bitwidth_config.bw_symmetric_, usePOT2);
         quant_params.shift_bw_tensor_ = encoded.pot_shift;
-        quant_params.raw_scale_bw_tensor_ = encoded.continuous_scale;
+        quant_params.raw_scale_bw_tensor_ = storedScaleForMode(encoded, usePOT2);
         // 将所有 per-channel 值设置为 tensor 值
         std::fill(quant_params.shift_bw_.begin(), quant_params.shift_bw_.end(), quant_params.shift_bw_tensor_);
         std::fill(quant_params.raw_scale_bw_.begin(), quant_params.raw_scale_bw_.end(), quant_params.raw_scale_bw_tensor_);
@@ -243,7 +243,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             const EncodedScaleResult encoded = encodeFromRange(
                 min_gate, max_gate, bitwidth_config.bw_, bitwidth_config.bw_symmetric_, usePOT2);
             quant_params.shift_bw_gate_[gate] = encoded.pot_shift;
-            quant_params.raw_scale_bw_gate_[gate] = encoded.continuous_scale;
+            quant_params.raw_scale_bw_gate_[gate] = storedScaleForMode(encoded, usePOT2);
             // 将该 gate 内的所有 channel 设置为 gate 值
             for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
                 quant_params.shift_bw_[c] = quant_params.shift_bw_gate_[gate];
@@ -261,7 +261,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             quant_ranges.min_br_[c], quant_ranges.max_br_[c], bitwidth_config.br_, bitwidth_config.br_symmetric_, usePOT2);
         quant_params.shift_br_[c] = encoded.pot_shift;
-        quant_params.raw_scale_br_[c] = encoded.continuous_scale;
+        quant_params.raw_scale_br_[c] = storedScaleForMode(encoded, usePOT2);
         quant_params.fixed_scale_br_[c] = encoded.fixed_scale;
     }
     
@@ -272,7 +272,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(
             min_br, max_br, bitwidth_config.br_, bitwidth_config.br_symmetric_, usePOT2);
         quant_params.shift_br_tensor_ = encoded.pot_shift;
-        quant_params.raw_scale_br_tensor_ = encoded.continuous_scale;
+        quant_params.raw_scale_br_tensor_ = storedScaleForMode(encoded, usePOT2);
         // 将所有 per-channel 值设置为 tensor 值
         std::fill(quant_params.shift_br_.begin(), quant_params.shift_br_.end(), quant_params.shift_br_tensor_);
         std::fill(quant_params.raw_scale_br_.begin(), quant_params.raw_scale_br_.end(), quant_params.raw_scale_br_tensor_);
@@ -288,7 +288,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
             const EncodedScaleResult encoded = encodeFromRange(
                 min_gate, max_gate, bitwidth_config.br_, bitwidth_config.br_symmetric_, usePOT2);
             quant_params.shift_br_gate_[gate] = encoded.pot_shift;
-            quant_params.raw_scale_br_gate_[gate] = encoded.continuous_scale;
+            quant_params.raw_scale_br_gate_[gate] = storedScaleForMode(encoded, usePOT2);
             // 将该 gate 内的所有 channel 设置为 gate 值
             for (int c = gate * hidden_size; c < (gate + 1) * hidden_size; ++c) {
                 quant_params.shift_br_[c] = quant_params.shift_br_gate_[gate];
@@ -331,7 +331,7 @@ GRUQuantParams calculateGRUQuantitativeParameters(
         const EncodedScaleResult encoded = encodeFromRange(min_val, max_val, bw, symmetric, usePOT2);
         shift = encoded.pot_shift;
         zp = encoded.zero_point;
-        raw_scale = encoded.continuous_scale;
+        raw_scale = storedScaleForMode(encoded, usePOT2);
         fixed_scale = encoded.fixed_scale;
     };
 
@@ -1293,7 +1293,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromHistograms(
             continuous.scale, continuous.min, bw, sym, usePOT2);
         shift = encoded.pot_shift;
         zp = encoded.zero_point;
-        raw = encoded.continuous_scale;
+        raw = storedScaleForMode(encoded, usePOT2);
         fixed = encoded.fixed_scale;
     };
 
@@ -1542,7 +1542,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
             continuous_result.scale, continuous_result.min, quant_bw, is_symmetric, usePOT2);
         out_shift = encoded.pot_shift;
         out_zp = encoded.zero_point;
-        out_raw = encoded.continuous_scale;
+        out_raw = storedScaleForMode(encoded, usePOT2);
         out_fixed = encoded.fixed_scale;
         
     };
@@ -1600,7 +1600,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
         EncodedScaleResult encoded = encodeScaleResult(
             continuous_result.scale, continuous_result.min, quant_bw, is_symmetric, usePOT2);
         out_shift = encoded.pot_shift;
-        out_raw = encoded.continuous_scale;
+        out_raw = storedScaleForMode(encoded, usePOT2);
         out_fixed = encoded.fixed_scale;
     };
     
@@ -1632,7 +1632,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
             EncodedScaleResult encoded = encodeScaleResult(
                 continuous_result.scale, continuous_result.min, quant_bw, is_symmetric, usePOT2);
             out_gate[gate] = encoded.pot_shift;
-            out_raw_gate[gate] = encoded.continuous_scale;
+            out_raw_gate[gate] = storedScaleForMode(encoded, usePOT2);
             out_fixed_gate[gate] = encoded.fixed_scale;
         }
     };
@@ -1661,7 +1661,7 @@ GRUQuantParams calculateGRUQuantitativeParametersFromGPUHistograms(
             EncodedScaleResult encoded = encodeScaleResult(
                 continuous_results[c].scale, continuous_results[c].min, quant_bw, is_symmetric, usePOT2);
             out_shift[c] = encoded.pot_shift;
-            out_raw[c] = encoded.continuous_scale;
+            out_raw[c] = storedScaleForMode(encoded, usePOT2);
             out_fixed[c] = encoded.fixed_scale;
         }
     };
