@@ -29,12 +29,15 @@ struct QuantBitWidth {
     }
     
     // Auto scale专用的qmax函数
-    // 有符号数：qmax从 (1 << (bits_ - 1)) - 1 改为 (1 << (bits_ - 1))
-    // 无符号数：qmax从 (1 << bits_) - 1 改为 (1 << bits_)
-    // 例如：int8: 127->128, uint8: 255->256, int4: 7->8, uint4: 15->16
+    // 与 AIMET 对齐：num_steps = qmax_auto_scale - qmin_auto_scale = 2^bits - 1
+    // 有符号数：qmax = (1 << (bits_ - 1)) - 1   （int8: 127, int4: 7）
+    // 无符号数：qmax = (1 << bits_) - 1         （uint8: 255, uint4: 15）
+    // 注意：此处必须与 qmax() 保持一致，否则计算出的 scale 会与 AIMET（及下一层）不一致。
+    // 历史实现曾为对称性返回 1<<(bits_-1)（int8: 128），导致 num_steps=256≠AIMET 的 255，
+    // 进而 scale=range/256≠range/255，造成上下层 scale 不一致，现已修正。
     __host__ __device__ int32_t qmax_auto_scale() const {
         if (bits_ >= 32) return 0x7FFFFFFF;
-        return is_unsigned_ ? (1 << bits_) : (1 << (bits_ - 1));
+        return is_unsigned_ ? (1 << bits_) - 1 : (1 << (bits_ - 1)) - 1;
     }
     
     __host__ __device__ int64_t range() const {
