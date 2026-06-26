@@ -65,8 +65,8 @@ struct GRUQuantParams {
     int32_t zp_x_;     ///< 输入 x 的零点
     int8_t shift_h_;   ///< 隐状态 h 的移位量
     int32_t zp_h_;     ///< 隐状态 h 的零点
-    float raw_scale_x_ = 0.0f;  ///< encode 前连续 scale（导出/调试语义）
-    float raw_scale_h_ = 0.0f;  ///< encode 前连续 scale（导出/调试语义）
+    float raw_scale_x_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_h_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_x_;
     FixedPointScale fixed_scale_h_;
 
@@ -88,18 +88,18 @@ struct GRUQuantParams {
     std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
     std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
     std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
-    std::vector<float> raw_scale_W_;   ///< encode 前连续 scale（per-channel）
-    std::vector<float> raw_scale_R_;   ///< encode 前连续 scale（per-channel）
-    std::vector<float> raw_scale_bw_;  ///< encode 前连续 scale（per-channel）
-    std::vector<float> raw_scale_br_;  ///< encode 前连续 scale（per-channel）
-    float raw_scale_W_tensor_ = 0.0f;  ///< encode 前连续 scale（per-tensor）
-    float raw_scale_R_tensor_ = 0.0f;  ///< encode 前连续 scale（per-tensor）
-    float raw_scale_bw_tensor_ = 0.0f; ///< encode 前连续 scale（per-tensor）
-    float raw_scale_br_tensor_ = 0.0f; ///< encode 前连续 scale（per-tensor）
-    std::array<float, 3> raw_scale_W_gate_ = {0.0f, 0.0f, 0.0f};   ///< encode 前连续 scale（per-gate）
-    std::array<float, 3> raw_scale_R_gate_ = {0.0f, 0.0f, 0.0f};   ///< encode 前连续 scale（per-gate）
-    std::array<float, 3> raw_scale_bw_gate_ = {0.0f, 0.0f, 0.0f};  ///< encode 前连续 scale（per-gate）
-    std::array<float, 3> raw_scale_br_gate_ = {0.0f, 0.0f, 0.0f};  ///< encode 前连续 scale（per-gate）
+    std::vector<float> raw_scale_W_;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
+    std::vector<float> raw_scale_R_;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
+    std::vector<float> raw_scale_bw_;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
+    std::vector<float> raw_scale_br_;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
+    float raw_scale_W_tensor_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
+    float raw_scale_R_tensor_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
+    float raw_scale_bw_tensor_ = 0.0f; ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
+    float raw_scale_br_tensor_ = 0.0f; ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
+    std::array<float, 3> raw_scale_W_gate_ = {0.0f, 0.0f, 0.0f};   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
+    std::array<float, 3> raw_scale_R_gate_ = {0.0f, 0.0f, 0.0f};   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
+    std::array<float, 3> raw_scale_bw_gate_ = {0.0f, 0.0f, 0.0f};  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
+    std::array<float, 3> raw_scale_br_gate_ = {0.0f, 0.0f, 0.0f};  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
     std::vector<FixedPointScale> fixed_scale_W_;
     std::vector<FixedPointScale> fixed_scale_R_;
     std::vector<FixedPointScale> fixed_scale_bw_;
@@ -110,8 +110,8 @@ struct GRUQuantParams {
     int32_t zp_weight_ih_linear_;      ///< W*x + bw 的零点
     int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
     int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
-    float raw_scale_weight_ih_linear_ = 0.0f;  ///< encode 前连续 scale
-    float raw_scale_weight_hh_linear_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_weight_ih_linear_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_weight_hh_linear_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_weight_ih_linear_;
     FixedPointScale fixed_scale_weight_hh_linear_;
 
@@ -122,9 +122,9 @@ struct GRUQuantParams {
     int32_t zp_reset_gate_input_;      ///< reset gate 激活前的零点
     int8_t shift_new_gate_input_;      ///< new gate 激活前的移位量
     int32_t zp_new_gate_input_;        ///< new gate 激活前的零点
-    float raw_scale_update_gate_input_ = 0.0f;  ///< encode 前连续 scale
-    float raw_scale_reset_gate_input_ = 0.0f;   ///< encode 前连续 scale
-    float raw_scale_new_gate_input_ = 0.0f;     ///< encode 前连续 scale
+    float raw_scale_update_gate_input_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_reset_gate_input_ = 0.0f;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_new_gate_input_ = 0.0f;     ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_update_gate_input_;
     FixedPointScale fixed_scale_reset_gate_input_;
     FixedPointScale fixed_scale_new_gate_input_;
@@ -136,9 +136,9 @@ struct GRUQuantParams {
     int32_t zp_reset_gate_output_;      ///< reset gate 激活后的零点
     int8_t shift_new_gate_output_;      ///< new gate 激活后的移位量（tanh 输出）
     int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
-    float raw_scale_update_gate_output_ = 0.0f;  ///< encode 前连续 scale
-    float raw_scale_reset_gate_output_ = 0.0f;   ///< encode 前连续 scale
-    float raw_scale_new_gate_output_ = 0.0f;     ///< encode 前连续 scale
+    float raw_scale_update_gate_output_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_reset_gate_output_ = 0.0f;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_new_gate_output_ = 0.0f;     ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_update_gate_output_;
     FixedPointScale fixed_scale_reset_gate_output_;
     FixedPointScale fixed_scale_new_gate_output_;
@@ -146,7 +146,7 @@ struct GRUQuantParams {
     // -------------------- 中间计算参数 --------------------
     int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
     int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
-    float raw_scale_mul_reset_hidden_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_mul_reset_hidden_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_mul_reset_hidden_;
 
     // -------------------- 隐状态更新参数 --------------------
@@ -154,8 +154,8 @@ struct GRUQuantParams {
     int32_t zp_mul_new_contribution_;     ///< (1-u)*n 的零点
     int8_t shift_mul_old_contribution_;   ///< u*h 的移位量
     int32_t zp_mul_old_contribution_;     ///< u*h 的零点
-    float raw_scale_mul_new_contribution_ = 0.0f;  ///< encode 前连续 scale
-    float raw_scale_mul_old_contribution_ = 0.0f;  ///< encode 前连续 scale
+    float raw_scale_mul_new_contribution_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
+    float raw_scale_mul_old_contribution_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
     FixedPointScale fixed_scale_mul_new_contribution_;
     FixedPointScale fixed_scale_mul_old_contribution_;
 

@@ -64,6 +64,15 @@ struct EncodedScaleResult {
     int32_t zero_point;
 };
 
+/**
+ * 按量化模式选择落盘/导出的 scale：
+ *   - POT2: effective_scale (po2_scale = 2^-shift, M=1)
+ *   - Affine: continuous_scale (编译器侧再 encodeMShift)
+ */
+inline float storedScaleForMode(const EncodedScaleResult& encoded, bool use_pot2) {
+    return use_pot2 ? encoded.effective_scale : encoded.continuous_scale;
+}
+
 // ============================================================================
 // 模块 2: Percentile 校准
 // ============================================================================

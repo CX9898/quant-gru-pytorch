@@ -1434,11 +1434,9 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     return cpp_params;
 }
 
-// 返回 forward 实际使用的"有效定点 scale"（连续浮点）。
-// 量化核 dequantize 使用的是按 usePOT2 编码后的 fixed_scale（POT2: 2^-shift；
-// M16: M*2^-(15+rshift)），而非校准得到的原始连续 scale。get_io_quant_meta
-// 必须返回该有效 scale，才能保证 (q - zp) * scale 与 forward_quantized 的整数
-// 输出 bit-exact 一致。
+// 返回 forward 实际使用的有效定点 scale。
+// POT2 模式下 quant_params 中落盘的 scale 已是 po2_scale，此处 encode 近似恒等；
+// Affine 模式下由连续 scale encodeMShift 得到 effective scale。
 float decode_effective_scale_wrapper(float scale, bool usePOT2) {
     if (!(scale > 0.0f)) {
         throw std::invalid_argument("scale must be > 0");
