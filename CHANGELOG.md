@@ -4,6 +4,18 @@
 
 ---
 
+## [2026-06-26]
+
+### 版本更新
+1. **版本号更新**: 将版本号从 1.0.8 更新至 1.0.9
+
+### Bug 修复
+1. **修复 `qmax_auto_scale()` 导致的 scale 与 AIMET（及下一层）不一致**: 标定阶段统一以 `num_steps = qmax_auto_scale() - qmin_auto_scale()` 计算量化级数与 scale，但 `qmax_auto_scale()` 历史上为追求“对称性”对有符号数返回 `1 << (bits_ - 1)`（int8: 128）、无符号数返回 `1 << bits_`（uint8: 256），使得 `num_steps = 256`，scale = `range/256`。而 AIMET 在所有路径（`_derive_qmin_qmax`、MinMax/Percentile/SQNR `EncodingAnalyzer`）均使用 `num_steps = 2^bits - 1 = 255`（int8 量化范围为 **-128~127**），scale = `range/255`。两者 `num_steps` 不一致（256 vs 255）直接导致计算出的 scale 不同，造成本层输出 scale 与下一层输入 scale 对不齐。
+   - `quantize_bitwidth_config.h::qmax_auto_scale()`：有符号数改为 `(1 << (bits_ - 1)) - 1`、无符号数改为 `(1 << bits_) - 1`，与 `qmax()` 及 AIMET 完全一致（int8: 127, uint8: 255）。
+   - 该修正自动传播至 `calibrateQuantParams`（MINMAX）、`pot_sqnr_calibrator.h`、`gru_interface.cc`、`calibration_gpu.cu` 等所有以 `num_steps` 推导 scale 的路径；对称 INT 路径此后 `num_pos_steps=127`、`num_neg_steps=128`、`offset=-128`，与 AIMET 对齐。
+
+---
+
 ## [2026-06-23]
 
 ### 版本更新
