@@ -32,13 +32,8 @@
 ### 1. 编译 C++ 库
 
 ```bash
-# 创建构建目录
 mkdir build && cd build
-
-# 配置 CMake
 cmake ..
-
-# 编译
 make -j$(nproc)
 ```
 
@@ -70,209 +65,65 @@ python pytorch/test_quant_gru.py
 
 ---
 
-## 📖 使用示例
+## 📐 GRU 公式
 
-### 基础使用（浮点模式）
+本项目实现的标准 GRU 递推（与 PyTorch `nn.GRU` 一致）：
 
-```python
-from quant_gru import QuantGRU
-import torch
-
-# 创建模型（与 nn.GRU 接口一致）
-gru = QuantGRU(
-    input_size=64,
-    hidden_size=128,
-    batch_first=True,
-    bidirectional=False
-).cuda()
-
-# 前向传播
-input_data = torch.randn(32, 50, 64).cuda()  # [batch, seq_len, input_size]
-output, h_n = gru(input_data)
-# output: [32, 50, 128], h_n: [1, 32, 128]
+```
+z_t = σ(W_z · x_t + R_z · h_{t-1} + b_z)              # 更新门
+r_t = σ(W_r · x_t + R_r · h_{t-1} + b_r)              # 重置门
+g_t = tanh(W_g · x_t + r_t ⊙ (R_g · h_{t-1}) + b_g)   # 候选隐藏状态
+h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t                # 新隐藏状态
 ```
 
-### 量化推理
+其中 `σ` 为 Sigmoid，`⊙` 为逐元素乘。量化配置中的算子名（如 `update_gate_output`、`weight_ih_linear`）对应该公式各步骤的中间结果；逐步展开与命名对照见 [pytorch/config/README.md](pytorch/config/README.md)。
 
-```python
-from quant_gru import QuantGRU
-import torch
+---
 
-# 1. 创建模型
-gru = QuantGRU(
-    input_size=64,
-    hidden_size=128,
-    batch_first=True
-).cuda()
+## 📖 典型工作流
 
-# 2. 加载位宽配置（二选一）
-# 方式一：从配置文件加载
-gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json", verbose=True)
-# 方式二：直接设置统一位宽（1-32 bit，is_symmetric控制对称量化）
-# gru.set_all_bitwidth(bitwidth=8, is_symmetric=True, verbose=True)
-
-# 3. 校准：设置 calibrating=True，然后用校准数据前向传播
-gru.calibrating = True
-for batch in calibration_loader:
-    gru(batch.cuda())  # forward 中同时收集校准数据
-gru.calibrating = False
-
-# 4. 启用量化推理（首次 forward 会自动完成校准参数计算）
-gru.use_quantization = True
-output, h_n = gru(input_data)
-```
-
-> 💡 **量化开关**：配置文件中的 `disable_quantization` 控制是否启用量化：
-> - `false`（默认）：启用量化推理
-> - `true`：使用浮点推理
-
-### 量化感知训练 (QAT)
+`QuantGRU` 与 `nn.GRU` 接口一致。浮点推理直接 `forward`；量化推理遵循 **配置 → 校准 → 启用量化** 三步。
 
 ```python
 from quant_gru import QuantGRU
 import torch
 
 gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
-gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
 
-# 校准
+# --- 浮点推理 ---
+x = torch.randn(32, 50, 64).cuda()
+output, h_n = gru(x)
+
+# --- 量化推理 (PTQ) ---
+# 1) 加载位宽配置（或 gru.set_all_bitwidth(8, is_symmetric=True)）
+gru.load_bitwidth_config("pytorch/config/gru_quant_bitwidth_config.json")
+# 可选: gru.calibration_method = 'sqnr'  # 默认 'minmax'，见下方对比表
+
+# 2) 用代表性数据校准（forward 同时收集统计量）
 gru.calibrating = True
 for batch in calibration_loader:
     gru(batch.cuda())
 gru.calibrating = False
 
-# 启用量化
+# 3) 启用量化推理（首次 forward 会自动 finalize 校准参数）
 gru.use_quantization = True
+output, h_n = gru(x)
 
-# 训练循环（前向使用量化，反向使用浮点）
-optimizer = torch.optim.Adam(gru.parameters(), lr=0.001)
-criterion = torch.nn.MSELoss()
-gru.train()
-
-for epoch in range(num_epochs):
-    for x, target in train_loader:
-        optimizer.zero_grad()
-        output, _ = gru(x.cuda())
-        loss = criterion(output, target.cuda())
-        loss.backward()
-        optimizer.step()
-```
-
-### 校准方法选择
-
-```python
-# MinMax 校准（默认，速度快，适合快速原型验证）
-gru.calibration_method = 'minmax'
-
-# SQNR 优化校准（高精度，推荐用于生产部署）
-gru.calibration_method = 'sqnr'
-
-# 百分位裁剪校准（基于直方图，可配置裁剪比例）
-gru.calibration_method = 'percentile'
-gru.percentile_value = 100.0  # 默认 100.0%（即不裁剪）
-```
-
-### 量化参数导入导出
-
-校准完成后，可以导出量化参数供其他模型加载使用，避免重复校准：
-
-```python
-# 导出量化参数
-gru.export_quant_params("quant_params.json", verbose=True)
-
-# 在另一个模型中加载（位宽配置自动包含在量化参数中）
+# --- 复用量化参数（跳过重新校准）---
+gru.export_quant_params("quant_params.json")
 gru2 = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cuda()
-gru2.load_state_dict(gru.state_dict(), strict=False)  # 加载权重
-gru2.load_quant_params("quant_params.json", verbose=True)  # 加载量化参数（含位宽配置）
-gru2.use_quantization = True  # 直接启用量化，无需再校准
+gru2.load_state_dict(gru.state_dict(), strict=False)
+gru2.load_quant_params("quant_params.json")
+gru2.use_quantization = True
 ```
 
-### 调整和查询量化配置
+> 配置文件中的 `disable_quantization: true` 可强制该配置走浮点路径；默认 `false` 表示启用量化。
 
-```python
-# 调整单个算子的量化配置（修改位宽会自动调整 scale）
-gru.adjust_quant_config("update_gate_output", bitwidth=16, verbose=True)
+### 量化感知训练 (QAT)
 
-# 获取单个算子的量化配置
-config = gru.get_quant_config("update_gate_output")
-print(config)  # {'bitwidth': 16, 'is_symmetric': False, 'shift': ..., 'scale': ..., ...}
+完成上述校准并设置 `gru.use_quantization = True` 后，按常规 PyTorch 训练循环 `loss.backward()` 即可（前向量化、反向浮点）。完整示例见 `pytorch/example/example_usage.py` 中的 `example_training()`。
 
-# 获取所有算子的量化配置
-all_configs = gru.get_quant_config()
-for op_name, config in all_configs.items():
-    print(f"{op_name}: {config['bitwidth']}bit")
-```
-
-## ⚙️ 量化配置
-
-### 量化位宽配置文件格式
-
-配置文件 `pytorch/config/gru_quant_bitwidth_config.json`：
-
-```json
-{
-  "GRU_config": {
-    "default_config": {
-      "disable_quantization": false
-    },
-    "operator_config": {
-      "input": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
-      "output": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false },
-      "weight_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "weight_hh": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "bias_ih": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "bias_hh": { "bitwidth": 8, "is_symmetric": true, "is_unsigned": false, "quantization_granularity": "PER_CHANNEL" },
-      "update_gate_output": { "bitwidth": 8, "is_symmetric": false, "is_unsigned": true },
-      ...
-    }
-  }
-}
-```
-
-> 💡 **配置说明**：
-> - `bitwidth`: 量化位宽 (1-32 bit)
-> - `is_symmetric`: 是否对称量化 (true: zero_point=0)
-> - `is_unsigned`: 是否无符号量化 (false: INT, true: UINT)，Sigmoid 输出建议用 UINT
-> - `quantization_granularity`: 量化粒度（仅权重类算子支持：`PER_TENSOR`/`PER_GATE`/`PER_CHANNEL`）
-
-### 可配置的算子
-
-| 类别 | 算子名 | 说明 |
-|------|--------|------|
-| 输入/输出 | `input`, `output` | 输入序列和隐藏状态输出 |
-| 权重 | `weight_ih`, `weight_hh`, `bias_ih`, `bias_hh` | 输入权重、循环权重、输入偏置、循环偏置（支持 per-channel 量化） |
-| Linear 层 | `weight_ih_linear`, `weight_hh_linear` | GEMM+bias 融合后的输出 |
-| 门控 | `update_gate_input`, `update_gate_output`, `reset_gate_input`, `reset_gate_output`, `new_gate_input`, `new_gate_output` | 更新门、重置门、候选门的激活前后 |
-| 运算 | `mul_reset_hidden`, `mul_old_contribution`, `mul_new_contribution` | 中间运算结果 |
-
-> 📖 **详细配置说明**：请参考 `pytorch/config/README.md` 查看完整的算子列表和配置示例
-
-### 快速设置所有位宽
-
-```python
-# 设置所有算子使用 8bit 对称量化
-gru.set_all_bitwidth(8, is_symmetric=True)
-
-# 设置所有算子使用 14bit 非对称量化（支持任意 1-32 bit）
-gru.set_all_bitwidth(14, is_symmetric=False)
-```
-
-## 📐 GRU 公式
-
-本项目实现的 GRU 遵循以下计算公式：
-
-```
-z_t = σ(W_z · x_t + R_z · h_{t-1} + b_z)        # 更新门
-r_t = σ(W_r · x_t + R_r · h_{t-1} + b_r)        # 重置门
-g_t = tanh(W_g · x_t + r_t ⊙ (R_g · h_{t-1}) + b_g)  # 候选隐藏状态
-h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
-```
-
-其中：
-- `σ` 表示 Sigmoid 激活函数
-- `⊙` 表示逐元素乘法
-
-## 🔬 校准方法对比
+### 校准方法对比
 
 | 方法 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
@@ -280,158 +131,109 @@ h_t = z_t ⊙ h_{t-1} + (1 - z_t) ⊙ g_t          # 新隐藏状态
 | **SQNR** | 精度最高，自动搜索最优 scale | 计算开销稍大 | 生产部署（推荐） |
 | **Percentile** | 可配置裁剪比例，抗异常值 | 需调参 | 数据有异常值时 |
 
+设置方式：`gru.calibration_method = 'minmax' | 'sqnr' | 'percentile'`；Percentile 可额外设置 `gru.percentile_value`（默认 `100.0`）。
+
+---
+
+## ⚙️ 量化配置
+
+位宽 JSON 格式、算子列表、字段语义与 GRU 计算流程见 **[pytorch/config/README.md](pytorch/config/README.md)**。
+
+常用快捷接口：
+
+```python
+gru.set_all_bitwidth(8, is_symmetric=True)          # 全部算子 8bit 对称
+gru.adjust_quant_config("update_gate_output", bitwidth=16)
+config = gru.get_quant_config("update_gate_output")  # 不传参数则返回全部算子
+```
+
+---
+
 ## 📦 ONNX 导出
 
-`QuantGRU` 在 `export_mode=True` 时导出为标准 ONNX `GRU` 节点（核心计算单节点）
+`export_mode=True` 时走 ONNX 单节点 `GRU` 导出路径；默认 `False` 使用 CUDA 高性能推理。
 
-### 导出模式工作原理
+**要点：**
 
-```
-forward()
-  ├─ export_mode=False (默认) → CUDA C++ 实现（高性能推理）
-  └─ export_mode=True         → ONNX 单节点 GRU 导出路径（仅导出上下文可用）
-```
+1. 导出前设 `gru.export_mode = True`，导出后恢复 `False`
+2. 须调用 `ensure_quant_gru_onnx_registered(opset=...)`，且与 `torch.onnx.export(opset_version=...)` **一致**（支持 `opset>=13`）
+3. 使用 legacy exporter：`torch.onnx.export(..., dynamo=False)`
+4. 传入 `custom_opsets=get_quant_gru_custom_opsets()`
 
-### 标准导出示例（standalone）
+**与 `aimet_rx` 分工：** 本项目提供标准 ONNX `GRU` 节点与量化参数接口；整模型导出、encodings 合并由 `aimet_rx/export_onnx_and_encodings` 负责。多 GRU 模型建议导出前调用 `set_quant_gru_module_names(model)`。
 
-```python
-from quant_gru import (
-    QuantGRU,
-    ensure_quant_gru_onnx_registered,
-    get_quant_gru_custom_opsets,
-)
-import torch
+完整代码见 `example_onnx_export()`。
 
-gru = QuantGRU(input_size=64, hidden_size=128, batch_first=True).cpu()
-gru.eval()
+---
 
-opset = 18  # 支持 >=13；需与 torch.onnx.export(opset_version=...) 一致
-gru.export_mode = True
-ensure_quant_gru_onnx_registered(opset=opset)
+## 📚 常见场景索引
 
-dummy_input = torch.randn(1, 50, 64).cpu()
-torch.onnx.export(
-    gru, dummy_input, "gru_float.onnx",
-    opset_version=opset,
-    dynamo=False, # PyTorch 2.x 需要此参数使用传统导出
-    custom_opsets=get_quant_gru_custom_opsets(),
-    input_names=['input'],
-    output_names=['output', 'hidden'],
-    dynamic_axes={'input': {0: 'batch', 1: 'seq_len'},
-                  'output': {0: 'batch', 1: 'seq_len'}}
-)
+完整可运行示例见 [`pytorch/example/example_usage.py`](pytorch/example/example_usage.py)。
 
-gru.export_mode = False
-```
+| 场景 | 示例函数 |
+|------|----------|
+| 基础浮点使用 | `example_basic_usage()` |
+| JSON 配置 + PTQ | `example_quantization_with_json()` |
+| 手动统一位宽 | `example_quantization_manual()` |
+| 浮点 vs 量化精度对比 | `example_compare_precision()` |
+| QAT 训练 | `example_training()` |
+| 校准方法对比 | `example_calibration_method()` |
+| 双向 GRU | `example_bidirectional()` |
+| ONNX 单节点导出 | `example_onnx_export()` |
+| 量化参数导入导出 | `example_quant_params_export_import()` |
+| 单算子配置调整 | `example_adjust_quant_config()` |
+| per-tensor / per-gate 权重 | `example_weight_bias_granularity()` |
 
-### 与 `aimet_rx` 配合
+---
 
-- 本项目负责导出标准 ONNX `GRU` 节点和量化参数导入/导出接口。
-- 高层 `aimet_rx/export_onnx_and_encodings` 负责整模型导出、postprocess、
-  encodings 合并与命名规范化。
-- 推荐多 GRU 模型在导出前调用 `set_quant_gru_module_names(model)` 提升命名稳定性。
+## 📝 API 速查
 
-### 注意事项
+### 常用属性
 
-1. **导出前必须设置 `export_mode = True`**：否则会尝试追踪 CUDA 自定义算子，导致失败
-2. **导出使用 legacy exporter**：`torch.onnx.export(..., dynamo=False)`
-3. **必须指定 custom_opsets**：推荐使用 `custom_opsets=get_quant_gru_custom_opsets()`
-4. **支持 opset>=13**：`ensure_quant_gru_onnx_registered(opset=...)` 必须与 `torch.onnx.export(opset_version=...)` 一致
-5. **导出后恢复运行模式**：设置 `export_mode = False` 以恢复常规高性能推理
+| 属性 | 默认值 | 说明 |
+|------|--------|------|
+| `use_quantization` | `False` | 量化推理开关 |
+| `calibrating` | `False` | `True` 时 forward 收集校准数据 |
+| `calibration_method` | `'minmax'` | `'minmax'` / `'sqnr'` / `'percentile'` |
+| `percentile_value` | `100.0` | 仅 percentile 校准使用 |
+| `export_mode` | `False` | `True` 启用 ONNX 单节点导出路径 |
 
-> 💡 **提示**：更多详细示例请参阅 `pytorch/example/example_usage.py`
-
-## 📝 API 参考
-
-### QuantGRU 类
-
-```python
-class QuantGRU(nn.Module):
-    def __init__(
-        self,
-        input_size: int,              # 输入特征维度
-        hidden_size: int,             # 隐藏状态维度
-        num_layers: int = 1,          # 层数（仅支持 1）
-        bias: bool = True,            # 是否使用偏置
-        batch_first: bool = False,    # 输入格式：True=[B,T,I], False=[T,B,I]
-        dropout: float = 0.0,         # 暂不支持，必须为 0
-        bidirectional: bool = False,  # 是否双向
-        use_quantization: bool = False # 是否启用量化
-    )
-    
-    # 重要属性默认值（可在创建后修改）
-    gru.calibrating = False            # 默认关闭；True 时 forward 收集校准数据
-    gru.use_quantization = False       # 默认关闭量化推理
-    gru.calibration_method = 'minmax' # 默认 MinMax；可选 'sqnr' / 'percentile'
-    gru.export_mode = False            # 默认 CUDA 路径；导出 ONNX 时设为 True
-```
-
-### 主要属性
-
-| 属性 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `use_quantization` | bool | False | 量化开关 |
-| `calibrating` | bool | False | 校准模式开关，True 时 forward 会收集校准数据 |
-| `calibration_method` | str | 'minmax' | 校准方法：'minmax'（快速，默认）/ 'sqnr'（高精度）/ 'percentile'（百分位） |
-| `percentile_value` | float | 100.0 | 百分位值，仅 'percentile' 方法使用（100.0 表示不裁剪） |
-| `export_mode` | bool | False | ONNX 导出模式，True 时启用标准 GRU 单节点导出路径 |
-
-### 主要方法
+### 常用方法
 
 | 方法 | 说明 |
 |------|------|
-| `forward(input, hx=None)` | 前向传播（`calibrating=True` 时同时收集校准数据） |
-| `finalize_calibration(verbose=False)` | 完成校准，计算量化参数（通常无需手动调用，`use_quantization=True` 时自动处理） |
-| `reset_calibration()` | 重置校准状态，清除所有累积的校准数据 |
-| `load_bitwidth_config(path, verbose=False)` | 从 JSON 文件加载位宽配置 |
-| `set_all_bitwidth(bitwidth, is_symmetric=True, verbose=False)` | 设置所有算子统一位宽 |
-| `is_calibrated()` | 检查是否已完成校准 |
-| `export_quant_params(path, include_weights=False, verbose=False)` | 导出量化参数到 JSON 文件 |
-| `load_quant_params(path, verbose=False)` | 从 JSON 文件加载量化参数 |
-| `set_quant_params_locked(locked)` | 锁定/解锁 quant_params，控制后续校准是否允许覆盖 |
-| `adjust_quant_config(operator, bitwidth=None, is_symmetric=None, exp2_inv=None, zero_point=None, verbose=False)` | 手动调整指定算子的量化配置 |
-| `get_quant_config(operator=None)` | 获取量化配置信息（单个算子或所有算子） |
-| `export_quant_params_to_aimet_format(encodings_dict, module_name=None, verbose=False)` | 将量化参数导出为 AIMET encodings 格式 |
-| `load_quant_params_from_aimet_format(encodings_dict, module_name=None, verbose=False)` | 从 AIMET encodings 格式加载量化参数 |
+| `forward(input, hx=None)` | 前向传播 |
+| `load_bitwidth_config(path)` | 加载位宽 JSON |
+| `set_all_bitwidth(bitwidth, is_symmetric=True)` | 统一位宽 |
+| `export_quant_params(path)` / `load_quant_params(path)` | 量化参数导入导出 |
+| `adjust_quant_config(operator, ...)` / `get_quant_config(operator=None)` | 调整/查询算子配置 |
+| `set_quant_params_locked(locked)` | 锁定量化参数，防止校准覆盖 |
+| `export_quant_params_to_aimet_format(...)` / `load_quant_params_from_aimet_format(...)` | AIMET encodings 互转 |
+
+完整签名与 docstring 见 `pytorch/quant_gru.py`。
+
+---
 
 ## 🏗️ 项目结构
 
 ```
 quant-gru-pytorch/
-├── include/                    # C++/CUDA 头文件
-│   ├── gru.h                   # 浮点 GRU 前向/反向传播类
-│   ├── gru_quant.h             # 量化 GRU 前向传播类
-│   ├── gru_interface.h         # 统一接口层（校准、量化、前向传播）
-│   ├── quantize_bitwidth_config.h    # 量化位宽配置
-│   ├── quantize_ops_helper.h   # 量化操作（CPU/GPU 共用）
-│   ├── histogram_collector.h   # 直方图收集器（AIMET 风格校准）
-│   ├── pot_sqnr_calibrator.h   # SQNR 校准器
-│   └── ...
-├── src/                        # C++/CUDA 源文件
-│   ├── gru_forward_gpu.cu      # 浮点前向传播 GPU 实现
-│   ├── gru_forward_gpu_quant.cu # 量化前向传播 GPU 实现
-│   ├── gru_backward_gpu.cu     # 反向传播 GPU 实现
-│   ├── gru_interface.cc        # 接口实现
-│   └── quantize_ops.cu         # 量化操作实现
-├── pytorch/                    # PyTorch 绑定和 Python 接口
-│   ├── quant_gru.py            # 量化 GRU 类（含 CUDA 和纯 PyTorch 双实现）
-│   ├── setup.py                # Python 扩展编译配置
-│   ├── lib/                    # 编译生成的库文件
-│   ├── config/                 # 配置文件
-│   │   └── gru_quant_bitwidth_config.json  # 量化位宽配置
-│   └── test_*.py               # 测试脚本
-├── example/                    # C++ 使用示例
-│   └── gru.cc                  # 浮点/量化 GRU 对比示例
-├── quant-gru-cpu-only/         # 纯 CPU 定点 GRU 实现（Reference Model）
-│   ├── include/                # 头文件
-│   ├── src/                    # 源文件
-│   └── example/                # 使用示例
-├── CMakeLists.txt              # CMake 构建配置
+├── include/ / src/          # C++/CUDA 核心实现
+├── pytorch/                 # Python 绑定、配置、测试与示例
+│   ├── quant_gru.py
+│   ├── config/              # 位宽 JSON 与配置说明
+│   └── example/example_usage.py
+├── example/                 # C++ 示例
+├── quant-gru-cpu-only/      # CPU 定点 Reference Model
+└── CMakeLists.txt
 ```
+
+算法与量化流程深度文档见 `docs/`。
+
+---
 
 ## 📚 参考
 
 - [AIMET (AI Model Efficiency Toolkit)](https://github.com/quic/aimet)
 - [Haste: Fast RNN Library](https://github.com/lmnt-com/haste)
 - [PyTorch Quantization](https://pytorch.org/docs/stable/quantization.html)
-
