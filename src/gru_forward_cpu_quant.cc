@@ -11,7 +11,7 @@
 // ============================================================================
 
 #include "gru_quant_cpu.h"
-#include "pot_sqnr_calibrator.h"
+#include "quantize_ops_helper.h"  // makeRescale* 及 GRU 门模板/通用算子
 
 #include <cstdio>
 #include <stdexcept>
@@ -86,13 +86,16 @@ void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *
     const int input_size = data_->input_size;
     const int hidden3 = hidden_size * 3;
 
+    const int32_t zp_x = use_pot2_ ? linear_params_pot2_.zp_x_ : linear_params_mshift_.zp_x_;
+    const int32_t zp_h = use_pot2_ ? linear_params_pot2_.zp_h_ : linear_params_mshift_.zp_h_;
+
     for (int m = 0; m < hidden3; m++) {
         int64_t sum = 0;
         for (int k = 0; k < input_size; k++) {
             sum += static_cast<int64_t>(W[k * hidden3 + m]);
         }
         // 与 GPU 保持一致：不在此处移位，只计算 W_sum * zp_x
-        W_sum_mul_x_zp_[m] = sum * linear_params_.zp_x_;
+        W_sum_mul_x_zp_[m] = sum * zp_x;
     }
 
     for (int m = 0; m < hidden3; m++) {
@@ -101,13 +104,15 @@ void ForwardPassQuantCPU::PrecomputeWeightSums(const int32_t *W, const int32_t *
             sum += static_cast<int64_t>(R[k * hidden3 + m]);
         }
         // 与 GPU 保持一致：不在此处移位，只计算 R_sum * zp_h
-        R_sum_mul_h_zp_[m] = sum * linear_params_.zp_h_;
+        R_sum_mul_h_zp_[m] = sum * zp_h;
     }
 
     weight_sums_computed_ = true;
 }
 
-void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps) {
+template <class R>
+void ForwardPassQuantCPU::ComputeLinearX(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                         const int32_t *W, const int32_t *x, const int32_t *bw, int steps) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -123,25 +128,21 @@ void ForwardPassQuantCPU::ComputeLinearX(const int32_t *W, const int32_t *x, con
                        static_cast<int64_t>(x[n * input_size + k]);
             }
             int64_t gemm_val = acc - W_sum_mul_x_zp_[m];
-            
-            // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-            // POT2 模式用整数移位；affine 模式用 per-channel FixedPointScale
-            int64_t bias_shifted;
-            int64_t gemm_plus_bias_rescaled;
-            if (gate_params_.bitwidth_config_.usePOT2_) {
-                bias_shifted = rshift_round(static_cast<int64_t>(bw[m]), linear_params_.shift_bw_to_weight_ih_linear_[m]);
-                gemm_plus_bias_rescaled = rshift_round(gemm_val + bias_shifted, linear_params_.shift_gemm_x_to_weight_ih_linear_[m]);
-            } else {
-                bias_shifted = rescale_round<false>(static_cast<int64_t>(bw[m]), linear_params_.fixed_rescale_bw_to_weight_ih_linear_[m]);
-                gemm_plus_bias_rescaled = rescale_round<false>(gemm_val + bias_shifted, linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[m]);
-            }
-            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gate_params_.zp_weight_ih_linear_;
-            tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_ih_linear_);
+
+            // bias 先 rescale 到 GEMM 累加器 scale，再和 GEMM 结果一起 rescale 到 Linear scale
+            const int64_t bias_shifted =
+                applyRescale(static_cast<int64_t>(bw[m]), lp.rescale_bw_to_weight_ih_linear_[m]);
+            const int64_t gemm_plus_bias_rescaled =
+                applyRescale(gemm_val + bias_shifted, lp.rescale_gemm_x_to_weight_ih_linear_[m]);
+            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gp.zp_weight_ih_linear_;
+            tmp_weight_ih_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gp.bitwidth_config_.weight_ih_linear_);
         }
     }
 }
 
-void ForwardPassQuantCPU::ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br) {
+template <class R>
+void ForwardPassQuantCPU::ComputeLinearH(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                         const int32_t *R_w, const int32_t *h, const int32_t *br) {
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
     const int hidden3 = hidden_size * 3;
@@ -151,29 +152,24 @@ void ForwardPassQuantCPU::ComputeLinearH(const int32_t *R, const int32_t *h, con
             // GEMM: R*h
             int64_t acc = 0;
             for (int k = 0; k < hidden_size; k++) {
-                acc += static_cast<int64_t>(R[k * hidden3 + m]) *
+                acc += static_cast<int64_t>(R_w[k * hidden3 + m]) *
                        static_cast<int64_t>(h[n * hidden_size + k]);
             }
             int64_t gemm_val = acc - R_sum_mul_h_zp_[m];
-            
-            // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-            // POT2 模式用整数移位；affine 模式用 per-channel FixedPointScale
-            int64_t bias_shifted;
-            int64_t gemm_plus_bias_rescaled;
-            if (gate_params_.bitwidth_config_.usePOT2_) {
-                bias_shifted = rshift_round(static_cast<int64_t>(br[m]), linear_params_.shift_br_to_weight_hh_linear_[m]);
-                gemm_plus_bias_rescaled = rshift_round(gemm_val + bias_shifted, linear_params_.shift_gemm_h_to_weight_hh_linear_[m]);
-            } else {
-                bias_shifted = rescale_round<false>(static_cast<int64_t>(br[m]), linear_params_.fixed_rescale_br_to_weight_hh_linear_[m]);
-                gemm_plus_bias_rescaled = rescale_round<false>(gemm_val + bias_shifted, linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[m]);
-            }
-            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gate_params_.zp_weight_hh_linear_;
-            tmp_weight_hh_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gate_params_.bitwidth_config_.weight_hh_linear_);
+
+            const int64_t bias_shifted =
+                applyRescale(static_cast<int64_t>(br[m]), lp.rescale_br_to_weight_hh_linear_[m]);
+            const int64_t gemm_plus_bias_rescaled =
+                applyRescale(gemm_val + bias_shifted, lp.rescale_gemm_h_to_weight_hh_linear_[m]);
+            int32_t result = static_cast<int32_t>(gemm_plus_bias_rescaled) + gp.zp_weight_hh_linear_;
+            tmp_weight_hh_linear_[n * hidden3 + m] = clamp_by_bitwidth(result, gp.bitwidth_config_.weight_hh_linear_);
         }
     }
 }
 
-void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
+template <class R>
+void ForwardPassQuantCPU::IterateInternal(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                          const int32_t *R_w, const int32_t *br,
                                           const int32_t *h, int32_t *h_out, int32_t *v,
                                           const int32_t *cur_weight_ih_linear,
                                           float zoneout_prob,
@@ -183,7 +179,7 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
     const int hidden_size = data_->hidden_size;
 
     // 计算 R*h + br GEMM+bias 融合
-    ComputeLinearH(R, h, br);
+    ComputeLinearH<R>(lp, gp, R_w, h, br);
 
     for (int col = 0; col < batch_size; col++) {
         for (int row = 0; row < hidden_size; row++) {
@@ -195,10 +191,10 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
 
             // GEMM+bias 融合版本：直接使用 Wx_bw 和 Rh_br
             // CPU 版本不使用 mask（推理模式），传递 false 模板参数
-            const int32_t update_gate = computeUpdateGate<false>(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gate_params_);
-            const int32_t reset_gate = computeResetGate<false>(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gate_params_);
+            const int32_t update_gate = computeUpdateGate<false>(cur_weight_ih_linear[update_idx], tmp_weight_hh_linear_[update_idx], gp);
+            const int32_t reset_gate = computeResetGate<false>(cur_weight_ih_linear[reset_idx], tmp_weight_hh_linear_[reset_idx], gp);
 
-            const int32_t new_gate = computeNewGate<false>(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gate_params_);
+            const int32_t new_gate = computeNewGate<false>(cur_weight_ih_linear[new_idx], tmp_weight_hh_linear_[new_idx], reset_gate, gp);
 
             if (training && v != nullptr) {
                 const int base_v_idx = col * (hidden_size * 4) + row;
@@ -208,7 +204,7 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
                 v[base_v_idx + 3 * hidden_size] = tmp_weight_hh_linear_[new_idx];  // 直接使用 tmp_weight_hh_linear_[new_idx]
             }
 
-            int32_t cur_h = computeHiddenState<false>(update_gate, new_gate, h[output_idx], gate_params_);
+            int32_t cur_h = computeHiddenState<false>(update_gate, new_gate, h[output_idx], gp);
 
             if (zoneout_prob > 0.0f && zoneout_mask != nullptr) {
                 if (zoneout_mask[output_idx] != 0) cur_h = h[output_idx];
@@ -219,185 +215,125 @@ void ForwardPassQuantCPU::IterateInternal(const int32_t *R, const int32_t *br,
     }
 }
 
-// setRescaleParam: 直接复用 quantize_lut_types.h 中声明的 generate_*_lut 函数
-void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
+namespace {
+
+// 由单一权威种子派生 CPU Linear 参数（仅 per-channel，每条一份 R 表示）。
+template <class R>
+void fillLinearParamsCPU(LinearQuantParamsCPUT<R> &lp, const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
-    const bool usePOT2 = parms.bitwidth_config_.usePOT2_;
-    auto to_fixed_rescale = [usePOT2](int8_t shift) {
-        if (usePOT2) return FixedPointScale{1u, shift};
-        return encodeMShift(exp2_scale(static_cast<int8_t>(-shift)));
-    };
-    auto to_ratio_fixed = [usePOT2](float src_scale, float dst_scale) {
-        const float ratio = src_scale / dst_scale;
-        if (!(ratio > 0.0f)) {
-            throw std::runtime_error("Invalid non-positive rescale ratio");
-        }
-        if (usePOT2) {
-            return FixedPointScale{1u, static_cast<int8_t>(round_f(-std::log2(ratio)))};
-        }
-        return encodeMShift(ratio);
-    };
+    lp.zp_x_ = parms.x_.zero_point;
+    lp.zp_h_ = parms.h_.zero_point;
 
-    // ==================== Linear 层参数（per-channel）====================
-    linear_params_.zp_x_ = parms.zp_x_;
-    linear_params_.zp_h_ = parms.zp_h_;
-
-    // 计算 per-channel 移位参数
-    linear_params_.shift_gemm_x_to_weight_ih_linear_.resize(channel);
-    linear_params_.shift_bw_to_weight_ih_linear_.resize(channel);
-    linear_params_.shift_gemm_h_to_weight_hh_linear_.resize(channel);
-    linear_params_.shift_br_to_weight_hh_linear_.resize(channel);
-
-    for (int idx = 0; idx < channel; ++idx) {
-        linear_params_.shift_gemm_x_to_weight_ih_linear_[idx] = (parms.shift_W_[idx] + parms.shift_x_) - parms.shift_weight_ih_linear_;
-        linear_params_.shift_gemm_h_to_weight_hh_linear_[idx] = (parms.shift_R_[idx] + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-        // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
-        // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
-        linear_params_.shift_bw_to_weight_ih_linear_[idx] = parms.shift_bw_[idx] - (parms.shift_W_[idx] + parms.shift_x_);
-        linear_params_.shift_br_to_weight_hh_linear_[idx] = parms.shift_br_[idx] - (parms.shift_R_[idx] + parms.shift_h_);
+    lp.rescale_gemm_x_to_weight_ih_linear_.resize(channel);
+    lp.rescale_bw_to_weight_ih_linear_.resize(channel);
+    lp.rescale_gemm_h_to_weight_hh_linear_.resize(channel);
+    lp.rescale_br_to_weight_hh_linear_.resize(channel);
+    for (int c = 0; c < channel; ++c) {
+        // GEMM 结果(累加器 scale = scale_W*scale_x) -> weight_ih_linear
+        lp.rescale_gemm_x_to_weight_ih_linear_[c] =
+            makeRescaleProduct<R>(parms.W_.channel(c), parms.x_, parms.weight_ih_linear_);
+        // bias bw(自身 scale) -> 累加器 scale = scale_W*scale_x
+        lp.rescale_bw_to_weight_ih_linear_[c] =
+            makeRescaleToProduct<R>(parms.bw_.channel(c), parms.W_.channel(c), parms.x_);
+        lp.rescale_gemm_h_to_weight_hh_linear_[c] =
+            makeRescaleProduct<R>(parms.R_.channel(c), parms.h_, parms.weight_hh_linear_);
+        lp.rescale_br_to_weight_hh_linear_[c] =
+            makeRescaleToProduct<R>(parms.br_.channel(c), parms.R_.channel(c), parms.h_);
     }
-    linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_.resize(channel);
-    linear_params_.fixed_rescale_bw_to_weight_ih_linear_.resize(channel);
-    linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_.resize(channel);
-    linear_params_.fixed_rescale_br_to_weight_hh_linear_.resize(channel);
-    for (int idx = 0; idx < channel; ++idx) {
-        linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[idx] =
-            to_fixed_rescale(linear_params_.shift_gemm_x_to_weight_ih_linear_[idx]);
-        linear_params_.fixed_rescale_bw_to_weight_ih_linear_[idx] =
-            to_fixed_rescale(linear_params_.shift_bw_to_weight_ih_linear_[idx]);
-        linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[idx] =
-            to_fixed_rescale(linear_params_.shift_gemm_h_to_weight_hh_linear_[idx]);
-        linear_params_.fixed_rescale_br_to_weight_hh_linear_[idx] =
-            to_fixed_rescale(linear_params_.shift_br_to_weight_hh_linear_[idx]);
-        if (!usePOT2) {
-            const float scale_wx = decode_scale(parms.fixed_scale_W_[idx]) * decode_scale(parms.fixed_scale_x_);
-            const float scale_rh = decode_scale(parms.fixed_scale_R_[idx]) * decode_scale(parms.fixed_scale_h_);
-            linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_[idx] =
-                to_ratio_fixed(scale_wx, decode_scale(parms.fixed_scale_weight_ih_linear_));
-            linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_[idx] =
-                to_ratio_fixed(scale_rh, decode_scale(parms.fixed_scale_weight_hh_linear_));
-            linear_params_.fixed_rescale_bw_to_weight_ih_linear_[idx] =
-                to_ratio_fixed(decode_scale(parms.fixed_scale_bw_[idx]), scale_wx);
-            linear_params_.fixed_rescale_br_to_weight_hh_linear_[idx] =
-                to_ratio_fixed(decode_scale(parms.fixed_scale_br_[idx]), scale_rh);
-        }
-    }
+}
 
-#ifdef DEBUG
-    linear_params_.shift_bw_ = parms.shift_bw_;
-    linear_params_.shift_br_ = parms.shift_br_;
-#endif
+// 由单一权威种子派生门计算参数（每条一份 R 表示）。
+template <class R>
+void fillGateParamsCPU(GateQuantParamsT<R> &gp, const GRUQuantParams &parms) {
+    gp.zp_weight_ih_linear_ = parms.weight_ih_linear_.zero_point;
+    gp.zp_weight_hh_linear_ = parms.weight_hh_linear_.zero_point;
+    gp.zp_h_ = parms.h_.zero_point;
 
-    // ==================== 门计算参数（标量）====================
-    gate_params_.zp_weight_ih_linear_ = parms.zp_weight_ih_linear_;
-    gate_params_.zp_weight_hh_linear_ = parms.zp_weight_hh_linear_;
-    gate_params_.zp_h_ = parms.zp_h_;
+    gp.zp_update_gate_input_ = parms.update_gate_input_.zero_point;
+    gp.zp_update_gate_output_ = parms.update_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_update_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.update_gate_input_);
+    gp.rescale_weight_hh_linear_to_update_gate_input_ = makeRescale<R>(parms.weight_hh_linear_, parms.update_gate_input_);
 
-    // update gate
-    gate_params_.zp_update_gate_input_ = parms.zp_update_gate_input_;
-    gate_params_.zp_update_gate_output_ = parms.zp_update_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_update_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_update_gate_input_;
-    gate_params_.shift_weight_hh_linear_to_update_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_update_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_update_gate_input_);
-    gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_update_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
-        gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
-    }
+    gp.zp_reset_gate_input_ = parms.reset_gate_input_.zero_point;
+    gp.zp_reset_gate_output_ = parms.reset_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_reset_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.reset_gate_input_);
+    gp.rescale_weight_hh_linear_to_reset_gate_input_ = makeRescale<R>(parms.weight_hh_linear_, parms.reset_gate_input_);
 
-    // reset gate
-    gate_params_.zp_reset_gate_input_ = parms.zp_reset_gate_input_;
-    gate_params_.zp_reset_gate_output_ = parms.zp_reset_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
-    gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_reset_gate_input_);
-    gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_reset_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
-        gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
-    }
+    gp.zp_new_gate_input_ = parms.new_gate_input_.zero_point;
+    gp.zp_new_gate_output_ = parms.new_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_new_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.new_gate_input_);
+    // r*weight_hh_linear（scale = scale_reset_out*scale_weight_hh_linear）-> new_gate_input
+    gp.rescale_reset_mul_hh_to_new_gate_input_ =
+        makeRescaleProduct<R>(parms.reset_gate_output_, parms.weight_hh_linear_, parms.new_gate_input_);
 
-    // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
-    gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
-    gate_params_.zp_new_gate_output_ = parms.zp_new_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
-    gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
-        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_new_gate_input_);
-    gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_reset_mul_hh_to_new_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_new_gate_input_));
-        gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
-            to_ratio_fixed(
-                decode_scale(parms.fixed_scale_reset_gate_output_) * decode_scale(parms.fixed_scale_weight_hh_linear_),
-                decode_scale(parms.fixed_scale_new_gate_input_));
-    }
+    // 常数 1 量化到 update_gate_output 空间
+    gp.quant_one_in_update_gate_scale_ =
+        round_to_int(1.0f / parms.update_gate_output_.scale) + parms.update_gate_output_.zero_point;
+    gp.rescale_new_gate_output_to_h_ = makeRescale<R>(parms.new_gate_output_, parms.h_);
+    // u*h（scale = scale_update_out*scale_h）-> h
+    gp.rescale_update_old_to_h_ = makeRescaleProduct<R>(parms.update_gate_output_, parms.h_, parms.h_);
 
-    // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
-    gate_params_.quant_one_in_update_gate_scale_ =
-        round_to_int(1.0f / decode_scale(parms.fixed_scale_update_gate_output_)) + parms.zp_update_gate_output_;
-    // new_gate_output 对齐到 h 的移位
-    gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
-    // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
-    gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
-    gate_params_.fixed_rescale_new_gate_output_to_h_ = to_fixed_rescale(gate_params_.shift_new_gate_output_to_h_);
-    gate_params_.fixed_rescale_update_old_to_h_ = to_fixed_rescale(gate_params_.shift_update_old_to_h_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_new_gate_output_to_h_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_new_gate_output_), decode_scale(parms.fixed_scale_h_));
-        gate_params_.fixed_rescale_update_old_to_h_ =
-            to_ratio_fixed(
-                decode_scale(parms.fixed_scale_update_gate_output_) * decode_scale(parms.fixed_scale_h_),
-                decode_scale(parms.fixed_scale_h_));
-    }
-
-    // 位宽配置和 LUT
-    gate_params_.bitwidth_config_ = parms.bitwidth_config_;
+    gp.bitwidth_config_ = parms.bitwidth_config_;
     // 直接复用校准时预计算的 LUT（与 GPU 路径一致）。
-    // 校准 LUT 使用 affine 连续 scale（fixed_scale），CPU 不可再用 POT2 shift 重新生成，
-    // 否则 affine 模式下 CPU/GPU LUT 不一致。
-    gate_params_.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
-    gate_params_.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
-    gate_params_.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
+    gp.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
+    gp.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
+    gp.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
 
 #ifdef DEBUG
-    gate_params_.test = parms;
+    gp.test = parms;
 #endif
+}
+
+}  // namespace
+
+// setRescaleParam: 只填充生效的那套（编译期两套实例都存在，运行时按模式选择）
+void ForwardPassQuantCPU::setRescaleParam(const GRUQuantParams &parms) {
+    use_pot2_ = parms.bitwidth_config_.usePOT2_;
+    bitwidth_config_ = parms.bitwidth_config_;
+    if (use_pot2_) {
+        fillLinearParamsCPU<Pot2Rescale>(linear_params_pot2_, parms);
+        fillGateParamsCPU<Pot2Rescale>(gate_params_pot2_, parms);
+    } else {
+        fillLinearParamsCPU<FixedPointScale>(linear_params_mshift_, parms);
+        fillGateParamsCPU<FixedPointScale>(gate_params_mshift_, parms);
+    }
+}
+
+template <class R>
+void ForwardPassQuantCPU::RunImpl(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                  int steps, const int32_t *W, const int32_t *R_w, const int32_t *bw,
+                                  const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
+                                  float zoneout_prob, const int32_t *zoneout_mask) {
+    const int batch_size = data_->batch_size;
+    const int hidden_size = data_->hidden_size;
+
+    EnsureBuffersAllocated(steps);
+    PrecomputeWeightSums(W, R_w);
+
+    // 计算 W*x + bw GEMM+bias 融合
+    ComputeLinearX<R>(lp, gp, W, x, bw, steps);
+
+    const int NH = batch_size * hidden_size;
+    const int NH3 = batch_size * hidden_size * 3;
+
+    for (int i = 0; i < steps; ++i) {
+        IterateInternal<R>(lp, gp, R_w, br, h + i * NH, h + (i + 1) * NH,
+                           v ? v + i * NH * 4 : nullptr,
+                           tmp_weight_ih_linear_.data() + i * NH3,
+                           zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
+    }
 }
 
 void ForwardPassQuantCPU::Run(int steps, const int32_t *W, const int32_t *R,
                                const int32_t *bw, const int32_t *br, const int32_t *x,
                                int32_t *h, int32_t *v, float zoneout_prob,
                                const int32_t *zoneout_mask) {
-    const int batch_size = data_->batch_size;
-    const int hidden_size = data_->hidden_size;
-
-    EnsureBuffersAllocated(steps);
-    PrecomputeWeightSums(W, R);
-    
-    // 计算 W*x + bw GEMM+bias 融合
-    ComputeLinearX(W, x, bw, steps);
-
-    const int NH = batch_size * hidden_size;
-    const int NH3 = batch_size * hidden_size * 3;
-
-    for (int i = 0; i < steps; ++i) {
-        IterateInternal(R, br, h + i * NH, h + (i + 1) * NH,
-                        v ? v + i * NH * 4 : nullptr,
-                        tmp_weight_ih_linear_.data() + i * NH3,
-                        zoneout_prob, zoneout_mask ? zoneout_mask + i * NH : nullptr);
+    if (use_pot2_) {
+        RunImpl<Pot2Rescale>(linear_params_pot2_, gate_params_pot2_, steps, W, R, bw, br, x, h, v,
+                             zoneout_prob, zoneout_mask);
+    } else {
+        RunImpl<FixedPointScale>(linear_params_mshift_, gate_params_mshift_, steps, W, R, bw, br, x, h, v,
+                                 zoneout_prob, zoneout_mask);
     }
 }
 

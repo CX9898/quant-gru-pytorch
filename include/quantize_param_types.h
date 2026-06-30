@@ -4,26 +4,21 @@
 // quantize_param_types.h - GRU 量化参数结构体定义
 // ============================================================================
 //
-// 本文件包含 GRU 量化过程中使用的核心数据结构：
-//   1. GRUQuantParams - Host 端完整量化参数（校准阶段使用）
-//   2. GateQuantParams - 门计算参数（CPU/GPU 共用，推理阶段使用）
-//   3. LinearQuantParamsGPU - Linear 层 per-channel 参数（GPU 版本）
-//   4. LinearQuantParamsCPU - Linear 层 per-channel 参数（CPU 版本）
+// 设计（单一权威种子 + 类型驱动派发）：
+//   1. QuantParam        - 单一权威量化种子（原始 scale + 零点），所有表示按需派生
+//   2. ChannelQuantParam - 权重/偏置的多粒度容器，仅保留一份 per-channel 权威数组
+//   3. GRUQuantParams    - Host 端完整量化参数（校准阶段使用），由上面两者组成
+//   4. Pot2Rescale / FixedPointScale / FloatRescale - 强类型 rescale 表示（设备执行用）
+//   5. GateQuantParamsT<R> / LinearQuantParamsGPUT<R> / LinearQuantParamsCPUT<R>
+//        - INT 后端按表示分裂的设备结构体（每个只带一份执行表示）
+//   6. GateQuantParamsFP / LinearRescaleParamsFP - FP 后端独立结构体
 //
-// 设计原则：
-//   - 所有缩放因子均为 2 的负 n 次方：scale = 2^(-shift)
-//   - 支持对称量化（zp=0）和非对称量化（zp≠0）
-//   - 结构体按职责分离：GEMM 用 LinearQuantParams，门计算用 GateQuantParams
-//
-// 命名约定（与 optimized_quantizable_gru_2.md 文档对齐）：
-//   - weight_ih_linear: W*x + bw 的输出（输入线性变换）
-//   - weight_hh_linear: R*h + br 的输出（隐状态线性变换）
-//   - reset_gate_input/output: reset gate 的输入/输出
-//   - update_gate_input/output: update gate 的输入/输出
-//   - new_gate_input/output: new gate（候选隐状态）的输入/输出
-//   - mul_reset_hidden: r * weight_hh_linear 的输出
-//   - mul_new_contribution: (1-u) * n 的输出
-//   - mul_old_contribution: u * h 的输出
+// 关键约定：
+//   - QuantParam.scale 是唯一权威：
+//       * 仿射(M+shift)模式 = 校准原始连续 scale（绝不经 encode/decode 往返）
+//       * POT2 模式         = 2^-shift（精确，shift 可由 scale 无损还原）
+//   - 设备执行表示（Pot2Rescale/FixedPointScale/FloatRescale）只在 setRescaleParam
+//     里从权威种子派生一次，kernel 通过重载的 applyRescale 使用。
 //
 // ============================================================================
 
@@ -34,365 +29,266 @@
 #include "quantize_bitwidth_config.h"
 #include "quantize_lut_types.h"
 
+// ============================================================================
+// 强类型 rescale 表示（供 applyRescale 重载派发）
+// ============================================================================
+
+// 仿射 M+shift：rescale(x) = round((x * multiplier) >> shift)；POT2 退化为 {1, shift}
 struct FixedPointScale {
     uint16_t multiplier = 1;
     int8_t shift = 0;
 };
 
+// POT2：rescale(x) = round(x >> shift)（纯移位，shift 可为负表示左移）
+struct Pot2Rescale {
+    int8_t shift = 0;
+};
+
+// FP 存储版：rescale(x) = x * inv_div
+struct FloatRescale {
+    float inv_div = 1.0f;
+};
+
 // ============================================================================
-// GRU 完整量化参数结构体（Host 端）
+// 单一权威量化种子
+// ============================================================================
+
+/**
+ * @brief 单一权威量化种子。
+ *
+ * 只存储原始 scale 与零点；shift / FixedPointScale / inv_div 等执行表示一律按需派生
+ * （见 quantize_ops_helper.h 的 pot2Shift / toFixedScale / makeRescale），
+ * 从结构上消除"同一数值存多份、用错版本"的隐藏 BUG。本类型层保持纯数据、不含算子逻辑。
+ */
+struct QuantParam {
+    float scale = 0.0f;       ///< 权威 scale：仿射=连续校准值；POT2=2^-shift
+    int32_t zero_point = 0;   ///< 零点
+};
+
+/**
+ * @brief 权重/偏置多粒度容器。
+ *
+ * 仅保留一份 per-channel 权威数组（按粒度广播填满 3*hidden）。
+ * tensor()/gate(g)/channel(c) 均是对该数组取索引的只读视图，无独立副本。
+ */
+struct ChannelQuantParam {
+    OperatorQuantConfig::QuantizationGranularity granularity = OperatorQuantConfig::PER_CHANNEL;
+    int hidden = 0;                       ///< channel = hidden * 3
+    std::vector<QuantParam> channels;     ///< 唯一权威存储，size = hidden * 3
+
+    void resize(int channel_size) { channels.assign(channel_size, QuantParam{}); }
+    size_t size() const { return channels.size(); }
+
+    const QuantParam& channel(int c) const { return channels[c]; }
+    QuantParam& channel(int c) { return channels[c]; }
+    const QuantParam& gate(int g) const { return channels[g * hidden]; }
+    const QuantParam& tensor() const { return channels[0]; }
+};
+
+// ============================================================================
+// GRU 完整量化参数结构体（Host 端，单一权威种子）
 // ============================================================================
 
 /**
  * @brief GRU 量化参数结构体（Host 端）
  *
- * 存储 GRU 网络量化过程中所有定点化/反量化所需的参数。
- * 主要在校准阶段使用，推理阶段会拆分为 GateQuantParams 和 LinearQuantParams。
- *
- * 命名约定：
- *   - shift_xxx: 缩放因子指数，scale = 2^(-shift)
- *   - zp_xxx: 零点（zero point）
- *
- * 量化公式：q = round(x / scale + zp)
- * 反量化公式：x = (q - zp) * scale
+ * 每个量只存一个 QuantParam（权重/偏置用 ChannelQuantParam）。推理阶段通过
+ * setRescaleParam 派生为对应表示的精简设备结构体。
  */
 struct GRUQuantParams {
     OperatorQuantConfig bitwidth_config_;  ///< 各算子的量化位宽配置
 
-    // -------------------- 基础参数 --------------------
-    int hidden_;       ///< 隐藏层大小，channel = hidden * 3
-    int8_t shift_x_;   ///< 输入 x 的移位量
-    int32_t zp_x_;     ///< 输入 x 的零点
-    int8_t shift_h_;   ///< 隐状态 h 的移位量
-    int32_t zp_h_;     ///< 隐状态 h 的零点
-    float raw_scale_x_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_h_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_x_;
-    FixedPointScale fixed_scale_h_;
+    int hidden_ = 0;  ///< 隐藏层大小，channel = hidden * 3
 
-    // ========== 多粒度参数存储 ==========
-    // Per-Tensor 参数（标量）
-    int8_t shift_W_tensor_ = 0;
-    int8_t shift_R_tensor_ = 0;
-    int8_t shift_bw_tensor_ = 0;
-    int8_t shift_br_tensor_ = 0;
-    
-    // Per-Gate 参数（数组：索引 0=z, 1=r, 2=g）
-    std::array<int8_t, 3> shift_W_gate_ = {0, 0, 0};  // [z, r, g]
-    std::array<int8_t, 3> shift_R_gate_ = {0, 0, 0};  // [z, r, g]
-    std::array<int8_t, 3> shift_bw_gate_ = {0, 0, 0}; // [z, r, g]
-    std::array<int8_t, 3> shift_br_gate_ = {0, 0, 0}; // [z, r, g]
-    
-    // Per-Channel 参数（现有字段，保持 std::vector）
-    std::vector<int8_t> shift_W_;   ///< 输入权重 W 的移位量，size = hidden * 3
-    std::vector<int8_t> shift_R_;   ///< 循环权重 R 的移位量，size = hidden * 3
-    std::vector<int8_t> shift_bw_;  ///< 输入偏置移位量 (bias for W)
-    std::vector<int8_t> shift_br_;  ///< 循环偏置移位量 (bias for R)
-    std::vector<float> raw_scale_W_;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
-    std::vector<float> raw_scale_R_;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
-    std::vector<float> raw_scale_bw_;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
-    std::vector<float> raw_scale_br_;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-channel）
-    float raw_scale_W_tensor_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
-    float raw_scale_R_tensor_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
-    float raw_scale_bw_tensor_ = 0.0f; ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
-    float raw_scale_br_tensor_ = 0.0f; ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-tensor）
-    std::array<float, 3> raw_scale_W_gate_ = {0.0f, 0.0f, 0.0f};   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
-    std::array<float, 3> raw_scale_R_gate_ = {0.0f, 0.0f, 0.0f};   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
-    std::array<float, 3> raw_scale_bw_gate_ = {0.0f, 0.0f, 0.0f};  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
-    std::array<float, 3> raw_scale_br_gate_ = {0.0f, 0.0f, 0.0f};  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）（per-gate）
-    std::vector<FixedPointScale> fixed_scale_W_;
-    std::vector<FixedPointScale> fixed_scale_R_;
-    std::vector<FixedPointScale> fixed_scale_bw_;
-    std::vector<FixedPointScale> fixed_scale_br_;
+    // -------------------- 基础输入 --------------------
+    QuantParam x_;
+    QuantParam h_;
 
-    // -------------------- Linear 输出参数 (GEMM+bias) --------------------
-    int8_t shift_weight_ih_linear_;    ///< W*x + bw 的移位量
-    int32_t zp_weight_ih_linear_;      ///< W*x + bw 的零点
-    int8_t shift_weight_hh_linear_;    ///< R*h + br 的移位量
-    int32_t zp_weight_hh_linear_;      ///< R*h + br 的零点
-    float raw_scale_weight_ih_linear_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_weight_hh_linear_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_weight_ih_linear_;
-    FixedPointScale fixed_scale_weight_hh_linear_;
+    // -------------------- 权重 / 偏置（多粒度，唯一 per-channel 权威） --------------------
+    ChannelQuantParam W_;
+    ChannelQuantParam R_;
+    ChannelQuantParam bw_;
+    ChannelQuantParam br_;
 
-    // -------------------- 门激活函数输入参数（pre-activation）--------------------
-    int8_t shift_update_gate_input_;   ///< update gate 激活前的移位量
-    int32_t zp_update_gate_input_;     ///< update gate 激活前的零点
-    int8_t shift_reset_gate_input_;    ///< reset gate 激活前的移位量
-    int32_t zp_reset_gate_input_;      ///< reset gate 激活前的零点
-    int8_t shift_new_gate_input_;      ///< new gate 激活前的移位量
-    int32_t zp_new_gate_input_;        ///< new gate 激活前的零点
-    float raw_scale_update_gate_input_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_reset_gate_input_ = 0.0f;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_new_gate_input_ = 0.0f;     ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_update_gate_input_;
-    FixedPointScale fixed_scale_reset_gate_input_;
-    FixedPointScale fixed_scale_new_gate_input_;
+    // -------------------- Linear 输出 (GEMM+bias) --------------------
+    QuantParam weight_ih_linear_;  ///< W*x + bw
+    QuantParam weight_hh_linear_;  ///< R*h + br
 
-    // -------------------- 门激活函数输出参数（post-activation）--------------------
-    int8_t shift_update_gate_output_;   ///< update gate 激活后的移位量（sigmoid 输出）
-    int32_t zp_update_gate_output_;     ///< update gate 激活后的零点
-    int8_t shift_reset_gate_output_;    ///< reset gate 激活后的移位量（sigmoid 输出）
-    int32_t zp_reset_gate_output_;      ///< reset gate 激活后的零点
-    int8_t shift_new_gate_output_;      ///< new gate 激活后的移位量（tanh 输出）
-    int32_t zp_new_gate_output_;        ///< new gate 激活后的零点
-    float raw_scale_update_gate_output_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_reset_gate_output_ = 0.0f;   ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_new_gate_output_ = 0.0f;     ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_update_gate_output_;
-    FixedPointScale fixed_scale_reset_gate_output_;
-    FixedPointScale fixed_scale_new_gate_output_;
+    // -------------------- 门激活前（pre-activation） --------------------
+    QuantParam update_gate_input_;
+    QuantParam reset_gate_input_;
+    QuantParam new_gate_input_;
 
-    // -------------------- 中间计算参数 --------------------
-    int8_t shift_mul_reset_hidden_;    ///< r * weight_hh_linear 的移位量
-    int32_t zp_mul_reset_hidden_;      ///< r * weight_hh_linear 的零点
-    float raw_scale_mul_reset_hidden_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_mul_reset_hidden_;
+    // -------------------- 门激活后（post-activation） --------------------
+    QuantParam update_gate_output_;
+    QuantParam reset_gate_output_;
+    QuantParam new_gate_output_;
 
-    // -------------------- 隐状态更新参数 --------------------
-    int8_t shift_mul_new_contribution_;   ///< (1-u)*n 的移位量
-    int32_t zp_mul_new_contribution_;     ///< (1-u)*n 的零点
-    int8_t shift_mul_old_contribution_;   ///< u*h 的移位量
-    int32_t zp_mul_old_contribution_;     ///< u*h 的零点
-    float raw_scale_mul_new_contribution_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    float raw_scale_mul_old_contribution_ = 0.0f;  ///< 导出/运行时 scale（POT2: 2^-shift；Affine: 连续校准值）
-    FixedPointScale fixed_scale_mul_new_contribution_;
-    FixedPointScale fixed_scale_mul_old_contribution_;
+    // -------------------- 中间计算 --------------------
+    QuantParam mul_reset_hidden_;       ///< r * weight_hh_linear
 
-    // -------------------- LUT 表（每层独立，在 finalize_calibration 时生成）--------------------
-    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
-    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
-    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
+    // -------------------- 隐状态更新 --------------------
+    QuantParam mul_new_contribution_;   ///< (1-u) * n
+    QuantParam mul_old_contribution_;   ///< u * h
+
+    // -------------------- LUT 表（每层独立，finalize_calibration 时生成） --------------------
+    SigmoidLUT sigmoid_update_gate_lut_;
+    SigmoidLUT sigmoid_reset_gate_lut_;
+    SigmoidLUT tanh_new_gate_lut_;
 };
 
 // ============================================================================
-// GRU 门计算量化参数（纯标量，CPU/GPU 共用）
+// GRU 门计算量化参数（纯标量，CPU/GPU 共用，按 rescale 表示 R 模板化）
 // ============================================================================
 
 /**
- * @brief 门计算量化参数（纯标量，CPU/GPU 共用）
+ * @brief 门计算量化参数（按 rescale 表示 R 模板化，每个实例只带一份执行表示）。
  *
- * 存储 computeUpdateGate/ResetGate/NewGate/HiddenState 等门计算函数所需的标量参数。
- * 这些参数不涉及 per-channel 数组，可以安全地在 CPU/GPU 间共享。
- *
- * 命名约定：
- *   - shift_A_to_B: 从 A 空间到 B 空间的移位量，= shift_A - shift_B
- *   - shift_xxx: 右移位数
- *   - zp_xxx: 零点
+ * R ∈ { Pot2Rescale, FixedPointScale }。kernel 通过重载的 applyRescale(x, R) 使用，
+ * 无运行时 usePOT2 分支、无多版本拷贝。
  */
-struct GateQuantParams {
+template <class R>
+struct GateQuantParamsT {
     // -------------------- Linear 输出零点 --------------------
-    int32_t zp_weight_ih_linear_;  ///< W*x+bw 的零点
-    int32_t zp_weight_hh_linear_;  ///< R*h+br 的零点
-    int32_t zp_h_;                 ///< 隐状态 h 的零点
+    int32_t zp_weight_ih_linear_ = 0;
+    int32_t zp_weight_hh_linear_ = 0;
+    int32_t zp_h_ = 0;
 
-    // -------------------- Update Gate 参数 --------------------
-    int32_t zp_update_gate_input_;                  ///< update gate 激活前零点
-    int32_t zp_update_gate_output_;                 ///< update gate 激活后零点
-    int8_t shift_weight_ih_linear_to_update_gate_input_;    ///< weight_ih_linear 到 update_gate_input 的移位
-    int8_t shift_weight_hh_linear_to_update_gate_input_;    ///< weight_hh_linear 到 update_gate_input 的移位
-    FixedPointScale fixed_rescale_weight_ih_linear_to_update_gate_input_;
-    FixedPointScale fixed_rescale_weight_hh_linear_to_update_gate_input_;
+    // -------------------- Update Gate --------------------
+    int32_t zp_update_gate_input_ = 0;
+    int32_t zp_update_gate_output_ = 0;
+    R rescale_weight_ih_linear_to_update_gate_input_{};
+    R rescale_weight_hh_linear_to_update_gate_input_{};
 
-    // -------------------- Reset Gate 参数 --------------------
-    int32_t zp_reset_gate_input_;                  ///< reset gate 激活前零点
-    int32_t zp_reset_gate_output_;                 ///< reset gate 激活后零点
-    int8_t shift_weight_ih_linear_to_reset_gate_input_;    ///< weight_ih_linear 到 reset_gate_input 的移位
-    int8_t shift_weight_hh_linear_to_reset_gate_input_;    ///< weight_hh_linear 到 reset_gate_input 的移位
-    FixedPointScale fixed_rescale_weight_ih_linear_to_reset_gate_input_;
-    FixedPointScale fixed_rescale_weight_hh_linear_to_reset_gate_input_;
+    // -------------------- Reset Gate --------------------
+    int32_t zp_reset_gate_input_ = 0;
+    int32_t zp_reset_gate_output_ = 0;
+    R rescale_weight_ih_linear_to_reset_gate_input_{};
+    R rescale_weight_hh_linear_to_reset_gate_input_{};
 
-    // -------------------- New Gate（候选隐状态）参数 --------------------
-    int32_t zp_new_gate_input_;                  ///< new gate 激活前零点
-    int32_t zp_new_gate_output_;                 ///< new gate 激活后零点
-    int8_t shift_weight_ih_linear_to_new_gate_input_;      ///< weight_ih_linear 到 new_gate_input 的移位
-    int8_t shift_reset_mul_hh_to_new_gate_input_;          ///< r*weight_hh_linear 直接对齐到 new_gate_input 的移位（融合）
-    FixedPointScale fixed_rescale_weight_ih_linear_to_new_gate_input_;
-    FixedPointScale fixed_rescale_reset_mul_hh_to_new_gate_input_;
+    // -------------------- New Gate（候选隐状态） --------------------
+    int32_t zp_new_gate_input_ = 0;
+    int32_t zp_new_gate_output_ = 0;
+    R rescale_weight_ih_linear_to_new_gate_input_{};
+    R rescale_reset_mul_hh_to_new_gate_input_{};
 
-    // -------------------- 隐状态更新参数（乘法scale融合，统一scale空间优化）--------------------
-    int32_t quant_one_in_update_gate_scale_;     ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
-    int8_t shift_new_gate_output_to_h_;          ///< new_gate_output 对齐到 h 的移位（统一scale空间优化）
-    int8_t shift_update_old_to_h_;               ///< u*h 统一scale到 h 的移位（= shift_update_gate_output，统一scale空间优化）
-    FixedPointScale fixed_rescale_new_gate_output_to_h_;
-    FixedPointScale fixed_rescale_update_old_to_h_;
+    // -------------------- 隐状态更新（统一 scale 空间优化） --------------------
+    int32_t quant_one_in_update_gate_scale_ = 0;  ///< 常数 1 量化到 update_gate_output 空间 = round(1/scale)+zp
+    R rescale_new_gate_output_to_h_{};
+    R rescale_update_old_to_h_{};
 
     // -------------------- 运行时配置 --------------------
-    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置
+    OperatorQuantConfig bitwidth_config_;
 
     // -------------------- LUT 表 --------------------
-    SigmoidLUT sigmoid_update_gate_lut_;  ///< update gate Sigmoid LUT
-    SigmoidLUT sigmoid_reset_gate_lut_;   ///< reset gate Sigmoid LUT
-    SigmoidLUT tanh_new_gate_lut_;        ///< new gate Tanh LUT
+    SigmoidLUT sigmoid_update_gate_lut_;
+    SigmoidLUT sigmoid_reset_gate_lut_;
+    SigmoidLUT tanh_new_gate_lut_;
 
 #ifdef DEBUG
     GRUQuantParams test;  ///< 保存完整量化参数用于调试
 #endif
 };
 
+using GateQuantParamsPot2 = GateQuantParamsT<Pot2Rescale>;
+using GateQuantParamsMShift = GateQuantParamsT<FixedPointScale>;
+
 // ============================================================================
-// Linear 层量化参数（GPU/CPU 分离版本）
+// Linear 层量化参数（INT 后端，仅 per-channel，按 rescale 表示 R 模板化）
 // ============================================================================
 
 /**
- * @brief Linear 层量化参数（GPU 版本，使用 dev::vector）
+ * @brief Linear 层量化参数（GPU 版本）。
  *
- * 存储 GEMM+bias 融合计算所需的参数，支持 per-tensor、per-gate、per-channel 三种粒度。
- * 仅在 ComputeLinearX/ComputeLinearH 等 GEMM 函数中使用。
+ * 设备层只保留 per-channel 数组（已删除 per-tensor/per-gate 快路径与 granularity 分支）。
+ * 每条 rescale 只存一份 R 表示。
  */
-struct LinearQuantParamsGPU {
-    int32_t zp_x_;  ///< 输入 x 的零点
-    int32_t zp_h_;  ///< 隐状态 h 的零点
+template <class R>
+struct LinearQuantParamsGPUT {
+    int32_t zp_x_ = 0;
+    int32_t zp_h_ = 0;
 
-    // 粒度配置（从 OperatorQuantConfig 复制，用于 kernel 中判断）
-    int8_t W_granularity_;   ///< W 的量化粒度：0=PER_TENSOR, 1=PER_GATE, 2=PER_CHANNEL
-    int8_t R_granularity_;   ///< R 的量化粒度
-    int8_t bw_granularity_;  ///< bw 的量化粒度
-    int8_t br_granularity_;  ///< br 的量化粒度
-    int hidden_size_;        ///< 隐藏层大小（用于计算 gate_idx）
-
-    // Per-tensor 参数（标量，rescale 后的值，通过参数内存传递，访问快）
-    int8_t shift_gemm_x_tensor_;   ///< W*x rescale per-tensor shift（已计算 rescale）
-    int8_t shift_gemm_h_tensor_;   ///< R*h rescale per-tensor shift（已计算 rescale）
-    int8_t shift_bw_tensor_;       ///< bw rescale per-tensor shift（已计算 rescale）
-    int8_t shift_br_tensor_;       ///< br rescale per-tensor shift（已计算 rescale）
-
-    // Per-gate 参数（3个值，rescale 后的值，通过参数内存传递，访问快）
-    int8_t shift_gemm_x_gate_[3];   ///< W*x rescale per-gate shift [z, r, g]（已计算 rescale）
-    int8_t shift_gemm_h_gate_[3];   ///< R*h rescale per-gate shift [z, r, g]（已计算 rescale）
-    int8_t shift_bw_gate_[3];       ///< bw rescale per-gate shift [z, r, g]（已计算 rescale）
-    int8_t shift_br_gate_[3];       ///< br rescale per-gate shift [z, r, g]（已计算 rescale）
-
-    // Per-channel 参数（数组，全局内存，PER_CHANNEL 粒度时使用）
-    dev::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    dev::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
-    dev::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
-    dev::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
-    dev::vector<FixedPointScale> fixed_rescale_gemm_x_to_weight_ih_linear_;
-    dev::vector<FixedPointScale> fixed_rescale_bw_to_weight_ih_linear_;
-    dev::vector<FixedPointScale> fixed_rescale_gemm_h_to_weight_hh_linear_;
-    dev::vector<FixedPointScale> fixed_rescale_br_to_weight_hh_linear_;
-
-#ifdef DEBUG
-    dev::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
-    dev::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
-#endif
+    dev::vector<R> rescale_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel rescale
+    dev::vector<R> rescale_bw_to_weight_ih_linear_;      ///< bw per-channel rescale
+    dev::vector<R> rescale_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel rescale
+    dev::vector<R> rescale_br_to_weight_hh_linear_;      ///< br per-channel rescale
 };
 
 /**
- * @brief Linear 层量化参数（CPU 版本，使用 std::vector）
- *
- * 与 LinearQuantParamsGPU 结构相同，但使用 std::vector 管理内存。
+ * @brief Linear 层量化参数（CPU 版本，std::vector）。
  */
-struct LinearQuantParamsCPU {
-    int32_t zp_x_;  ///< 输入 x 的零点
-    int32_t zp_h_;  ///< 隐状态 h 的零点
+template <class R>
+struct LinearQuantParamsCPUT {
+    int32_t zp_x_ = 0;
+    int32_t zp_h_ = 0;
 
-    std::vector<int8_t> shift_gemm_x_to_weight_ih_linear_;  ///< W*x per-channel 移位
-    std::vector<int8_t> shift_bw_to_weight_ih_linear_;      ///< bw per-channel 移位
-    std::vector<int8_t> shift_gemm_h_to_weight_hh_linear_;  ///< R*h per-channel 移位
-    std::vector<int8_t> shift_br_to_weight_hh_linear_;      ///< br per-channel 移位
-    std::vector<FixedPointScale> fixed_rescale_gemm_x_to_weight_ih_linear_;
-    std::vector<FixedPointScale> fixed_rescale_bw_to_weight_ih_linear_;
-    std::vector<FixedPointScale> fixed_rescale_gemm_h_to_weight_hh_linear_;
-    std::vector<FixedPointScale> fixed_rescale_br_to_weight_hh_linear_;
-
-#ifdef DEBUG
-    std::vector<int8_t> shift_bw_;  ///< bw 移位量（调试用）
-    std::vector<int8_t> shift_br_;  ///< br 移位量（调试用）
-#endif
+    std::vector<R> rescale_gemm_x_to_weight_ih_linear_;
+    std::vector<R> rescale_bw_to_weight_ih_linear_;
+    std::vector<R> rescale_gemm_h_to_weight_hh_linear_;
+    std::vector<R> rescale_br_to_weight_hh_linear_;
 };
 
 // ============================================================================
-// 浮点存储版量化参数（用于 gru_forward_gpu_quant_fp.cu）
-// ============================================================================
-//
-// 与整数版本的区别：
-//   - 所有量化值使用 float 存储（值仍是定点整数）
-//   - shift 预处理为除数：divisor = 2^shift
-//   - 不包含 LUT（使用 real_sigmoid/real_tanh）
-//
+// 浮点存储版量化参数（FP 后端独立，含激活 scale、float 零点、无 LUT）
 // ============================================================================
 
 /**
- * @brief 门计算量化参数（浮点存储版本）
+ * @brief 门计算量化参数（浮点存储版本）。
  *
- * shift 预处理为除数：divisor = 2^shift
- * 零点使用 float 存储
- * 不包含 LUT（使用 real_sigmoid/real_tanh）
+ * rescale 以 inv_div = src_scale/dst_scale 形式存储；零点使用 float；激活用 real_sigmoid/real_tanh。
  */
 struct GateQuantParamsFP {
     // -------------------- Linear 输出零点 --------------------
-    float zp_weight_ih_linear_;   ///< W*x+bw 的零点
-    float zp_weight_hh_linear_;   ///< R*h+br 的零点
-    float zp_h_;                  ///< 隐状态 h 的零点
+    float zp_weight_ih_linear_ = 0.0f;
+    float zp_weight_hh_linear_ = 0.0f;
+    float zp_h_ = 0.0f;
 
-    // -------------------- Update Gate 参数 --------------------
-    float zp_update_gate_input_;                      ///< update gate 激活前零点
-    float zp_update_gate_output_;                     ///< update gate 激活后零点
-    float inv_div_weight_ih_linear_to_update_gate_input_; ///< 1.0f / (2^shift)，用于乘法替代除法
-    float inv_div_weight_hh_linear_to_update_gate_input_; ///< 1.0f / (2^shift)，用于乘法替代除法
+    // -------------------- Update Gate --------------------
+    float zp_update_gate_input_ = 0.0f;
+    float zp_update_gate_output_ = 0.0f;
+    float inv_div_weight_ih_linear_to_update_gate_input_ = 1.0f;
+    float inv_div_weight_hh_linear_to_update_gate_input_ = 1.0f;
 
-    // -------------------- Reset Gate 参数 --------------------
-    float zp_reset_gate_input_;                       ///< reset gate 激活前零点
-    float zp_reset_gate_output_;                      ///< reset gate 激活后零点
-    float inv_div_weight_ih_linear_to_reset_gate_input_;  ///< 1.0f / (2^shift)，用于乘法替代除法
-    float inv_div_weight_hh_linear_to_reset_gate_input_;  ///< 1.0f / (2^shift)，用于乘法替代除法
+    // -------------------- Reset Gate --------------------
+    float zp_reset_gate_input_ = 0.0f;
+    float zp_reset_gate_output_ = 0.0f;
+    float inv_div_weight_ih_linear_to_reset_gate_input_ = 1.0f;
+    float inv_div_weight_hh_linear_to_reset_gate_input_ = 1.0f;
 
-    // -------------------- New Gate 参数 --------------------
-    float zp_new_gate_input_;                         ///< new gate 激活前零点
-    float zp_new_gate_output_;                        ///< new gate 激活后零点
-    float inv_div_weight_ih_linear_to_new_gate_input_;    ///< 1.0f / (2^shift)，用于乘法替代除法
-    float inv_div_reset_mul_hh_to_new_gate_input_;        ///< 1.0f / (2^shift)，r*hh 到 new_gate_input 的倒数
+    // -------------------- New Gate --------------------
+    float zp_new_gate_input_ = 0.0f;
+    float zp_new_gate_output_ = 0.0f;
+    float inv_div_weight_ih_linear_to_new_gate_input_ = 1.0f;
+    float inv_div_reset_mul_hh_to_new_gate_input_ = 1.0f;
 
-    // -------------------- 隐状态更新参数 --------------------
-    float quant_one_in_update_gate_scale_;  ///< 常数 1 量化到 update_gate_output 空间的值 = 2^shift + zp
-    float inv_div_update_old_to_h_;             ///< 1.0f / (2^shift)，u*h 到 h 的倒数
-    float inv_div_new_gate_output_to_h_;       ///< 1.0f / (2^shift)，new_gate_output 到 h 的倒数（用于先将new_gate对齐到h scale）
+    // -------------------- 隐状态更新 --------------------
+    float quant_one_in_update_gate_scale_ = 0.0f;
+    float inv_div_update_old_to_h_ = 1.0f;
+    float inv_div_new_gate_output_to_h_ = 1.0f;
 
-    // -------------------- 激活函数 scale（用于 real_sigmoid/real_tanh）--------------------
-    float scale_update_gate_input_;   ///< = 2^(-shift)，反量化 scale
-    float scale_update_gate_output_;  ///< = 2^(-shift)，量化 scale
-    float scale_reset_gate_input_;    ///< = 2^(-shift)
-    float scale_reset_gate_output_;   ///< = 2^(-shift)
-    float scale_new_gate_input_;      ///< = 2^(-shift)
-    float scale_new_gate_output_;     ///< = 2^(-shift)
+    // -------------------- 激活函数 scale（real_sigmoid/real_tanh） --------------------
+    float scale_update_gate_input_ = 1.0f;
+    float scale_update_gate_output_ = 1.0f;
+    float scale_reset_gate_input_ = 1.0f;
+    float scale_reset_gate_output_ = 1.0f;
+    float scale_new_gate_input_ = 1.0f;
+    float scale_new_gate_output_ = 1.0f;
 };
 
 /**
- * @brief Linear Rescale 参数（用于 kernel 和类成员，统一管理所有量化参数）
- * 
- * 用于减少 kernel 参数数量，将所有 BiasRescale 相关参数打包到一个结构体中
- * 同时作为类成员变量，直接管理数据，避免维护两套数据
- * 注意：粒度配置通过 OperatorQuantConfig 单独传递，不在此结构体中
+ * @brief Linear Rescale 参数（FP 版本，kernel 直接使用）。
  */
 struct LinearRescaleParamsFP {
-    // 基础零点参数
-    float zp_x_;                 ///< 输入 x 的零点
-    float zp_h_;                 ///< 隐状态 h 的零点
-    // weight_ih_linear 相关参数
-    const float *W_sum_mul_x_zp;                    ///< [3*hidden] 预计算的 sum(W)*zp_x（运行时设置）
-    const float *inv_div_gemm_x_to_weight_ih_linear_;  ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_gemm_x)，从GEMM_x空间到weight_ih_linear空间（指向 dev::vector）
-    const float *inv_div_bw_to_gemm_x_;              ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_bw)，从bw空间到GEMM_x空间（指向 dev::vector）
-    float zp_weight_ih_linear_;                     ///< weight_ih_linear 输出零点
-    // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
-    
-    // Per-tensor 参数（标量，通过参数内存传递，访问快）
-    float inv_div_gemm_x_tensor_;   ///< W*x rescale per-tensor 倒数
-    float inv_div_gemm_h_tensor_;   ///< R*h rescale per-tensor 倒数
-    float inv_div_bw_tensor_;       ///< bw rescale per-tensor 倒数
-    float inv_div_br_tensor_;       ///< br rescale per-tensor 倒数
+    float zp_x_ = 0.0f;
+    float zp_h_ = 0.0f;
 
-    // Per-gate 参数（3个值，通过参数内存传递，访问快）
-    float inv_div_gemm_x_gate_[3];   ///< W*x rescale per-gate 倒数 [z, r, g]
-    float inv_div_gemm_h_gate_[3];   ///< R*h rescale per-gate 倒数 [z, r, g]
-    float inv_div_bw_gate_[3];       ///< bw rescale per-gate 倒数 [z, r, g]
-    float inv_div_br_gate_[3];       ///< br rescale per-gate 倒数 [z, r, g]
-    
-    // weight_hh_linear 相关参数
-    const float *R_sum_mul_h_zp;                    ///< [3*hidden] 预计算的 sum(R)*zp_h（运行时设置）
-    const float *inv_div_gemm_h_to_weight_hh_linear_;  ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_gemm_h)，从GEMM_h空间到weight_hh_linear空间（指向 dev::vector）
-    const float *inv_div_br_to_gemm_h_;              ///< [3*hidden] PER_CHANNEL: 1.0f / (2^shift_br)，从br空间到GEMM_h空间（指向 dev::vector）
-    float zp_weight_hh_linear_;                     ///< weight_hh_linear 输出零点
-    // 注意：output_bw_ih_ 和 output_bw_hh_ 已移除，直接从 OperatorQuantConfig 中获取
+    const float *W_sum_mul_x_zp = nullptr;                    ///< [3*hidden] 运行时设置
+    const float *inv_div_gemm_x_to_weight_ih_linear_ = nullptr;  ///< [3*hidden] 指向 dev::vector
+    const float *inv_div_bw_to_gemm_x_ = nullptr;              ///< [3*hidden] 指向 dev::vector
+    float zp_weight_ih_linear_ = 0.0f;
+
+    const float *R_sum_mul_h_zp = nullptr;                    ///< [3*hidden] 运行时设置
+    const float *inv_div_gemm_h_to_weight_hh_linear_ = nullptr;  ///< [3*hidden] 指向 dev::vector
+    const float *inv_div_br_to_gemm_h_ = nullptr;              ///< [3*hidden] 指向 dev::vector
+    float zp_weight_hh_linear_ = 0.0f;
 };

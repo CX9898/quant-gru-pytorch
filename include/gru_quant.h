@@ -59,9 +59,20 @@ class ForwardPassQuant {
                                dev::vector<int32_t>* weight_hh_linear_out) const;
 
    private:
+    // 按 rescale 表示 R 模板化的执行实现（R = Pot2Rescale / FixedPointScale）。
+    // Run() 根据 use_pot2_ 选择实例化，编译期生成两套 kernel，逻辑一套。
+    template <class R>
+    void RunImpl(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                 int steps, const int32_t *W, const int32_t *R_w, const int32_t *bw,
+                 const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
+                 float zoneout_prob, const int32_t *zoneout_mask,
+                 uint8_t *weight_ih_linear_mask, uint8_t *weight_hh_linear_mask,
+                 uint8_t *gate_input_mask, uint8_t *gate_output_mask, uint8_t *h_mask);
+
     // 内部迭代函数 (Linear 融合版本)
-    // cur_linear_x: 当前时间步的 W*x + bw 结果（指向 tmp_linear_x_ 的偏移）
-    void IterateInternal(const int32_t *R, const int32_t *br,
+    template <class R>
+    void IterateInternal(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                         const int32_t *R_w, const int32_t *br,
                          const int32_t *h, int32_t *h_out, int32_t *v,
                          const int32_t *cur_linear_x, const float zoneout_prob,
                          const int32_t *zoneout_mask,
@@ -71,11 +82,15 @@ class ForwardPassQuant {
                          uint8_t *h_mask = nullptr);
 
     // 计算输入 Linear 变换: W*x + bw（输出到 tmp_linear_x_）
-    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps,
+    template <class R>
+    void ComputeLinearX(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                        const int32_t *W, const int32_t *x, const int32_t *bw, int steps,
                         uint8_t *weight_ih_linear_mask = nullptr);
 
     // 计算隐状态 Linear 变换: R*h + br（输出到 tmp_linear_h_）
-    void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br,
+    template <class R>
+    void ComputeLinearH(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                        const int32_t *R_w, const int32_t *h, const int32_t *br,
                         uint8_t *weight_hh_linear_mask = nullptr);
 
     // 预分配内存缓冲区
@@ -87,9 +102,13 @@ class ForwardPassQuant {
     struct private_data;
     private_data *data_;
 
-    // -------------------- 量化参数（拆分设计）--------------------
-    GateQuantParams gate_params_;        ///< 门计算参数（纯标量，传给 PointwiseOperationsQuant）
-    LinearQuantParamsGPU linear_params_; ///< Linear 层参数（per-channel，用于 GEMM）
+    // -------------------- 量化参数（类型驱动派发，只填充生效的那套）--------------------
+    bool use_pot2_ = false;                ///< setRescaleParam 时确定的运行时模式
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（缓冲区分配等通用逻辑使用）
+    GateQuantParamsPot2 gate_params_pot2_;
+    GateQuantParamsMShift gate_params_mshift_;
+    LinearQuantParamsGPUT<Pot2Rescale> linear_params_pot2_;
+    LinearQuantParamsGPUT<FixedPointScale> linear_params_mshift_;
 
     // 预分配的内部缓冲区（使用 dev::vector 自动管理内存）
     int max_steps_ = 0;

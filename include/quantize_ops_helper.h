@@ -215,6 +215,141 @@ __host__ __device__ __forceinline__ int64_t rescale_round(int64_t x, FixedPointS
 }
 
 // ============================================================================
+// applyRescale: 类型驱动的统一 rescale 原语（重载派发，消除运行时 usePOT2 分支）
+// ============================================================================
+//   - Pot2Rescale     : 纯移位 round(x >> shift)
+//   - FixedPointScale : 仿射 round((x * multiplier) >> shift)
+//   - FloatRescale    : 浮点 x * inv_div（FP 后端）
+
+__host__ __device__ __forceinline__ int64_t applyRescale(int64_t x, Pot2Rescale r) {
+    return rshift_round(x, r.shift);
+}
+
+__host__ __device__ __forceinline__ int64_t applyRescale(int64_t x, FixedPointScale r) {
+    return rshift_round(x * static_cast<int64_t>(r.multiplier), r.shift);
+}
+
+__host__ __device__ __forceinline__ float applyRescale(float x, FloatRescale r) {
+    return x * r.inv_div;
+}
+
+// ============================================================================
+// 单一权威种子 -> 执行表示派生（host 端）
+// ============================================================================
+// 把唯一权威 QuantParam（scale + zero_point）按需派生为各 kernel 消费的执行
+// 表示（FixedPointScale / Pot2Rescale / FloatRescale）。这些是纯量化算子转换，
+// 不含任何校准（直方图/SQNR）逻辑，故归属算子层；setRescaleParam / 权重量化 /
+// 量化-反量化 boundary 使用。均为 host-only（含 throw、std::frexp 等）。
+
+// 连续 scale -> 16bit 乘子 + 移位定点（scale ≈ multiplier * 2^-shift）。
+inline FixedPointScale encodeMShift(float scale) {
+    if (!(scale > 0.0f)) {
+        throw std::runtime_error("Invalid scale <= 0 in encodeMShift");
+    }
+    int exp2 = 0;
+    double mant = std::frexp(static_cast<double>(scale), &exp2);  // scale = mant * 2^exp2
+    uint32_t m = static_cast<uint32_t>(std::llround(mant * 65536.0));
+    if (m == 65536u) {
+        m = 32768u;
+        exp2 += 1;
+    }
+    if (m < 32768u) {
+        m = 32768u;
+    }
+    const int shift = 16 - exp2;
+    if (shift < std::numeric_limits<int8_t>::min() || shift > std::numeric_limits<int8_t>::max()) {
+        throw std::runtime_error("encodeMShift shift out of int8 range");
+    }
+    return FixedPointScale{static_cast<uint16_t>(m), static_cast<int8_t>(shift)};
+}
+
+inline float decodeMShift(const FixedPointScale &s) {
+    return static_cast<float>(s.multiplier) * std::ldexp(1.0f, -static_cast<int>(s.shift));
+}
+
+// POT2 整数移位：scale = 2^-shift  =>  shift = round(-log2(scale))。
+// 仅当 scale 已是 2 的幂（POT2 模式权威）时精确；仿射连续 scale 请改用 encodeMShift。
+inline int8_t pot2Shift(const QuantParam &q) {
+    if (!(q.scale > 0.0f)) return 0;
+    return static_cast<int8_t>(std::lround(-std::log2(static_cast<double>(q.scale))));
+}
+
+// 量化 boundary 用：把单个 QuantParam 派生为 FixedPointScale。
+//   - POT2 : {1, shift}（shift 由 scale 无损还原）
+//   - 仿射 : encodeMShift(连续 scale)
+inline FixedPointScale toFixedScale(const QuantParam &q, bool use_pot2) {
+    if (use_pot2) return FixedPointScale{1, pot2Shift(q)};
+    return encodeMShift(q.scale);
+}
+
+inline std::vector<FixedPointScale> toFixedScales(const ChannelQuantParam &c, bool use_pot2) {
+    std::vector<FixedPointScale> out(c.channels.size());
+    for (size_t i = 0; i < c.channels.size(); ++i) out[i] = toFixedScale(c.channels[i], use_pot2);
+    return out;
+}
+
+// makeRescale<R>: 由源/目标权威 QuantParam 推导 rescale 执行表示。
+//   - POT2 : 整数移位差（与现状 bit 级一致，零 float）
+//   - 仿射 : 原始连续 scale 比值 + encodeMShift（绝不经 fixed_scale 往返）
+//   - FP   : src_scale / dst_scale
+// 提供单值与"两源乘积"（GEMM：src_scale = a.scale * b.scale）两组。
+template <class R>
+R makeRescale(const QuantParam &src, const QuantParam &dst);
+
+template <>
+inline Pot2Rescale makeRescale<Pot2Rescale>(const QuantParam &src, const QuantParam &dst) {
+    return Pot2Rescale{static_cast<int8_t>(pot2Shift(src) - pot2Shift(dst))};
+}
+
+template <>
+inline FixedPointScale makeRescale<FixedPointScale>(const QuantParam &src, const QuantParam &dst) {
+    return encodeMShift(src.scale / dst.scale);
+}
+
+template <>
+inline FloatRescale makeRescale<FloatRescale>(const QuantParam &src, const QuantParam &dst) {
+    return FloatRescale{src.scale / dst.scale};
+}
+
+// 两源乘积版（GEMM：源 scale = a.scale * b.scale）
+template <class R>
+R makeRescaleProduct(const QuantParam &a, const QuantParam &b, const QuantParam &dst);
+
+template <>
+inline Pot2Rescale makeRescaleProduct<Pot2Rescale>(const QuantParam &a, const QuantParam &b, const QuantParam &dst) {
+    return Pot2Rescale{static_cast<int8_t>(pot2Shift(a) + pot2Shift(b) - pot2Shift(dst))};
+}
+
+template <>
+inline FixedPointScale makeRescaleProduct<FixedPointScale>(const QuantParam &a, const QuantParam &b, const QuantParam &dst) {
+    return encodeMShift((a.scale * b.scale) / dst.scale);
+}
+
+template <>
+inline FloatRescale makeRescaleProduct<FloatRescale>(const QuantParam &a, const QuantParam &b, const QuantParam &dst) {
+    return FloatRescale{(a.scale * b.scale) / dst.scale};
+}
+
+// 单源 -> "两源乘积"目标（GEMM bias：bias 从自身 scale 进入累加器 scale = a.scale * b.scale）
+template <class R>
+R makeRescaleToProduct(const QuantParam &src, const QuantParam &a, const QuantParam &b);
+
+template <>
+inline Pot2Rescale makeRescaleToProduct<Pot2Rescale>(const QuantParam &src, const QuantParam &a, const QuantParam &b) {
+    return Pot2Rescale{static_cast<int8_t>(pot2Shift(src) - (pot2Shift(a) + pot2Shift(b)))};
+}
+
+template <>
+inline FixedPointScale makeRescaleToProduct<FixedPointScale>(const QuantParam &src, const QuantParam &a, const QuantParam &b) {
+    return encodeMShift(src.scale / (a.scale * b.scale));
+}
+
+template <>
+inline FloatRescale makeRescaleToProduct<FloatRescale>(const QuantParam &src, const QuantParam &a, const QuantParam &b) {
+    return FloatRescale{src.scale / (a.scale * b.scale)};
+}
+
+// ============================================================================
 // CPU/GPU 共用饱和截断函数
 // ============================================================================
 
@@ -611,9 +746,9 @@ __host__ __device__ __forceinline__ float tanh_fp(float x) { return tanh<float>(
  * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
  *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
-template <bool Training>
+template <bool Training, class R>
 __host__ __device__ __forceinline__ 
-int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
+int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParamsT<R> &params,
                  uint8_t* input_keep_gradient = nullptr,
                  uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
@@ -621,13 +756,9 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
     const int64_t ih_diff = static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_;
     const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
     const int32_t ih_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(ih_diff, params.fixed_rescale_weight_ih_linear_to_update_gate_input_)
-            : rescale_round<false>(ih_diff, params.fixed_rescale_weight_ih_linear_to_update_gate_input_));
+        applyRescale(ih_diff, params.rescale_weight_ih_linear_to_update_gate_input_));
     const int32_t hh_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(hh_diff, params.fixed_rescale_weight_hh_linear_to_update_gate_input_)
-            : rescale_round<false>(hh_diff, params.fixed_rescale_weight_hh_linear_to_update_gate_input_));
+        applyRescale(hh_diff, params.rescale_weight_hh_linear_to_update_gate_input_));
 
     const int32_t update_gate_input = ih_shifted + hh_shifted + params.zp_update_gate_input_;
 
@@ -663,10 +794,10 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
 
 #ifdef DEBUG_QUANT
         if (debug_idx == 0) {
-            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
-                             (float)(1 << params.test.shift_update_gate_input_);
-            float update_gate_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                         (float)(1 << params.test.shift_update_gate_output_);
+            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) *
+                             params.test.update_gate_input_.scale;
+            float update_gate_fp = (float)(update_gate - params.zp_update_gate_output_) *
+                         params.test.update_gate_output_.scale;
             printf("[QUANT_I32] computeUpdateGate: update_gate_input_q=%d, update_gate_input_fp=%.6f, update_gate_q=%d, update_gate_fp=%.6f\n", 
                    update_gate_input, update_gate_input_fp, update_gate, update_gate_fp);
         }
@@ -674,10 +805,10 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
 
 #ifdef DEBUG_QUANT_DETAIL
         if (debug_idx >= 0 && debug_idx < 3) {
-            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) /
-                             (float)(1 << params.test.shift_update_gate_input_);
-            float update_gate_quant_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                               (float)(1 << params.test.shift_update_gate_output_);
+            float update_gate_input_fp = (float)(update_gate_input - params.zp_update_gate_input_) *
+                             params.test.update_gate_input_.scale;
+            float update_gate_quant_fp = (float)(update_gate - params.zp_update_gate_output_) *
+                               params.test.update_gate_output_.scale;
             float update_gate_theory = sigmoid_fp(update_gate_input_fp);
             float error = update_gate_quant_fp - update_gate_theory;
             printf("[UpdateGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -698,22 +829,18 @@ int32_t computeUpdateGate(int32_t weight_ih_linear, int32_t weight_hh_linear, co
  * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
  *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
-template <bool Training>
+template <bool Training, class R>
 __host__ __device__ __forceinline__ 
-int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParams &params,
+int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, const GateQuantParamsT<R> &params,
                  uint8_t* input_keep_gradient = nullptr,
                  uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     const int64_t ih_diff = static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_;
     const int64_t hh_diff = static_cast<int64_t>(weight_hh_linear) - params.zp_weight_hh_linear_;
     const int32_t ih_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(ih_diff, params.fixed_rescale_weight_ih_linear_to_reset_gate_input_)
-            : rescale_round<false>(ih_diff, params.fixed_rescale_weight_ih_linear_to_reset_gate_input_));
+        applyRescale(ih_diff, params.rescale_weight_ih_linear_to_reset_gate_input_));
     const int32_t hh_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(hh_diff, params.fixed_rescale_weight_hh_linear_to_reset_gate_input_)
-            : rescale_round<false>(hh_diff, params.fixed_rescale_weight_hh_linear_to_reset_gate_input_));
+        applyRescale(hh_diff, params.rescale_weight_hh_linear_to_reset_gate_input_));
 
     const int32_t reset_gate_input = ih_shifted + hh_shifted + params.zp_reset_gate_input_;
 
@@ -747,10 +874,10 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
 
 #ifdef DEBUG_QUANT
         if (debug_idx == 0) {
-            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
-                             (float)(1 << params.test.shift_reset_gate_input_);
-            float reset_gate_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
-                         (float)(1 << params.test.shift_reset_gate_output_);
+            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) *
+                             params.test.reset_gate_input_.scale;
+            float reset_gate_fp = (float)(reset_gate - params.zp_reset_gate_output_) *
+                         params.test.reset_gate_output_.scale;
             printf("[QUANT_I32] computeResetGate: reset_gate_input_q=%d, reset_gate_input_fp=%.6f, reset_gate_q=%d, reset_gate_fp=%.6f\n", 
                    reset_gate_input, reset_gate_input_fp, reset_gate, reset_gate_fp);
         }
@@ -758,10 +885,10 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
 
 #ifdef DEBUG_QUANT_DETAIL
         if (debug_idx >= 0 && debug_idx < 3) {
-            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) /
-                             (float)(1 << params.test.shift_reset_gate_input_);
-            float reset_gate_quant_fp = (float)(reset_gate - params.zp_reset_gate_output_) /
-                               (float)(1 << params.test.shift_reset_gate_output_);
+            float reset_gate_input_fp = (float)(reset_gate_input - params.zp_reset_gate_input_) *
+                             params.test.reset_gate_input_.scale;
+            float reset_gate_quant_fp = (float)(reset_gate - params.zp_reset_gate_output_) *
+                               params.test.reset_gate_output_.scale;
             float reset_gate_theory = sigmoid_fp(reset_gate_input_fp);
             float error = reset_gate_quant_fp - reset_gate_theory;
             printf("[ResetGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -787,10 +914,10 @@ int32_t computeResetGate(int32_t weight_ih_linear, int32_t weight_hh_linear, con
  * @param output_keep_gradient 训练模式时保存输出梯度保持标志，推理模式时可为 nullptr
  *                             0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
-template <bool Training>
+template <bool Training, class R>
 __host__ __device__ __forceinline__ 
 int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32_t reset_gate,
-                 const GateQuantParams &params,
+                 const GateQuantParamsT<R> &params,
                  uint8_t* input_keep_gradient = nullptr,
                  uint8_t* output_keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
@@ -802,17 +929,12 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
 
     // 乘法结果直接 shift 到 new_gate_input 空间（融合后省略中间 zp）
     const int32_t rh_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(reset_hidden_mul, params.fixed_rescale_reset_mul_hh_to_new_gate_input_)
-            : rescale_round<false>(reset_hidden_mul, params.fixed_rescale_reset_mul_hh_to_new_gate_input_));
+        applyRescale(reset_hidden_mul, params.rescale_reset_mul_hh_to_new_gate_input_));
 
     // weight_ih_linear shift 到 new_gate_input 空间
     const int32_t ih_shifted = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_,
-                                  params.fixed_rescale_weight_ih_linear_to_new_gate_input_)
-            : rescale_round<false>(static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_,
-                                   params.fixed_rescale_weight_ih_linear_to_new_gate_input_));
+        applyRescale(static_cast<int64_t>(weight_ih_linear) - params.zp_weight_ih_linear_,
+                     params.rescale_weight_ih_linear_to_new_gate_input_));
 
     const int32_t new_gate_input = ih_shifted + rh_shifted + params.zp_new_gate_input_;
 
@@ -846,12 +968,12 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
 
 #ifdef DEBUG_QUANT
         if (debug_idx == 0) {
-            float hh_fp = (float)(weight_hh_linear - params.zp_weight_hh_linear_) /
-                          (float)(1 << params.test.shift_weight_hh_linear_);
-            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
-                             (float)(1 << params.test.shift_new_gate_input_);
-            float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                         (float)(1 << params.test.shift_new_gate_output_);
+            float hh_fp = (float)(weight_hh_linear - params.zp_weight_hh_linear_) *
+                          params.test.weight_hh_linear_.scale;
+            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) *
+                             params.test.new_gate_input_.scale;
+            float new_gate_fp = (float)(new_gate - params.zp_new_gate_output_) *
+                         params.test.new_gate_output_.scale;
             printf("[QUANT_I32] computeNewGate: hh_fp=%.6f, new_gate_input_fp=%.6f, new_gate_fp=%.6f\n",
                    hh_fp, new_gate_input_fp, new_gate_fp);
         }
@@ -859,10 +981,10 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
 
 #ifdef DEBUG_QUANT_DETAIL
         if (debug_idx >= 0 && debug_idx < 3) {
-            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) /
-                             (float)(1 << params.test.shift_new_gate_input_);
-            float new_gate_quant_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                               (float)(1 << params.test.shift_new_gate_output_);
+            float new_gate_input_fp = (float)(new_gate_input - params.zp_new_gate_input_) *
+                             params.test.new_gate_input_.scale;
+            float new_gate_quant_fp = (float)(new_gate - params.zp_new_gate_output_) *
+                               params.test.new_gate_output_.scale;
             float new_gate_theory = tanh_fp(new_gate_input_fp);
             float error = new_gate_quant_fp - new_gate_theory;
             printf("[NewGate] idx=%d input_q=%d input_fp=%.4f | output_q=%d output_fp=%.4f | theory=%.4f | err=%.6f\n",
@@ -883,18 +1005,16 @@ int32_t computeNewGate(int32_t weight_ih_linear, int32_t weight_hh_linear, int32
  * @param keep_gradient 训练模式时保存梯度保持标志，推理模式时可为 nullptr
  *                      0=被clamp（Backward 时梯度置零），1=未被clamp（Backward 时梯度保持）
  */
-template <bool Training>
+template <bool Training, class R>
 __host__ __device__ __forceinline__ 
-int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParams &params,
+int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old, const GateQuantParamsT<R> &params,
                  uint8_t* keep_gradient = nullptr,
                  [[maybe_unused]] int debug_idx = -1) {
     // ========== 步骤1: 将 new_gate 从 new_gate_output scale 对齐到 h scale ==========
     // 这样后续计算时 old_contribution 和 new_contribution 的 scale 可以统一
     const int64_t n_diff_from_zp = static_cast<int64_t>(new_gate) - params.zp_new_gate_output_;
     const int32_t new_gate_aligned_to_h = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(n_diff_from_zp, params.fixed_rescale_new_gate_output_to_h_)
-            : rescale_round<false>(n_diff_from_zp, params.fixed_rescale_new_gate_output_to_h_)) + params.zp_h_;
+        applyRescale(n_diff_from_zp, params.rescale_new_gate_output_to_h_)) + params.zp_h_;
 
     // ========== 步骤2: 计算 old_contribution = update_gate * h_old ==========
     // u_diff 在 update_gate_output scale，h_diff 在 h scale
@@ -921,9 +1041,7 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
     // rescale 到 h scale: 从 scale_update_gate_output * scale_h 到 scale_h
     // shift_update_old_to_h_ = shift_update_gate_output（因为 scale_h / scale_h = 1）
     const int32_t h_new = static_cast<int32_t>(
-        params.bitwidth_config_.usePOT2_
-            ? rescale_round<true>(combined, params.fixed_rescale_update_old_to_h_)
-            : rescale_round<false>(combined, params.fixed_rescale_update_old_to_h_)) + params.zp_h_;
+        applyRescale(combined, params.rescale_update_old_to_h_)) + params.zp_h_;
 
     // 使用 if constexpr 避免运行时分支
     if constexpr (Training) {
@@ -933,14 +1051,14 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 
 #ifdef DEBUG_QUANT
         if (debug_idx == 0) {
-            float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                         (float)(1 << params.test.shift_update_gate_output_);
-            float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                         (float)(1 << params.test.shift_new_gate_output_);
-            float h_old_fp = (float)(h_old - params.zp_h_) / 
-                             (float)(1 << params.test.shift_h_);
-            float h_fp = (float)(h - params.zp_h_) / 
-                         (float)(1 << params.test.shift_h_);
+            float u_fp = (float)(update_gate - params.zp_update_gate_output_) *
+                         params.test.update_gate_output_.scale;
+            float n_fp = (float)(new_gate - params.zp_new_gate_output_) *
+                         params.test.new_gate_output_.scale;
+            float h_old_fp = (float)(h_old - params.zp_h_) * 
+                             params.test.h_.scale;
+            float h_fp = (float)(h - params.zp_h_) * 
+                         params.test.h_.scale;
             printf("[QUANT_I32] computeHiddenState: u_fp=%.6f, n_fp=%.6f, h_old_fp=%.6f, h_new_fp=%.6f\n", 
                    u_fp, n_fp, h_old_fp, h_fp);
         }
@@ -948,14 +1066,14 @@ int32_t computeHiddenState(int32_t update_gate, int32_t new_gate, int32_t h_old,
 
 #ifdef DEBUG_QUANT_DETAIL
         if (debug_idx >= 0 && debug_idx < 3) {
-            float u_fp = (float)(update_gate - params.zp_update_gate_output_) /
-                         (float)(1 << params.test.shift_update_gate_output_);
-            float n_fp = (float)(new_gate - params.zp_new_gate_output_) /
-                         (float)(1 << params.test.shift_new_gate_output_);
-            float h_old_fp = (float)(h_old - params.zp_h_) / 
-                             (float)(1 << params.test.shift_h_);
-            float h_quant_fp = (float)(h - params.zp_h_) / 
-                               (float)(1 << params.test.shift_h_);
+            float u_fp = (float)(update_gate - params.zp_update_gate_output_) *
+                         params.test.update_gate_output_.scale;
+            float n_fp = (float)(new_gate - params.zp_new_gate_output_) *
+                         params.test.new_gate_output_.scale;
+            float h_old_fp = (float)(h_old - params.zp_h_) * 
+                             params.test.h_.scale;
+            float h_quant_fp = (float)(h - params.zp_h_) * 
+                               params.test.h_.scale;
             printf("[HiddenState] idx=%d u_fp=%.4f n_fp=%.4f h_old_fp=%.4f | h_q=%d h_fp=%.4f\n",
                    debug_idx, u_fp, n_fp, h_old_fp, h, h_quant_fp);
         }
@@ -1475,39 +1593,39 @@ inline void printParms(const GRUQuantParams &quant_parms) {
     printf("  hidden = %d\n", quant_parms.hidden_);
 
     // 输入/隐状态
-    printf("  x:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_x_, quant_parms.zp_x_);
-    printf("  h:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_h_, quant_parms.zp_h_);
+    printf("  x:  exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.x_), quant_parms.x_.zero_point);
+    printf("  h:  exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.h_), quant_parms.h_.zero_point);
 
-    // Per-channel 权重
-    auto print_vec = [](const char *name, const std::vector<int8_t> &vec) {
-        printf("  %s (size %zu): ", name, vec.size());
-        for (size_t i = 0; i < vec.size() && i < 5; ++i) printf("%d ", vec[i]);
-        if (vec.size() > 5) printf("...");
+    // Per-channel 权重（唯一权威 per-channel 数组）
+    auto print_vec = [](const char *name, const ChannelQuantParam &c) {
+        printf("  %s (size %zu): ", name, c.channels.size());
+        for (size_t i = 0; i < c.channels.size() && i < 5; ++i) printf("%d ", pot2Shift(c.channels[i]));
+        if (c.channels.size() > 5) printf("...");
         printf("\n");
     };
-    print_vec("W ", quant_parms.shift_W_);
-    print_vec("R ", quant_parms.shift_R_);
-    print_vec("bw", quant_parms.shift_bw_);
-    print_vec("br", quant_parms.shift_br_);
+    print_vec("W ", quant_parms.W_);
+    print_vec("R ", quant_parms.R_);
+    print_vec("bw", quant_parms.bw_);
+    print_vec("br", quant_parms.br_);
 
     // Linear 输出
-    printf("  weight_ih_linear: shift=%2d, zp=%d\n", quant_parms.shift_weight_ih_linear_, quant_parms.zp_weight_ih_linear_);
-    printf("  weight_hh_linear: shift=%2d, zp=%d\n", quant_parms.shift_weight_hh_linear_, quant_parms.zp_weight_hh_linear_);
+    printf("  weight_ih_linear: shift=%2d, zp=%d\n", pot2Shift(quant_parms.weight_ih_linear_), quant_parms.weight_ih_linear_.zero_point);
+    printf("  weight_hh_linear: shift=%2d, zp=%d\n", pot2Shift(quant_parms.weight_hh_linear_), quant_parms.weight_hh_linear_.zero_point);
 
     // 门参数
-    printf("  update_gate_input:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_update_gate_input_, quant_parms.zp_update_gate_input_);
-    printf("  update_gate_output: exp2_inv=%2d, zp=%d\n", quant_parms.shift_update_gate_output_, quant_parms.zp_update_gate_output_);
-    printf("  reset_gate_input:   exp2_inv=%2d, zp=%d\n", quant_parms.shift_reset_gate_input_, quant_parms.zp_reset_gate_input_);
-    printf("  reset_gate_output:  exp2_inv=%2d, zp=%d\n", quant_parms.shift_reset_gate_output_, quant_parms.zp_reset_gate_output_);
-    printf("  new_gate_input:     exp2_inv=%2d, zp=%d\n", quant_parms.shift_new_gate_input_, quant_parms.zp_new_gate_input_);
-    printf("  new_gate_output:    exp2_inv=%2d, zp=%d\n", quant_parms.shift_new_gate_output_, quant_parms.zp_new_gate_output_);
+    printf("  update_gate_input:  exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.update_gate_input_), quant_parms.update_gate_input_.zero_point);
+    printf("  update_gate_output: exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.update_gate_output_), quant_parms.update_gate_output_.zero_point);
+    printf("  reset_gate_input:   exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.reset_gate_input_), quant_parms.reset_gate_input_.zero_point);
+    printf("  reset_gate_output:  exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.reset_gate_output_), quant_parms.reset_gate_output_.zero_point);
+    printf("  new_gate_input:     exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.new_gate_input_), quant_parms.new_gate_input_.zero_point);
+    printf("  new_gate_output:    exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.new_gate_output_), quant_parms.new_gate_output_.zero_point);
 
     // 中间计算
-    printf("  mul_reset_hidden:   exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_reset_hidden_, quant_parms.zp_mul_reset_hidden_);
+    printf("  mul_reset_hidden:   exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.mul_reset_hidden_), quant_parms.mul_reset_hidden_.zero_point);
 
     // 隐状态更新
-    printf("  mul_new_contribution: exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_new_contribution_,
-           quant_parms.zp_mul_new_contribution_);
-    printf("  mul_old_contribution: exp2_inv=%2d, zp=%d\n", quant_parms.shift_mul_old_contribution_,
-           quant_parms.zp_mul_old_contribution_);
+    printf("  mul_new_contribution: exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.mul_new_contribution_),
+           quant_parms.mul_new_contribution_.zero_point);
+    printf("  mul_old_contribution: exp2_inv=%2d, zp=%d\n", pot2Shift(quant_parms.mul_old_contribution_),
+           quant_parms.mul_old_contribution_.zero_point);
 }
