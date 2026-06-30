@@ -83,7 +83,7 @@ struct OperatorQuantConfig {
     bool mul_reset_hidden_symmetric_ = false;
     bool mul_old_contribution_symmetric_ = false, mul_new_contribution_symmetric_ = false;
     // true: POT2 (multiplier=1, shift-only fast path), false: affine M+shift
-    bool usePOT2_ = true;
+    bool usePOT2_ = false;
 
     OperatorQuantConfig& setAllBitWidths(int8_t bits) {
         QuantBitWidth* signed_members[] = {

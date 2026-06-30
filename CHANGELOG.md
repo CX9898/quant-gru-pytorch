@@ -12,11 +12,23 @@
 
 ### 变更 (Changed)
 
+1. **POT2 量化模式默认关闭**：`use_pot2_scale` / `usePOT2_` 的默认值由 `true` 改为 `false`，未显式指定时量化默认走 affine（`M + shift`）编码而非 POT2（`M=1`、仅 shift）。
+   - 涉及 C++ 头文件 `include/quantize_bitwidth_config.h`、CPU-only 头文件 `quant-gru-cpu-only/include/quantize_bitwidth_config.h`、pybind 绑定结构体 `pytorch/lib/gru_interface_binding.cc`、默认配置 `pytorch/config/gru_quant_bitwidth_config.json`。
+   - Python 端 `QuantGRU` 构造函数、反序列化（`__setstate__`）、`use_pot2_scale` property getter，以及加载旧导出文件时 `model_info.get("use_pot2_scale", ...)` 的兜底默认值统一改为 `False`，保证各入口默认行为一致。
+
 ### 修复 (Fixed)
+
+1. **修复配置变更后导出过期量化参数（stale scale）的问题**
+   - **影响**：`QuantGRU` 采用懒同步，改配置（`use_pot2_scale` / 位宽 / granularity / 重新收集校准数据等）只标记 `_quant_params_dirty=True`，真正重算 `quant_params` 推迟到下一次 `forward`；而导出路径不经过 `forward`，会静默导出与当前配置不一致的旧 `scale`。
+   - 新增 `_ensure_quant_params_fresh_for_export()`，在 AIMET encodings 导出与 `_export_quant_params_impl` 两处导出前对齐 `quant_params`，语义与 `forward` 中的 dirty 处理一致（锁定且已有参数时仅清脏不覆盖）。
+   - 校准数据已丢失（如 pickle/deepcopy 后）且参数已过期时，明确抛 `RuntimeError` 而非静默导出错误结果，并提示重新校准或在改配置后导出前调用 `finalize_calibration()`。
 
 ### 性能 (Performance)
 
 ### 破坏性变更 (Breaking Changes)
+
+1. **默认量化编码由 POT2 改为 affine**
+   - **影响**：此前未显式设置 `use_pot2_scale` 即默认走 POT2；改动后默认走 affine（`M + shift`）。依赖旧默认行为的调用方/示例脚本/配置若未显式指定 `use_pot2_scale=True`（或 JSON `use_pot2_scale: true`），量化编码方式会静默切换。需要 POT2 的场景请显式开启。
 
 ### 说明 (Notes)
 
