@@ -2567,6 +2567,9 @@ class QuantGRU(nn.Module):
             if verbose:
                 print(f"  ⚠️ 警告：模块 {module_name or 'unknown'} 未校准，跳过导出")
             return encodings_dict
+
+        # 配置变更后 quant_params 可能过期（懒同步），导出前强制对齐
+        _ensure_quant_params_fresh_for_export(self, verbose=verbose)
         
         # 确定模块名称
         if module_name is None:
@@ -4207,6 +4210,45 @@ def _parse_operators_dict(operators: dict, bitwidth_config, quant_params, verbos
         _parse_single_operator(bitwidth_config, quant_params, op_name, op_data, verbose)
 
 
+def _ensure_quant_params_fresh_for_export(gru: 'QuantGRU', verbose: bool = False) -> None:
+    """导出前确保 quant_params 与当前配置一致（消除懒同步导致的 stale 导出）。
+
+    QuantGRU 采用懒同步：改配置（use_pot2_scale / 位宽 / granularity / 重新收集
+    校准数据等）只标记 _quant_params_dirty=True，真正重算 quant_params 推迟到下一次
+    forward。导出路径不经过 forward，若不在此显式重算，会静默导出与当前配置不一致的
+    旧 scale。此函数与 forward 中的 dirty 处理保持相同语义。
+    """
+    if not getattr(gru, '_quant_params_dirty', False):
+        return
+
+    # 锁定且已有参数：与 forward 路径一致，视为有效并清脏，不覆盖
+    if getattr(gru, '_quant_params_locked', False) and gru.quant_params is not None:
+        gru._quant_params_dirty = False
+        return
+
+    # 判断是否仍持有可重算的校准数据（与 finalize_calibration 的前置检查一致）
+    try:
+        if gru._use_histogram_collection():
+            has_calib_data = gru.hist_collectors is not None and gru.hist_collectors.is_valid()
+        else:
+            has_calib_data = gru.quant_ranges is not None
+    except Exception:
+        has_calib_data = gru.quant_ranges is not None
+
+    if not has_calib_data:
+        raise RuntimeError(
+            "导出失败：量化参数已过期（配置变更后未重新计算），且校准数据已丢失，"
+            "无法安全导出。\n"
+            "请重新校准，或在改动配置后、导出前调用 finalize_calibration()。\n"
+            "提示：pickle/deepcopy 后校准数据会丢失，需要重新校准。"
+        )
+
+    if verbose:
+        print("[QuantGRU] 导出前检测到 _quant_params_dirty=True，"
+              "自动重新 finalize_calibration() 以保证导出与当前配置一致 ...")
+    gru.finalize_calibration(verbose=verbose)
+
+
 def _export_quant_params_impl(
     gru: 'QuantGRU',
     export_path: str,
@@ -4222,6 +4264,9 @@ def _export_quant_params_impl(
             "  3. gru.calibrating = False\n"
             "  4. gru.finalize_calibration()"
         )
+
+    # 配置变更后 quant_params 可能过期（懒同步），导出前强制对齐
+    _ensure_quant_params_fresh_for_export(gru, verbose=verbose)
     
     # 构建导出数据（统一的 operators 结构）
     export_data = {
