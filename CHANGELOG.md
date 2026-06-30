@@ -34,7 +34,14 @@
    - **范围**：校准（MINMAX / 直方图 / GPU SQNR）、权重量化、pybind 绑定（`from_cpp` / `to_cpp`）全部对齐到 `QuantParam` / `ChannelQuantParam`。
    - **验证**：容器 `quant-gru-cuda128` 内 `gru_quant_shared`、`gru_example` 均编译通过；POT2 输出 bit 级一致，仿射不劣于浮点参考。
 
-2. **POT2 量化模式默认关闭**：`use_pot2_scale` / `usePOT2_` 的默认值由 `true` 改为 `false`，未显式指定时量化默认走 affine（`M + shift`）编码而非 POT2（`M=1`、仅 shift）。
+2. **`GRUQuantParamsPy`（pybind 绑定）权重/偏置 scale 收敛为单一 per-channel 数组**
+   - **动机**：绑定结构体此前为 W/R/bw/br 各存了三套 scale（per-channel `scale_W_` + per-tensor `scale_W_tensor_` + per-gate `scale_W_gate_`），与上次 C++ 侧消除的多版本冗余是同一问题：多个可变字段易出现"用错版本/漏更新"。
+   - **收敛**：仅保留 per-channel 权威数组 `scale_{W,R,bw,br}_`（始终 3*hidden，按粒度广播）；tensor 视图 = `scale_W_[0]`、gate 视图 = `scale_W_[g*hidden]`，纯索引还原。删除 8 个 `_tensor_` / `_gate_` 字段及其 `def_readwrite` 注册。
+   - **`from_cpp`**：只读 per-channel 数组，不再派生 tensor/gate 副本；**`to_cpp`**：一律从 per-channel 数组展开，`granularity` 仅作元数据写回——顺带修掉 "granularity=PER_TENSOR 且未设 tensor 副本时灌入 0 scale" 的潜在 bug。
+   - **清理**：删除已无调用方的死代码 `encode_runtime_scale` 及其 `encode_per_tensor_scale` / `encode_per_gate_scale` / `encode_per_channel_scale` 辅助函数（旧多粒度 runtime-encode 逻辑）。
+   - Python 消费方仅读 per-channel 数组（如 `quantize_per_channel(..., list(params.scale_W_), ...)`），无需改动。
+
+3. **POT2 量化模式默认关闭**：`use_pot2_scale` / `usePOT2_` 的默认值由 `true` 改为 `false`，未显式指定时量化默认走 affine（`M + shift`）编码而非 POT2（`M=1`、仅 shift）。
    - 涉及 C++ 头文件 `include/quantize_bitwidth_config.h`、CPU-only 头文件 `quant-gru-cpu-only/include/quantize_bitwidth_config.h`、pybind 绑定结构体 `pytorch/lib/gru_interface_binding.cc`、默认配置 `pytorch/config/gru_quant_bitwidth_config.json`。
    - Python 端 `QuantGRU` 构造函数、反序列化（`__setstate__`）、`use_pot2_scale` property getter，以及加载旧导出文件时 `model_info.get("use_pot2_scale", ...)` 的兜底默认值统一改为 `False`，保证各入口默认行为一致。
 
@@ -52,7 +59,7 @@
 
 ### 说明 (Notes)
 
-1. **Python 对外 API 不变**：`GRUQuantParamsPy` 的 `scale_*` / `zp_*` / `scale_W_` 字段语义保持不变，本次为 C++ 内部存储结构的纯重构，故按补丁号递增。
+1. **Python 对外 API**：标量/激活类 `scale_*` / `zp_*` 与 per-channel 数组 `scale_{W,R,bw,br}_` 字段语义保持不变；仅移除了从未被消费方使用的冗余绑定属性 `scale_*_tensor_` / `scale_*_gate_`（仓库内无任何读写方）。本次主体为 C++/绑定内部存储结构的去冗余重构，故按补丁号递增。
 
 ---
 
