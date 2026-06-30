@@ -1117,7 +1117,7 @@ class QuantGRU(nn.Module):
             dropout: float = 0.0,
             bidirectional: bool = False,
             use_quantization: bool = False,
-            use_pot2_scale: bool = True,
+            use_pot2_scale: bool = False,
             quant_storage_dtype: str = "float32",
     ):
         super(QuantGRU, self).__init__()
@@ -1291,7 +1291,7 @@ class QuantGRU(nn.Module):
             state['quant_storage_dtype'] = "float32"
         
         self.__dict__.update(state)
-        self._use_pot2_scale = bool(getattr(self._bitwidth_config, 'usePOT2_', getattr(self, '_use_pot2_scale', True)))
+        self._use_pot2_scale = bool(getattr(self._bitwidth_config, 'usePOT2_', getattr(self, '_use_pot2_scale', False)))
 
     def reset_parameters(self):
         """权重初始化(与 nn.GRU 相同的均匀分布)"""
@@ -1753,7 +1753,7 @@ class QuantGRU(nn.Module):
         """是否使用 POT2 scale 编码；False 时使用 affine/M+shift 编码。"""
         if hasattr(self, '_bitwidth_config') and self._bitwidth_config is not None:
             return bool(self._bitwidth_config.usePOT2_)
-        return bool(getattr(self, '_use_pot2_scale', True))
+        return bool(getattr(self, '_use_pot2_scale', False))
 
     @use_pot2_scale.setter
     def use_pot2_scale(self, value: bool):
@@ -4351,7 +4351,7 @@ def _load_quant_params_impl(
     
     # 解析 operators 字典
     gru._bitwidth_config = gru_ops.OperatorQuantConfig()
-    gru.use_pot2_scale = bool(model_info.get("use_pot2_scale", True))
+    gru.use_pot2_scale = bool(model_info.get("use_pot2_scale", False))
     gru._bitwidth_config.usePOT2_ = gru.use_pot2_scale
     gru.quant_params = gru_ops.GRUQuantParams()
     gru.quant_params.hidden_ = gru.hidden_size

@@ -103,7 +103,7 @@ struct OperatorQuantConfigPy {
     int R_granularity_ = 2;
     int bw_granularity_ = 2;
     int br_granularity_ = 2;
-    bool usePOT2_ = true;
+    bool usePOT2_ = false;
 
     // 方法声明（实现在文件末尾）
     OperatorQuantConfigPy();                           // 默认构造函数：从 C++ 默认值初始化
