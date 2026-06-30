@@ -138,23 +138,12 @@ struct GRUQuantParamsPy {
     int32_t zp_x_;
     float scale_h_;
     int32_t zp_h_;
-    // 权重参数（per-channel）
+    // 权重/偏置参数：唯一 per-channel 权威数组（始终 3*hidden，按粒度广播）。
+    // tensor 视图 = scale_W_[0]，gate 视图 = scale_W_[g*hidden]，纯索引还原，不再单独存储。
     std::vector<float> scale_W_;
     std::vector<float> scale_R_;
     std::vector<float> scale_bw_;
     std::vector<float> scale_br_;
-    
-    // Per-Tensor 参数（Python 绑定需要访问）
-    float scale_W_tensor_ = 0.0f;
-    float scale_R_tensor_ = 0.0f;
-    float scale_bw_tensor_ = 0.0f;
-    float scale_br_tensor_ = 0.0f;
-    
-    // Per-Gate 参数（Python 绑定需要访问）
-    std::array<float, 3> scale_W_gate_ = {0.0f, 0.0f, 0.0f};
-    std::array<float, 3> scale_R_gate_ = {0.0f, 0.0f, 0.0f};
-    std::array<float, 3> scale_bw_gate_ = {0.0f, 0.0f, 0.0f};
-    std::array<float, 3> scale_br_gate_ = {0.0f, 0.0f, 0.0f};
     // Linear 输出参数 (GEMM+bias)
     float scale_weight_ih_linear_;
     int32_t zp_weight_ih_linear_;
@@ -1183,94 +1172,6 @@ inline FixedPointScale encode_fixed_from_scale(float scale, bool usePOT2) {
     return encodeMShift(scale);
 }
 
-inline void encode_per_tensor_scale(float scale, int8_t &shift, float &raw_scale) {
-    shift = encode_shift_from_scale(scale);
-    raw_scale = scale;
-}
-
-template <size_t N>
-inline void encode_per_gate_scale(
-    const std::array<float, N> &scale,
-    std::array<int8_t, N> &shift,
-    std::array<float, N> &raw_scale) {
-    for (size_t i = 0; i < N; ++i) {
-        shift[i] = encode_shift_from_scale(scale[i]);
-        raw_scale[i] = scale[i];
-    }
-}
-
-inline void encode_per_channel_scale(
-    const std::vector<float> &scale,
-    std::vector<int8_t> &shift,
-    std::vector<float> &raw_scale,
-    std::vector<FixedPointScale> &fixed_scale,
-    bool usePOT2) {
-    shift.resize(scale.size());
-    raw_scale.resize(scale.size());
-    fixed_scale.resize(scale.size());
-    for (size_t i = 0; i < scale.size(); ++i) {
-        shift[i] = encode_shift_from_scale(scale[i]);
-        raw_scale[i] = scale[i];
-        fixed_scale[i] = encode_fixed_from_scale(scale[i], usePOT2);
-    }
-}
-
-inline void encode_runtime_scale(
-    int granularity,
-    int hidden,
-    float tensor_scale,
-    const std::array<float, 3> &gate_scale,
-    const std::vector<float> &channel_scale,
-    int8_t &shift_tensor,
-    float &raw_scale_tensor,
-    std::array<int8_t, 3> &shift_gate,
-    std::array<float, 3> &raw_scale_gate,
-    std::vector<int8_t> &shift_channel,
-    std::vector<float> &raw_scale_channel,
-    std::vector<FixedPointScale> &fixed_scale_channel,
-    bool usePOT2,
-    const char *name) {
-    if (hidden <= 0) {
-        throw std::invalid_argument(std::string(name) + " hidden size must be > 0");
-    }
-    if (granularity < 0 || granularity > 2) {
-        throw std::invalid_argument(std::string(name) + " granularity must be 0, 1, or 2");
-    }
-    const size_t channel_count = static_cast<size_t>(hidden) * 3;
-
-    shift_channel.resize(channel_count);
-    raw_scale_channel.resize(channel_count);
-    fixed_scale_channel.resize(channel_count);
-
-    if (granularity == 0) {  // PER_TENSOR
-        encode_per_tensor_scale(tensor_scale, shift_tensor, raw_scale_tensor);
-        const FixedPointScale fixed = encode_fixed_from_scale(tensor_scale, usePOT2);
-        for (size_t i = 0; i < channel_count; ++i) {
-            shift_channel[i] = shift_tensor;
-            raw_scale_channel[i] = raw_scale_tensor;
-            fixed_scale_channel[i] = fixed;
-        }
-    } else if (granularity == 1) {  // PER_GATE
-        encode_per_gate_scale(gate_scale, shift_gate, raw_scale_gate);
-        for (int gate = 0; gate < 3; ++gate) {
-            const FixedPointScale fixed = encode_fixed_from_scale(gate_scale[gate], usePOT2);
-            for (int c = gate * hidden; c < (gate + 1) * hidden; ++c) {
-                shift_channel[static_cast<size_t>(c)] = shift_gate[gate];
-                raw_scale_channel[static_cast<size_t>(c)] = raw_scale_gate[gate];
-                fixed_scale_channel[static_cast<size_t>(c)] = fixed;
-            }
-        }
-    } else {  // PER_CHANNEL
-        if (channel_scale.size() != channel_count) {
-            throw std::invalid_argument(
-                std::string(name) + " per-channel scale size mismatch: got " +
-                std::to_string(channel_scale.size()) + ", expected " +
-                std::to_string(channel_count));
-        }
-        encode_per_channel_scale(
-            channel_scale, shift_channel, raw_scale_channel, fixed_scale_channel, usePOT2);
-    }
-}
 }  // namespace
 
 // 从 C++ 结构体转换
@@ -1282,23 +1183,15 @@ void GRUQuantParamsPy::from_cpp(const GRUQuantParams &cpp_params) {
     scale_h_ = cpp_params.h_.scale;
     zp_h_ = cpp_params.h_.zero_point;
 
-    // 权重/偏置：唯一 per-channel 权威数组（tensor/gate 视图取索引）
-    auto read_channel = [](const ChannelQuantParam &c, std::vector<float> &out,
-                           float &tensor_out, std::array<float, 3> &gate_out, int hidden) {
+    // 权重/偏置：唯一 per-channel 权威数组（已按粒度广播，tensor/gate 视图由索引还原）
+    auto read_channel = [](const ChannelQuantParam &c, std::vector<float> &out) {
         out.resize(c.channels.size());
         for (size_t i = 0; i < c.channels.size(); ++i) out[i] = c.channels[i].scale;
-        if (!c.channels.empty()) {
-            tensor_out = c.channels[0].scale;
-            for (int g = 0; g < 3; ++g) {
-                const size_t idx = static_cast<size_t>(g) * static_cast<size_t>(hidden);
-                gate_out[g] = idx < c.channels.size() ? c.channels[idx].scale : c.channels[0].scale;
-            }
-        }
     };
-    read_channel(cpp_params.W_, scale_W_, scale_W_tensor_, scale_W_gate_, hidden_);
-    read_channel(cpp_params.R_, scale_R_, scale_R_tensor_, scale_R_gate_, hidden_);
-    read_channel(cpp_params.bw_, scale_bw_, scale_bw_tensor_, scale_bw_gate_, hidden_);
-    read_channel(cpp_params.br_, scale_br_, scale_br_tensor_, scale_br_gate_, hidden_);
+    read_channel(cpp_params.W_, scale_W_);
+    read_channel(cpp_params.R_, scale_R_);
+    read_channel(cpp_params.bw_, scale_bw_);
+    read_channel(cpp_params.br_, scale_br_);
 
     // Linear 输出参数
     scale_weight_ih_linear_ = cpp_params.weight_ih_linear_.scale;
@@ -1340,34 +1233,28 @@ GRUQuantParams GRUQuantParamsPy::to_cpp() const {
     cpp_params.x_ = QuantParam{scale_x_, zp_x_};
     cpp_params.h_ = QuantParam{scale_h_, zp_h_};
 
-    // 权重/偏置：按粒度展开到唯一 per-channel 权威数组（权重零点取 0）
-    auto fill_channel = [this](ChannelQuantParam &out, int gran, float tensor_scale,
-                               const std::array<float, 3> &gate_scale,
+    // 权重/偏置：一律从唯一 per-channel 权威数组展开（已按粒度广播，权重零点取 0）。
+    // granularity 仅作为元数据写回；scale 值不再依赖 tensor/gate 副本。
+    auto fill_channel = [this](ChannelQuantParam &out, int gran,
                                const std::vector<float> &channel_scale, const char *name) {
         if (hidden_ <= 0) throw std::invalid_argument(std::string(name) + " hidden size must be > 0");
         const int channel_count = hidden_ * 3;
+        if (static_cast<int>(channel_scale.size()) != channel_count) {
+            throw std::invalid_argument(std::string(name) + " per-channel scale size mismatch");
+        }
         out.hidden = hidden_;
         out.resize(channel_count);
-        if (gran == 0) {  // PER_TENSOR
-            out.granularity = OperatorQuantConfig::PER_TENSOR;
-            for (auto &q : out.channels) q = QuantParam{tensor_scale, 0};
-        } else if (gran == 1) {  // PER_GATE
-            out.granularity = OperatorQuantConfig::PER_GATE;
-            for (int g = 0; g < 3; ++g)
-                for (int c = g * hidden_; c < (g + 1) * hidden_; ++c)
-                    out.channel(c) = QuantParam{gate_scale[g], 0};
-        } else {  // PER_CHANNEL
-            out.granularity = OperatorQuantConfig::PER_CHANNEL;
-            if (static_cast<int>(channel_scale.size()) != channel_count) {
-                throw std::invalid_argument(std::string(name) + " per-channel scale size mismatch");
-            }
-            for (int c = 0; c < channel_count; ++c) out.channel(c) = QuantParam{channel_scale[c], 0};
+        switch (gran) {
+            case 0:  out.granularity = OperatorQuantConfig::PER_TENSOR;  break;
+            case 1:  out.granularity = OperatorQuantConfig::PER_GATE;    break;
+            default: out.granularity = OperatorQuantConfig::PER_CHANNEL; break;
         }
+        for (int c = 0; c < channel_count; ++c) out.channel(c) = QuantParam{channel_scale[c], 0};
     };
-    fill_channel(cpp_params.W_, bitwidth_config_.W_granularity_, scale_W_tensor_, scale_W_gate_, scale_W_, "W");
-    fill_channel(cpp_params.R_, bitwidth_config_.R_granularity_, scale_R_tensor_, scale_R_gate_, scale_R_, "R");
-    fill_channel(cpp_params.bw_, bitwidth_config_.bw_granularity_, scale_bw_tensor_, scale_bw_gate_, scale_bw_, "bw");
-    fill_channel(cpp_params.br_, bitwidth_config_.br_granularity_, scale_br_tensor_, scale_br_gate_, scale_br_, "br");
+    fill_channel(cpp_params.W_, bitwidth_config_.W_granularity_, scale_W_, "W");
+    fill_channel(cpp_params.R_, bitwidth_config_.R_granularity_, scale_R_, "R");
+    fill_channel(cpp_params.bw_, bitwidth_config_.bw_granularity_, scale_bw_, "bw");
+    fill_channel(cpp_params.br_, bitwidth_config_.br_granularity_, scale_br_, "br");
 
     // Linear 输出参数
     cpp_params.weight_ih_linear_ = QuantParam{scale_weight_ih_linear_, zp_weight_ih_linear_};
@@ -1548,21 +1435,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("zp_x_", &GRUQuantParamsPy::zp_x_)
         .def_readwrite("scale_h_", &GRUQuantParamsPy::scale_h_)
         .def_readwrite("zp_h_", &GRUQuantParamsPy::zp_h_)
-    // 权重参数（per-channel）
+    // 权重/偏置参数（唯一 per-channel 权威数组）
     .def_readwrite("scale_W_", &GRUQuantParamsPy::scale_W_)
     .def_readwrite("scale_R_", &GRUQuantParamsPy::scale_R_)
     .def_readwrite("scale_bw_", &GRUQuantParamsPy::scale_bw_)
     .def_readwrite("scale_br_", &GRUQuantParamsPy::scale_br_)
-    // Per-Tensor 参数
-    .def_readwrite("scale_W_tensor_", &GRUQuantParamsPy::scale_W_tensor_)
-    .def_readwrite("scale_R_tensor_", &GRUQuantParamsPy::scale_R_tensor_)
-    .def_readwrite("scale_bw_tensor_", &GRUQuantParamsPy::scale_bw_tensor_)
-    .def_readwrite("scale_br_tensor_", &GRUQuantParamsPy::scale_br_tensor_)
-    // Per-Gate 参数
-    .def_readwrite("scale_W_gate_", &GRUQuantParamsPy::scale_W_gate_)
-    .def_readwrite("scale_R_gate_", &GRUQuantParamsPy::scale_R_gate_)
-    .def_readwrite("scale_bw_gate_", &GRUQuantParamsPy::scale_bw_gate_)
-    .def_readwrite("scale_br_gate_", &GRUQuantParamsPy::scale_br_gate_)
         // Linear 输出参数 (GEMM+bias)
         .def_readwrite("scale_weight_ih_linear_", &GRUQuantParamsPy::scale_weight_ih_linear_)
         .def_readwrite("zp_weight_ih_linear_", &GRUQuantParamsPy::zp_weight_ih_linear_)
