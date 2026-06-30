@@ -20,41 +20,30 @@
 // 在 finalize_calibration 时调用一次，然后在每次 forward 时从参数复制到 QuantGRUReScale
 void generate_piecewise_linear_lut_to_params(GRUQuantParams &params) {
     const auto &config = params.bitwidth_config_;
-    const float update_in_scale = (params.fixed_scale_update_gate_input_.multiplier != 0)
-                                      ? decode_scale(params.fixed_scale_update_gate_input_)
-                                      : exp2_scale(params.shift_update_gate_input_);
-    const float update_out_scale = (params.fixed_scale_update_gate_output_.multiplier != 0)
-                                       ? decode_scale(params.fixed_scale_update_gate_output_)
-                                       : exp2_scale(params.shift_update_gate_output_);
-    const float reset_in_scale = (params.fixed_scale_reset_gate_input_.multiplier != 0)
-                                     ? decode_scale(params.fixed_scale_reset_gate_input_)
-                                     : exp2_scale(params.shift_reset_gate_input_);
-    const float reset_out_scale = (params.fixed_scale_reset_gate_output_.multiplier != 0)
-                                      ? decode_scale(params.fixed_scale_reset_gate_output_)
-                                      : exp2_scale(params.shift_reset_gate_output_);
-    const float new_in_scale = (params.fixed_scale_new_gate_input_.multiplier != 0)
-                                   ? decode_scale(params.fixed_scale_new_gate_input_)
-                                   : exp2_scale(params.shift_new_gate_input_);
-    const float new_out_scale = (params.fixed_scale_new_gate_output_.multiplier != 0)
-                                    ? decode_scale(params.fixed_scale_new_gate_output_)
-                                    : exp2_scale(params.shift_new_gate_output_);
+    // 直接使用单一权威 scale（仿射=连续校准值，POT2=2^-shift），无需 fixed/shift 往返
+    const float update_in_scale = params.update_gate_input_.scale;
+    const float update_out_scale = params.update_gate_output_.scale;
+    const float reset_in_scale = params.reset_gate_input_.scale;
+    const float reset_out_scale = params.reset_gate_output_.scale;
+    const float new_in_scale = params.new_gate_input_.scale;
+    const float new_out_scale = params.new_gate_output_.scale;
 
     // update gate Sigmoid
     params.sigmoid_update_gate_lut_ = generate_sigmoid_lut(
-        update_in_scale, params.zp_update_gate_input_,
-        update_out_scale, params.zp_update_gate_output_,
+        update_in_scale, params.update_gate_input_.zero_point,
+        update_out_scale, params.update_gate_output_.zero_point,
         config.update_gate_input_, config.update_gate_output_);
 
     // reset gate Sigmoid
     params.sigmoid_reset_gate_lut_ = generate_sigmoid_lut(
-        reset_in_scale, params.zp_reset_gate_input_,
-        reset_out_scale, params.zp_reset_gate_output_,
+        reset_in_scale, params.reset_gate_input_.zero_point,
+        reset_out_scale, params.reset_gate_output_.zero_point,
         config.reset_gate_input_, config.reset_gate_output_);
 
     // new gate Tanh
     params.tanh_new_gate_lut_ = generate_tanh_lut(
-        new_in_scale, params.zp_new_gate_input_,
-        new_out_scale, params.zp_new_gate_output_,
+        new_in_scale, params.new_gate_input_.zero_point,
+        new_out_scale, params.new_gate_output_.zero_point,
         config.new_gate_input_, config.new_gate_output_);
 
 #ifdef DEBUG

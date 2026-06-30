@@ -12,7 +12,29 @@
 
 ### 变更 (Changed)
 
-1. **POT2 量化模式默认关闭**：`use_pot2_scale` / `usePOT2_` 的默认值由 `true` 改为 `false`，未显式指定时量化默认走 affine（`M + shift`）编码而非 POT2（`M=1`、仅 shift）。
+### 修复 (Fixed)
+
+### 性能 (Performance)
+
+### 破坏性变更 (Breaking Changes)
+
+### 说明 (Notes)
+
+---
+
+## [1.0.10] - 2026-06-30
+
+### 变更 (Changed)
+
+1. **`GRUQuantParams` 收敛为单一权威量化种子（内部重构，无 Python API 破坏）**
+   - **动机**：同一意义的量化数值此前以多套表示并存（`shift_*`、`raw_scale_*`、`fixed_scale_*` 及 per-tensor/per-gate/per-channel 多份副本），极易出现"用错版本"或"更新一处漏更新另一处"的隐藏 BUG，缺乏数据唯一性。
+   - **权威种子**：新增 `QuantParam`（仅 `scale` + `zero_point`）与 per-channel 的 `ChannelQuantParam`。`include/quantize_param_types.h` 类型层回归纯数据，不再内嵌任何算子逻辑；执行表示改为强类型 `Pot2Rescale` / `FixedPointScale` / `FloatRescale`。
+   - **派生算子族（自由函数，归入 `include/quantize_ops_helper.h`）**：`pot2Shift`、`encodeMShift`、`toFixedScale(s)`、`makeRescale*`。POT2 用整数 shift 差；仿射用**原始连续 scale 比值** + `encodeMShift`（绝不经 `fixed_scale` 往返，避免精度损失）；FP 用 `1/ratio`。新增重载原语 `applyRescale` 统一三种 rescale 的应用。
+   - **设备层模板化 + per-channel 统一**：设备结构体按 rescale 类型模板化（`GateQuantParamsT<R>`、`LinearQuantParamsGPUT/CPUT<R>`），device 侧线性参数统一为 per-channel；kernel 模板化、`Run()` 按 `R` 编译期派发，取代运行时 `usePOT2` 分支。FP 路径保留独立 kernel，仅复用 `applyRescale`。
+   - **范围**：校准（MINMAX / 直方图 / GPU SQNR）、权重量化、pybind 绑定（`from_cpp` / `to_cpp`）全部对齐到 `QuantParam` / `ChannelQuantParam`。
+   - **验证**：容器 `quant-gru-cuda128` 内 `gru_quant_shared`、`gru_example` 均编译通过；POT2 输出 bit 级一致，仿射不劣于浮点参考。
+
+2. **POT2 量化模式默认关闭**：`use_pot2_scale` / `usePOT2_` 的默认值由 `true` 改为 `false`，未显式指定时量化默认走 affine（`M + shift`）编码而非 POT2（`M=1`、仅 shift）。
    - 涉及 C++ 头文件 `include/quantize_bitwidth_config.h`、CPU-only 头文件 `quant-gru-cpu-only/include/quantize_bitwidth_config.h`、pybind 绑定结构体 `pytorch/lib/gru_interface_binding.cc`、默认配置 `pytorch/config/gru_quant_bitwidth_config.json`。
    - Python 端 `QuantGRU` 构造函数、反序列化（`__setstate__`）、`use_pot2_scale` property getter，以及加载旧导出文件时 `model_info.get("use_pot2_scale", ...)` 的兜底默认值统一改为 `False`，保证各入口默认行为一致。
 
@@ -23,14 +45,14 @@
    - 新增 `_ensure_quant_params_fresh_for_export()`，在 AIMET encodings 导出与 `_export_quant_params_impl` 两处导出前对齐 `quant_params`，语义与 `forward` 中的 dirty 处理一致（锁定且已有参数时仅清脏不覆盖）。
    - 校准数据已丢失（如 pickle/deepcopy 后）且参数已过期时，明确抛 `RuntimeError` 而非静默导出错误结果，并提示重新校准或在改配置后导出前调用 `finalize_calibration()`。
 
-### 性能 (Performance)
-
 ### 破坏性变更 (Breaking Changes)
 
 1. **默认量化编码由 POT2 改为 affine**
    - **影响**：此前未显式设置 `use_pot2_scale` 即默认走 POT2；改动后默认走 affine（`M + shift`）。依赖旧默认行为的调用方/示例脚本/配置若未显式指定 `use_pot2_scale=True`（或 JSON `use_pot2_scale: true`），量化编码方式会静默切换。需要 POT2 的场景请显式开启。
 
 ### 说明 (Notes)
+
+1. **Python 对外 API 不变**：`GRUQuantParamsPy` 的 `scale_*` / `zp_*` / `scale_W_` 字段语义保持不变，本次为 C++ 内部存储结构的纯重构，故按补丁号递增。
 
 ---
 

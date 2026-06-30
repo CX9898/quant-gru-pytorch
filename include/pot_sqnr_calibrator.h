@@ -412,31 +412,6 @@ inline std::pair<float, int8_t> roundScaleToPowerOfTwo(float scale) {
     return {std::pow(2.0f, -static_cast<float>(n_rounded)), n_rounded};
 }
 
-inline FixedPointScale encodeMShift(float scale) {
-    if (!(scale > 0.0f)) {
-        throw std::runtime_error("Invalid scale <= 0 in encodeMShift");
-    }
-    int exp2 = 0;
-    double mant = std::frexp(static_cast<double>(scale), &exp2);  // scale = mant * 2^exp2
-    uint32_t m = static_cast<uint32_t>(std::llround(mant * 65536.0));
-    if (m == 65536u) {
-        m = 32768u;
-        exp2 += 1;
-    }
-    if (m < 32768u) {
-        m = 32768u;
-    }
-    const int shift = 16 - exp2;
-    if (shift < std::numeric_limits<int8_t>::min() || shift > std::numeric_limits<int8_t>::max()) {
-        throw std::runtime_error("encodeMShift shift out of int8 range");
-    }
-    return FixedPointScale{static_cast<uint16_t>(m), static_cast<int8_t>(shift)};
-}
-
-inline float decodeMShift(const FixedPointScale &s) {
-    return static_cast<float>(s.multiplier) * std::ldexp(1.0f, -static_cast<int>(s.shift));
-}
-
 /**
  * 计算 zero-point
  * 

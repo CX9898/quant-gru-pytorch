@@ -28,7 +28,6 @@
 #include "blas.h"
 #include "dev_vector.h"
 #include "gru_quant.h"
-#include "pot_sqnr_calibrator.h"
 #include "quantize_ops_helper.h"
 #include "parallel_algorithm.h"
 
@@ -102,36 +101,12 @@ __global__ void quantizedGemmFused(const int32_t *__restrict__ A,  // [M, K] 权
     }
 }
 
-// 融合 GEMM + bias: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
-// A: [M, K] 权重，列主序
-// B: [K, N] 输入，列主序
-// C: [M, N] 输出，列主序
-// bias: [M] 偏置（per-channel）
-// shift_gemm_per_row: [M] GEMM 的 per-row shift
-// 融合 GEMM + bias: C = rshift(A * (B - zp_B), shift_gemm) + rshift(bias, shift_bias) + zp_out
-// 
+// 融合 GEMM + bias: C = applyRescale(A * (B - zp_B) + applyRescale(bias)) + zp_out
+// A: [M, K] 权重，列主序; B: [K, N] 输入; C: [M, N] 输出; bias: [M] per-channel
+// 设备层只保留 per-channel rescale 数组（每条只带一份执行表示 R）。
 // @tparam Training 是否训练模式（决定是否使用 mask）
-// @param C_mask 训练模式时保存 clamp mask，推理模式时可为 nullptr
-// 辅助函数：根据粒度配置获取 rescale 后的 shift 值（device 函数）
-__device__ __forceinline__ int8_t get_shift_gemm(
-    int8_t granularity,
-    int row,
-    int hidden_size,
-    int8_t shift_tensor,
-    const int8_t shift_gate[3],
-    const int8_t *shift_channel
-) {
-    if (granularity == 0) {  // PER_TENSOR
-        return shift_tensor;
-    } else if (granularity == 1) {  // PER_GATE
-        int gate_idx = row / hidden_size;
-        return shift_gate[gate_idx];
-    } else {  // PER_CHANNEL
-        return shift_channel[row];
-    }
-}
-
-template <bool Training>
+// @tparam R       rescale 执行表示（Pot2Rescale / FixedPointScale）
+template <bool Training, class R>
 __global__ void quantizedGemmBiasFused(
     const int32_t *__restrict__ A,               // [M, K] 权重，列主序
     const int32_t *__restrict__ B,               // [K, N] 输入，列主序
@@ -140,25 +115,11 @@ __global__ void quantizedGemmBiasFused(
     uint8_t *__restrict__ C_mask,                // [M, N] clamp mask，训练模式时有效
     int M, int N, int K,
     int32_t zp_B,                                // 输入的 zero-point
-    // 粒度配置（gemm 和 bias 的粒度，通过参数内存传递，访问快）
-    int8_t gemm_granularity,  // GEMM 的粒度（W_granularity 或 R_granularity）
-    int8_t bias_granularity,  // bias 的粒度（bw_granularity 或 br_granularity）
-    int hidden_size,
-    // Per-tensor rescale 参数（已计算 rescale，通过参数内存传递）
-    int8_t shift_gemm_tensor,  // GEMM rescale per-tensor shift
-    int8_t shift_bias_tensor,  // bias rescale per-tensor shift
-    // Per-gate rescale 参数（已计算 rescale，通过参数内存传递）
-    const int8_t shift_gemm_gate[3],  // GEMM rescale per-gate shift [z, r, g]
-    const int8_t shift_bias_gate[3],  // bias rescale per-gate shift [z, r, g]
-    // Per-channel 参数（数组指针，PER_CHANNEL 粒度时使用）
-    const int8_t *__restrict__ shift_gemm_per_row,   // [M] GEMM per-row shift
-    const int8_t *__restrict__ shift_bias_per_row,   // [M] bias per-row shift
+    // Per-channel rescale（每行一份 R）
+    const R *__restrict__ gemm_rescale_per_row,  // [M] GEMM per-row rescale
+    const R *__restrict__ bias_rescale_per_row,  // [M] bias per-row rescale
     int32_t zp_out,                              // 输出的 zero-point
-    QuantBitWidth output_bw,                     // 输出位宽配置
-    // Affine 模式：per-channel FixedPointScale rescale（usePOT2=false 时使用）
-    bool usePOT2,
-    const FixedPointScale *__restrict__ fixed_gemm_per_row,  // [M] GEMM affine rescale
-    const FixedPointScale *__restrict__ fixed_bias_per_row   // [M] bias affine rescale
+    QuantBitWidth output_bw                      // 输出位宽配置
 ) {
     __shared__ int32_t As[TILE_SIZE][TILE_SIZE + 1];
     __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE + 1];
@@ -197,25 +158,11 @@ __global__ void quantizedGemmBiasFused(
         __syncthreads();
     }
 
-    // 写回结果：rshift(GEMM, shift_gemm) + rshift(bias, shift_bias) + zp_out
+    // 写回结果：applyRescale(GEMM + applyRescale(bias)) + zp_out
     if (row < M && col < N) {
-        // 根据粒度配置获取 rescale 后的 shift 值（通过参数内存访问，比全局内存快）
         const int32_t bias_val = bias[row];
-
-        // POT2 模式用整数移位；affine 模式用 per-channel FixedPointScale（per-channel 数组对所有粒度均正确）
-        int64_t bias_result;
-        int64_t gemm_result;
-        if (usePOT2) {
-            const int8_t n_gemm = get_shift_gemm(gemm_granularity, row, hidden_size,
-                                                shift_gemm_tensor, shift_gemm_gate, shift_gemm_per_row);
-            const int8_t n_bias = get_shift_gemm(bias_granularity, row, hidden_size,
-                                                shift_bias_tensor, shift_bias_gate, shift_bias_per_row);
-            bias_result = rshift_round(static_cast<int64_t>(bias_val), n_bias);
-            gemm_result = rshift_round(acc + static_cast<int64_t>(bias_result), n_gemm);
-        } else {
-            bias_result = rescale_round<false>(static_cast<int64_t>(bias_val), fixed_bias_per_row[row]);
-            gemm_result = rescale_round<false>(acc + static_cast<int64_t>(bias_result), fixed_gemm_per_row[row]);
-        }
+        const int64_t bias_result = applyRescale(static_cast<int64_t>(bias_val), bias_rescale_per_row[row]);
+        const int64_t gemm_result = applyRescale(acc + bias_result, gemm_rescale_per_row[row]);
 
         // 合并结果
         const int64_t result = gemm_result + zp_out;
@@ -281,13 +228,13 @@ __global__ void rescaleGemmI32(
 // 所有量化值使用 int32_t 存储
 // weight_ih_linear = W*x + bw, weight_hh_linear = R*h + br (Linear 变换)
 
-template <bool Training, bool ApplyZoneout>
+template <bool Training, bool ApplyZoneout, class R>
 __global__ void PointwiseOperationsQuant(
     const int batch_dim, const int hidden_dim, 
     const int32_t *weight_ih_linear,  // 输入 Linear 变换: W*x + bw [batch, hidden*3]
     const int32_t *weight_hh_linear,  // 隐状态 Linear 变换: R*h + br [batch, hidden*3]
     const int32_t *h, int32_t *h_out, int32_t *v,
-    const float zoneout_prob, const int32_t *zoneout_mask, const GateQuantParams gate_params,
+    const float zoneout_prob, const int32_t *zoneout_mask, const GateQuantParamsT<R> gate_params,
     uint8_t *gate_input_mask = nullptr,         // [batch, hidden*3] 门输入 clamp mask
     uint8_t *gate_output_mask = nullptr,        // [batch, hidden*3] 门输出 clamp mask
     uint8_t *h_mask = nullptr                   // [batch, hidden] 隐状态输出 mask
@@ -309,16 +256,16 @@ __global__ void PointwiseOperationsQuant(
 
     if (debug_idx >= 0) {
         // 反量化 Linear 变换结果（使用通用函数）
-        float ih_u_fp = dequantize<int32_t>(weight_ih_linear[update_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
-        float ih_r_fp = dequantize<int32_t>(weight_ih_linear[reset_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
-        float ih_n_fp = dequantize<int32_t>(weight_ih_linear[new_idx], gate_params.test.shift_weight_ih_linear_, gate_params.zp_weight_ih_linear_);
+        float ih_u_fp = (weight_ih_linear[update_idx] - gate_params.zp_weight_ih_linear_) * gate_params.test.weight_ih_linear_.scale;
+        float ih_r_fp = (weight_ih_linear[reset_idx] - gate_params.zp_weight_ih_linear_) * gate_params.test.weight_ih_linear_.scale;
+        float ih_n_fp = (weight_ih_linear[new_idx] - gate_params.zp_weight_ih_linear_) * gate_params.test.weight_ih_linear_.scale;
 
-        float hh_u_fp = dequantize<int32_t>(weight_hh_linear[update_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
-        float hh_r_fp = dequantize<int32_t>(weight_hh_linear[reset_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
-        float hh_n_fp = dequantize<int32_t>(weight_hh_linear[new_idx], gate_params.test.shift_weight_hh_linear_, gate_params.zp_weight_hh_linear_);
+        float hh_u_fp = (weight_hh_linear[update_idx] - gate_params.zp_weight_hh_linear_) * gate_params.test.weight_hh_linear_.scale;
+        float hh_r_fp = (weight_hh_linear[reset_idx] - gate_params.zp_weight_hh_linear_) * gate_params.test.weight_hh_linear_.scale;
+        float hh_n_fp = (weight_hh_linear[new_idx] - gate_params.zp_weight_hh_linear_) * gate_params.test.weight_hh_linear_.scale;
 
         // 反量化 h_old
-        float h_old_fp = dequantize<int32_t>(h[output_idx], gate_params.test.shift_h_, gate_params.zp_h_);
+        float h_old_fp = (h[output_idx] - gate_params.zp_h_) * gate_params.test.h_.scale;
 
         // ========== 浮点 GRU 计算 ==========
         float u_pre_fp = ih_u_fp + hh_u_fp;
@@ -355,15 +302,15 @@ __global__ void PointwiseOperationsQuant(
     int32_t update_gate, reset_gate, new_gate, cur_h;
     
     // 直接调用函数，函数内部会根据 Training 模板参数决定实现
-    update_gate = computeUpdateGate<Training>(
+    update_gate = computeUpdateGate<Training, R>(
         weight_ih_linear[update_idx], weight_hh_linear[update_idx], gate_params,
         &update_input_mask, &update_output_mask, debug_idx);
 
-    reset_gate = computeResetGate<Training>(
+    reset_gate = computeResetGate<Training, R>(
         weight_ih_linear[reset_idx], weight_hh_linear[reset_idx], gate_params,
         &reset_input_mask, &reset_output_mask, debug_idx);
 
-    new_gate = computeNewGate<Training>(
+    new_gate = computeNewGate<Training, R>(
         weight_ih_linear[new_idx], weight_hh_linear[new_idx], reset_gate, gate_params,
         &new_input_mask, &new_output_mask, debug_idx);
 
@@ -391,7 +338,7 @@ __global__ void PointwiseOperationsQuant(
     }
 
     // 计算新的隐藏状态
-    cur_h = computeHiddenState<Training>(update_gate, new_gate, h[output_idx], gate_params, &h_out_mask, debug_idx);
+    cur_h = computeHiddenState<Training, R>(update_gate, new_gate, h[output_idx], gate_params, &h_out_mask, debug_idx);
 
     // 保存隐状态 mask（只在训练模式时执行）
     if constexpr (Training) {
@@ -409,9 +356,9 @@ __global__ void PointwiseOperationsQuant(
 #ifdef DEBUG_QUANT_DETAIL
     if (debug_idx >= 0) {
         // 反量化最终结果与浮点对比（使用通用函数）
-        float u_quant_fp = dequantize<int32_t>(update_gate, gate_params.test.shift_update_gate_output_, gate_params.zp_update_gate_output_);
-        float n_quant_fp = dequantize<int32_t>(new_gate, gate_params.test.shift_new_gate_output_, gate_params.zp_new_gate_output_);
-        float h_quant_fp = dequantize<int32_t>(cur_h, gate_params.test.shift_h_, gate_params.zp_h_);
+        float u_quant_fp = (update_gate - gate_params.zp_update_gate_output_) * gate_params.test.update_gate_output_.scale;
+        float n_quant_fp = (new_gate - gate_params.zp_new_gate_output_) * gate_params.test.new_gate_output_.scale;
+        float h_quant_fp = (cur_h - gate_params.zp_h_) * gate_params.test.h_.scale;
 
         printf("[QUANT] u_q=%d u_fp=%.4f | n_q=%d n_fp=%.4f | h_q=%d h_fp=%.4f\n", update_gate, u_quant_fp, new_gate,
                n_quant_fp, cur_h, h_quant_fp);
@@ -529,7 +476,7 @@ void ForwardPassQuant::EnsureBuffersAllocated(int steps) {
     }
 
     // INT8 GEMM 优化缓冲区（当位宽 <= 8 时使用）
-    const auto &bw_cfg = gate_params_.bitwidth_config_;
+    const auto &bw_cfg = bitwidth_config_;
     if (bw_cfg.W_.bits_ <= 8 && bw_cfg.x_.bits_ <= 8) {
         // 权重 int8 缓存（只分配一次）
         if (tmp_W_i8_.size() == 0) {
@@ -561,44 +508,25 @@ void ForwardPassQuant::EnsureBuffersAllocated(int steps) {
 }
 
 void ForwardPassQuant::PrecomputeWeightSums(const int32_t *W, const int32_t *R) {
-    // 如果权重变化，需要重新计算
+    // 零点补偿已在融合 GEMM kernel 内部处理（B 加载时直接减 zp_B），
+    // 此处预计算缓冲区在当前 GPU 路径中不再被消费，保留为兼容占位（清零）。
     if (cached_W_ != W || cached_R_ != R) {
         weight_sums_computed_ = false;
         cached_W_ = W;
         cached_R_ = R;
     }
-
     if (weight_sums_computed_) return;
 
-    const int hidden_size = data_->hidden_size;
-    const int input_size = data_->input_size;
-    const int hidden3 = hidden_size * 3;
-    const cudaStream_t stream = data_->stream[1];
-
-    // 计算 W_sum_mul_x_zp（如果 zp_x != 0，否则直接清零）
-    if (linear_params_.zp_x_ != 0) {
-        computeWeightSumMulzp(W, W_sum_mul_x_zp_.data(), linear_params_.zp_x_,
-                              linear_params_.shift_gemm_x_to_weight_ih_linear_.data(), hidden3, input_size,
-                              stream);
-    } else {
-        dev::fill_n(W_sum_mul_x_zp_.data(), hidden3, static_cast<int64_t>(0));
-    }
-
-    // 计算 R_sum_mul_h_zp（如果 zp_h != 0，否则直接清零）
-    if (linear_params_.zp_h_ != 0) {
-        computeWeightSumMulzp(R, R_sum_mul_h_zp_.data(), linear_params_.zp_h_,
-                              linear_params_.shift_gemm_h_to_weight_hh_linear_.data(), hidden3, hidden_size,
-                              stream);
-    } else {
-        dev::fill_n(R_sum_mul_h_zp_.data(), hidden3, static_cast<int64_t>(0));
-    }
-
-    cudaStreamSynchronize(stream);
+    const int hidden3 = data_->hidden_size * 3;
+    dev::fill_n(W_sum_mul_x_zp_.data(), hidden3, static_cast<int64_t>(0));
+    dev::fill_n(R_sum_mul_h_zp_.data(), hidden3, static_cast<int64_t>(0));
     weight_sums_computed_ = true;
 }
 
-void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps,
-                                       uint8_t *weight_ih_linear_mask) {
+template <class R>
+void ForwardPassQuant::ComputeLinearX(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                      const int32_t *W, const int32_t *x, const int32_t *bw, int steps,
+                                      uint8_t *weight_ih_linear_mask) {
     const int batch_size = data_->batch_size;
     const int input_size = data_->input_size;
     const int hidden_size = data_->hidden_size;
@@ -609,56 +537,34 @@ void ForwardPassQuant::ComputeLinearX(const int32_t *W, const int32_t *x, const 
     const int N = steps * batch_size;
     const int K = input_size;
 
-    // 使用 GEMM+bias 融合 kernel: W*x + bw
+    // 使用 GEMM+bias 融合 kernel: W*x + bw（设备层仅 per-channel）
     dim3 blockDim(kernel::TILE_SIZE, kernel::TILE_SIZE);
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
-    // ComputeLinearX 使用 W_granularity 和 bw_granularity
     if (training) {
-        kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
+        kernel::quantizedGemmBiasFused<true, R><<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), bw, weight_ih_linear_mask, M, N, K,
-            linear_params_.zp_x_,
-            // 粒度配置（W 和 bw）
-            linear_params_.W_granularity_, linear_params_.bw_granularity_,
-            linear_params_.hidden_size_,
-            // Per-tensor 参数
-            linear_params_.shift_gemm_x_tensor_, linear_params_.shift_bw_tensor_,
-            // Per-gate 参数
-            linear_params_.shift_gemm_x_gate_, linear_params_.shift_bw_gate_,
-            // Per-channel 参数（数组指针）
-            linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.shift_bw_to_weight_ih_linear_.data(),
-            gate_params_.zp_weight_ih_linear_,
-            gate_params_.bitwidth_config_.weight_ih_linear_,
-            gate_params_.bitwidth_config_.usePOT2_,
-            linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.fixed_rescale_bw_to_weight_ih_linear_.data());
+            lp.zp_x_,
+            lp.rescale_gemm_x_to_weight_ih_linear_.data(),
+            lp.rescale_bw_to_weight_ih_linear_.data(),
+            gp.zp_weight_ih_linear_,
+            gp.bitwidth_config_.weight_ih_linear_);
     } else {
-        kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
+        kernel::quantizedGemmBiasFused<false, R><<<gridDim, blockDim, 0, stream>>>(
             W, x, tmp_weight_ih_linear_.data(), bw, nullptr, M, N, K,
-            linear_params_.zp_x_,
-            // 粒度配置（W 和 bw）
-            linear_params_.W_granularity_, linear_params_.bw_granularity_,
-            linear_params_.hidden_size_,
-            // Per-tensor 参数
-            linear_params_.shift_gemm_x_tensor_, linear_params_.shift_bw_tensor_,
-            // Per-gate 参数
-            linear_params_.shift_gemm_x_gate_, linear_params_.shift_bw_gate_,
-            // Per-channel 参数（数组指针）
-            linear_params_.shift_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.shift_bw_to_weight_ih_linear_.data(),
-            gate_params_.zp_weight_ih_linear_,
-            gate_params_.bitwidth_config_.weight_ih_linear_,
-            gate_params_.bitwidth_config_.usePOT2_,
-            linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_.data(),
-            linear_params_.fixed_rescale_bw_to_weight_ih_linear_.data());
+            lp.zp_x_,
+            lp.rescale_gemm_x_to_weight_ih_linear_.data(),
+            lp.rescale_bw_to_weight_ih_linear_.data(),
+            gp.zp_weight_ih_linear_,
+            gp.bitwidth_config_.weight_ih_linear_);
     }
 }
 
-void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br,
-                                       uint8_t *weight_hh_linear_mask) {
+template <class R>
+void ForwardPassQuant::ComputeLinearH(const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                                      const int32_t *R_w, const int32_t *h, const int32_t *br,
+                                      uint8_t *weight_hh_linear_mask) {
     const int batch_size = data_->batch_size;
     const int hidden_size = data_->hidden_size;
     const cudaStream_t stream = data_->stream[0];
@@ -668,56 +574,34 @@ void ForwardPassQuant::ComputeLinearH(const int32_t *R, const int32_t *h, const 
     const int N = batch_size;
     const int K = hidden_size;
 
-    // 使用 GEMM+bias 融合 kernel: R*h + br
+    // 使用 GEMM+bias 融合 kernel: R*h + br（设备层仅 per-channel）
     dim3 blockDim(kernel::TILE_SIZE, kernel::TILE_SIZE);
     dim3 gridDim((N + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE,
                  (M + kernel::TILE_SIZE - 1) / kernel::TILE_SIZE);
 
-    // 使用模板版本的 quantizedGemmBiasFused，内部根据 Training 决定是否使用 mask
-    // ComputeLinearH 使用 R_granularity 和 br_granularity
     if (training) {
-        kernel::quantizedGemmBiasFused<true><<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), br, weight_hh_linear_mask, M, N, K,
-            linear_params_.zp_h_,
-            // 粒度配置（R 和 br）
-            linear_params_.R_granularity_, linear_params_.br_granularity_,
-            linear_params_.hidden_size_,
-            // Per-tensor 参数
-            linear_params_.shift_gemm_h_tensor_, linear_params_.shift_br_tensor_,
-            // Per-gate 参数
-            linear_params_.shift_gemm_h_gate_, linear_params_.shift_br_gate_,
-            // Per-channel 参数（数组指针）
-            linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.shift_br_to_weight_hh_linear_.data(),
-            gate_params_.zp_weight_hh_linear_,
-            gate_params_.bitwidth_config_.weight_hh_linear_,
-            gate_params_.bitwidth_config_.usePOT2_,
-            linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.fixed_rescale_br_to_weight_hh_linear_.data());
+        kernel::quantizedGemmBiasFused<true, R><<<gridDim, blockDim, 0, stream>>>(
+            R_w, h, tmp_weight_hh_linear_.data(), br, weight_hh_linear_mask, M, N, K,
+            lp.zp_h_,
+            lp.rescale_gemm_h_to_weight_hh_linear_.data(),
+            lp.rescale_br_to_weight_hh_linear_.data(),
+            gp.zp_weight_hh_linear_,
+            gp.bitwidth_config_.weight_hh_linear_);
     } else {
-        kernel::quantizedGemmBiasFused<false><<<gridDim, blockDim, 0, stream>>>(
-            R, h, tmp_weight_hh_linear_.data(), br, nullptr, M, N, K,
-            linear_params_.zp_h_,
-            // 粒度配置（R 和 br）
-            linear_params_.R_granularity_, linear_params_.br_granularity_,
-            linear_params_.hidden_size_,
-            // Per-tensor 参数
-            linear_params_.shift_gemm_h_tensor_, linear_params_.shift_br_tensor_,
-            // Per-gate 参数
-            linear_params_.shift_gemm_h_gate_, linear_params_.shift_br_gate_,
-            // Per-channel 参数（数组指针）
-            linear_params_.shift_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.shift_br_to_weight_hh_linear_.data(),
-            gate_params_.zp_weight_hh_linear_,
-            gate_params_.bitwidth_config_.weight_hh_linear_,
-            gate_params_.bitwidth_config_.usePOT2_,
-            linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_.data(),
-            linear_params_.fixed_rescale_br_to_weight_hh_linear_.data());
+        kernel::quantizedGemmBiasFused<false, R><<<gridDim, blockDim, 0, stream>>>(
+            R_w, h, tmp_weight_hh_linear_.data(), br, nullptr, M, N, K,
+            lp.zp_h_,
+            lp.rescale_gemm_h_to_weight_hh_linear_.data(),
+            lp.rescale_br_to_weight_hh_linear_.data(),
+            gp.zp_weight_hh_linear_,
+            gp.bitwidth_config_.weight_hh_linear_);
     }
 }
 
+template <class R>
 void ForwardPassQuant::IterateInternal(
-    const int32_t *R,           // [H,H*3]
+    const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+    const int32_t *R_w,         // [H,H*3]
     const int32_t *br,          // [H*3] (用于 Linear 变换)
     const int32_t *h,           // [N,H]
     int32_t *h_out,             // [N,H]
@@ -740,7 +624,7 @@ void ForwardPassQuant::IterateInternal(
     cublasSetStream(blas_handle, stream1);
 
     // 计算隐状态 Linear 变换: R*h + br（结果存入 tmp_weight_hh_linear_，可选 mask）
-    ComputeLinearH(R, h, br, weight_hh_linear_mask);
+    ComputeLinearH<R>(lp, gp, R_w, h, br, weight_hh_linear_mask);
 
     // Compute launch configuration for pointwise operations kernel.
     const dim3 blockDim(32, 16);
@@ -754,264 +638,113 @@ void ForwardPassQuant::IterateInternal(
     // 启动量化 GRU kernel（统一接口，所有模式都传递 mask 参数）
     if (training) {
         if (apply_zoneout) {
-            kernel::PointwiseOperationsQuant<true, true>
+            kernel::PointwiseOperationsQuant<true, true, R>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v,
-                                                    zoneout_prob, zoneout_mask, gate_params_,
+                                                    zoneout_prob, zoneout_mask, gp,
                                                     gate_input_mask, gate_output_mask, h_mask);
         } else {
-            kernel::PointwiseOperationsQuant<true, false>
+            kernel::PointwiseOperationsQuant<true, false, R>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, v, 0.0f,
-                                                    nullptr, gate_params_,
+                                                    nullptr, gp,
                                                     gate_input_mask, gate_output_mask, h_mask);
         }
     } else {
         if (apply_zoneout) {
-            kernel::PointwiseOperationsQuant<false, true>
+            kernel::PointwiseOperationsQuant<false, true, R>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, nullptr,
-                                                    zoneout_prob, zoneout_mask, gate_params_,
+                                                    zoneout_prob, zoneout_mask, gp,
                                                     nullptr, nullptr, nullptr);
         } else {
-            kernel::PointwiseOperationsQuant<false, false>
+            kernel::PointwiseOperationsQuant<false, false, R>
                 <<<gridDim, blockDim, 0, stream1>>>(batch_size, hidden_size, cur_weight_ih_linear,
                                                     tmp_weight_hh_linear_.data(), h, h_out, nullptr, 0.0f,
-                                                    nullptr, gate_params_,
+                                                    nullptr, gp,
                                                     nullptr, nullptr, nullptr);
         }
     }
 }
 
-void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
+namespace {
+
+// 由单一权威种子派生 INT Linear 设备参数（仅 per-channel，每条一份 R 表示）。
+template <class R>
+void fillLinearParams(LinearQuantParamsGPUT<R> &lp, const GRUQuantParams &parms) {
     const int channel = parms.hidden_ * 3;
-    const int hidden_size = parms.hidden_;
-    const auto& cfg = parms.bitwidth_config_;
-    const bool usePOT2 = parms.bitwidth_config_.usePOT2_;
-    auto to_fixed_rescale = [usePOT2](int8_t shift) {
-        if (usePOT2) return FixedPointScale{1u, shift};
-        return encodeMShift(exp2_scale(static_cast<int8_t>(-shift)));
-    };
-    auto to_ratio_fixed = [usePOT2](float src_scale, float dst_scale) {
-        const float ratio = src_scale / dst_scale;
-        if (!(ratio > 0.0f)) {
-            throw std::runtime_error("Invalid non-positive rescale ratio");
-        }
-        if (usePOT2) {
-            return FixedPointScale{1u, static_cast<int8_t>(round_f(-std::log2(ratio)))};
-        }
-        return encodeMShift(ratio);
-    };
+    lp.zp_x_ = parms.x_.zero_point;
+    lp.zp_h_ = parms.h_.zero_point;
 
-    // ==================== Linear 层参数 =====================
-    linear_params_.zp_x_ = parms.zp_x_;
-    linear_params_.zp_h_ = parms.zp_h_;
-
-    // 存储粒度配置和 hidden_size（用于 kernel 中判断）
-    linear_params_.W_granularity_ = static_cast<int8_t>(cfg.W_granularity_);
-    linear_params_.R_granularity_ = static_cast<int8_t>(cfg.R_granularity_);
-    linear_params_.bw_granularity_ = static_cast<int8_t>(cfg.bw_granularity_);
-    linear_params_.br_granularity_ = static_cast<int8_t>(cfg.br_granularity_);
-    linear_params_.hidden_size_ = hidden_size;
-
-    // 计算并存储 per-tensor rescale 参数（通过参数内存传递，访问快）
-    if (cfg.W_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        int8_t shift_W = parms.shift_W_tensor_;
-        linear_params_.shift_gemm_x_tensor_ = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
-        linear_params_.shift_bw_tensor_ = checkedShiftToInt8(
-            static_cast<float>(static_cast<int>(parms.shift_bw_tensor_) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
-            "rescale shift_bw (per-tensor)");
+    std::vector<R> gemm_x(channel), bw_r(channel), gemm_h(channel), br_r(channel);
+    for (int c = 0; c < channel; ++c) {
+        // GEMM 结果(累加器 scale = scale_W*scale_x) -> weight_ih_linear
+        gemm_x[c] = makeRescaleProduct<R>(parms.W_.channel(c), parms.x_, parms.weight_ih_linear_);
+        // bias bw(自身 scale) -> 累加器 scale = scale_W*scale_x
+        bw_r[c] = makeRescaleToProduct<R>(parms.bw_.channel(c), parms.W_.channel(c), parms.x_);
+        gemm_h[c] = makeRescaleProduct<R>(parms.R_.channel(c), parms.h_, parms.weight_hh_linear_);
+        br_r[c] = makeRescaleToProduct<R>(parms.br_.channel(c), parms.R_.channel(c), parms.h_);
     }
-    if (cfg.R_granularity_ == OperatorQuantConfig::PER_TENSOR) {
-        int8_t shift_R = parms.shift_R_tensor_;
-        linear_params_.shift_gemm_h_tensor_ = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        linear_params_.shift_br_tensor_ = checkedShiftToInt8(
-            static_cast<float>(static_cast<int>(parms.shift_br_tensor_) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
-            "rescale shift_br (per-tensor)");
-    }
+    lp.rescale_gemm_x_to_weight_ih_linear_ = dev::vector<R>(gemm_x);
+    lp.rescale_bw_to_weight_ih_linear_ = dev::vector<R>(bw_r);
+    lp.rescale_gemm_h_to_weight_hh_linear_ = dev::vector<R>(gemm_h);
+    lp.rescale_br_to_weight_hh_linear_ = dev::vector<R>(br_r);
+}
 
-    // 计算并存储 per-gate rescale 参数（通过参数内存传递，访问快）
-    if (cfg.W_granularity_ == OperatorQuantConfig::PER_GATE) {
-        for (int gate = 0; gate < 3; ++gate) {
-            int8_t shift_W = parms.shift_W_gate_[gate];
-            int8_t shift_bw = parms.shift_bw_gate_[gate];
-            linear_params_.shift_gemm_x_gate_[gate] = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
-            linear_params_.shift_bw_gate_[gate] = checkedShiftToInt8(
-                static_cast<float>(static_cast<int>(shift_bw) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
-                "rescale shift_bw (per-gate)");
-        }
-    }
-    if (cfg.R_granularity_ == OperatorQuantConfig::PER_GATE) {
-        for (int gate = 0; gate < 3; ++gate) {
-            int8_t shift_R = parms.shift_R_gate_[gate];
-            int8_t shift_br = parms.shift_br_gate_[gate];
-            linear_params_.shift_gemm_h_gate_[gate] = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
-            linear_params_.shift_br_gate_[gate] = checkedShiftToInt8(
-                static_cast<float>(static_cast<int>(shift_br) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
-                "rescale shift_br (per-gate)");
-        }
-    }
+// 由单一权威种子派生门计算设备参数（每条一份 R 表示）。
+template <class R>
+void fillGateParams(GateQuantParamsT<R> &gp, const GRUQuantParams &parms) {
+    gp.zp_weight_ih_linear_ = parms.weight_ih_linear_.zero_point;
+    gp.zp_weight_hh_linear_ = parms.weight_hh_linear_.zero_point;
+    gp.zp_h_ = parms.h_.zero_point;
 
-    // 计算 per-channel 移位参数（仅 PER_CHANNEL 粒度时使用）
-    // 对于 PER_TENSOR 和 PER_GATE，这些数组不会被使用，但仍需要分配以避免 kernel 中空指针
-    std::vector<int8_t> shift_gemm_x(channel);
-    std::vector<int8_t> shift_gemm_h(channel);
-    std::vector<int8_t> shift_bw(channel);
-    std::vector<int8_t> shift_br(channel);
+    gp.zp_update_gate_input_ = parms.update_gate_input_.zero_point;
+    gp.zp_update_gate_output_ = parms.update_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_update_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.update_gate_input_);
+    gp.rescale_weight_hh_linear_to_update_gate_input_ = makeRescale<R>(parms.weight_hh_linear_, parms.update_gate_input_);
 
-    // 辅助函数：从 per-channel 数组获取 W 的 shift 值
-    // 注意：无论什么粒度，per-channel 数组都已正确设置（PER_TENSOR 时所有值相同，PER_GATE 时每个门内值相同）
-    auto get_W_shift = [&](int idx) -> int8_t {
-        return parms.shift_W_[idx];
-    };
+    gp.zp_reset_gate_input_ = parms.reset_gate_input_.zero_point;
+    gp.zp_reset_gate_output_ = parms.reset_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_reset_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.reset_gate_input_);
+    gp.rescale_weight_hh_linear_to_reset_gate_input_ = makeRescale<R>(parms.weight_hh_linear_, parms.reset_gate_input_);
 
-    // 辅助函数：从 per-channel 数组获取 R 的 shift 值
-    auto get_R_shift = [&](int idx) -> int8_t {
-        return parms.shift_R_[idx];
-    };
+    gp.zp_new_gate_input_ = parms.new_gate_input_.zero_point;
+    gp.zp_new_gate_output_ = parms.new_gate_output_.zero_point;
+    gp.rescale_weight_ih_linear_to_new_gate_input_ = makeRescale<R>(parms.weight_ih_linear_, parms.new_gate_input_);
+    // r*weight_hh_linear（scale = scale_reset_out*scale_weight_hh_linear）-> new_gate_input
+    gp.rescale_reset_mul_hh_to_new_gate_input_ =
+        makeRescaleProduct<R>(parms.reset_gate_output_, parms.weight_hh_linear_, parms.new_gate_input_);
 
-    // 辅助函数：从 per-channel 数组获取 bw 的 shift 值
-    auto get_bw_shift = [&](int idx) -> int8_t {
-        return parms.shift_bw_[idx];
-    };
+    // 常数 1 量化到 update_gate_output 空间
+    gp.quant_one_in_update_gate_scale_ =
+        round_to_int(1.0f / parms.update_gate_output_.scale) + parms.update_gate_output_.zero_point;
+    gp.rescale_new_gate_output_to_h_ = makeRescale<R>(parms.new_gate_output_, parms.h_);
+    // u*h（scale = scale_update_out*scale_h）-> h
+    gp.rescale_update_old_to_h_ = makeRescaleProduct<R>(parms.update_gate_output_, parms.h_, parms.h_);
 
-    // 辅助函数：从 per-channel 数组获取 br 的 shift 值
-    auto get_br_shift = [&](int idx) -> int8_t {
-        return parms.shift_br_[idx];
-    };
-
-    for (int idx = 0; idx < channel; ++idx) {
-        int8_t shift_W = get_W_shift(idx);
-        int8_t shift_R = get_R_shift(idx);
-        int8_t shift_bw_val = get_bw_shift(idx);
-        int8_t shift_br_val = get_br_shift(idx);
-        
-        shift_gemm_x[idx] = (shift_W + parms.shift_x_) - parms.shift_weight_ih_linear_;
-        shift_gemm_h[idx] = (shift_R + parms.shift_h_) - parms.shift_weight_hh_linear_;
-        // bias 先移位到 GEMM scale，再和 GEMM 结果一起移位到 Linear scale
-        // shift_bw_to_gemm = shift_bw - (shift_W + shift_x)
-        // 如果 shift_bw = shift_W + shift_x，则 shift_bw_to_gemm = 0（不需要移位）
-        shift_bw[idx] = checkedShiftToInt8(
-            static_cast<float>(static_cast<int>(shift_bw_val) - (static_cast<int>(shift_W) + static_cast<int>(parms.shift_x_))),
-            "rescale shift_bw (per-channel)");
-        shift_br[idx] = checkedShiftToInt8(
-            static_cast<float>(static_cast<int>(shift_br_val) - (static_cast<int>(shift_R) + static_cast<int>(parms.shift_h_))),
-            "rescale shift_br (per-channel)");
-    }
-
-    // 存储 per-channel 数组（PER_CHANNEL 粒度时使用，其他粒度时作为占位符）
-    linear_params_.shift_gemm_x_to_weight_ih_linear_ = dev::vector<int8_t>(shift_gemm_x);
-    linear_params_.shift_bw_to_weight_ih_linear_ = dev::vector<int8_t>(shift_bw);
-    linear_params_.shift_gemm_h_to_weight_hh_linear_ = dev::vector<int8_t>(shift_gemm_h);
-    linear_params_.shift_br_to_weight_hh_linear_ = dev::vector<int8_t>(shift_br);
-    std::vector<FixedPointScale> fixed_shift_gemm_x(channel), fixed_shift_bw(channel), fixed_shift_gemm_h(channel), fixed_shift_br(channel);
-    for (int idx = 0; idx < channel; ++idx) {
-        fixed_shift_gemm_x[idx] = to_fixed_rescale(shift_gemm_x[idx]);
-        fixed_shift_bw[idx] = to_fixed_rescale(shift_bw[idx]);
-        fixed_shift_gemm_h[idx] = to_fixed_rescale(shift_gemm_h[idx]);
-        fixed_shift_br[idx] = to_fixed_rescale(shift_br[idx]);
-        if (!usePOT2) {
-            const float scale_wx = decode_scale(parms.fixed_scale_W_[idx]) * decode_scale(parms.fixed_scale_x_);
-            const float scale_rh = decode_scale(parms.fixed_scale_R_[idx]) * decode_scale(parms.fixed_scale_h_);
-            fixed_shift_gemm_x[idx] = to_ratio_fixed(scale_wx, decode_scale(parms.fixed_scale_weight_ih_linear_));
-            fixed_shift_gemm_h[idx] = to_ratio_fixed(scale_rh, decode_scale(parms.fixed_scale_weight_hh_linear_));
-            fixed_shift_bw[idx] = to_ratio_fixed(decode_scale(parms.fixed_scale_bw_[idx]), scale_wx);
-            fixed_shift_br[idx] = to_ratio_fixed(decode_scale(parms.fixed_scale_br_[idx]), scale_rh);
-        }
-    }
-    linear_params_.fixed_rescale_gemm_x_to_weight_ih_linear_ = dev::vector<FixedPointScale>(fixed_shift_gemm_x);
-    linear_params_.fixed_rescale_bw_to_weight_ih_linear_ = dev::vector<FixedPointScale>(fixed_shift_bw);
-    linear_params_.fixed_rescale_gemm_h_to_weight_hh_linear_ = dev::vector<FixedPointScale>(fixed_shift_gemm_h);
-    linear_params_.fixed_rescale_br_to_weight_hh_linear_ = dev::vector<FixedPointScale>(fixed_shift_br);
+    gp.bitwidth_config_ = parms.bitwidth_config_;
+    gp.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
+    gp.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
+    gp.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
 
 #ifdef DEBUG
-    linear_params_.shift_bw_ = dev::vector<int8_t>(parms.shift_bw_);
-    linear_params_.shift_br_ = dev::vector<int8_t>(parms.shift_br_);
+    gp.test = parms;
 #endif
+}
 
-    // ==================== 门计算参数（标量）====================
-    gate_params_.zp_weight_ih_linear_ = parms.zp_weight_ih_linear_;
-    gate_params_.zp_weight_hh_linear_ = parms.zp_weight_hh_linear_;
-    gate_params_.zp_h_ = parms.zp_h_;
+}  // namespace
 
-    // update gate
-    gate_params_.zp_update_gate_input_ = parms.zp_update_gate_input_;
-    gate_params_.zp_update_gate_output_ = parms.zp_update_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_update_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_update_gate_input_;
-    gate_params_.shift_weight_hh_linear_to_update_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_update_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_update_gate_input_);
-    gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_update_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_update_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
-        gate_params_.fixed_rescale_weight_hh_linear_to_update_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_update_gate_input_));
+void ForwardPassQuant::setRescaleParam(const GRUQuantParams &parms) {
+    use_pot2_ = parms.bitwidth_config_.usePOT2_;
+    bitwidth_config_ = parms.bitwidth_config_;
+    // 只填充生效的那套（编译期两套实例都存在，运行时按模式选择）
+    if (use_pot2_) {
+        fillLinearParams<Pot2Rescale>(linear_params_pot2_, parms);
+        fillGateParams<Pot2Rescale>(gate_params_pot2_, parms);
+    } else {
+        fillLinearParams<FixedPointScale>(linear_params_mshift_, parms);
+        fillGateParams<FixedPointScale>(gate_params_mshift_, parms);
     }
-
-    // reset gate
-    gate_params_.zp_reset_gate_input_ = parms.zp_reset_gate_input_;
-    gate_params_.zp_reset_gate_output_ = parms.zp_reset_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_reset_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_reset_gate_input_;
-    gate_params_.shift_weight_hh_linear_to_reset_gate_input_ = parms.shift_weight_hh_linear_ - parms.shift_reset_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_reset_gate_input_);
-    gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_hh_linear_to_reset_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_reset_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
-        gate_params_.fixed_rescale_weight_hh_linear_to_reset_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_hh_linear_), decode_scale(parms.fixed_scale_reset_gate_input_));
-    }
-
-    // new gate（乘法scale融合：r*weight_hh_linear 直接对齐到 new_gate_input）
-    gate_params_.zp_new_gate_input_ = parms.zp_new_gate_input_;
-    gate_params_.zp_new_gate_output_ = parms.zp_new_gate_output_;
-    gate_params_.shift_weight_ih_linear_to_new_gate_input_ = parms.shift_weight_ih_linear_ - parms.shift_new_gate_input_;
-    gate_params_.shift_reset_mul_hh_to_new_gate_input_ =
-        (parms.shift_reset_gate_output_ + parms.shift_weight_hh_linear_) - parms.shift_new_gate_input_;
-    gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_weight_ih_linear_to_new_gate_input_);
-    gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
-        to_fixed_rescale(gate_params_.shift_reset_mul_hh_to_new_gate_input_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_weight_ih_linear_to_new_gate_input_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_weight_ih_linear_), decode_scale(parms.fixed_scale_new_gate_input_));
-        gate_params_.fixed_rescale_reset_mul_hh_to_new_gate_input_ =
-            to_ratio_fixed(
-                decode_scale(parms.fixed_scale_reset_gate_output_) * decode_scale(parms.fixed_scale_weight_hh_linear_),
-                decode_scale(parms.fixed_scale_new_gate_input_));
-    }
-
-    // h_new（统一scale空间优化：先将new_gate对齐到h，然后在统一scale下计算和相加）
-    gate_params_.quant_one_in_update_gate_scale_ =
-        round_to_int(1.0f / decode_scale(parms.fixed_scale_update_gate_output_)) + parms.zp_update_gate_output_;
-    // new_gate_output 对齐到 h 的移位
-    gate_params_.shift_new_gate_output_to_h_ = parms.shift_new_gate_output_ - parms.shift_h_;
-    // 统一scale到h的移位（= shift_update_gate_output，因为 scale_h / scale_h = 1）
-    gate_params_.shift_update_old_to_h_ = parms.shift_update_gate_output_;
-    gate_params_.fixed_rescale_new_gate_output_to_h_ = to_fixed_rescale(gate_params_.shift_new_gate_output_to_h_);
-    gate_params_.fixed_rescale_update_old_to_h_ = to_fixed_rescale(gate_params_.shift_update_old_to_h_);
-    if (!usePOT2) {
-        gate_params_.fixed_rescale_new_gate_output_to_h_ =
-            to_ratio_fixed(decode_scale(parms.fixed_scale_new_gate_output_), decode_scale(parms.fixed_scale_h_));
-        gate_params_.fixed_rescale_update_old_to_h_ =
-            to_ratio_fixed(
-                decode_scale(parms.fixed_scale_update_gate_output_) * decode_scale(parms.fixed_scale_h_),
-                decode_scale(parms.fixed_scale_h_));
-    }
-
-    // 位宽配置和 LUT
-    gate_params_.bitwidth_config_ = parms.bitwidth_config_;
-    gate_params_.sigmoid_update_gate_lut_ = parms.sigmoid_update_gate_lut_;
-    gate_params_.sigmoid_reset_gate_lut_ = parms.sigmoid_reset_gate_lut_;
-    gate_params_.tanh_new_gate_lut_ = parms.tanh_new_gate_lut_;
-
-#ifdef DEBUG
-    gate_params_.test = parms;
-#endif
 }
 
 void ForwardPassQuant::Run(
@@ -1031,9 +764,29 @@ void ForwardPassQuant::Run(
     uint8_t *gate_output_mask,
     uint8_t *h_mask
 ) {
+    // 类型驱动派发：编译期两套实例都生成，运行时只启动生效模式的那套。
+    if (use_pot2_) {
+        RunImpl<Pot2Rescale>(linear_params_pot2_, gate_params_pot2_, steps, W, R, bw, br, x, h, v,
+                             zoneout_prob, zoneout_mask, weight_ih_linear_mask, weight_hh_linear_mask,
+                             gate_input_mask, gate_output_mask, h_mask);
+    } else {
+        RunImpl<FixedPointScale>(linear_params_mshift_, gate_params_mshift_, steps, W, R, bw, br, x, h, v,
+                                 zoneout_prob, zoneout_mask, weight_ih_linear_mask, weight_hh_linear_mask,
+                                 gate_input_mask, gate_output_mask, h_mask);
+    }
+}
+
+template <class R>
+void ForwardPassQuant::RunImpl(
+    const LinearQuantParamsGPUT<R> &lp, const GateQuantParamsT<R> &gp,
+    const int steps, const int32_t *W, const int32_t *R_w, const int32_t *bw,
+    const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
+    const float zoneout_prob, const int32_t *zoneout_mask,
+    uint8_t *weight_ih_linear_mask, uint8_t *weight_hh_linear_mask,
+    uint8_t *gate_input_mask, uint8_t *gate_output_mask, uint8_t *h_mask
+) {
     // 量化模式：禁用 TensorCore 以提高精度（与浮点模式保持一致）
-    // TensorCore 使用 TF32 精度，可能导致精度问题
-    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);  // 注释掉以禁用 TensorCore
+    const blas<void>::enable_tensor_cores scoped0(data_->blas_handle);
     const blas<void>::set_pointer_mode scoped1(data_->blas_handle);
 
     const int batch_size = data_->batch_size;
@@ -1045,7 +798,7 @@ void ForwardPassQuant::Run(
     EnsureBuffersAllocated(steps);
 
     // 预计算权重和（权重不变时只计算一次）
-    PrecomputeWeightSums(W, R);
+    PrecomputeWeightSums(W, R_w);
 
     cudaStream_t save_stream;
     cublasGetStream(data_->blas_handle, &save_stream);
@@ -1053,7 +806,7 @@ void ForwardPassQuant::Run(
     cublasSetStream(data_->blas_handle, stream2);
 
     // 计算输入 Linear 变换（所有时间步一次性计算，结果存入 tmp_weight_ih_linear_，可选 mask）
-    ComputeLinearX(W, x, bw, steps, weight_ih_linear_mask);
+    ComputeLinearX<R>(lp, gp, W, x, bw, steps, weight_ih_linear_mask);
 
     // 同步 Linear 计算
     cudaEventRecord(event, stream2);
@@ -1062,7 +815,7 @@ void ForwardPassQuant::Run(
     const int NH3 = batch_size * hidden_size * 3;
 
     for (int i = 0; i < steps; ++i) {
-        IterateInternal(R, br,
+        IterateInternal<R>(lp, gp, R_w, br,
                         h + i * NH,                      // 输入 h
                         h + (i + 1) * NH,                // 输出 h
                         v + i * NH * 4,                  // 中间激活

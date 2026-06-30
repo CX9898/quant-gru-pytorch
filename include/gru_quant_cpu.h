@@ -59,9 +59,13 @@ class ForwardPassQuantCPU {
     struct PrivateData;
     std::unique_ptr<PrivateData> data_;
 
-    // -------------------- 量化参数（拆分设计）--------------------
-    GateQuantParams gate_params_;        ///< 门计算参数（纯标量，传给 computeZ/R/G/H）
-    LinearQuantParamsCPU linear_params_; ///< Linear 层参数（per-channel，用于 GEMM）
+    // -------------------- 量化参数（类型驱动派发，只填充生效的那套）--------------------
+    bool use_pot2_ = false;                ///< setRescaleParam 时确定的运行时模式
+    OperatorQuantConfig bitwidth_config_;  ///< 位宽配置（缓冲区分配等通用逻辑使用）
+    GateQuantParamsPot2 gate_params_pot2_;
+    GateQuantParamsMShift gate_params_mshift_;
+    LinearQuantParamsCPUT<Pot2Rescale> linear_params_pot2_;
+    LinearQuantParamsCPUT<FixedPointScale> linear_params_mshift_;
 
     int max_steps_ = 0;
     std::vector<int32_t> tmp_weight_ih_linear_;  // Linear 变换: W*x + bw
@@ -74,11 +78,24 @@ class ForwardPassQuantCPU {
 
     void EnsureBuffersAllocated(int steps);
     void PrecomputeWeightSums(const int32_t *W, const int32_t *R);
-    void ComputeLinearX(const int32_t *W, const int32_t *x, const int32_t *bw, int steps);
-    void ComputeLinearH(const int32_t *R, const int32_t *h, const int32_t *br);
-    void IterateInternal(const int32_t *R, const int32_t *br, const int32_t *h,
-                         int32_t *h_out, int32_t *v, const int32_t *cur_linear_x, float zoneout_prob,
-                         const int32_t *zoneout_mask);
+
+    // 按 rescale 表示 R 模板化的执行实现（R = Pot2Rescale / FixedPointScale）。
+    template <class R>
+    void RunImpl(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                 int steps, const int32_t *W, const int32_t *R_w, const int32_t *bw,
+                 const int32_t *br, const int32_t *x, int32_t *h, int32_t *v,
+                 float zoneout_prob, const int32_t *zoneout_mask);
+    template <class R>
+    void ComputeLinearX(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                        const int32_t *W, const int32_t *x, const int32_t *bw, int steps);
+    template <class R>
+    void ComputeLinearH(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                        const int32_t *R_w, const int32_t *h, const int32_t *br);
+    template <class R>
+    void IterateInternal(const LinearQuantParamsCPUT<R> &lp, const GateQuantParamsT<R> &gp,
+                         const int32_t *R_w, const int32_t *br, const int32_t *h,
+                         int32_t *h_out, int32_t *v, const int32_t *cur_linear_x,
+                         float zoneout_prob, const int32_t *zoneout_mask);
 };
 
 }  // namespace cpu
